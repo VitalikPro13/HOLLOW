@@ -24,6 +24,10 @@ Future<NetworkEvent?> pollNetworkEvent() =>
 Future<String?> getLocalPeerId() =>
     RustLib.instance.api.crateApiNetworkGetLocalPeerId();
 
+/// Send a text message to a peer. The peer must be reachable (discovered via mDNS).
+Future<void> sendMessage({required String peerId, required String text}) =>
+    RustLib.instance.api.crateApiNetworkSendMessage(peerId: peerId, text: text);
+
 /// Stop the running node.
 Future<void> stopNode() => RustLib.instance.api.crateApiNetworkStopNode();
 
@@ -56,6 +60,16 @@ sealed class NetworkEvent with _$NetworkEvent {
       NetworkEvent_PeerExpired;
   const factory NetworkEvent.listening({required String address}) =
       NetworkEvent_Listening;
+  const factory NetworkEvent.messageReceived({
+    required String fromPeer,
+    required String text,
+  }) = NetworkEvent_MessageReceived;
+  const factory NetworkEvent.messageSent({required String toPeer}) =
+      NetworkEvent_MessageSent;
+  const factory NetworkEvent.messageSendFailed({
+    required String toPeer,
+    required String error,
+  }) = NetworkEvent_MessageSendFailed;
   const factory NetworkEvent.error({required String message}) =
       NetworkEvent_Error;
 }

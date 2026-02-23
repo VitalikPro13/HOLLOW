@@ -1,6 +1,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use flutter_rust_bridge::frb;
+use libp2p::PeerId;
 use tokio::sync::mpsc;
 
 use crate::identity;
@@ -17,6 +18,9 @@ pub enum NetworkEvent {
     PeerDiscovered { peer: DiscoveredPeer },
     PeerExpired { peer_id: String },
     Listening { address: String },
+    MessageReceived { from_peer: String, text: String },
+    MessageSent { to_peer: String },
+    MessageSendFailed { to_peer: String, error: String },
     Error { message: String },
 }
 
@@ -24,6 +28,7 @@ pub enum NetworkEvent {
 struct NodeState {
     local_peer_id: String,
     event_rx: mpsc::Receiver<node::NetworkEvent>,
+    cmd_tx: mpsc::Sender<node::NodeCommand>,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -55,6 +60,13 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         },
         node::NetworkEvent::PeerExpired { peer_id } => NetworkEvent::PeerExpired { peer_id },
         node::NetworkEvent::Listening { address } => NetworkEvent::Listening { address },
+        node::NetworkEvent::MessageReceived { from_peer, text } => {
+            NetworkEvent::MessageReceived { from_peer, text }
+        }
+        node::NetworkEvent::MessageSent { to_peer } => NetworkEvent::MessageSent { to_peer },
+        node::NetworkEvent::MessageSendFailed { to_peer, error } => {
+            NetworkEvent::MessageSendFailed { to_peer, error }
+        }
         node::NetworkEvent::Error { message } => NetworkEvent::Error { message },
     }
 }
@@ -74,16 +86,18 @@ pub fn start_node() -> Result<String, String> {
     // Load the persistent identity (or create one if first run).
     let id = identity::load_or_create_identity()?;
 
-    let (tx, rx) = mpsc::channel::<node::NetworkEvent>(100);
+    let (event_tx, event_rx) = mpsc::channel::<node::NetworkEvent>(100);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<node::NodeCommand>(100);
     let rt = get_runtime();
 
     let (peer_id_str, handle) = rt
-        .block_on(node::spawn_node(id.keypair, tx))
+        .block_on(node::spawn_node(id.keypair, event_tx, cmd_rx))
         .map_err(|e| format!("Failed to start node: {e}"))?;
 
     *guard = Some(NodeState {
         local_peer_id: peer_id_str.clone(),
-        event_rx: rx,
+        event_rx,
+        cmd_tx,
         handle,
     });
 
@@ -105,6 +119,29 @@ pub fn get_local_peer_id() -> Option<String> {
     let node = get_node();
     let guard = node.lock().ok()?;
     guard.as_ref().map(|s| s.local_peer_id.clone())
+}
+
+/// Send a text message to a peer. The peer must be reachable (discovered via mDNS).
+#[frb]
+pub fn send_message(peer_id: String, text: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let peer: PeerId = peer_id
+        .parse()
+        .map_err(|e| format!("Invalid peer ID: {e}"))?;
+
+    let rt = get_runtime();
+    rt.block_on(
+        state
+            .cmd_tx
+            .send(node::NodeCommand::SendMessage { peer_id: peer, text }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
 }
 
 /// Stop the running node.

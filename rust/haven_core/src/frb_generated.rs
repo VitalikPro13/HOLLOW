@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 17703524;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1843800748;
 
 // Section: executor
 
@@ -271,6 +271,40 @@ fn wire__crate__api__identity__restore_identity_from_mnemonic_impl(
         },
     )
 }
+fn wire__crate__api__network__send_message_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "send_message",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_peer_id = <String>::sse_decode(&mut deserializer);
+            let api_text = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::network::send_message(api_peer_id, api_text)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__network__start_node_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -416,6 +450,28 @@ impl SseDecode for crate::api::network::NetworkEvent {
                 };
             }
             3 => {
+                let mut var_fromPeer = <String>::sse_decode(deserializer);
+                let mut var_text = <String>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::MessageReceived {
+                    from_peer: var_fromPeer,
+                    text: var_text,
+                };
+            }
+            4 => {
+                let mut var_toPeer = <String>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::MessageSent {
+                    to_peer: var_toPeer,
+                };
+            }
+            5 => {
+                let mut var_toPeer = <String>::sse_decode(deserializer);
+                let mut var_error = <String>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::MessageSendFailed {
+                    to_peer: var_toPeer,
+                    error: var_error,
+                };
+            }
+            6 => {
                 let mut var_message = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::Error {
                     message: var_message,
@@ -508,8 +564,9 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        8 => wire__crate__api__network__start_node_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__network__stop_node_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__network__send_message_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__network__start_node_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__network__stop_node_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -584,8 +641,23 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
             crate::api::network::NetworkEvent::Listening { address } => {
                 [2.into_dart(), address.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::network::NetworkEvent::MessageReceived { from_peer, text } => [
+                3.into_dart(),
+                from_peer.into_into_dart().into_dart(),
+                text.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::network::NetworkEvent::MessageSent { to_peer } => {
+                [4.into_dart(), to_peer.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::network::NetworkEvent::MessageSendFailed { to_peer, error } => [
+                5.into_dart(),
+                to_peer.into_into_dart().into_dart(),
+                error.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             crate::api::network::NetworkEvent::Error { message } => {
-                [3.into_dart(), message.into_into_dart().into_dart()].into_dart()
+                [6.into_dart(), message.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -664,8 +736,22 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 <i32>::sse_encode(2, serializer);
                 <String>::sse_encode(address, serializer);
             }
-            crate::api::network::NetworkEvent::Error { message } => {
+            crate::api::network::NetworkEvent::MessageReceived { from_peer, text } => {
                 <i32>::sse_encode(3, serializer);
+                <String>::sse_encode(from_peer, serializer);
+                <String>::sse_encode(text, serializer);
+            }
+            crate::api::network::NetworkEvent::MessageSent { to_peer } => {
+                <i32>::sse_encode(4, serializer);
+                <String>::sse_encode(to_peer, serializer);
+            }
+            crate::api::network::NetworkEvent::MessageSendFailed { to_peer, error } => {
+                <i32>::sse_encode(5, serializer);
+                <String>::sse_encode(to_peer, serializer);
+                <String>::sse_encode(error, serializer);
+            }
+            crate::api::network::NetworkEvent::Error { message } => {
+                <i32>::sse_encode(6, serializer);
                 <String>::sse_encode(message, serializer);
             }
             _ => {

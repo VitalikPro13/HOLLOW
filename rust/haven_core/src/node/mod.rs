@@ -1,3 +1,3 @@
 mod swarm;
 
-pub(crate) use swarm::{spawn_node, NetworkEvent};
+pub(crate) use swarm::{spawn_node, NetworkEvent, NodeCommand};

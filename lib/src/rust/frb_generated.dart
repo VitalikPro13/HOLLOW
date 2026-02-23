@@ -68,7 +68,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 17703524;
+  int get rustContentHash => -1843800748;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -93,6 +93,11 @@ abstract class RustLibApi extends BaseApi {
 
   Future<IdentityInfo> crateApiIdentityRestoreIdentityFromMnemonic({
     required String phrase,
+  });
+
+  Future<void> crateApiNetworkSendMessage({
+    required String peerId,
+    required String text,
   });
 
   Future<String> crateApiNetworkStartNode();
@@ -300,6 +305,40 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiNetworkSendMessage({
+    required String peerId,
+    required String text,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(peerId, serializer);
+          sse_encode_String(text, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 8,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNetworkSendMessageConstMeta,
+        argValues: [peerId, text],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNetworkSendMessageConstMeta => const TaskConstMeta(
+    debugName: "send_message",
+    argNames: ["peerId", "text"],
+  );
+
+  @override
   Future<String> crateApiNetworkStartNode() {
     return handler.executeNormal(
       NormalTask(
@@ -308,7 +347,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 9,
             port: port_,
           );
         },
@@ -335,7 +374,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 10,
             port: port_,
           );
         },
@@ -420,6 +459,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 2:
         return NetworkEvent_Listening(address: dco_decode_String(raw[1]));
       case 3:
+        return NetworkEvent_MessageReceived(
+          fromPeer: dco_decode_String(raw[1]),
+          text: dco_decode_String(raw[2]),
+        );
+      case 4:
+        return NetworkEvent_MessageSent(toPeer: dco_decode_String(raw[1]));
+      case 5:
+        return NetworkEvent_MessageSendFailed(
+          toPeer: dco_decode_String(raw[1]),
+          error: dco_decode_String(raw[2]),
+        );
+      case 6:
         return NetworkEvent_Error(message: dco_decode_String(raw[1]));
       default:
         throw Exception("unreachable");
@@ -524,6 +575,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         var var_address = sse_decode_String(deserializer);
         return NetworkEvent_Listening(address: var_address);
       case 3:
+        var var_fromPeer = sse_decode_String(deserializer);
+        var var_text = sse_decode_String(deserializer);
+        return NetworkEvent_MessageReceived(
+          fromPeer: var_fromPeer,
+          text: var_text,
+        );
+      case 4:
+        var var_toPeer = sse_decode_String(deserializer);
+        return NetworkEvent_MessageSent(toPeer: var_toPeer);
+      case 5:
+        var var_toPeer = sse_decode_String(deserializer);
+        var var_error = sse_decode_String(deserializer);
+        return NetworkEvent_MessageSendFailed(
+          toPeer: var_toPeer,
+          error: var_error,
+        );
+      case 6:
         var var_message = sse_decode_String(deserializer);
         return NetworkEvent_Error(message: var_message);
       default:
@@ -651,8 +719,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case NetworkEvent_Listening(address: final address):
         sse_encode_i_32(2, serializer);
         sse_encode_String(address, serializer);
-      case NetworkEvent_Error(message: final message):
+      case NetworkEvent_MessageReceived(
+        fromPeer: final fromPeer,
+        text: final text,
+      ):
         sse_encode_i_32(3, serializer);
+        sse_encode_String(fromPeer, serializer);
+        sse_encode_String(text, serializer);
+      case NetworkEvent_MessageSent(toPeer: final toPeer):
+        sse_encode_i_32(4, serializer);
+        sse_encode_String(toPeer, serializer);
+      case NetworkEvent_MessageSendFailed(
+        toPeer: final toPeer,
+        error: final error,
+      ):
+        sse_encode_i_32(5, serializer);
+        sse_encode_String(toPeer, serializer);
+        sse_encode_String(error, serializer);
+      case NetworkEvent_Error(message: final message):
+        sse_encode_i_32(6, serializer);
         sse_encode_String(message, serializer);
     }
   }

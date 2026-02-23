@@ -55,13 +55,16 @@ extension NetworkEventPatterns on NetworkEvent {
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( NetworkEvent_PeerDiscovered value)?  peerDiscovered,TResult Function( NetworkEvent_PeerExpired value)?  peerExpired,TResult Function( NetworkEvent_Listening value)?  listening,TResult Function( NetworkEvent_Error value)?  error,required TResult orElse(),}){
+@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( NetworkEvent_PeerDiscovered value)?  peerDiscovered,TResult Function( NetworkEvent_PeerExpired value)?  peerExpired,TResult Function( NetworkEvent_Listening value)?  listening,TResult Function( NetworkEvent_MessageReceived value)?  messageReceived,TResult Function( NetworkEvent_MessageSent value)?  messageSent,TResult Function( NetworkEvent_MessageSendFailed value)?  messageSendFailed,TResult Function( NetworkEvent_Error value)?  error,required TResult orElse(),}){
 final _that = this;
 switch (_that) {
 case NetworkEvent_PeerDiscovered() when peerDiscovered != null:
 return peerDiscovered(_that);case NetworkEvent_PeerExpired() when peerExpired != null:
 return peerExpired(_that);case NetworkEvent_Listening() when listening != null:
-return listening(_that);case NetworkEvent_Error() when error != null:
+return listening(_that);case NetworkEvent_MessageReceived() when messageReceived != null:
+return messageReceived(_that);case NetworkEvent_MessageSent() when messageSent != null:
+return messageSent(_that);case NetworkEvent_MessageSendFailed() when messageSendFailed != null:
+return messageSendFailed(_that);case NetworkEvent_Error() when error != null:
 return error(_that);case _:
   return orElse();
 
@@ -80,13 +83,16 @@ return error(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( NetworkEvent_PeerDiscovered value)  peerDiscovered,required TResult Function( NetworkEvent_PeerExpired value)  peerExpired,required TResult Function( NetworkEvent_Listening value)  listening,required TResult Function( NetworkEvent_Error value)  error,}){
+@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( NetworkEvent_PeerDiscovered value)  peerDiscovered,required TResult Function( NetworkEvent_PeerExpired value)  peerExpired,required TResult Function( NetworkEvent_Listening value)  listening,required TResult Function( NetworkEvent_MessageReceived value)  messageReceived,required TResult Function( NetworkEvent_MessageSent value)  messageSent,required TResult Function( NetworkEvent_MessageSendFailed value)  messageSendFailed,required TResult Function( NetworkEvent_Error value)  error,}){
 final _that = this;
 switch (_that) {
 case NetworkEvent_PeerDiscovered():
 return peerDiscovered(_that);case NetworkEvent_PeerExpired():
 return peerExpired(_that);case NetworkEvent_Listening():
-return listening(_that);case NetworkEvent_Error():
+return listening(_that);case NetworkEvent_MessageReceived():
+return messageReceived(_that);case NetworkEvent_MessageSent():
+return messageSent(_that);case NetworkEvent_MessageSendFailed():
+return messageSendFailed(_that);case NetworkEvent_Error():
 return error(_that);}
 }
 /// A variant of `map` that fallback to returning `null`.
@@ -101,13 +107,16 @@ return error(_that);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( NetworkEvent_PeerDiscovered value)?  peerDiscovered,TResult? Function( NetworkEvent_PeerExpired value)?  peerExpired,TResult? Function( NetworkEvent_Listening value)?  listening,TResult? Function( NetworkEvent_Error value)?  error,}){
+@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( NetworkEvent_PeerDiscovered value)?  peerDiscovered,TResult? Function( NetworkEvent_PeerExpired value)?  peerExpired,TResult? Function( NetworkEvent_Listening value)?  listening,TResult? Function( NetworkEvent_MessageReceived value)?  messageReceived,TResult? Function( NetworkEvent_MessageSent value)?  messageSent,TResult? Function( NetworkEvent_MessageSendFailed value)?  messageSendFailed,TResult? Function( NetworkEvent_Error value)?  error,}){
 final _that = this;
 switch (_that) {
 case NetworkEvent_PeerDiscovered() when peerDiscovered != null:
 return peerDiscovered(_that);case NetworkEvent_PeerExpired() when peerExpired != null:
 return peerExpired(_that);case NetworkEvent_Listening() when listening != null:
-return listening(_that);case NetworkEvent_Error() when error != null:
+return listening(_that);case NetworkEvent_MessageReceived() when messageReceived != null:
+return messageReceived(_that);case NetworkEvent_MessageSent() when messageSent != null:
+return messageSent(_that);case NetworkEvent_MessageSendFailed() when messageSendFailed != null:
+return messageSendFailed(_that);case NetworkEvent_Error() when error != null:
 return error(_that);case _:
   return null;
 
@@ -125,12 +134,15 @@ return error(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( DiscoveredPeer peer)?  peerDiscovered,TResult Function( String peerId)?  peerExpired,TResult Function( String address)?  listening,TResult Function( String message)?  error,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( DiscoveredPeer peer)?  peerDiscovered,TResult Function( String peerId)?  peerExpired,TResult Function( String address)?  listening,TResult Function( String fromPeer,  String text)?  messageReceived,TResult Function( String toPeer)?  messageSent,TResult Function( String toPeer,  String error)?  messageSendFailed,TResult Function( String message)?  error,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case NetworkEvent_PeerDiscovered() when peerDiscovered != null:
 return peerDiscovered(_that.peer);case NetworkEvent_PeerExpired() when peerExpired != null:
 return peerExpired(_that.peerId);case NetworkEvent_Listening() when listening != null:
-return listening(_that.address);case NetworkEvent_Error() when error != null:
+return listening(_that.address);case NetworkEvent_MessageReceived() when messageReceived != null:
+return messageReceived(_that.fromPeer,_that.text);case NetworkEvent_MessageSent() when messageSent != null:
+return messageSent(_that.toPeer);case NetworkEvent_MessageSendFailed() when messageSendFailed != null:
+return messageSendFailed(_that.toPeer,_that.error);case NetworkEvent_Error() when error != null:
 return error(_that.message);case _:
   return orElse();
 
@@ -149,12 +161,15 @@ return error(_that.message);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( DiscoveredPeer peer)  peerDiscovered,required TResult Function( String peerId)  peerExpired,required TResult Function( String address)  listening,required TResult Function( String message)  error,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( DiscoveredPeer peer)  peerDiscovered,required TResult Function( String peerId)  peerExpired,required TResult Function( String address)  listening,required TResult Function( String fromPeer,  String text)  messageReceived,required TResult Function( String toPeer)  messageSent,required TResult Function( String toPeer,  String error)  messageSendFailed,required TResult Function( String message)  error,}) {final _that = this;
 switch (_that) {
 case NetworkEvent_PeerDiscovered():
 return peerDiscovered(_that.peer);case NetworkEvent_PeerExpired():
 return peerExpired(_that.peerId);case NetworkEvent_Listening():
-return listening(_that.address);case NetworkEvent_Error():
+return listening(_that.address);case NetworkEvent_MessageReceived():
+return messageReceived(_that.fromPeer,_that.text);case NetworkEvent_MessageSent():
+return messageSent(_that.toPeer);case NetworkEvent_MessageSendFailed():
+return messageSendFailed(_that.toPeer,_that.error);case NetworkEvent_Error():
 return error(_that.message);}
 }
 /// A variant of `when` that fallback to returning `null`
@@ -169,12 +184,15 @@ return error(_that.message);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( DiscoveredPeer peer)?  peerDiscovered,TResult? Function( String peerId)?  peerExpired,TResult? Function( String address)?  listening,TResult? Function( String message)?  error,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( DiscoveredPeer peer)?  peerDiscovered,TResult? Function( String peerId)?  peerExpired,TResult? Function( String address)?  listening,TResult? Function( String fromPeer,  String text)?  messageReceived,TResult? Function( String toPeer)?  messageSent,TResult? Function( String toPeer,  String error)?  messageSendFailed,TResult? Function( String message)?  error,}) {final _that = this;
 switch (_that) {
 case NetworkEvent_PeerDiscovered() when peerDiscovered != null:
 return peerDiscovered(_that.peer);case NetworkEvent_PeerExpired() when peerExpired != null:
 return peerExpired(_that.peerId);case NetworkEvent_Listening() when listening != null:
-return listening(_that.address);case NetworkEvent_Error() when error != null:
+return listening(_that.address);case NetworkEvent_MessageReceived() when messageReceived != null:
+return messageReceived(_that.fromPeer,_that.text);case NetworkEvent_MessageSent() when messageSent != null:
+return messageSent(_that.toPeer);case NetworkEvent_MessageSendFailed() when messageSendFailed != null:
+return messageSendFailed(_that.toPeer,_that.error);case NetworkEvent_Error() when error != null:
 return error(_that.message);case _:
   return null;
 
@@ -374,6 +392,208 @@ class _$NetworkEvent_ListeningCopyWithImpl<$Res>
 @pragma('vm:prefer-inline') $Res call({Object? address = null,}) {
   return _then(NetworkEvent_Listening(
 address: null == address ? _self.address : address // ignore: cast_nullable_to_non_nullable
+as String,
+  ));
+}
+
+
+}
+
+/// @nodoc
+
+
+class NetworkEvent_MessageReceived extends NetworkEvent {
+  const NetworkEvent_MessageReceived({required this.fromPeer, required this.text}): super._();
+  
+
+ final  String fromPeer;
+ final  String text;
+
+/// Create a copy of NetworkEvent
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$NetworkEvent_MessageReceivedCopyWith<NetworkEvent_MessageReceived> get copyWith => _$NetworkEvent_MessageReceivedCopyWithImpl<NetworkEvent_MessageReceived>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageReceived&&(identical(other.fromPeer, fromPeer) || other.fromPeer == fromPeer)&&(identical(other.text, text) || other.text == text));
+}
+
+
+@override
+int get hashCode => Object.hash(runtimeType,fromPeer,text);
+
+@override
+String toString() {
+  return 'NetworkEvent.messageReceived(fromPeer: $fromPeer, text: $text)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $NetworkEvent_MessageReceivedCopyWith<$Res> implements $NetworkEventCopyWith<$Res> {
+  factory $NetworkEvent_MessageReceivedCopyWith(NetworkEvent_MessageReceived value, $Res Function(NetworkEvent_MessageReceived) _then) = _$NetworkEvent_MessageReceivedCopyWithImpl;
+@useResult
+$Res call({
+ String fromPeer, String text
+});
+
+
+
+
+}
+/// @nodoc
+class _$NetworkEvent_MessageReceivedCopyWithImpl<$Res>
+    implements $NetworkEvent_MessageReceivedCopyWith<$Res> {
+  _$NetworkEvent_MessageReceivedCopyWithImpl(this._self, this._then);
+
+  final NetworkEvent_MessageReceived _self;
+  final $Res Function(NetworkEvent_MessageReceived) _then;
+
+/// Create a copy of NetworkEvent
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? fromPeer = null,Object? text = null,}) {
+  return _then(NetworkEvent_MessageReceived(
+fromPeer: null == fromPeer ? _self.fromPeer : fromPeer // ignore: cast_nullable_to_non_nullable
+as String,text: null == text ? _self.text : text // ignore: cast_nullable_to_non_nullable
+as String,
+  ));
+}
+
+
+}
+
+/// @nodoc
+
+
+class NetworkEvent_MessageSent extends NetworkEvent {
+  const NetworkEvent_MessageSent({required this.toPeer}): super._();
+  
+
+ final  String toPeer;
+
+/// Create a copy of NetworkEvent
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$NetworkEvent_MessageSentCopyWith<NetworkEvent_MessageSent> get copyWith => _$NetworkEvent_MessageSentCopyWithImpl<NetworkEvent_MessageSent>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSent&&(identical(other.toPeer, toPeer) || other.toPeer == toPeer));
+}
+
+
+@override
+int get hashCode => Object.hash(runtimeType,toPeer);
+
+@override
+String toString() {
+  return 'NetworkEvent.messageSent(toPeer: $toPeer)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $NetworkEvent_MessageSentCopyWith<$Res> implements $NetworkEventCopyWith<$Res> {
+  factory $NetworkEvent_MessageSentCopyWith(NetworkEvent_MessageSent value, $Res Function(NetworkEvent_MessageSent) _then) = _$NetworkEvent_MessageSentCopyWithImpl;
+@useResult
+$Res call({
+ String toPeer
+});
+
+
+
+
+}
+/// @nodoc
+class _$NetworkEvent_MessageSentCopyWithImpl<$Res>
+    implements $NetworkEvent_MessageSentCopyWith<$Res> {
+  _$NetworkEvent_MessageSentCopyWithImpl(this._self, this._then);
+
+  final NetworkEvent_MessageSent _self;
+  final $Res Function(NetworkEvent_MessageSent) _then;
+
+/// Create a copy of NetworkEvent
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? toPeer = null,}) {
+  return _then(NetworkEvent_MessageSent(
+toPeer: null == toPeer ? _self.toPeer : toPeer // ignore: cast_nullable_to_non_nullable
+as String,
+  ));
+}
+
+
+}
+
+/// @nodoc
+
+
+class NetworkEvent_MessageSendFailed extends NetworkEvent {
+  const NetworkEvent_MessageSendFailed({required this.toPeer, required this.error}): super._();
+  
+
+ final  String toPeer;
+ final  String error;
+
+/// Create a copy of NetworkEvent
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$NetworkEvent_MessageSendFailedCopyWith<NetworkEvent_MessageSendFailed> get copyWith => _$NetworkEvent_MessageSendFailedCopyWithImpl<NetworkEvent_MessageSendFailed>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSendFailed&&(identical(other.toPeer, toPeer) || other.toPeer == toPeer)&&(identical(other.error, error) || other.error == error));
+}
+
+
+@override
+int get hashCode => Object.hash(runtimeType,toPeer,error);
+
+@override
+String toString() {
+  return 'NetworkEvent.messageSendFailed(toPeer: $toPeer, error: $error)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $NetworkEvent_MessageSendFailedCopyWith<$Res> implements $NetworkEventCopyWith<$Res> {
+  factory $NetworkEvent_MessageSendFailedCopyWith(NetworkEvent_MessageSendFailed value, $Res Function(NetworkEvent_MessageSendFailed) _then) = _$NetworkEvent_MessageSendFailedCopyWithImpl;
+@useResult
+$Res call({
+ String toPeer, String error
+});
+
+
+
+
+}
+/// @nodoc
+class _$NetworkEvent_MessageSendFailedCopyWithImpl<$Res>
+    implements $NetworkEvent_MessageSendFailedCopyWith<$Res> {
+  _$NetworkEvent_MessageSendFailedCopyWithImpl(this._self, this._then);
+
+  final NetworkEvent_MessageSendFailed _self;
+  final $Res Function(NetworkEvent_MessageSendFailed) _then;
+
+/// Create a copy of NetworkEvent
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? toPeer = null,Object? error = null,}) {
+  return _then(NetworkEvent_MessageSendFailed(
+toPeer: null == toPeer ? _self.toPeer : toPeer // ignore: cast_nullable_to_non_nullable
+as String,error: null == error ? _self.error : error // ignore: cast_nullable_to_non_nullable
 as String,
   ));
 }
