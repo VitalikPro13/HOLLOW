@@ -832,7 +832,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 - [X] libp2p: QUIC transport (for internet connectivity)
 - [X] Kademlia DHT for peer discovery
 - [X] NAT traversal: AutoNAT, DCUtR hole punching, circuit relay
-- [ ] Lightweight signaling service (Cloudflare Worker or equivalent)
+- [X] Lightweight signaling service (Cloudflare Worker or equivalent)
 - [ ] Prekey bundle storage in DHT (for async key exchange)
 - [ ] Invite link generation and joining flow
 - [ ] Connection management (persistent connections, reconnection logic)

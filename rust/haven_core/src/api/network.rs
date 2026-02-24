@@ -206,6 +206,26 @@ pub fn send_message(peer_id: String, text: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Join a room via the signaling service.
+/// Registers our addresses and bootstraps from other peers in the room.
+#[frb]
+pub fn join_room(room_code: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(
+        state
+            .cmd_tx
+            .send(node::NodeCommand::JoinRoom { room_code }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
 /// Stop the running node.
 #[frb]
 pub fn stop_node() -> Result<(), String> {

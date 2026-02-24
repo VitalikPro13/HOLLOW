@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::crypto::{CryptoStore, OlmManager};
+use super::signaling::{self, SignalingCmd, SignalingEvent};
 
 /// A discovered peer on the local network.
 pub(crate) struct DiscoveredPeer {
@@ -31,6 +32,7 @@ pub(crate) enum NetworkEvent {
 /// Commands the FFI layer can send into the swarm event loop.
 pub(crate) enum NodeCommand {
     SendMessage { peer_id: PeerId, text: String },
+    JoinRoom { room_code: String },
 }
 
 // -- Wire protocol types (v2: encrypted) --
@@ -173,6 +175,9 @@ pub(crate) async fn spawn_node(
     olm: OlmManager,
     crypto_store: CryptoStore,
 ) -> Result<(String, tokio::task::JoinHandle<()>), String> {
+    // Clone keypair for signaling task (it needs to sign register requests).
+    let sig_keypair = keypair.clone();
+
     let swarm = SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
         .with_tcp(
@@ -235,7 +240,14 @@ pub(crate) async fn spawn_node(
         .build();
 
     let peer_id_str = swarm.local_peer_id().to_string();
-    let handle = tokio::spawn(run_swarm(swarm, event_tx, cmd_rx, olm, crypto_store));
+
+    // Spawn the signaling background task.
+    let (sig_cmd_tx, sig_event_rx) =
+        signaling::spawn_signaling_task(sig_keypair, peer_id_str.clone());
+
+    let handle = tokio::spawn(run_swarm(
+        swarm, event_tx, cmd_rx, olm, crypto_store, sig_cmd_tx, sig_event_rx,
+    ));
 
     Ok((peer_id_str, handle))
 }
@@ -247,6 +259,8 @@ async fn run_swarm(
     mut cmd_rx: mpsc::Receiver<NodeCommand>,
     mut olm: OlmManager,
     crypto_store: CryptoStore,
+    sig_cmd_tx: mpsc::Sender<SignalingCmd>,
+    mut sig_event_rx: mpsc::Receiver<SignalingEvent>,
 ) {
     // Listen on all interfaces — TCP and QUIC, random ports.
     let tcp_addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
@@ -283,11 +297,25 @@ async fn run_swarm(
     // Track which peers have an active key request in flight (avoid duplicate requests).
     let mut key_request_in_flight: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Track our own listen addresses for signaling registration.
+    let mut known_addresses: Vec<String> = Vec::new();
+
     loop {
         tokio::select! {
             // Handle commands from the FFI layer.
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
+                    NodeCommand::JoinRoom { room_code } => {
+                        // Register ourselves and bootstrap from the signaling service.
+                        let addrs = known_addresses.clone();
+                        let _ = sig_cmd_tx.send(SignalingCmd::Register {
+                            room_code: room_code.clone(),
+                            addresses: addrs,
+                        }).await;
+                        let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
+                            room_code,
+                        }).await;
+                    }
                     NodeCommand::SendMessage { peer_id, text } => {
                         let peer_id_str = peer_id.to_string();
 
@@ -326,9 +354,13 @@ async fn run_swarm(
             event = swarm.select_next_some() => {
                 match event {
                     SwarmEvent::NewListenAddr { address, .. } => {
+                        let addr_str = address.to_string();
+                        if !known_addresses.contains(&addr_str) {
+                            known_addresses.push(addr_str.clone());
+                        }
                         let _ = event_tx
                             .send(NetworkEvent::Listening {
-                                address: address.to_string(),
+                                address: addr_str,
                             })
                             .await;
                     }
@@ -449,6 +481,10 @@ async fn run_swarm(
                         match new {
                             autonat::NatStatus::Public(addr) => {
                                 // We're publicly reachable — advertise our address.
+                                let addr_str = addr.to_string();
+                                if !known_addresses.contains(&addr_str) {
+                                    known_addresses.push(addr_str);
+                                }
                                 swarm.add_external_address(addr);
                             }
                             autonat::NatStatus::Private => {
@@ -486,6 +522,51 @@ async fn run_swarm(
                     }
 
                     _ => {}
+                }
+            }
+            // Handle signaling service events (bootstrap peer discovery).
+            Some(sig_event) = sig_event_rx.recv() => {
+                match sig_event {
+                    SignalingEvent::BootstrapPeers { peers } => {
+                        for bp in peers {
+                            // Skip ourselves.
+                            let Ok(peer_id) = bp.peer_id.parse::<PeerId>() else {
+                                continue;
+                            };
+                            if peer_id == *swarm.local_peer_id() {
+                                continue;
+                            }
+
+                            // Register addresses and dial.
+                            for addr_str in &bp.addresses {
+                                if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+                                    swarm.add_peer_address(peer_id, addr.clone());
+                                    swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                                }
+                            }
+
+                            // Notify Dart of the discovered peer.
+                            let _ = event_tx
+                                .send(NetworkEvent::PeerDiscovered {
+                                    peer: DiscoveredPeer {
+                                        peer_id: bp.peer_id.clone(),
+                                        addresses: bp.addresses.clone(),
+                                    },
+                                })
+                                .await;
+
+                            // Attempt to dial the peer.
+                            let _ = swarm.dial(peer_id);
+                        }
+
+                        // Trigger Kademlia bootstrap to populate routing table.
+                        let _ = swarm.behaviour_mut().kademlia.bootstrap();
+                    }
+                    SignalingEvent::Error { message } => {
+                        let _ = event_tx
+                            .send(NetworkEvent::Error { message })
+                            .await;
+                    }
                 }
             }
         }

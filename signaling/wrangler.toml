@@ -1,0 +1,7 @@
+name = "haven-signaling"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[[kv_namespaces]]
+binding = "PEERS"
+id = "ee0dc7b6ad8a40dcbdd656aeeaf1aa91"

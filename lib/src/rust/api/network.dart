@@ -33,6 +33,11 @@ Future<String?> getOlmFingerprint() =>
 Future<void> sendMessage({required String peerId, required String text}) =>
     RustLib.instance.api.crateApiNetworkSendMessage(peerId: peerId, text: text);
 
+/// Join a room via the signaling service.
+/// Registers our addresses and bootstraps from other peers in the room.
+Future<void> joinRoom({required String roomCode}) =>
+    RustLib.instance.api.crateApiNetworkJoinRoom(roomCode: roomCode);
+
 /// Stop the running node.
 Future<void> stopNode() => RustLib.instance.api.crateApiNetworkStopNode();
 

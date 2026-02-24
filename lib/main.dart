@@ -63,6 +63,8 @@ class _HavenHomeState extends State<HavenHome> {
   final Map<String, List<String>> _discoveredPeers = {};
   final Map<String, List<ChatMessage>> _chatHistory = {};
   final Set<String> _encryptedPeers = {};
+  String? _activeRoom;
+  final _roomController = TextEditingController();
 
   @override
   void initState() {
@@ -233,9 +235,20 @@ class _HavenHomeState extends State<HavenHome> {
     );
   }
 
+  Future<void> _joinRoom(String roomCode) async {
+    if (roomCode.isEmpty || _status != NodeStatus.connected) return;
+    try {
+      await joinRoom(roomCode: roomCode);
+      setState(() => _activeRoom = roomCode);
+    } catch (e) {
+      setState(() => _error = e.toString());
+    }
+  }
+
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _roomController.dispose();
     super.dispose();
   }
 
@@ -397,6 +410,9 @@ class _HavenHomeState extends State<HavenHome> {
                   },
                   lastMessage: _lastMessage,
                   formatTime: _formatTime,
+                  activeRoom: _activeRoom,
+                  roomController: _roomController,
+                  onJoinRoom: _joinRoom,
                 ),
 
                 // Right chat area
@@ -455,6 +471,9 @@ class _Sidebar extends StatelessWidget {
   final ValueChanged<String> onPeerSelected;
   final ChatMessage? Function(String) lastMessage;
   final String Function(DateTime) formatTime;
+  final String? activeRoom;
+  final TextEditingController roomController;
+  final Future<void> Function(String) onJoinRoom;
 
   const _Sidebar({
     required this.peers,
@@ -465,6 +484,9 @@ class _Sidebar extends StatelessWidget {
     required this.onPeerSelected,
     required this.lastMessage,
     required this.formatTime,
+    required this.activeRoom,
+    required this.roomController,
+    required this.onJoinRoom,
   });
 
   @override
@@ -482,9 +504,90 @@ class _Sidebar extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Room code section
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+            child: activeRoom != null
+                ? Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.primary.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: theme.colorScheme.primary.withValues(alpha: 0.3),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.cloud_done,
+                          size: 16,
+                          color: theme.colorScheme.primary,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Room: $activeRoom',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.primary,
+                              fontWeight: FontWeight.w500,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                : Row(
+                    children: [
+                      Expanded(
+                        child: SizedBox(
+                          height: 36,
+                          child: TextField(
+                            controller: roomController,
+                            style: theme.textTheme.bodySmall,
+                            decoration: InputDecoration(
+                              hintText: 'Room code...',
+                              hintStyle: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurface
+                                    .withValues(alpha: 0.4),
+                              ),
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 0,
+                              ),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              isDense: true,
+                            ),
+                            onSubmitted: (v) => onJoinRoom(v.trim()),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      SizedBox(
+                        height: 36,
+                        child: FilledButton(
+                          onPressed: () =>
+                              onJoinRoom(roomController.text.trim()),
+                          style: FilledButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                          ),
+                          child: const Text('Join'),
+                        ),
+                      ),
+                    ],
+                  ),
+          ),
+          const Divider(height: 1),
+
           // Sidebar header
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
             child: Text(
               'Peers (${peers.length})',
               style: theme.textTheme.labelLarge?.copyWith(
