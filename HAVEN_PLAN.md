@@ -810,7 +810,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 ## 13. Development Phases & Milestones
 
-### Phase 1: Foundation (Months 1-3)
+### Phase 1: Foundation (Finished in 2 days)
 
 **Goal:** Two users can send encrypted text messages to each other.
 
@@ -825,7 +825,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 **Deliverable:** Two devices on the same network can chat with E2E encryption.
 
-### Phase 2: Internet Connectivity (Months 3-4)
+### Phase 2: Internet Connectivity (Almost finished in 3-4 days)
 
 **Goal:** Two users anywhere in the world can find each other and chat 1:1 with E2EE.
 
@@ -833,13 +833,33 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 - [X] Kademlia DHT for peer discovery
 - [X] NAT traversal: AutoNAT, DCUtR hole punching, circuit relay
 - [X] Lightweight signaling service (Cloudflare Worker or equivalent)
+- [X] Combined relay + signaling server on VPS (replaced Cloudflare Worker)
+- [X] Cross-network peer discovery and relay circuit connectivity
 - [ ] Prekey bundle storage in DHT (for async key exchange)
 - [ ] Invite link generation and joining flow
 - [ ] Connection management (persistent connections, reconnection logic)
+- [ ] Room state cleanup (clear peers on room switch, deduplicate peer list)
 
 **Deliverable:** Two users on different networks can find each other via invite link and chat with E2EE.
 
-### Phase 3: Servers & Channels (Months 4-7)
+### Phase 2.5: UI Foundation (Day 7-10)
+
+**Goal:** Establish Haven's visual identity and UI architecture before building complex features on top. Replace Material Design defaults with a custom design system that feels native, premium, and distinctly Haven.
+
+- [ ] Custom theme system (HavenTheme: color palette, typography scale, spacing, elevation, border radii — no Material defaults)
+- [ ] Dark mode primary, light mode secondary (both fully custom, not Material's ColorScheme)
+- [ ] State management architecture (Provider, Riverpod, or Bloc — pick one, commit, use everywhere)
+- [ ] Navigation shell (server list sidebar, channel/chat view, member panel — responsive: sidebar on desktop, bottom nav on mobile)
+- [ ] Reusable component library (HavenButton, HavenTextField, HavenCard, HavenAvatar, HavenDialog, HavenToast — all custom-painted, no Material widgets)
+- [ ] Animation system (spring curves, page transitions, micro-interactions — buttery smooth 60fps, GPU-accelerated via Flutter's rendering pipeline)
+- [ ] Chat UI rebuild (message bubbles, timestamps, read indicators, typing indicator — custom widgets, not Material ListTiles)
+- [ ] Peer/contact list rebuild (online/offline status, avatars, encryption badge — integrated with new component library)
+- [ ] Adaptive layout system (responsive breakpoints for desktop/tablet/mobile — single codebase, three layouts)
+- [ ] Custom iconography (Haven icon set or curated icon package — consistent visual language)
+
+**Deliverable:** The app looks and feels like a real product — custom visual identity, smooth animations, responsive layout. All future UI work builds on this foundation.
+
+### Phase 3: Servers & Channels (Day 10-14)
 
 **Goal:** Multi-user servers with channels, roles, and MLS encryption.
 
@@ -857,7 +877,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 **Deliverable:** A functional group chat platform with servers, channels, and multi-device support.
 
-### Phase 4: Shared Vault — Distributed Storage (Months 7-11)
+### Phase 4: Shared Vault — Distributed Storage (Day 14-21)
 
 **Goal:** The core innovation — distributed storage across members.
 
@@ -876,7 +896,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 **Deliverable:** Server data lives distributed across members. No single point of failure. Account recovery works.
 
-### Phase 5: Voice & Video (Months 11-14)
+### Phase 5: Voice & Video (Day 21-25)
 
 **Goal:** Real-time calls with E2EE.
 
@@ -893,7 +913,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 **Deliverable:** Full voice/video/screen-share with E2EE.
 
-### Phase 6: Polish & Features (Months 14-17)
+### Phase 6: Polish & Features (Day 25-28)
 
 **Goal:** Feature parity with Discord's core experience.
 
@@ -917,7 +937,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 **Deliverable:** A polished, feature-complete communication platform.
 
-### Phase 7: Distribution & Launch (Months 17-19)
+### Phase 7: Distribution & Launch (Day 28-30)
 
 **Goal:** Ship it.
 
