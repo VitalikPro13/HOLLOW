@@ -181,6 +181,7 @@ class _HavenHomeState extends State<HavenHome> {
       setState(() {
         switch (event) {
           case NetworkEvent_PeerDiscovered(:final peer):
+            debugPrint('[HAVEN] Peer discovered: ${peer.peerId} at ${peer.addresses}');
             final existing = _discoveredPeers[peer.peerId] ?? [];
             final allAddrs = {...existing, ...peer.addresses}.toList();
             _discoveredPeers[peer.peerId] = allAddrs;
@@ -189,8 +190,8 @@ class _HavenHomeState extends State<HavenHome> {
             if (_selectedPeerId == peerId) {
               _selectedPeerId = null;
             }
-          case NetworkEvent_Listening():
-            // Node is listening — status already set to connected.
+          case NetworkEvent_Listening(:final address):
+            debugPrint('[HAVEN] Listening: $address');
             break;
           case NetworkEvent_MessageReceived(:final fromPeer, :final text):
             final now = DateTime.now();
@@ -213,6 +214,7 @@ class _HavenHomeState extends State<HavenHome> {
               ChatMessage(text: '[Failed to send: $error]', isMe: true),
             );
           case NetworkEvent_Error(:final message):
+            debugPrint('[HAVEN] $message');
             _error = message;
         }
       });

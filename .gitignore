@@ -47,6 +47,7 @@ app.*.map.json
 # Rust
 rust/haven_core/target/
 rust/target/
+relay/target/
 
 # flutter_rust_bridge
 .flutter-plugins
@@ -55,6 +56,12 @@ rust/target/
 .env
 *.key
 *.pem
+
+# Deprecated (replaced by relay/)
+signaling/
+
+# Temporary files
+temporary_ssh_log.txt
 
 # Claude Code
 .claude/

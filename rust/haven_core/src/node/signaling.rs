@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
-const SIGNALING_URL: &str = "https://haven-signaling.anonlisten.workers.dev";
+const SIGNALING_URL: &str = "http://141.227.186.209:8080";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 
 // -- Commands & Events --
@@ -14,6 +14,12 @@ pub(crate) enum SignalingCmd {
         addresses: Vec<String>,
     },
     Bootstrap {
+        room_code: String,
+    },
+    UpdateAddresses {
+        addresses: Vec<String>,
+    },
+    SetRoom {
         room_code: String,
     },
 }
@@ -117,6 +123,26 @@ async fn signaling_loop(
                                 }).await;
                             }
                         }
+                    }
+                    SignalingCmd::UpdateAddresses { addresses } => {
+                        active_addrs = addresses;
+                        // Re-register immediately if we're in a room and have
+                        // addresses so new relay circuit addrs get published.
+                        if let Some(room) = &active_room {
+                            if !active_addrs.is_empty() {
+                                if let Err(e) = do_register(
+                                    &client, &keypair, &peer_id_str, &pub_key_b64,
+                                    room, &active_addrs,
+                                ).await {
+                                    let _ = event_tx.send(SignalingEvent::Error {
+                                        message: format!("Re-register failed: {e}"),
+                                    }).await;
+                                }
+                            }
+                        }
+                    }
+                    SignalingCmd::SetRoom { room_code } => {
+                        active_room = Some(room_code);
                     }
                 }
             }

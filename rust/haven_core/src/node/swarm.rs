@@ -4,12 +4,73 @@ use std::time::Duration;
 
 use libp2p::futures::StreamExt;
 use libp2p::request_response::{self, ProtocolSupport};
-use libp2p::{autonat, dcutr, identity, kad, mdns, noise, relay, swarm::SwarmEvent, tcp, yamux, Multiaddr, PeerId, SwarmBuilder};
+use libp2p::{autonat, dcutr, identify, identity, kad, mdns, noise, ping, relay, swarm::SwarmEvent, tcp, yamux, Multiaddr, PeerId, SwarmBuilder};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::crypto::{CryptoStore, OlmManager};
 use super::signaling::{self, SignalingCmd, SignalingEvent};
+
+// -- Relay node constants (OVH VPS, Belgium) --
+const RELAY_ADDR_TCP: &str = "/ip4/141.227.186.209/tcp/4001";
+const RELAY_ADDR_QUIC: &str = "/ip4/141.227.186.209/udp/4001/quic-v1";
+const RELAY_PEER_ID: &str = "12D3KooWSN4XSvAZdyKULvTgnsxYqcfr4LEmqCkAcQoTzaotDX8s";
+
+/// Parse the relay PeerId from the hardcoded constant.
+/// Returns None if the relay hasn't been configured yet (empty string).
+fn relay_peer_id() -> Option<PeerId> {
+    if RELAY_PEER_ID.is_empty() {
+        return None;
+    }
+    RELAY_PEER_ID.parse().ok()
+}
+
+/// Build the relay multiaddrs including the peer ID suffix.
+fn relay_addrs() -> Vec<Multiaddr> {
+    if RELAY_PEER_ID.is_empty() {
+        return vec![];
+    }
+    [RELAY_ADDR_TCP, RELAY_ADDR_QUIC]
+        .iter()
+        .filter_map(|base| {
+            format!("{base}/p2p/{RELAY_PEER_ID}").parse().ok()
+        })
+        .collect()
+}
+
+/// Filter addresses for signaling registration.
+/// Removes loopback, link-local, and private LAN addresses.
+/// Keeps relay circuit addresses and public IPs.
+fn is_registerable_address(addr: &str) -> bool {
+    // Always keep relay circuit addresses — they're routable from anywhere.
+    if addr.contains("p2p-circuit") {
+        return true;
+    }
+    // Exclude loopback.
+    if addr.contains("/ip4/127.") || addr.contains("/ip6/::1/") {
+        return false;
+    }
+    // Exclude link-local.
+    if addr.contains("/ip4/169.254.") || addr.contains("/ip6/fe80") {
+        return false;
+    }
+    // Exclude private LAN ranges (unreachable from other networks).
+    if addr.contains("/ip4/192.168.") || addr.contains("/ip4/10.") {
+        return false;
+    }
+    // 172.16.0.0 - 172.31.255.255
+    if let Some(pos) = addr.find("/ip4/172.") {
+        let after = &addr[pos + 9..];
+        if let Some(dot_pos) = after.find('.') {
+            if let Ok(second_octet) = after[..dot_pos].parse::<u8>() {
+                if (16..=31).contains(&second_octet) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
 
 /// A discovered peer on the local network.
 pub(crate) struct DiscoveredPeer {
@@ -160,6 +221,8 @@ impl request_response::Codec for HavenCodec {
 #[derive(libp2p::swarm::NetworkBehaviour)]
 struct HavenBehaviour {
     relay_client: relay::client::Behaviour,
+    identify: identify::Behaviour,
+    ping: ping::Behaviour,
     kademlia: kad::Behaviour<kad::store::MemoryStore>,
     autonat: autonat::Behaviour,
     dcutr: dcutr::Behaviour,
@@ -224,8 +287,18 @@ pub(crate) async fn spawn_node(
             // DCUtR — hole punching via relay-assisted coordination
             let dcutr = dcutr::Behaviour::new(local_peer_id);
 
+            // Identify — required for relay protocol to work.
+            let identify = identify::Behaviour::new(identify::Config::new(
+                "/haven/1.0.0".to_string(),
+                key.public(),
+            ));
+
+            let ping = ping::Behaviour::default();
+
             Ok(HavenBehaviour {
                 relay_client,
+                identify,
+                ping,
                 kademlia,
                 autonat,
                 dcutr,
@@ -283,10 +356,39 @@ async fn run_swarm(
         // QUIC failure is non-fatal — TCP still works as fallback.
     }
 
-    // Listen on relay circuit — allows NATted peers to reach us through a relay.
-    // This may fail if no relay is available yet — that's OK.
-    let relay_addr: Multiaddr = "/ip4/0.0.0.0/tcp/0/p2p-circuit".parse().unwrap();
-    let _ = swarm.listen_on(relay_addr);
+    // Dial the relay node and request a reservation (for NAT traversal).
+    if let Some(relay_pid) = relay_peer_id() {
+        let _ = event_tx
+            .send(NetworkEvent::Error {
+                message: format!("[DEBUG] Dialing relay {relay_pid}..."),
+            })
+            .await;
+        for addr in relay_addrs() {
+            let _ = event_tx
+                .send(NetworkEvent::Error {
+                    message: format!("[DEBUG] Relay addr: {addr}"),
+                })
+                .await;
+            swarm.add_peer_address(relay_pid, addr.clone());
+            swarm.behaviour_mut().kademlia.add_address(&relay_pid, addr);
+        }
+        if let Err(e) = swarm.dial(relay_pid) {
+            let _ = event_tx
+                .send(NetworkEvent::Error {
+                    message: format!("Failed to dial relay: {e}"),
+                })
+                .await;
+        }
+        // NOTE: listen_on for the relay circuit is deferred to
+        // ConnectionEstablished — calling it before the relay is
+        // connected causes libp2p to immediately close the listener.
+    } else {
+        let _ = event_tx
+            .send(NetworkEvent::Error {
+                message: "[DEBUG] No relay configured!".to_string(),
+            })
+            .await;
+    }
 
     // Track outbound request IDs → peer for delivery confirmation.
     let mut pending_requests = HashMap::<request_response::OutboundRequestId, String>::new();
@@ -300,17 +402,35 @@ async fn run_swarm(
     // Track our own listen addresses for signaling registration.
     let mut known_addresses: Vec<String> = Vec::new();
 
+    // Track the active room code so we can re-bootstrap after getting a relay circuit address.
+    let mut active_room: Option<String> = None;
+
     loop {
         tokio::select! {
             // Handle commands from the FFI layer.
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
                     NodeCommand::JoinRoom { room_code } => {
+                        active_room = Some(room_code.clone());
                         // Register ourselves and bootstrap from the signaling service.
-                        let addrs = known_addresses.clone();
-                        let _ = sig_cmd_tx.send(SignalingCmd::Register {
+                        // Filter out loopback/link-local/private — only send routable addresses.
+                        let addrs: Vec<String> = known_addresses.iter()
+                            .filter(|a| is_registerable_address(a))
+                            .cloned()
+                            .collect();
+                        // Only register if we have routable addresses.
+                        // If empty (relay circuit not yet established), the
+                        // UpdateAddresses flow will register us once it is.
+                        if !addrs.is_empty() {
+                            let _ = sig_cmd_tx.send(SignalingCmd::Register {
+                                room_code: room_code.clone(),
+                                addresses: addrs,
+                            }).await;
+                        }
+                        // Always store the room code so UpdateAddresses can
+                        // register later, and always bootstrap to find peers.
+                        let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
                             room_code: room_code.clone(),
-                            addresses: addrs,
                         }).await;
                         let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
                             room_code,
@@ -355,8 +475,35 @@ async fn run_swarm(
                 match event {
                     SwarmEvent::NewListenAddr { address, .. } => {
                         let addr_str = address.to_string();
-                        if !known_addresses.contains(&addr_str) {
+                        let is_new = !known_addresses.contains(&addr_str);
+                        let is_circuit = addr_str.contains("p2p-circuit");
+                        if is_new {
                             known_addresses.push(addr_str.clone());
+
+                            // Push updated addresses to signaling so relay circuit
+                            // addresses get registered for other peers to find us.
+                            let registerable: Vec<String> = known_addresses.iter()
+                                .filter(|a| is_registerable_address(a))
+                                .cloned()
+                                .collect();
+                            let _ = sig_cmd_tx.send(SignalingCmd::UpdateAddresses {
+                                addresses: registerable,
+                            }).await;
+
+                            // When a relay circuit address appears, re-bootstrap
+                            // to discover peers that registered before us.
+                            if is_circuit {
+                                if let Some(room) = &active_room {
+                                    let _ = event_tx
+                                        .send(NetworkEvent::Error {
+                                            message: "[DEBUG] Relay circuit up — re-bootstrapping...".to_string(),
+                                        })
+                                        .await;
+                                    let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
+                                        room_code: room.clone(),
+                                    }).await;
+                                }
+                            }
                         }
                         let _ = event_tx
                             .send(NetworkEvent::Listening {
@@ -517,8 +664,115 @@ async fn run_swarm(
 
                     // -- Relay client events --
                     SwarmEvent::Behaviour(HavenBehaviourEvent::RelayClient(event)) => {
-                        // Relay events (reservation established, etc.) — log via catch-all for now.
-                        let _ = event;
+                        match event {
+                            relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
+                                if !renewal {
+                                    let _ = event_tx
+                                        .send(NetworkEvent::Listening {
+                                            address: format!("relay-reserved:{relay_peer_id}"),
+                                        })
+                                        .await;
+                                }
+                            }
+                            relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
+                                let _ = event_tx
+                                    .send(NetworkEvent::Listening {
+                                        address: format!("relay-circuit-out:{relay_peer_id}"),
+                                    })
+                                    .await;
+                            }
+                            relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
+                                let _ = event_tx
+                                    .send(NetworkEvent::Listening {
+                                        address: format!("relay-circuit-in:{src_peer_id}"),
+                                    })
+                                    .await;
+                                // Emit PeerDiscovered so the Dart UI shows this peer.
+                                let _ = event_tx
+                                    .send(NetworkEvent::PeerDiscovered {
+                                        peer: DiscoveredPeer {
+                                            peer_id: src_peer_id.to_string(),
+                                            addresses: vec![format!(
+                                                "{}/p2p/{}/p2p-circuit/p2p/{}",
+                                                RELAY_ADDR_QUIC, RELAY_PEER_ID, src_peer_id
+                                            )],
+                                        },
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+
+                    // -- Identify events --
+                    SwarmEvent::Behaviour(HavenBehaviourEvent::Identify(
+                        identify::Event::Received { peer_id, info, .. },
+                    )) => {
+                        // Add identified peer's addresses to Kademlia.
+                        for addr in info.listen_addrs {
+                            swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                        }
+                    }
+                    SwarmEvent::Behaviour(HavenBehaviourEvent::Identify(_)) => {}
+
+                    // -- Ping events --
+                    SwarmEvent::Behaviour(HavenBehaviourEvent::Ping(_)) => {}
+
+                    // -- Debug: connection lifecycle --
+                    SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                        let _ = event_tx
+                            .send(NetworkEvent::Error {
+                                message: format!("[DEBUG] Connected to {peer_id} via {endpoint:?}"),
+                            })
+                            .await;
+
+                        // Once connected to the relay, request a circuit reservation.
+                        // Use the transport that actually connected (check endpoint).
+                        if relay_peer_id() == Some(peer_id) {
+                            let ep_str = format!("{endpoint:?}");
+                            let base = if ep_str.contains("quic") {
+                                RELAY_ADDR_QUIC
+                            } else {
+                                RELAY_ADDR_TCP
+                            };
+                            let relay_circuit: Multiaddr = format!(
+                                "{base}/p2p/{RELAY_PEER_ID}/p2p-circuit"
+                            )
+                            .parse()
+                            .unwrap();
+                            let _ = event_tx
+                                .send(NetworkEvent::Error {
+                                    message: format!("[DEBUG] Connected to relay! Requesting circuit via: {relay_circuit}"),
+                                })
+                                .await;
+                            if let Err(e) = swarm.listen_on(relay_circuit) {
+                                let _ = event_tx
+                                    .send(NetworkEvent::Error {
+                                        message: format!("Failed to listen on relay circuit: {e}"),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+                    SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                        let _ = event_tx
+                            .send(NetworkEvent::Error {
+                                message: format!("[DEBUG] Dial failed to {peer_id:?}: {error}"),
+                            })
+                            .await;
+                    }
+                    SwarmEvent::ListenerError { listener_id, error } => {
+                        let _ = event_tx
+                            .send(NetworkEvent::Error {
+                                message: format!("[DEBUG] Listener error ({listener_id:?}): {error}"),
+                            })
+                            .await;
+                    }
+                    SwarmEvent::ListenerClosed { listener_id, reason, .. } => {
+                        let _ = event_tx
+                            .send(NetworkEvent::Error {
+                                message: format!("[DEBUG] Listener closed ({listener_id:?}): {reason:?}"),
+                            })
+                            .await;
                     }
 
                     _ => {}
@@ -528,6 +782,11 @@ async fn run_swarm(
             Some(sig_event) = sig_event_rx.recv() => {
                 match sig_event {
                     SignalingEvent::BootstrapPeers { peers } => {
+                        let _ = event_tx
+                            .send(NetworkEvent::Error {
+                                message: format!("[DEBUG] Bootstrap returned {} peers", peers.len()),
+                            })
+                            .await;
                         for bp in peers {
                             // Skip ourselves.
                             let Ok(peer_id) = bp.peer_id.parse::<PeerId>() else {
@@ -537,12 +796,28 @@ async fn run_swarm(
                                 continue;
                             }
 
-                            // Register addresses and dial.
+                            // Register any addresses from signaling.
                             for addr_str in &bp.addresses {
                                 if let Ok(addr) = addr_str.parse::<Multiaddr>() {
                                     swarm.add_peer_address(peer_id, addr.clone());
-                                    swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                                    // Only add non-circuit addresses to Kademlia.
+                                    if !addr_str.contains("p2p-circuit") {
+                                        swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                                    }
                                 }
+                            }
+
+                            // Always add a relay circuit address for the peer so libp2p
+                            // can reach them through the relay even if their direct
+                            // addresses are unreachable (NAT, firewall, etc.).
+                            if let Some(relay_pid) = relay_peer_id() {
+                                let circuit_addr: Multiaddr = format!(
+                                    "{}/p2p/{}/p2p-circuit/p2p/{}",
+                                    RELAY_ADDR_TCP, relay_pid, peer_id
+                                )
+                                .parse()
+                                .unwrap();
+                                swarm.add_peer_address(peer_id, circuit_addr);
                             }
 
                             // Notify Dart of the discovered peer.
@@ -555,7 +830,8 @@ async fn run_swarm(
                                 })
                                 .await;
 
-                            // Attempt to dial the peer.
+                            // Attempt to dial the peer (libp2p tries all known
+                            // addresses including the relay circuit).
                             let _ = swarm.dial(peer_id);
                         }
 
