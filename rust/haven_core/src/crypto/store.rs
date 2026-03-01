@@ -27,7 +27,7 @@ impl CryptoStore {
             let store = match MessageStore::open(&db_path, &passphrase) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("CryptoStore: failed to open DB: {e}");
+                    haven_log!("CryptoStore: failed to open DB: {e}");
                     return;
                 }
             };
@@ -38,12 +38,12 @@ impl CryptoStore {
                 match cmd {
                     CryptoStoreCmd::SaveAccount(pickle) => {
                         if let Err(e) = store.save_olm_account(&pickle) {
-                            eprintln!("CryptoStore: failed to save account: {e}");
+                            haven_log!("CryptoStore: failed to save account: {e}");
                         }
                     }
                     CryptoStoreCmd::SaveSession { peer_id, pickle } => {
                         if let Err(e) = store.save_olm_session(&peer_id, &pickle) {
-                            eprintln!("CryptoStore: failed to save session for {peer_id}: {e}");
+                            haven_log!("CryptoStore: failed to save session for {peer_id}: {e}");
                         }
                     }
                 }

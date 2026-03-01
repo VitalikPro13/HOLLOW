@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use libp2p::futures::StreamExt;
 use libp2p::request_response::{self, ProtocolSupport};
-use libp2p::{autonat, dcutr, identify, identity, kad, mdns, noise, ping, relay, swarm::SwarmEvent, tcp, yamux, Multiaddr, PeerId, SwarmBuilder};
+use libp2p::{autonat, dcutr, identify, identity, kad, mdns, noise, ping, relay, swarm::SwarmEvent, tcp, tls, yamux, Multiaddr, PeerId, SwarmBuilder};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -15,6 +15,7 @@ use super::signaling::{self, SignalingCmd, SignalingEvent};
 // -- Relay node constants (OVH VPS, Belgium) --
 const RELAY_ADDR_TCP: &str = "/ip4/141.227.186.209/tcp/4001";
 const RELAY_ADDR_QUIC: &str = "/ip4/141.227.186.209/udp/4001/quic-v1";
+const RELAY_ADDR_WSS: &str = "/dns4/relay.anonlisten.com/tcp/443/tls/ws";
 const RELAY_PEER_ID: &str = "12D3KooWSN4XSvAZdyKULvTgnsxYqcfr4LEmqCkAcQoTzaotDX8s";
 
 /// Parse the relay PeerId from the hardcoded constant.
@@ -31,7 +32,7 @@ fn relay_addrs() -> Vec<Multiaddr> {
     if RELAY_PEER_ID.is_empty() {
         return vec![];
     }
-    [RELAY_ADDR_TCP, RELAY_ADDR_QUIC]
+    [RELAY_ADDR_TCP, RELAY_ADDR_QUIC, RELAY_ADDR_WSS]
         .iter()
         .filter_map(|base| {
             format!("{base}/p2p/{RELAY_PEER_ID}").parse().ok()
@@ -385,7 +386,18 @@ pub(crate) async fn spawn_node(
             config.handshake_timeout = Duration::from_secs(10);
             config
         })
-        .with_relay_client(noise::Config::new, yamux::Config::default)
+        .with_dns()
+        .map_err(|e| format!("DNS setup failed: {e}"))?
+        .with_websocket(
+            (tls::Config::new, noise::Config::new),
+            yamux::Config::default,
+        )
+        .await
+        .map_err(|e| format!("WebSocket setup failed: {e}"))?
+        .with_relay_client(
+            (tls::Config::new, noise::Config::new),
+            yamux::Config::default,
+        )
         .map_err(|e| format!("Relay client setup failed: {e}"))?
         .with_behaviour(|key, relay_client| {
             let local_peer_id = key.public().to_peer_id();
@@ -569,6 +581,11 @@ async fn run_swarm(
     let mut rebootstrap_timer = tokio::time::interval(Duration::from_secs(30));
     rebootstrap_timer.tick().await; // consume immediate first tick
 
+    // Relay health check timer (60 seconds). Detects dropped relay connections
+    // and re-dials to restore circuit-based reachability.
+    let mut relay_health_timer = tokio::time::interval(Duration::from_secs(60));
+    relay_health_timer.tick().await; // consume immediate first tick
+
     loop {
         tokio::select! {
             // Handle commands from the FFI layer.
@@ -608,7 +625,7 @@ async fn run_swarm(
                     }
                     NodeCommand::SendMessage { peer_id, text } => {
                         let peer_id_str = peer_id.to_string();
-                        eprintln!("[HAVEN-SWARM] SendMessage received for {peer_id_str}");
+                        haven_log!("[HAVEN-SWARM] SendMessage received for {peer_id_str}");
 
                         if olm.has_session(&peer_id_str) {
                             // Session exists — encrypt and send.
@@ -634,7 +651,7 @@ async fn run_swarm(
                                 && !dht_fetch_in_flight.contains(&peer_id_str)
                             {
                                 // Try DHT prekey fetch before falling back to KeyRequest.
-                                eprintln!("[HAVEN-SWARM] No session for {peer_id_str}, starting DHT prekey fetch");
+                                haven_log!("[HAVEN-SWARM] No session for {peer_id_str}, starting DHT prekey fetch");
                                 let record_key = kad::RecordKey::new(
                                     &format!("/haven/prekeys/{}", peer_id_str),
                                 );
@@ -788,7 +805,7 @@ async fn run_swarm(
                                     // If this was an encrypted message, re-queue the original
                                     // text so it can be retried when the connection is established.
                                     if let Some((_peer_str, original_text)) = outbound_message_text.remove(&request_id) {
-                                        eprintln!("[HAVEN-SWARM] OutboundFailure for {to_peer}, re-queuing message for retry");
+                                        haven_log!("[HAVEN-SWARM] OutboundFailure for {to_peer}, re-queuing message for retry");
                                         pending_messages
                                             .entry(to_peer.clone())
                                             .or_default()
@@ -799,7 +816,7 @@ async fn run_swarm(
                                         if olm.has_session(&to_peer) {
                                             olm.remove_session(&to_peer);
                                             persist_crypto_state(&olm, &crypto_store, &to_peer);
-                                            eprintln!("[HAVEN-SWARM] Removed stale session for {to_peer}");
+                                            haven_log!("[HAVEN-SWARM] Removed stale session for {to_peer}");
                                         }
                                     } else {
                                         // Not a message send (was a KeyRequest or similar) — report failure.
@@ -851,9 +868,9 @@ async fn run_swarm(
                                         kad::GetRecordOk::FoundRecord(kad::PeerRecord { record, .. })
                                     )) => {
                                         // Check if this is a prekey fetch we initiated.
-                                        eprintln!("[HAVEN-SWARM] GetRecord FoundRecord for query {:?}", id);
+                                        haven_log!("[HAVEN-SWARM] GetRecord FoundRecord for query {:?}", id);
                                         if let Some(target_peer) = pending_prekey_fetches.remove(&id) {
-                                            eprintln!("[HAVEN-SWARM] Found prekey record for {target_peer}");
+                                            haven_log!("[HAVEN-SWARM] Found prekey record for {target_peer}");
                                             dht_fetch_in_flight.remove(&target_peer);
 
                                             let mut used = false;
@@ -936,9 +953,9 @@ async fn run_swarm(
                                         kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. }
                                     )) => {
                                         // If this query is still pending (no FoundRecord came), fall back.
-                                        eprintln!("[HAVEN-SWARM] GetRecord FinishedWithNoAdditionalRecord for query {:?}", id);
+                                        haven_log!("[HAVEN-SWARM] GetRecord FinishedWithNoAdditionalRecord for query {:?}", id);
                                         if let Some(target_peer) = pending_prekey_fetches.remove(&id) {
-                                            eprintln!("[HAVEN-SWARM] No prekey record found for {target_peer}, falling back");
+                                            haven_log!("[HAVEN-SWARM] No prekey record found for {target_peer}, falling back");
                                             dht_fetch_in_flight.remove(&target_peer);
                                             let _ = event_tx.send(NetworkEvent::Error {
                                                 message: format!("[DHT] No prekey found for {target_peer}, falling back to KeyRequest"),
@@ -959,9 +976,9 @@ async fn run_swarm(
                                     }
                                     kad::QueryResult::GetRecord(Err(e)) => {
                                         // DHT fetch failed — fall back to KeyRequest.
-                                        eprintln!("[HAVEN-SWARM] GetRecord Error for query {:?}: {e:?}", id);
+                                        haven_log!("[HAVEN-SWARM] GetRecord Error for query {:?}: {e:?}", id);
                                         if let Some(target_peer) = pending_prekey_fetches.remove(&id) {
-                                            eprintln!("[HAVEN-SWARM] GetRecord failed for {target_peer}, falling back");
+                                            haven_log!("[HAVEN-SWARM] GetRecord failed for {target_peer}, falling back");
                                             dht_fetch_in_flight.remove(&target_peer);
                                             let _ = event_tx.send(NetworkEvent::Error {
                                                 message: format!("[DHT] Prekey fetch failed for {target_peer}: {e:?}"),
@@ -1128,6 +1145,8 @@ async fn run_swarm(
                             let ep_str = format!("{endpoint:?}");
                             let base = if ep_str.contains("quic") {
                                 RELAY_ADDR_QUIC
+                            } else if ep_str.contains("ws") || ep_str.contains("443") {
+                                RELAY_ADDR_WSS
                             } else {
                                 RELAY_ADDR_TCP
                             };
@@ -1154,7 +1173,7 @@ async fn run_swarm(
                             // exchange or send them now.
                             let peer_str = peer_id.to_string();
                             if pending_messages.contains_key(&peer_str) {
-                                eprintln!("[HAVEN-SWARM] Connection established to {peer_str}, flushing pending messages");
+                                haven_log!("[HAVEN-SWARM] Connection established to {peer_str}, flushing pending messages");
                                 if olm.has_session(&peer_str) {
                                     // Session exists — flush immediately.
                                     if let Some(queued) = pending_messages.remove(&peer_str) {
@@ -1177,7 +1196,7 @@ async fn run_swarm(
                                         .get_record(record_key);
                                     pending_prekey_fetches.insert(query_id, peer_str.clone());
                                     dht_fetch_in_flight.insert(peer_str.clone());
-                                    eprintln!("[HAVEN-SWARM] Starting DHT prekey fetch for {peer_str}");
+                                    haven_log!("[HAVEN-SWARM] Starting DHT prekey fetch for {peer_str}");
                                 }
                             }
                         }
@@ -1222,6 +1241,27 @@ async fn run_swarm(
                                 })
                                 .await;
                         }
+
+                        // Relay connection lost — immediately re-dial to restore circuit.
+                        if num_established == 0 && relay_peer_id() == Some(peer_id) {
+                            let _ = event_tx.send(NetworkEvent::Error {
+                                message: "[RELAY] Relay connection lost! Re-dialing in 5s...".to_string(),
+                            }).await;
+                            // Remove stale relay circuit addresses.
+                            known_addresses.retain(|a| !a.contains("p2p-circuit"));
+                            // Brief delay before re-dial to avoid tight reconnect loops.
+                            let relay_pid = peer_id;
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            for addr in relay_addrs() {
+                                swarm.add_peer_address(relay_pid, addr.clone());
+                                swarm.behaviour_mut().kademlia.add_address(&relay_pid, addr);
+                            }
+                            if let Err(e) = swarm.dial(relay_pid) {
+                                let _ = event_tx.send(NetworkEvent::Error {
+                                    message: format!("[RELAY] Re-dial failed: {e}"),
+                                }).await;
+                            }
+                        }
                     }
 
                     _ => {}
@@ -1256,17 +1296,19 @@ async fn run_swarm(
                                 }
                             }
 
-                            // Always add a relay circuit address for the peer so libp2p
+                            // Always add relay circuit addresses for the peer so libp2p
                             // can reach them through the relay even if their direct
                             // addresses are unreachable (NAT, firewall, etc.).
+                            // Add both TCP and WSS circuits for censorship resilience.
                             if let Some(relay_pid) = relay_peer_id() {
-                                let circuit_addr: Multiaddr = format!(
-                                    "{}/p2p/{}/p2p-circuit/p2p/{}",
-                                    RELAY_ADDR_TCP, relay_pid, peer_id
-                                )
-                                .parse()
-                                .unwrap();
-                                swarm.add_peer_address(peer_id, circuit_addr);
+                                for base in [RELAY_ADDR_TCP, RELAY_ADDR_WSS] {
+                                    if let Ok(circuit_addr) = format!(
+                                        "{}/p2p/{}/p2p-circuit/p2p/{}",
+                                        base, relay_pid, peer_id
+                                    ).parse::<Multiaddr>() {
+                                        swarm.add_peer_address(peer_id, circuit_addr);
+                                    }
+                                }
                             }
 
                             // Mark as expected so ConnectionEstablished can emit PeerDiscovered.
@@ -1326,6 +1368,39 @@ async fn run_swarm(
                     let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
                         room_code: room.clone(),
                     }).await;
+                }
+            }
+
+            // Relay health check — re-dial relay if connection dropped.
+            _ = relay_health_timer.tick() => {
+                if let Some(relay_pid) = relay_peer_id() {
+                    if !swarm.is_connected(&relay_pid) {
+                        let _ = event_tx.send(NetworkEvent::Error {
+                            message: "[RELAY] Not connected to relay, re-dialing...".to_string(),
+                        }).await;
+                        // Remove stale relay circuit addresses.
+                        known_addresses.retain(|a| !a.contains("p2p-circuit"));
+                        // Re-add relay addresses and dial.
+                        for addr in relay_addrs() {
+                            swarm.add_peer_address(relay_pid, addr.clone());
+                            swarm.behaviour_mut().kademlia.add_address(&relay_pid, addr);
+                        }
+                        let _ = swarm.dial(relay_pid);
+                    } else {
+                        // Connected to relay but check if we have a circuit address.
+                        let has_circuit = known_addresses.iter().any(|a| a.contains("p2p-circuit"));
+                        if !has_circuit {
+                            let _ = event_tx.send(NetworkEvent::Error {
+                                message: "[RELAY] Connected but no circuit address, re-requesting...".to_string(),
+                            }).await;
+                            // Re-request circuit reservation.
+                            let relay_circuit: Multiaddr = format!(
+                                "{}/p2p/{}/p2p-circuit",
+                                RELAY_ADDR_QUIC, RELAY_PEER_ID
+                            ).parse().unwrap();
+                            let _ = swarm.listen_on(relay_circuit);
+                        }
+                    }
                 }
             }
         }
@@ -1486,7 +1561,7 @@ async fn handle_incoming_request(
                     Ok(pt) => pt,
                     Err(e) => {
                         // Stale session — remove it and initiate fresh key exchange.
-                        eprintln!("[HAVEN-SWARM] Decrypt failed for {peer_str}: {e} — removing stale session");
+                        haven_log!("[HAVEN-SWARM] Decrypt failed for {peer_str}: {e} — removing stale session");
                         olm.remove_session(&peer_str);
                         persist_crypto_state(olm, crypto_store, &peer_str);
 

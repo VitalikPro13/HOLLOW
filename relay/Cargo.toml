@@ -11,8 +11,9 @@ path = "src/main.rs"
 libp2p = { version = "0.56.0", features = [
     "tcp", "noise", "yamux", "quic", "tokio", "macros",
     "identify", "relay", "kad", "ping",
+    "dns", "websocket", "tls",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "signal", "fs"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 ed25519-dalek = { version = "2", features = ["pkcs8"] }

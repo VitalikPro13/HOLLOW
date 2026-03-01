@@ -866,16 +866,16 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 - Warning: #F59E0B
 - Border radius: 8-12px (medium rounded)
 
-- [ ] Custom theme system (HavenTheme: color palette, typography scale, spacing, elevation, border radii — no Material defaults. Multi-theme architecture supporting Default Dark + future Aero theme)
+- [X] Custom theme system (HavenTheme: color palette, typography scale, spacing, elevation, border radii — no Material defaults. Multi-theme architecture supporting Default Dark + future Aero theme)
 - [ ] Dark mode primary, light mode secondary (both fully custom, not Material's ColorScheme)
 - [ ] Custom window chrome (remove native title bar, custom-drawn title bar with Haven branding, window controls — via flutter_acrylic or bitsdojo_window)
 - [X] State management architecture (Riverpod — chosen for auto-dispose, .family per-peer state, StreamProvider for Rust FFI streams, granular rebuilds)
 - [ ] Event streaming refactor (replace polling with Rust→Dart stream — real-time updates)
 - [ ] Navigation shell (server list sidebar, channel/chat view, member panel — responsive: sidebar on desktop, bottom nav on mobile)
-- [ ] Reusable component library (HavenButton, HavenTextField, HavenCard, HavenAvatar, HavenDialog, HavenToast — all custom-painted, no Material widgets)
-- [ ] Animation system (spring curves, page transitions, micro-interactions — buttery smooth 60fps, GPU-accelerated via Flutter's rendering pipeline)
-- [ ] Chat UI rebuild (message bubbles, timestamps, read indicators, typing indicator — custom widgets, not Material ListTiles)
-- [ ] Peer/contact list rebuild (online/offline status, avatars, encryption badge — integrated with new component library)
+- [X] Reusable component library (HavenButton, HavenTextField, HavenCard, HavenAvatar, HavenDialog, HavenToast — all custom-painted, no Material widgets)
+- [X] Animation system (spring curves, page transitions, micro-interactions — buttery smooth 60fps, GPU-accelerated via Flutter's rendering pipeline)
+- [X] Chat UI rebuild (message bubbles, timestamps, read indicators, typing indicator — custom widgets, not Material ListTiles)
+- [X] Peer/contact list rebuild (online/offline status, avatars, encryption badge — integrated with new component library)
 - [X] Adaptive layout system (responsive breakpoints for desktop/tablet/mobile — single codebase, three layouts)
 - [ ] Custom iconography (Haven icon set or curated icon package — consistent visual language)
 
@@ -983,6 +983,23 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 - [ ] Security audit (third-party review of E2EE implementation)
 
 **Deliverable:** Public release across all platforms.
+
+### Phase ???: Fight Government Censorship
+
+**Goal:** Bypass networks.
+
+**Explanation:**
+
+The hard truth: Russia's TSPU (DPI system) is one of the most advanced censorship systems in the world. It doesn't just look at port numbers — it analyzes traffic patterns, packet sizes, and timing. Even though our WSS goes through TLS on port 443, the libp2p protocol fingerprint inside the WebSocket frames is detectable. This is the same reason Tor needed pluggable transports (obfs4, meek, snowflake) — plain TLS wrapping isn't enough against sophisticated DPI.
+
+Fighting this properly would require:
+- Traffic obfuscation (like obfs4 — randomizing packet sizes and timing)
+- Domain fronting (making traffic look like it's going to Google/Amazon)
+- Custom protocol that mimics real HTTPS browsing patterns
+
+This is months of specialized anti-censorship engineering — it's what entire teams at Tor Project and V2Ray work on full-time.
+
+- [] WSS is implemented but it doesn't work. Implement HARD bypassers.
 
 ---
 

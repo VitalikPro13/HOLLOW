@@ -55,8 +55,34 @@ fn get_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-/// Convert internal event to FFI event.
+/// Convert internal event to FFI event. Also logs Error events to the debug log file.
 fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
+    // Log all events to the debug log file so release builds have diagnostics.
+    match &event {
+        node::NetworkEvent::Error { message } => haven_log!("[HAVEN] {message}"),
+        node::NetworkEvent::PeerDiscovered { peer } => {
+            haven_log!("[HAVEN] Peer discovered: {} at {:?}", peer.peer_id, peer.addresses);
+        }
+        node::NetworkEvent::PeerDisconnected { peer_id } => {
+            haven_log!("[HAVEN] Peer disconnected: {peer_id}");
+        }
+        node::NetworkEvent::Listening { address } => {
+            haven_log!("[HAVEN] Listening: {address}");
+        }
+        node::NetworkEvent::SessionEstablished { peer_id } => {
+            haven_log!("[HAVEN] Session established: {peer_id}");
+        }
+        node::NetworkEvent::MessageReceived { from_peer, .. } => {
+            haven_log!("[HAVEN] Message received from: {from_peer}");
+        }
+        node::NetworkEvent::MessageSent { to_peer } => {
+            haven_log!("[HAVEN] Message sent to: {to_peer}");
+        }
+        node::NetworkEvent::MessageSendFailed { to_peer, error } => {
+            haven_log!("[HAVEN] Message send failed to {to_peer}: {error}");
+        }
+        _ => {}
+    }
     match event {
         node::NetworkEvent::PeerDiscovered { peer } => NetworkEvent::PeerDiscovered {
             peer: DiscoveredPeer {
@@ -95,6 +121,10 @@ pub fn start_node() -> Result<String, String> {
     if guard.is_some() {
         return Err("Node is already running".to_string());
     }
+
+    // Initialize debug log file (writes next to executable, works in release builds).
+    crate::log::init();
+    haven_log!("[HAVEN] === Node starting ===");
 
     // Load the persistent identity (or create one if first run).
     let id = identity::load_or_create_identity()?;

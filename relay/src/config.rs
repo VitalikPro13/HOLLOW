@@ -22,6 +22,14 @@ pub struct Config {
     /// Public IP address of this server (required for relay reservations)
     #[arg(long)]
     pub public_ip: String,
+
+    /// Internal plain WebSocket port (Nginx reverse-proxies TLS/443 → this port)
+    #[arg(long, default_value = "9001")]
+    pub ws_port: u16,
+
+    /// Domain name for WSS (used in external address advertisement)
+    #[arg(long, default_value = "relay.anonlisten.com")]
+    pub domain: String,
 }
 
 /// Load an existing keypair from disk, or generate a new one and save it.
