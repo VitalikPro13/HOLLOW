@@ -2,10 +2,12 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/core/providers/channel_provider.dart';
 import 'package:haven/src/core/providers/chat_provider.dart';
 import 'package:haven/src/core/providers/node_provider.dart';
 import 'package:haven/src/core/providers/peers_provider.dart';
 import 'package:haven/src/core/providers/selected_peer_provider.dart';
+import 'package:haven/src/core/providers/server_provider.dart';
 import 'package:haven/src/core/providers/service_providers.dart';
 import 'package:haven/src/rust/api/network.dart';
 
@@ -84,6 +86,43 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HAVEN] $message');
         ref.read(nodeProvider.notifier).state =
             ref.read(nodeProvider).copyWith(error: message);
+
+      // -- CRDT events (Phase 3) --
+      case NetworkEvent_ServerCreated(:final serverId, :final name):
+        debugPrint('[HAVEN] Server created: $name ($serverId)');
+        ref.read(serverListProvider.notifier).onServerCreated(serverId, name);
+
+      case NetworkEvent_ServerUpdated(:final serverId):
+        debugPrint('[HAVEN] Server updated: $serverId');
+        ref.read(serverListProvider.notifier).onServerUpdated(serverId);
+
+      case NetworkEvent_ChannelAdded(
+            :final serverId, :final channelId, :final name):
+        debugPrint('[HAVEN] Channel added: $name ($channelId) in $serverId');
+        ref
+            .read(channelListProvider.notifier)
+            .onChannelAdded(serverId, channelId, name);
+
+      case NetworkEvent_ChannelRemoved(:final serverId, :final channelId):
+        debugPrint('[HAVEN] Channel removed: $channelId in $serverId');
+        ref
+            .read(channelListProvider.notifier)
+            .onChannelRemoved(serverId, channelId);
+
+      case NetworkEvent_MemberJoined(:final serverId, :final peerId):
+        debugPrint('[HAVEN] Member joined: $peerId in $serverId');
+        ref.read(serverListProvider.notifier).onServerUpdated(serverId);
+        ref.invalidate(serverMembersProvider(serverId));
+
+      case NetworkEvent_MemberLeft(:final serverId, :final peerId):
+        debugPrint('[HAVEN] Member left: $peerId in $serverId');
+        ref.read(serverListProvider.notifier).onServerUpdated(serverId);
+        ref.invalidate(serverMembersProvider(serverId));
+
+      case NetworkEvent_SyncCompleted(:final serverId, :final opsApplied):
+        debugPrint('[HAVEN] Sync completed: $serverId ($opsApplied ops)');
+        ref.read(serverListProvider.notifier).onServerUpdated(serverId);
+        ref.invalidate(serverMembersProvider(serverId));
     }
   }
 }

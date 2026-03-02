@@ -1,36 +1,94 @@
 import 'package:flutter/material.dart';
+import 'package:haven/src/theme/haven_spacing.dart';
+import 'package:haven/src/theme/haven_theme.dart';
+import 'package:haven/src/theme/haven_typography.dart';
+import 'package:lucide_icons/lucide_icons.dart';
 
-/// Haven-branded toast notification (overlay-based, replaces SnackBar).
+/// Toast type determines the icon and accent color.
+enum HavenToastType { success, error, info }
+
+/// Haven-branded toast notification — slides up from bottom, auto-dismisses.
+///
+/// Only one toast visible at a time. New toast replaces any existing one.
+/// Replaces Material SnackBar everywhere.
 class HavenToast {
   HavenToast._();
 
-  /// Show a brief toast message at the bottom of the screen.
-  static void show(BuildContext context, String message,
-      {Duration duration = const Duration(seconds: 2)}) {
+  static OverlayEntry? _currentEntry;
+  static AnimationController? _currentController;
+
+  /// Show a toast at the bottom of the screen.
+  static void show(
+    BuildContext context,
+    String message, {
+    HavenToastType type = HavenToastType.info,
+    Duration duration = const Duration(seconds: 3),
+  }) {
+    // Dismiss any existing toast immediately.
+    _dismiss();
+
     final overlay = Overlay.of(context);
-    final entry = OverlayEntry(
-      builder: (context) => _ToastWidget(message: message),
+    late final OverlayEntry entry;
+    late final AnimationController controller;
+
+    entry = OverlayEntry(
+      builder: (context) => _HavenToastWidget(
+        message: message,
+        type: type,
+        onControllerReady: (c) {
+          controller = c;
+          _currentController = c;
+
+          // Auto-dismiss after duration.
+          Future.delayed(duration, () {
+            if (entry.mounted) {
+              controller.reverse().then((_) {
+                if (entry.mounted) entry.remove();
+                if (_currentEntry == entry) {
+                  _currentEntry = null;
+                  _currentController = null;
+                }
+              });
+            }
+          });
+        },
+      ),
     );
 
+    _currentEntry = entry;
     overlay.insert(entry);
-    Future.delayed(duration, () {
-      if (entry.mounted) entry.remove();
-    });
+  }
+
+  static void _dismiss() {
+    if (_currentEntry != null && _currentEntry!.mounted) {
+      _currentEntry!.remove();
+    }
+    _currentController?.dispose();
+    _currentEntry = null;
+    _currentController = null;
   }
 }
 
-class _ToastWidget extends StatefulWidget {
+class _HavenToastWidget extends StatefulWidget {
   final String message;
-  const _ToastWidget({required this.message});
+  final HavenToastType type;
+  final ValueChanged<AnimationController> onControllerReady;
+
+  const _HavenToastWidget({
+    required this.message,
+    required this.type,
+    required this.onControllerReady,
+  });
 
   @override
-  State<_ToastWidget> createState() => _ToastWidgetState();
+  State<_HavenToastWidget> createState() => _HavenToastWidgetState();
 }
 
-class _ToastWidgetState extends State<_ToastWidget>
+class _HavenToastWidgetState extends State<_HavenToastWidget>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   late final Animation<double> _opacity;
+  late final Animation<Offset> _slide;
 
   @override
   void initState() {
@@ -38,14 +96,22 @@ class _ToastWidgetState extends State<_ToastWidget>
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 200),
+      reverseDuration: const Duration(milliseconds: 150),
     );
-    _opacity = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
-    _controller.forward();
+    _opacity = CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeOut,
+    );
+    _slide = Tween<Offset>(
+      begin: const Offset(0, 0.3),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeOutCubic,
+    ));
 
-    // Start fade-out before removal.
-    Future.delayed(const Duration(milliseconds: 1600), () {
-      if (mounted) _controller.reverse();
-    });
+    _controller.forward();
+    widget.onControllerReady(_controller);
   }
 
   @override
@@ -54,31 +120,63 @@ class _ToastWidgetState extends State<_ToastWidget>
     super.dispose();
   }
 
+  IconData _iconForType(HavenToastType type) {
+    return switch (type) {
+      HavenToastType.success => LucideIcons.checkCircle,
+      HavenToastType.error => LucideIcons.alertCircle,
+      HavenToastType.info => LucideIcons.info,
+    };
+  }
+
+  Color _colorForType(HavenToastType type, HavenTheme haven) {
+    return switch (type) {
+      HavenToastType.success => haven.success,
+      HavenToastType.error => haven.error,
+      HavenToastType.info => haven.accent,
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final haven = HavenTheme.of(context);
+    final iconColor = _colorForType(widget.type, haven);
 
     return Positioned(
       bottom: 32,
       left: 0,
       right: 0,
       child: Center(
-        child: FadeTransition(
-          opacity: _opacity,
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 20, vertical: 10),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.inverseSurface,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                widget.message,
-                style: TextStyle(
-                  color: theme.colorScheme.onInverseSurface,
-                  fontSize: 14,
+        child: SlideTransition(
+          position: _slide,
+          child: FadeTransition(
+            opacity: _opacity,
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                constraints: const BoxConstraints(maxWidth: 400),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HavenSpacing.lg,
+                  vertical: HavenSpacing.md,
+                ),
+                decoration: BoxDecoration(
+                  color: haven.elevated,
+                  borderRadius: BorderRadius.circular(haven.radiusMd),
+                  border: Border.all(color: haven.border),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(_iconForType(widget.type),
+                        size: 18, color: iconColor),
+                    const SizedBox(width: HavenSpacing.sm + 2),
+                    Flexible(
+                      child: Text(
+                        widget.message,
+                        style: HavenTypography.body
+                            .copyWith(color: haven.textPrimary),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),

@@ -3,6 +3,7 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
+import 'api/crdt.dart';
 import 'api/identity.dart';
 import 'api/network.dart';
 import 'api/simple.dart';
@@ -42,6 +43,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   NetworkEvent dco_decode_box_autoadd_network_event(dynamic raw);
 
   @protected
+  ChannelFfi dco_decode_channel_ffi(dynamic raw);
+
+  @protected
   DiscoveredPeer dco_decode_discovered_peer(dynamic raw);
 
   @protected
@@ -57,10 +61,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> dco_decode_list_String(dynamic raw);
 
   @protected
+  List<ChannelFfi> dco_decode_list_channel_ffi(dynamic raw);
+
+  @protected
+  List<MemberFfi> dco_decode_list_member_ffi(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<ServerFfi> dco_decode_list_server_ffi(dynamic raw);
+
+  @protected
   List<StoredMessage> dco_decode_list_stored_message(dynamic raw);
+
+  @protected
+  MemberFfi dco_decode_member_ffi(dynamic raw);
 
   @protected
   NetworkEvent dco_decode_network_event(dynamic raw);
@@ -72,7 +88,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   NetworkEvent? dco_decode_opt_box_autoadd_network_event(dynamic raw);
 
   @protected
+  ServerFfi dco_decode_server_ffi(dynamic raw);
+
+  @protected
   StoredMessage dco_decode_stored_message(dynamic raw);
+
+  @protected
+  int dco_decode_u_32(dynamic raw);
 
   @protected
   int dco_decode_u_8(dynamic raw);
@@ -105,6 +127,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ChannelFfi sse_decode_channel_ffi(SseDeserializer deserializer);
+
+  @protected
   DiscoveredPeer sse_decode_discovered_peer(SseDeserializer deserializer);
 
   @protected
@@ -120,12 +145,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> sse_decode_list_String(SseDeserializer deserializer);
 
   @protected
+  List<ChannelFfi> sse_decode_list_channel_ffi(SseDeserializer deserializer);
+
+  @protected
+  List<MemberFfi> sse_decode_list_member_ffi(SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<ServerFfi> sse_decode_list_server_ffi(SseDeserializer deserializer);
 
   @protected
   List<StoredMessage> sse_decode_list_stored_message(
     SseDeserializer deserializer,
   );
+
+  @protected
+  MemberFfi sse_decode_member_ffi(SseDeserializer deserializer);
 
   @protected
   NetworkEvent sse_decode_network_event(SseDeserializer deserializer);
@@ -139,7 +176,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ServerFfi sse_decode_server_ffi(SseDeserializer deserializer);
+
+  @protected
   StoredMessage sse_decode_stored_message(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_u_32(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_8(SseDeserializer deserializer);
@@ -178,6 +221,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_channel_ffi(ChannelFfi self, SseSerializer serializer);
+
+  @protected
   void sse_encode_discovered_peer(
     DiscoveredPeer self,
     SseSerializer serializer,
@@ -196,8 +242,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_channel_ffi(
+    List<ChannelFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_member_ffi(
+    List<MemberFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_server_ffi(
+    List<ServerFfi> self,
     SseSerializer serializer,
   );
 
@@ -206,6 +270,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     List<StoredMessage> self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_member_ffi(MemberFfi self, SseSerializer serializer);
 
   @protected
   void sse_encode_network_event(NetworkEvent self, SseSerializer serializer);
@@ -220,7 +287,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_server_ffi(ServerFfi self, SseSerializer serializer);
+
+  @protected
   void sse_encode_stored_message(StoredMessage self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_u_32(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_8(int self, SseSerializer serializer);

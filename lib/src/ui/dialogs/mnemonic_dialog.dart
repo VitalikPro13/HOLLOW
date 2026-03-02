@@ -3,95 +3,71 @@ import 'package:flutter/services.dart';
 import 'package:haven/src/theme/haven_spacing.dart';
 import 'package:haven/src/theme/haven_theme.dart';
 import 'package:haven/src/theme/haven_typography.dart';
+import 'package:haven/src/ui/components/haven_button.dart';
+import 'package:haven/src/ui/components/haven_dialog.dart';
+import 'package:haven/src/ui/components/haven_toast.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
 /// Shows the 24-word recovery phrase dialog.
 void showMnemonicDialog(BuildContext context, String mnemonic) {
-  final haven = HavenTheme.of(context);
-
-  showDialog(
+  showHavenDialog(
     context: context,
     barrierDismissible: false,
-    builder: (dialogContext) => AlertDialog(
-      backgroundColor: haven.elevated,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(haven.radiusLg),
-      ),
-      title: Text(
-        'Your Recovery Phrase',
-        style: HavenTypography.heading.copyWith(color: haven.textPrimary),
-      ),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'This is your 24-word recovery phrase. Write it down and keep '
-            'it safe. You will need it to restore your identity if you lose '
-            'access to this device.',
-            style: HavenTypography.body.copyWith(color: haven.textSecondary),
-          ),
-          const SizedBox(height: HavenSpacing.lg),
-          Container(
-            padding: const EdgeInsets.all(HavenSpacing.md),
-            decoration: BoxDecoration(
-              color: haven.background,
-              borderRadius: BorderRadius.circular(haven.radiusMd),
-              border: Border.all(color: haven.warning.withValues(alpha: 0.4)),
+    builder: (dialogContext) {
+      final haven = HavenTheme.of(dialogContext);
+
+      return HavenDialog(
+        title: 'Your Recovery Phrase',
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'This is your 24-word recovery phrase. Write it down and keep '
+              'it safe. You will need it to restore your identity if you lose '
+              'access to this device.',
+              style:
+                  HavenTypography.body.copyWith(color: haven.textSecondary),
             ),
-            child: SelectableText(
-              mnemonic,
-              style: HavenTypography.mono.copyWith(
-                color: haven.textPrimary,
-                height: 1.6,
+            const SizedBox(height: HavenSpacing.lg),
+            Container(
+              padding: const EdgeInsets.all(HavenSpacing.md),
+              decoration: BoxDecoration(
+                color: haven.background,
+                borderRadius: BorderRadius.circular(haven.radiusMd),
+                border:
+                    Border.all(color: haven.warning.withValues(alpha: 0.4)),
               ),
-            ),
-          ),
-          const SizedBox(height: HavenSpacing.md),
-          Row(
-            children: [
-              TextButton.icon(
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: mnemonic));
-                  ScaffoldMessenger.of(dialogContext).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        'Copied to clipboard',
-                        style: HavenTypography.body
-                            .copyWith(color: haven.textPrimary),
-                      ),
-                      backgroundColor: haven.elevated,
-                    ),
-                  );
-                },
-                icon: Icon(LucideIcons.copy, size: 16, color: haven.accent),
-                label: Text(
-                  'Copy',
-                  style:
-                      HavenTypography.label.copyWith(color: haven.accent),
+              child: SelectableText(
+                mnemonic,
+                style: HavenTypography.mono.copyWith(
+                  color: haven.textPrimary,
+                  height: 1.6,
                 ),
               ),
-            ],
+            ),
+            const SizedBox(height: HavenSpacing.md),
+            HavenButton.ghost(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: mnemonic));
+                HavenToast.show(
+                  dialogContext,
+                  'Copied to clipboard',
+                  type: HavenToastType.success,
+                );
+              },
+              icon: Icon(LucideIcons.copy, size: 16),
+              child: const Text('Copy'),
+            ),
+          ],
+        ),
+        actions: [
+          HavenButton.filled(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('I\'ve saved it'),
           ),
         ],
-      ),
-      actions: [
-        FilledButton(
-          onPressed: () => Navigator.of(dialogContext).pop(),
-          style: FilledButton.styleFrom(
-            backgroundColor: haven.accent,
-            foregroundColor: haven.textOnAccent,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(haven.radiusMd),
-            ),
-          ),
-          child: Text(
-            'I\'ve saved it',
-            style: HavenTypography.label
-                .copyWith(color: haven.textOnAccent),
-          ),
-        ),
-      ],
-    ),
+      );
+    },
   );
 }

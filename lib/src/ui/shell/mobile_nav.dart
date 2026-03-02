@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/theme/haven_theme.dart';
 import 'package:haven/src/theme/haven_typography.dart';
+import 'package:haven/src/ui/components/haven_pressable.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
 /// Which tab is active on mobile.
@@ -81,7 +82,7 @@ class _NavTab extends StatelessWidget {
     final haven = HavenTheme.of(context);
 
     return Expanded(
-      child: InkWell(
+      child: HavenPressable(
         onTap: onTap,
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,

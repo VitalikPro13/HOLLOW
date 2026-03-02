@@ -3,7 +3,9 @@ import 'package:haven/src/core/models/chat_message.dart';
 import 'package:haven/src/theme/haven_spacing.dart';
 import 'package:haven/src/theme/haven_theme.dart';
 import 'package:haven/src/theme/haven_typography.dart';
+import 'package:haven/src/ui/animations/haven_curves.dart';
 import 'package:haven/src/ui/components/haven_avatar.dart';
+import 'package:haven/src/ui/components/haven_pressable.dart';
 import 'package:haven/src/ui/components/status_dot.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
@@ -34,101 +36,98 @@ class PeerCard extends StatelessWidget {
         horizontal: HavenSpacing.sm,
         vertical: HavenSpacing.xxs,
       ),
-      child: Material(
-        color: isSelected
-            ? haven.accentMuted
-            : Colors.transparent,
+      child: HavenPressable(
+        onTap: onTap,
         borderRadius: BorderRadius.circular(haven.radiusMd),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(haven.radiusMd),
-          hoverColor: haven.elevated,
-          splashColor: haven.accentMuted,
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HavenSpacing.md,
-              vertical: HavenSpacing.sm + 2,
-            ),
-            child: Row(
-              children: [
-                // Avatar with status dot overlay
-                Stack(
-                  children: [
-                    HavenAvatar(peerId: peerId, size: 36),
-                    Positioned(
-                      right: 0,
-                      bottom: 0,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: haven.background,
-                          shape: BoxShape.circle,
-                        ),
-                        padding: const EdgeInsets.all(1.5),
-                        child: StatusDot(
-                          color: haven.success,
-                          size: 8,
-                        ),
+        backgroundColor:
+            isSelected ? haven.accentMuted : Colors.transparent,
+        hoverColor: haven.elevated,
+        padding: const EdgeInsets.symmetric(
+          horizontal: HavenSpacing.md,
+          vertical: HavenSpacing.sm + 2,
+        ),
+        child: AnimatedContainer(
+          duration: HavenDurations.fast,
+          curve: HavenCurves.subtle,
+          child: Row(
+            children: [
+              // Avatar with status dot overlay
+              Stack(
+                children: [
+                  HavenAvatar(peerId: peerId, size: 36),
+                  Positioned(
+                    right: 0,
+                    bottom: 0,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: haven.background,
+                        shape: BoxShape.circle,
+                      ),
+                      padding: const EdgeInsets.all(1.5),
+                      child: StatusDot(
+                        color: haven.success,
+                        size: 8,
                       ),
                     ),
-                  ],
-                ),
-                if (isEncrypted) ...[
-                  const SizedBox(width: HavenSpacing.xs),
-                  Icon(
-                    LucideIcons.lock,
-                    size: 12,
-                    color: haven.success,
                   ),
                 ],
-                const SizedBox(width: HavenSpacing.sm + 2),
-                // Peer info
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        peerId.length > 16
-                            ? '${peerId.substring(0, 16)}...'
-                            : peerId,
-                        style: HavenTypography.body.copyWith(
-                          fontFamily: 'Consolas',
-                          fontSize: 13,
-                          fontWeight:
-                              isSelected ? FontWeight.w600 : FontWeight.w400,
-                          color: isSelected
-                              ? haven.textPrimary
-                              : haven.textPrimary,
-                        ),
-                      ),
-                      if (lastMessage != null) ...[
-                        const SizedBox(height: HavenSpacing.xxs),
-                        Text(
-                          lastMessage!.isMe
-                              ? 'You: ${lastMessage!.text}'
-                              : lastMessage!.text,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: HavenTypography.bodySmall.copyWith(
-                            color: haven.textSecondary,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
+              ),
+              if (isEncrypted) ...[
+                const SizedBox(width: HavenSpacing.xs),
+                Icon(
+                  LucideIcons.lock,
+                  size: 12,
+                  color: haven.success,
                 ),
-                // Timestamp
-                if (lastMessage != null)
-                  Padding(
-                    padding: const EdgeInsets.only(left: HavenSpacing.sm),
-                    child: Text(
-                      formatTime(lastMessage!.timestamp),
-                      style: HavenTypography.caption.copyWith(
-                        color: haven.textSecondary,
+              ],
+              const SizedBox(width: HavenSpacing.sm + 2),
+              // Peer info
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      peerId.length > 16
+                          ? '${peerId.substring(0, 16)}...'
+                          : peerId,
+                      style: HavenTypography.body.copyWith(
+                        fontFamily: 'Consolas',
+                        fontSize: 13,
+                        fontWeight: isSelected
+                            ? FontWeight.w600
+                            : FontWeight.w400,
+                        color: haven.textPrimary,
                       ),
                     ),
+                    if (lastMessage != null) ...[
+                      const SizedBox(height: HavenSpacing.xxs),
+                      Text(
+                        lastMessage!.isMe
+                            ? 'You: ${lastMessage!.text}'
+                            : lastMessage!.text,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: HavenTypography.bodySmall.copyWith(
+                          color: haven.textSecondary,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              // Timestamp
+              if (lastMessage != null)
+                Padding(
+                  padding:
+                      const EdgeInsets.only(left: HavenSpacing.sm),
+                  child: Text(
+                    formatTime(lastMessage!.timestamp),
+                    style: HavenTypography.caption.copyWith(
+                      color: haven.textSecondary,
+                    ),
                   ),
-              ],
-            ),
+                ),
+            ],
           ),
         ),
       ),

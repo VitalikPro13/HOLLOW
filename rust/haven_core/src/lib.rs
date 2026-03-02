@@ -41,6 +41,7 @@ macro_rules! haven_log {
 }
 
 pub mod api;
+mod crdt;
 mod crypto;
 mod frb_generated;
 mod identity;

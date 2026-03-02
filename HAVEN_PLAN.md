@@ -881,17 +881,141 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 **Deliverable:** The app looks and feels like a real product — custom visual identity, smooth animations, responsive layout. All future UI work builds on this foundation.
 
+### Phase 2.75: Haven Design System v2 — Making the App Alive
+
+**Goal:** Replace all Material Design defaults with Haven's own interaction system. Kill the "Google feel" entirely. Every button, input, dialog, tooltip, and interactive element gets a custom Haven implementation with purposeful, smooth animations. Future features automatically inherit the Haven look.
+
+**Philosophy:** Restrained beauty. Smooth motion over flashy decoration. Premium feel through crisp interactions, not through gradients-on-everything. Think Discord's polish + Telegram's snappiness + Figma's precision, built on Flutter's GPU-accelerated renderer.
+
+#### Core Interaction System
+
+- [ ] **HavenPressable** — universal replacement for InkWell/GestureDetector across the entire app
+  - No Material ripple — ever. Kill it everywhere.
+  - On press: opacity dims to 0.85 + subtle scale to 0.98 (spring physics, ~150ms)
+  - On release: spring back to 1.0 opacity + 1.0 scale
+  - On hover (desktop): background color shifts to `haven.elevated` with smooth 120ms transition
+  - Configurable: `onTap`, `onLongPress`, `borderRadius`, `hoverColor`, `disabled` state (0.4 opacity)
+  - Used by every interactive element — buttons, cards, list items, nav items
+
+- [ ] **HavenButton** redesign — replace FilledButton/TextButton/OutlinedButton entirely
+  - **Filled variant:** solid accent bg, white text. Hover: bg lightens 10%. Press: opacity 0.85 + scale 0.98. Disabled: 0.4 opacity, no interaction.
+  - **Ghost variant (replaces TextButton):** transparent bg, accent text. Hover: `accentMuted` bg fade-in. Press: opacity dim.
+  - **Outline variant:** 1px accent border, accent text. Hover: fill with `accentMuted`. Press: opacity dim.
+  - **Danger variant:** error-red bg for destructive actions. Same interaction as filled.
+  - All variants: custom border radius (`haven.radiusMd`), no Material splash/highlight/ripple. Padding: 10px vertical, 16px horizontal. Font: `HavenTypography.label`.
+  - 🎞️ Animate: all state transitions use spring physics (damping: 0.8, stiffness: 300) — feels alive, not mechanical.
+
+- [ ] **HavenTextField** redesign — replace Material TextField/InputDecoration
+  - Flat design: `haven.elevated` fill, 1px `haven.border` border, `haven.radiusMd` corners
+  - Focus: border color transitions to `haven.accent` over 150ms (no floating label, no Material focus ring)
+  - No `InputDecoration` label animation — just a static placeholder that disappears on input
+  - Optional left icon (like the # in channel name input) — vertically centered, `haven.textSecondary`
+  - Error state: border turns `haven.error`, optional error text below in `haven.error` color
+  - Cursor: `haven.accent` color, 2px wide
+  - Selection: `haven.accentMuted` highlight
+  - 🎞️ Animate: focus border color change (150ms ease-out), error shake (subtle 3px horizontal oscillation, 300ms)
+
+- [ ] **HavenDialog** redesign — replace AlertDialog entirely
+  - Custom modal: `haven.elevated` background, `haven.radiusLg` corners, 1px `haven.border` border
+  - No Material elevation shadow — use a subtle `haven.border` glow or 1px border for depth
+  - Backdrop: black at 60% opacity (darker than Material default)
+  - 🎞️ Animate entrance: scale from 0.95 → 1.0 + opacity 0→1, 200ms with `HavenCurves.enter` (easeOutCubic). NOT Material's default slow fade-scale.
+  - 🎞️ Animate exit: scale 1.0 → 0.95 + opacity 1→0, 150ms (faster exit than entrance — feels snappy)
+  - Title: `HavenTypography.heading`, content: `HavenTypography.body`, actions: right-aligned HavenButtons
+  - `showHavenDialog()` function replaces `showDialog()` everywhere
+
+- [ ] **HavenTooltip** — replace Material Tooltip
+  - Dark tooltip: `haven.elevated` bg, `haven.textPrimary` text, `haven.radiusSm` corners
+  - Smaller padding (6px 10px), `HavenTypography.caption` font
+  - Appears after 400ms hover delay (not Material's slow 500ms)
+  - 🎞️ Animate: fade-in 100ms + translate Y from 4px → 0px (slides down into place). Fade-out 80ms.
+  - Positioned intelligently: prefer below, flip above if near bottom edge
+
+- [ ] **HavenToggle** — custom toggle/switch for settings
+  - Track: 36x20px rounded pill, `haven.border` bg when off, `haven.accent` when on
+  - Thumb: 16px circle, white, with subtle shadow
+  - 🎞️ Animate: thumb slides with spring physics (bouncy, 200ms). Track color crossfades (150ms). Satisfying.
+  - Replaces any future Switch widgets
+
+- [ ] **HavenSnackbar/Toast** — replace Material SnackBar
+  - Floating at bottom-center, `haven.elevated` bg, `haven.radiusMd` corners, 1px border
+  - Icon on left (success=check, error=alert, info=info), message text, optional action button
+  - 🎞️ Animate: slide up from bottom + fade-in (200ms), auto-dismiss after 3s with slide-down + fade-out (150ms)
+  - No Material SnackBar queue — only one toast visible at a time, new one replaces old
+
+#### Component Upgrades
+
+- [ ] **HavenAvatar v2** — upgrade existing HavenAvatar
+  - Current: static colored circle with initials
+  - Add: subtle gradient on the background color (15% lighter at top-left, creates depth)
+  - Add: 1px semi-transparent white inner border (gives a polished glass-like edge)
+  - Online status dot: currently using StatusDot — keep it but add a slow pulse animation (opacity 0.6→1.0→0.6, 2s loop) to show "alive" state
+
+- [ ] **StatusDot v2** — upgrade existing StatusDot
+  - Online (green): subtle pulse glow animation (2s loop, opacity 0.4→0.8→0.4 on a slightly larger circle behind)
+  - Away/idle (yellow): static, no pulse
+  - Offline (gray): static, smaller
+  - DND (red): static
+  - 🎞️ The pulse uses a simple `AnimationController` with repeat — costs nothing on GPU
+
+- [ ] **PeerCard / ChannelTile** — apply HavenPressable
+  - Replace InkWell/Material with HavenPressable
+  - Selected state: `haven.accentMuted` bg with smooth 150ms transition (no instant snap)
+  - Hover: `haven.elevated` bg with 120ms transition
+  - 🎞️ Selection change: background color animates (not instant), text color/weight animates too
+
+- [ ] **ServerStrip icons** — apply HavenPressable + refine
+  - Replace MouseRegion+GestureDetector with HavenPressable
+  - Keep existing scale-bounce for new icons
+  - Add: selected icon gets a very subtle glow (box-shadow with accent color at 15% opacity, 8px spread)
+
+#### Dialog & Modal Migration
+
+- [ ] **Migrate CreateServerDialog** → use `showHavenDialog()` + HavenTextField + HavenButton
+- [ ] **Migrate CreateChannelDialog** → same
+- [ ] **Migrate InviteDialog** → same
+- [ ] **Migrate MnemonicDialog** → same
+
+#### Global Cleanup
+
+- [ ] **Remove all InkWell usages** — replace with HavenPressable (search entire codebase)
+- [ ] **Remove all Material button usages** — replace with HavenButton variants
+- [ ] **Remove all showDialog()** — replace with showHavenDialog()
+- [ ] **Remove all SnackBar usages** — replace with HavenToast
+- [ ] **Remove all Tooltip usages** — replace with HavenTooltip
+- [ ] **ThemeData cleanup** — strip Material overrides from `haven_theme_data.dart` that are no longer needed since we bypass Material widgets entirely
+- [ ] **Verify no Material defaults leak through** — run app, inspect every interactive element
+
+#### What This Phase Does NOT Include
+- Rive/Lottie vector animations (deferred — these are design assets that need creation)
+- Custom shaders for backgrounds/effects (deferred to polishing phase)
+- Animated emoji/stickers (future feature)
+- Frutiger Aero theme (already deferred)
+- Anything that requires new backend work
+
+**Deliverable:** Every interactive element in Haven uses custom Haven widgets with spring-physics interactions, smooth transitions, and zero Material Design artifacts. The app feels premium, alive, and distinctly Haven — not "a Flutter app" or "a Google app."
+
+**Implementation order:**
+1. HavenPressable (everything depends on this)
+2. HavenButton (used everywhere)
+3. HavenTextField (used in dialogs + sidebar)
+4. HavenDialog + showHavenDialog (all dialogs depend on this)
+5. HavenTooltip, HavenToggle, HavenSnackbar (independent)
+6. Component upgrades (Avatar, StatusDot, PeerCard, ChannelTile, ServerStrip)
+7. Dialog migration (4 dialogs)
+8. Global cleanup + verification
+
 ### Phase 3: Servers & Channels
 
 **Goal:** Multi-user servers with channels, roles, and MLS encryption.
 
 - [X] Ghost peer fix
 - [X] 10s disconnection delay fix
-- [ ] CRDT integration (Automerge) for server state — foundation for all distributed data
-- [ ] Hybrid Logical Clocks for message ordering
-- [ ] Sync protocol (state vectors, delta sync)
-- [ ] Server creation and management — uses CRDTs for distributed state. 🎞️ Animate: server icon appears in ServerStrip with scale-bounce, creation dialog entrance/exit
-- [ ] Channel system (text channels, categories) — uses CRDTs for channel list. 🎞️ Animate: channel switch crossfade in ChatPane, channel list reorder/add/remove with slide transitions
+- [X] CRDT integration (`crdts` crate + custom AdminLwwReg) for server state — foundation for all distributed data
+- [X] Hybrid Logical Clocks for message ordering
+- [X] Sync protocol (state vectors, delta sync)
+- [X] Server creation and management — uses CRDTs for distributed state. 🎞️ Animate: server icon appears in ServerStrip with scale-bounce, creation dialog entrance/exit
+- [X] Channel system (text channels, categories) — uses CRDTs for channel list. 🎞️ Animate: channel switch crossfade in ChatPane, channel list reorder/add/remove with slide transitions
 - [ ] Roles and permissions system — uses CRDTs (LWW-Register with admin priority)
 - [ ] MLS group encryption for channels — standalone crypto task, can parallel with UI work
 - [ ] Server settings UI. 🎞️ Animate: settings panel slide-in, toggle/switch micro-interactions

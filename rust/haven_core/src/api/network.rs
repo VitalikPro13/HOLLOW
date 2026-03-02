@@ -28,12 +28,20 @@ pub enum NetworkEvent {
     MessageSendFailed { to_peer: String, error: String },
     SessionEstablished { peer_id: String },
     Error { message: String },
+    // -- CRDT events (Phase 3) --
+    ServerCreated { server_id: String, name: String },
+    ServerUpdated { server_id: String },
+    ChannelAdded { server_id: String, channel_id: String, name: String },
+    ChannelRemoved { server_id: String, channel_id: String },
+    MemberJoined { server_id: String, peer_id: String },
+    MemberLeft { server_id: String, peer_id: String },
+    SyncCompleted { server_id: String, ops_applied: u32 },
 }
 
 /// Holds all mutable state for the running node.
-struct NodeState {
-    local_peer_id: String,
-    cmd_tx: mpsc::Sender<node::NodeCommand>,
+pub(crate) struct NodeState {
+    pub(crate) local_peer_id: String,
+    pub(crate) cmd_tx: mpsc::Sender<node::NodeCommand>,
     handle: tokio::task::JoinHandle<()>,
     olm_fingerprint: String,
 }
@@ -49,11 +57,11 @@ fn get_event_rx() -> &'static Mutex<Option<mpsc::Receiver<node::NetworkEvent>>> 
     EVENT_RX.get_or_init(|| Mutex::new(None))
 }
 
-fn get_node() -> &'static Mutex<Option<NodeState>> {
+pub(crate) fn get_node() -> &'static Mutex<Option<NodeState>> {
     NODE.get_or_init(|| Mutex::new(None))
 }
 
-fn get_runtime() -> &'static tokio::runtime::Runtime {
+pub(crate) fn get_runtime() -> &'static tokio::runtime::Runtime {
     TOKIO_RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -88,6 +96,27 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::MessageSendFailed { to_peer, error } => {
             haven_log!("[HAVEN] Message send failed to {to_peer}: {error}");
         }
+        node::NetworkEvent::ServerCreated { server_id, name } => {
+            haven_log!("[HAVEN] Server created: {name} ({server_id})");
+        }
+        node::NetworkEvent::ServerUpdated { server_id } => {
+            haven_log!("[HAVEN] Server updated: {server_id}");
+        }
+        node::NetworkEvent::ChannelAdded { server_id, channel_id, name } => {
+            haven_log!("[HAVEN] Channel added: {name} ({channel_id}) in {server_id}");
+        }
+        node::NetworkEvent::ChannelRemoved { server_id, channel_id } => {
+            haven_log!("[HAVEN] Channel removed: {channel_id} in {server_id}");
+        }
+        node::NetworkEvent::MemberJoined { server_id, peer_id } => {
+            haven_log!("[HAVEN] Member joined: {peer_id} in {server_id}");
+        }
+        node::NetworkEvent::MemberLeft { server_id, peer_id } => {
+            haven_log!("[HAVEN] Member left: {peer_id} in {server_id}");
+        }
+        node::NetworkEvent::SyncCompleted { server_id, ops_applied } => {
+            haven_log!("[HAVEN] Sync completed for {server_id}: {ops_applied} ops applied");
+        }
         _ => {}
     }
     match event {
@@ -114,6 +143,27 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
             NetworkEvent::SessionEstablished { peer_id }
         }
         node::NetworkEvent::Error { message } => NetworkEvent::Error { message },
+        node::NetworkEvent::ServerCreated { server_id, name } => {
+            NetworkEvent::ServerCreated { server_id, name }
+        }
+        node::NetworkEvent::ServerUpdated { server_id } => {
+            NetworkEvent::ServerUpdated { server_id }
+        }
+        node::NetworkEvent::ChannelAdded { server_id, channel_id, name } => {
+            NetworkEvent::ChannelAdded { server_id, channel_id, name }
+        }
+        node::NetworkEvent::ChannelRemoved { server_id, channel_id } => {
+            NetworkEvent::ChannelRemoved { server_id, channel_id }
+        }
+        node::NetworkEvent::MemberJoined { server_id, peer_id } => {
+            NetworkEvent::MemberJoined { server_id, peer_id }
+        }
+        node::NetworkEvent::MemberLeft { server_id, peer_id } => {
+            NetworkEvent::MemberLeft { server_id, peer_id }
+        }
+        node::NetworkEvent::SyncCompleted { server_id, ops_applied } => {
+            NetworkEvent::SyncCompleted { server_id, ops_applied }
+        }
     }
 }
 

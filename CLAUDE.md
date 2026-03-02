@@ -25,8 +25,8 @@ HAVEN/
 │           ├── shell/    # Layout: haven_shell, server_strip, channel_sidebar, member_panel, user_bar, mobile_nav, window_title_bar
 │           ├── chat/     # ChatPane, MessageBubble
 │           ├── sidebar/  # PeerCard, EmptyPeerList (reusable components)
-│           ├── components/ # HavenAvatar, HavenButton, HavenCard, HavenDialog, HavenTextField, HavenToast, StatusDot
-│           ├── dialogs/  # InviteDialog, MnemonicDialog
+│           ├── components/ # HavenPressable, HavenButton, HavenTextField, HavenDialog, HavenTooltip, HavenToast, HavenToggle, HavenAvatar, HavenCard, StatusDot
+│           ├── dialogs/  # InviteDialog, MnemonicDialog, CreateServerDialog, CreateChannelDialog
 │           └── animations/ # HavenCurves, HavenDurations, FadeSlideTransition, ScaleFadeTransition
 ├── rust/haven_core/      # Rust library crate (networking, crypto, storage)
 │   └── src/
@@ -62,15 +62,26 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 ```
 
 ## Current Phase
-**Phase 2.5: UI Foundation** — COMPLETE.
+**Phase 2.75: Haven Design System v2** — COMPLETE.
 
-Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection management, invite links), 2.5 (UI Foundation) are complete. WSS transport (Nginx + Let's Encrypt on port 443) deployed for censorship resistance.
+Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection management, invite links), 2.5 (UI Foundation), 2.75 (Haven Design System v2) are complete. WSS transport (Nginx + Let's Encrypt on port 443) deployed for censorship resistance.
 
-**Phase 2.5 includes:** Theme system (dark primary + light secondary), Riverpod, component library, animations, adaptive layout, event streaming (Rust→Dart StreamSink), navigation shell (Discord-like 4-panel layout), custom window chrome (frameless window via window_manager), Lucide Icons.
+**Phase 2.75 includes:** Complete custom widget system replacing ALL Material Design defaults. Zero InkWell, IconButton, SnackBar, Tooltip, AlertDialog, FilledButton, TextButton, or OutlinedButton remain in the codebase. All interactions use spring physics (no ripple). See "Haven Design System" section below.
 
-**Pre-Phase 3 networking fixes** (Mar 2 2026): Ghost peer fix (disconnected_peers filter + /unregister endpoint), reconnection fix (removed has_bootstrapped, proactive key exchange, 60s rebootstrap), ping tuning (5s/5s). All deployed and tested. Known behavior: peers auto-discover via relay even without room membership — room gating needed in Phase 3.
+**Phase 3 foundation (Rust CRDT backend):** COMPLETE. `crdts` crate + custom `AdminLwwReg` for admin-only fields. 18 Rust tests passing. Dart FFI bindings generated, models (`ServerInfo`, `ChannelInfo`), providers (`serverListProvider`, `channelListProvider`, `selectedServerProvider`, `selectedChannelProvider`), and event dispatch for all 7 CRDT events wired. Server creation + channel system UI done (ServerStrip with server icons, dual-mode ChannelSidebar, channel placeholder in ChatPane, server members in MemberPanel).
 
-**Next:** Phase 3 — Servers, Channels & Sync.
+**Next:** Phase 3 — continue with channel messaging, sync protocol, room gating.
+
+## Haven Design System (Phase 2.75)
+All UI interactions go through custom Haven widgets — no Material defaults anywhere. Change behavior in one place, applies everywhere.
+
+- **HavenPressable** (`haven_pressable.dart`): Universal interaction widget. Press: opacity 0.85 + scale 0.98, spring physics reverse. Hover: smooth color transition 150ms. No ripple.
+- **HavenButton** (`haven_button.dart`): 4 variants — `.filled()` (accent bg), `.ghost()` (transparent), `.outline()` (1px border), `.danger()` (error red). Uses HavenPressable internally. Props: `onPressed`, `child`, `icon`, `expand`.
+- **HavenTextField** (`haven_text_field.dart`): Flat design, `haven.elevated` fill, animated border (border→accent on focus, →error on error). Error shake animation. Optional `prefixIcon`, `borderRadius`, `isDense`. No Material InputDecoration floating label.
+- **HavenDialog** (`haven_dialog.dart`): `showHavenDialog()` uses `showGeneralDialog` with scale 0.95→1.0 + fade entrance (200ms). Dark integrated feel with `haven.elevated` bg.
+- **HavenTooltip** (`haven_tooltip.dart`): Overlay-based, 400ms hover delay, 100ms fade+slide entrance. Dark style.
+- **HavenToast** (`haven_toast.dart`): Slide-up + fade, auto-dismiss. Three types: success/error/info. Only one visible at a time. Replaces SnackBar.
+- **HavenToggle** (`haven_toggle.dart`): Spring physics thumb, color crossfade track.
 
 ## Key Architecture Notes
 - **Peer state tracking in swarm.rs:** `connected_peers`, `expected_peers`, `disconnected_peers` HashSets. Bootstrap handler skips disconnected + connected peers. `InboundCircuitEstablished` clears disconnected. `ConnectionEstablished` triggers proactive DHT prekey fetch for auto-encryption. Ping: 5s/5s. Rebootstrap: 60s unconditional.

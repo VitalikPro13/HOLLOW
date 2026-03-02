@@ -8,6 +8,10 @@ import 'package:haven/src/theme/haven_theme.dart';
 import 'package:haven/src/theme/haven_typography.dart';
 import 'package:haven/src/ui/chat/message_bubble.dart';
 import 'package:haven/src/ui/components/haven_avatar.dart';
+import 'package:haven/src/ui/components/haven_pressable.dart';
+import 'package:haven/src/ui/components/haven_text_field.dart';
+import 'package:haven/src/ui/components/haven_toast.dart';
+import 'package:haven/src/ui/components/haven_tooltip.dart';
 import 'package:haven/src/ui/components/status_dot.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
@@ -120,48 +124,40 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                 ),
                 const SizedBox(width: HavenSpacing.sm),
               ],
-              IconButton(
-                icon: Icon(LucideIcons.copy, size: 16, color: haven.textSecondary),
-                tooltip: 'Copy peer ID',
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: widget.peerId));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        'Peer ID copied',
-                        style: HavenTypography.body.copyWith(
-                          color: haven.textPrimary,
-                        ),
-                      ),
-                      backgroundColor: haven.elevated,
+              HavenTooltip(
+                message: 'Copy peer ID',
+                child: HavenPressable(
+                  onTap: () {
+                    Clipboard.setData(ClipboardData(text: widget.peerId));
+                    HavenToast.show(
+                      context,
+                      'Peer ID copied',
+                      type: HavenToastType.success,
                       duration: const Duration(seconds: 1),
-                    ),
-                  );
-                },
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(
-                  minWidth: 28,
-                  minHeight: 28,
+                    );
+                  },
+                  borderRadius: BorderRadius.circular(haven.radiusSm),
+                  padding: const EdgeInsets.all(HavenSpacing.xs),
+                  child: Icon(LucideIcons.copy, size: 16, color: haven.textSecondary),
                 ),
               ),
               const SizedBox(width: HavenSpacing.xs),
-              IconButton(
-                icon: Icon(
-                  LucideIcons.users,
-                  size: 18,
-                  color: ref.watch(memberPanelProvider)
-                      ? haven.accent
-                      : haven.textSecondary,
-                ),
-                tooltip: 'Toggle member panel',
-                onPressed: () {
-                  ref.read(memberPanelProvider.notifier).state =
-                      !ref.read(memberPanelProvider);
-                },
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(
-                  minWidth: 28,
-                  minHeight: 28,
+              HavenTooltip(
+                message: 'Toggle member panel',
+                child: HavenPressable(
+                  onTap: () {
+                    ref.read(memberPanelProvider.notifier).state =
+                        !ref.read(memberPanelProvider);
+                  },
+                  borderRadius: BorderRadius.circular(haven.radiusSm),
+                  padding: const EdgeInsets.all(HavenSpacing.xs),
+                  child: Icon(
+                    LucideIcons.users,
+                    size: 18,
+                    color: ref.watch(memberPanelProvider)
+                        ? haven.accent
+                        : haven.textSecondary,
+                  ),
                 ),
               ),
             ],
@@ -218,56 +214,26 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           child: Row(
             children: [
               Expanded(
-                child: TextField(
+                child: HavenTextField(
                   controller: _controller,
+                  hintText: 'Type a message...',
                   style: HavenTypography.body.copyWith(
                     color: haven.textPrimary,
                   ),
-                  decoration: InputDecoration(
-                    hintText: 'Type a message...',
-                    hintStyle: HavenTypography.body.copyWith(
-                      color: haven.textSecondary,
-                    ),
-                    filled: true,
-                    fillColor: haven.elevated,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(haven.radiusLg),
-                      borderSide: BorderSide(color: haven.border),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(haven.radiusLg),
-                      borderSide: BorderSide(color: haven.border),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(haven.radiusLg),
-                      borderSide: BorderSide(color: haven.accent, width: 1.5),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: HavenSpacing.lg,
-                      vertical: HavenSpacing.sm + 2,
-                    ),
-                  ),
+                  borderRadius: haven.radiusLg,
                   onSubmitted: (_) => _handleSend(),
                 ),
               ),
               const SizedBox(width: HavenSpacing.sm),
-              Container(
-                decoration: BoxDecoration(
-                  color: haven.accent,
-                  borderRadius: BorderRadius.circular(haven.radiusMd),
-                ),
-                child: IconButton(
-                  onPressed: _handleSend,
-                  icon: Icon(
-                    LucideIcons.send,
-                    color: haven.textOnAccent,
-                    size: 20,
-                  ),
-                  padding: const EdgeInsets.all(HavenSpacing.sm),
-                  constraints: const BoxConstraints(
-                    minWidth: 40,
-                    minHeight: 40,
-                  ),
+              HavenPressable(
+                onTap: _handleSend,
+                borderRadius: BorderRadius.circular(haven.radiusMd),
+                backgroundColor: haven.accent,
+                padding: const EdgeInsets.all(HavenSpacing.sm),
+                child: Icon(
+                  LucideIcons.send,
+                  color: haven.textOnAccent,
+                  size: 20,
                 ),
               ),
             ],

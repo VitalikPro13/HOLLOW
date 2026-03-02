@@ -9,6 +9,10 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::crdt::hlc::Hlc;
+use crate::crdt::operations::CrdtPayload;
+use crate::crdt::server_state::ServerState;
+use crate::crdt::sync::{self as crdt_sync, StateVector};
 use crate::crypto::{CryptoStore, OlmManager};
 use super::signaling::{self, SignalingCmd, SignalingEvent};
 
@@ -92,12 +96,24 @@ pub(crate) enum NetworkEvent {
     MessageSendFailed { to_peer: String, error: String },
     SessionEstablished { peer_id: String },
     Error { message: String },
+    // -- CRDT events (Phase 3) --
+    ServerCreated { server_id: String, name: String },
+    ServerUpdated { server_id: String },
+    ChannelAdded { server_id: String, channel_id: String, name: String },
+    ChannelRemoved { server_id: String, channel_id: String },
+    MemberJoined { server_id: String, peer_id: String },
+    MemberLeft { server_id: String, peer_id: String },
+    SyncCompleted { server_id: String, ops_applied: u32 },
 }
 
 /// Commands the FFI layer can send into the swarm event loop.
 pub(crate) enum NodeCommand {
     SendMessage { peer_id: PeerId, text: String },
     JoinRoom { room_code: String },
+    // -- CRDT commands (Phase 3) --
+    CreateServer { name: String },
+    CreateChannel { server_id: String, name: String, category: Option<String> },
+    RemoveChannel { server_id: String, channel_id: String },
 }
 
 // -- Wire protocol types (v2: encrypted) --
@@ -125,6 +141,26 @@ enum HavenMessage {
 
     #[serde(rename = "ack")]
     Ack,
+
+    // -- CRDT sync messages (Phase 3) --
+
+    #[serde(rename = "sync_request")]
+    SyncRequest {
+        server_id: String,
+        state_vector_json: String,
+    },
+
+    #[serde(rename = "sync_response")]
+    SyncResponse {
+        server_id: String,
+        ops_json: String,
+    },
+
+    #[serde(rename = "crdt_op")]
+    CrdtOpBroadcast {
+        server_id: String,
+        op_json: String,
+    },
 }
 
 /// JSON codec for the Haven v2 protocol.
@@ -586,6 +622,10 @@ async fn run_swarm(
     // Cleared on room switch, removed on successful ConnectionEstablished.
     let mut disconnected_peers: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
 
+    // -- CRDT state (Phase 3) --
+    // Server states keyed by server_id. Loaded from DB at startup (empty for now).
+    let mut server_states: HashMap<String, ServerState> = HashMap::new();
+
     // Re-bootstrap timer (60 seconds) for mutual peer discovery.
     // Fires unconditionally — BootstrapPeers handler skips connected
     // and disconnected peers, so only genuinely new peers get processed.
@@ -678,6 +718,162 @@ async fn run_swarm(
                                 let _ = event_tx.send(NetworkEvent::Error {
                                     message: format!("[DHT] Fetching prekeys for {peer_id_str}"),
                                 }).await;
+                            }
+                        }
+                    }
+
+                    // -- CRDT commands (Phase 3) --
+
+                    NodeCommand::CreateServer { name } => {
+                        let local_peer = swarm.local_peer_id().to_string();
+                        let server_id = hex::encode(&{
+                            let mut buf = [0u8; 16];
+                            getrandom::fill(&mut buf).unwrap();
+                            buf
+                        });
+                        haven_log!("[HAVEN-CRDT] Creating server '{name}' id={server_id}");
+
+                        let mut state = ServerState::new(
+                            server_id.clone(),
+                            name.clone(),
+                            local_peer.clone(),
+                        );
+
+                        // Create the initial ServerCreated op and apply it
+                        let op = state.create_op(CrdtPayload::ServerCreated {
+                            name: name.clone(),
+                            owner_peer_id: local_peer,
+                        });
+                        let _ = state.apply_op(&op);
+
+                        // Persist
+                        if let Ok(json) = serde_json::to_string(&state) {
+                            // Save via direct DB call (initial creation)
+                            let _ = event_tx.send(NetworkEvent::Error {
+                                message: format!("[CRDT] Server state saved: {server_id}"),
+                            }).await;
+                            // We'll persist through the storage API
+                            let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                let _ = store.save_server_state(&server_id, &json);
+                                let _ = store.insert_crdt_op(&op);
+                            }
+                        }
+
+                        server_states.insert(server_id.clone(), state);
+
+                        let _ = event_tx.send(NetworkEvent::ServerCreated {
+                            server_id: server_id.clone(),
+                            name,
+                        }).await;
+
+                        // Broadcast the op to all connected peers
+                        if let Ok(op_json) = serde_json::to_string(&op) {
+                            for &peer_id in &connected_peers {
+                                swarm.behaviour_mut().messaging.send_request(
+                                    &peer_id,
+                                    HavenMessage::CrdtOpBroadcast {
+                                        server_id: server_id.clone(),
+                                        op_json: op_json.clone(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+
+                    NodeCommand::CreateChannel { server_id, name, category } => {
+                        if let Some(state) = server_states.get_mut(&server_id) {
+                            let channel_id = format!("{}-{}", &server_id[..8.min(server_id.len())], hex::encode(&{
+                                let mut buf = [0u8; 4];
+                                getrandom::fill(&mut buf).unwrap();
+                                buf
+                            }));
+                            haven_log!("[HAVEN-CRDT] Creating channel '{name}' id={channel_id} in server {server_id}");
+
+                            let op = state.create_op(CrdtPayload::ChannelAdded {
+                                channel_id: channel_id.clone(),
+                                name: name.clone(),
+                                category: category.clone(),
+                            });
+                            let _ = state.apply_op(&op);
+
+                            // Persist
+                            if let Ok(json) = serde_json::to_string(&state) {
+                                let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                    let _ = store.save_server_state(&server_id, &json);
+                                    let _ = store.insert_crdt_op(&op);
+                                }
+                            }
+
+                            let _ = event_tx.send(NetworkEvent::ChannelAdded {
+                                server_id: server_id.clone(),
+                                channel_id,
+                                name,
+                            }).await;
+
+                            // Broadcast
+                            if let Ok(op_json) = serde_json::to_string(&op) {
+                                for &peer_id in &connected_peers {
+                                    swarm.behaviour_mut().messaging.send_request(
+                                        &peer_id,
+                                        HavenMessage::CrdtOpBroadcast {
+                                            server_id: server_id.clone(),
+                                            op_json: op_json.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                        } else {
+                            let _ = event_tx.send(NetworkEvent::Error {
+                                message: format!("[CRDT] Server {server_id} not found"),
+                            }).await;
+                        }
+                    }
+
+                    NodeCommand::RemoveChannel { server_id, channel_id } => {
+                        if let Some(state) = server_states.get_mut(&server_id) {
+                            haven_log!("[HAVEN-CRDT] Removing channel {channel_id} from server {server_id}");
+
+                            let op = state.create_op(CrdtPayload::ChannelRemoved {
+                                channel_id: channel_id.clone(),
+                            });
+                            let _ = state.apply_op(&op);
+
+                            // Persist
+                            if let Ok(json) = serde_json::to_string(&state) {
+                                let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                    let _ = store.save_server_state(&server_id, &json);
+                                    let _ = store.insert_crdt_op(&op);
+                                }
+                            }
+
+                            let _ = event_tx.send(NetworkEvent::ChannelRemoved {
+                                server_id: server_id.clone(),
+                                channel_id,
+                            }).await;
+
+                            // Broadcast
+                            if let Ok(op_json) = serde_json::to_string(&op) {
+                                for &peer_id in &connected_peers {
+                                    swarm.behaviour_mut().messaging.send_request(
+                                        &peer_id,
+                                        HavenMessage::CrdtOpBroadcast {
+                                            server_id: server_id.clone(),
+                                            op_json: op_json.clone(),
+                                        },
+                                    );
+                                }
                             }
                         }
                     }
@@ -792,6 +988,9 @@ async fn run_swarm(
                                             &mut outbound_message_text,
                                             &mut pending_messages,
                                             &mut key_request_in_flight,
+                                            &mut server_states,
+                                            &bundle_keypair,
+                                            &connected_peers,
                                             peer,
                                             request,
                                             channel,
@@ -1507,6 +1706,9 @@ async fn handle_incoming_request(
     outbound_message_text: &mut HashMap<request_response::OutboundRequestId, (String, String)>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     key_request_in_flight: &mut std::collections::HashSet<String>,
+    server_states: &mut HashMap<String, ServerState>,
+    bundle_keypair: &identity::Keypair,
+    connected_peers: &std::collections::HashSet<PeerId>,
     peer: PeerId,
     request: HavenMessage,
     channel: request_response::ResponseChannel<HavenMessage>,
@@ -1645,6 +1847,128 @@ async fn handle_incoming_request(
 
             // Ack.
             let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
+        }
+
+        // -- CRDT sync message handlers --
+
+        HavenMessage::SyncRequest { server_id, state_vector_json } => {
+            haven_log!("[HAVEN-CRDT] SyncRequest from {peer_str} for server {server_id}");
+            let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
+
+            if let Some(state) = server_states.get(&server_id) {
+                // Compute what they're missing
+                if let Ok(their_vector) = serde_json::from_str::<StateVector>(&state_vector_json) {
+                    let delta = crdt_sync::compute_delta(&state.op_log, &their_vector);
+                    if !delta.is_empty() {
+                        if let Ok(ops_json) = serde_json::to_string(&delta) {
+                            haven_log!("[HAVEN-CRDT] Sending {} delta ops to {peer_str}", delta.len());
+                            swarm.behaviour_mut().messaging.send_request(
+                                &peer,
+                                HavenMessage::SyncResponse {
+                                    server_id: server_id.clone(),
+                                    ops_json,
+                                },
+                            );
+                        }
+                    }
+                }
+
+                // Also send our own SyncRequest back (bidirectional sync)
+                let our_vector = StateVector::from_server_state(state);
+                if let Ok(sv_json) = serde_json::to_string(&our_vector) {
+                    swarm.behaviour_mut().messaging.send_request(
+                        &peer,
+                        HavenMessage::SyncRequest {
+                            server_id,
+                            state_vector_json: sv_json,
+                        },
+                    );
+                }
+            }
+        }
+
+        HavenMessage::SyncResponse { server_id, ops_json } => {
+            haven_log!("[HAVEN-CRDT] SyncResponse from {peer_str} for server {server_id}");
+            let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
+
+            if let Ok(incoming_ops) = serde_json::from_str::<Vec<crate::crdt::operations::CrdtOp>>(&ops_json) {
+                let state = server_states.entry(server_id.clone()).or_insert_with(|| {
+                    let mut s = ServerState::new(server_id.clone(), "".into(), peer_str.clone());
+                    s.set_hlc(Hlc::new(swarm.local_peer_id().to_string()));
+                    s
+                });
+
+                match crdt_sync::merge_ops(state, incoming_ops) {
+                    Ok(applied) if applied > 0 => {
+                        haven_log!("[HAVEN-CRDT] Applied {applied} ops for server {server_id}");
+
+                        // Persist
+                        if let Ok(json) = serde_json::to_string(&state) {
+                            let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                let _ = store.save_server_state(&server_id, &json);
+                            }
+                        }
+
+                        let _ = event_tx.send(NetworkEvent::SyncCompleted {
+                            server_id,
+                            ops_applied: applied as u32,
+                        }).await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        HavenMessage::CrdtOpBroadcast { server_id, op_json } => {
+            haven_log!("[HAVEN-CRDT] CrdtOpBroadcast from {peer_str} for server {server_id}");
+            let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
+
+            if let Ok(op) = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json) {
+                let local_peer = swarm.local_peer_id().to_string();
+                let state = server_states.entry(server_id.clone()).or_insert_with(|| {
+                    let mut s = ServerState::new(server_id.clone(), "".into(), peer_str.clone());
+                    s.set_hlc(Hlc::new(local_peer));
+                    s
+                });
+
+                let was_len = state.op_log.len();
+                let _ = state.apply_op(&op);
+
+                if state.op_log.len() > was_len {
+                    // New op — persist and forward to other connected peers
+                    if let Ok(json) = serde_json::to_string(&state) {
+                        let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                            let _ = store.save_server_state(&server_id, &json);
+                            let _ = store.insert_crdt_op(&op);
+                        }
+                    }
+
+                    // Forward to other connected peers (simple gossip)
+                    for &other_peer in connected_peers {
+                        if other_peer != peer {
+                            swarm.behaviour_mut().messaging.send_request(
+                                &other_peer,
+                                HavenMessage::CrdtOpBroadcast {
+                                    server_id: server_id.clone(),
+                                    op_json: op_json.clone(),
+                                },
+                            );
+                        }
+                    }
+
+                    let _ = event_tx.send(NetworkEvent::ServerUpdated {
+                        server_id,
+                    }).await;
+                }
+            }
         }
 
         // KeyBundle and Ack shouldn't arrive as requests, but handle gracefully.

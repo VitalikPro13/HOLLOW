@@ -9,6 +9,9 @@ import 'package:haven/src/theme/haven_spacing.dart';
 import 'package:haven/src/theme/haven_theme.dart';
 import 'package:haven/src/theme/haven_typography.dart';
 import 'package:haven/src/ui/components/haven_avatar.dart';
+import 'package:haven/src/ui/components/haven_pressable.dart';
+import 'package:haven/src/ui/components/haven_toast.dart';
+import 'package:haven/src/ui/components/haven_tooltip.dart';
 import 'package:haven/src/ui/components/status_dot.dart';
 import 'package:haven/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:lucide_icons/lucide_icons.dart';
@@ -66,60 +69,52 @@ class UserBar extends ConsumerWidget {
 
           // Peer ID + status
           Expanded(
-            child: Tooltip(
+            child: HavenTooltip(
               message: localPeerId ?? 'Loading...',
-              child: InkWell(
+              child: HavenPressable(
                 borderRadius: BorderRadius.circular(haven.radiusSm),
                 onTap: () {
                   if (localPeerId != null) {
                     Clipboard.setData(ClipboardData(text: localPeerId));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          'Peer ID copied',
-                          style: HavenTypography.body.copyWith(
-                            color: haven.textPrimary,
-                          ),
-                        ),
-                        backgroundColor: haven.elevated,
-                        duration: const Duration(seconds: 1),
-                      ),
+                    HavenToast.show(
+                      context,
+                      'Peer ID copied',
+                      type: HavenToastType.success,
+                      duration: const Duration(seconds: 1),
                     );
                   }
                 },
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    vertical: HavenSpacing.xs,
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        shortPeerId,
-                        style: HavenTypography.mono.copyWith(
-                          color: haven.textPrimary,
-                          fontSize: 12,
+                padding: const EdgeInsets.symmetric(
+                  vertical: HavenSpacing.xs,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      shortPeerId,
+                      style: HavenTypography.mono.copyWith(
+                        color: haven.textPrimary,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        StatusDot(
+                          color: _statusColor(haven, nodeState.status),
+                          size: 7,
                         ),
-                      ),
-                      const SizedBox(height: 2),
-                      Row(
-                        children: [
-                          StatusDot(
-                            color: _statusColor(haven, nodeState.status),
-                            size: 7,
+                        const SizedBox(width: HavenSpacing.xs),
+                        Text(
+                          _statusText(nodeState.status),
+                          style: HavenTypography.caption.copyWith(
+                            color: haven.textSecondary,
                           ),
-                          const SizedBox(width: HavenSpacing.xs),
-                          Text(
-                            _statusText(nodeState.status),
-                            style: HavenTypography.caption.copyWith(
-                              color: haven.textSecondary,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -127,7 +122,7 @@ class UserBar extends ConsumerWidget {
 
           // Error indicator
           if (nodeState.error != null)
-            Tooltip(
+            HavenTooltip(
               message: nodeState.error!,
               child: Padding(
                 padding: const EdgeInsets.only(right: HavenSpacing.xs),
@@ -140,37 +135,38 @@ class UserBar extends ConsumerWidget {
             ),
 
           // Theme toggle
-          IconButton(
-            icon: Icon(
-              ref.watch(themeModeProvider) == ThemeMode.dark
-                  ? LucideIcons.sun
-                  : LucideIcons.moon,
-              size: 16,
-              color: haven.textSecondary,
-            ),
-            tooltip: ref.watch(themeModeProvider) == ThemeMode.dark
+          HavenTooltip(
+            message: ref.watch(themeModeProvider) == ThemeMode.dark
                 ? 'Switch to light mode'
                 : 'Switch to dark mode',
-            onPressed: () {
-              final current = ref.read(themeModeProvider);
-              ref.read(themeModeProvider.notifier).state =
-                  current == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
-            },
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            child: HavenPressable(
+              onTap: () {
+                final current = ref.read(themeModeProvider);
+                ref.read(themeModeProvider.notifier).state =
+                    current == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
+              },
+              borderRadius: BorderRadius.circular(haven.radiusSm),
+              padding: const EdgeInsets.all(HavenSpacing.xs),
+              child: Icon(
+                ref.watch(themeModeProvider) == ThemeMode.dark
+                    ? LucideIcons.sun
+                    : LucideIcons.moon,
+                size: 16,
+                color: haven.textSecondary,
+              ),
+            ),
           ),
 
           // Recovery key button
           if (identity.mnemonic != null)
-            IconButton(
-              icon: Icon(LucideIcons.keyRound, size: 16, color: haven.textSecondary),
-              tooltip: 'Recovery phrase',
-              onPressed: () =>
-                  showMnemonicDialog(context, identity.mnemonic!),
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(
-                minWidth: 28,
-                minHeight: 28,
+            HavenTooltip(
+              message: 'Recovery phrase',
+              child: HavenPressable(
+                onTap: () =>
+                    showMnemonicDialog(context, identity.mnemonic!),
+                borderRadius: BorderRadius.circular(haven.radiusSm),
+                padding: const EdgeInsets.all(HavenSpacing.xs),
+                child: Icon(LucideIcons.keyRound, size: 16, color: haven.textSecondary),
               ),
             ),
         ],

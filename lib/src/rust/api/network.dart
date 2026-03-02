@@ -93,4 +93,31 @@ sealed class NetworkEvent with _$NetworkEvent {
       NetworkEvent_SessionEstablished;
   const factory NetworkEvent.error({required String message}) =
       NetworkEvent_Error;
+  const factory NetworkEvent.serverCreated({
+    required String serverId,
+    required String name,
+  }) = NetworkEvent_ServerCreated;
+  const factory NetworkEvent.serverUpdated({required String serverId}) =
+      NetworkEvent_ServerUpdated;
+  const factory NetworkEvent.channelAdded({
+    required String serverId,
+    required String channelId,
+    required String name,
+  }) = NetworkEvent_ChannelAdded;
+  const factory NetworkEvent.channelRemoved({
+    required String serverId,
+    required String channelId,
+  }) = NetworkEvent_ChannelRemoved;
+  const factory NetworkEvent.memberJoined({
+    required String serverId,
+    required String peerId,
+  }) = NetworkEvent_MemberJoined;
+  const factory NetworkEvent.memberLeft({
+    required String serverId,
+    required String peerId,
+  }) = NetworkEvent_MemberLeft;
+  const factory NetworkEvent.syncCompleted({
+    required String serverId,
+    required int opsApplied,
+  }) = NetworkEvent_SyncCompleted;
 }

@@ -2,8 +2,11 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/core/models/channel_info.dart';
 import 'package:haven/src/core/models/chat_message.dart';
 import 'package:haven/src/core/models/node_status.dart';
+import 'package:haven/src/core/models/server_info.dart';
+import 'package:haven/src/core/providers/channel_provider.dart';
 import 'package:haven/src/core/providers/chat_provider.dart';
 import 'package:haven/src/core/providers/identity_provider.dart';
 import 'package:haven/src/core/providers/member_panel_provider.dart';
@@ -11,10 +14,15 @@ import 'package:haven/src/core/providers/node_provider.dart';
 import 'package:haven/src/core/providers/peers_provider.dart';
 import 'package:haven/src/core/providers/room_provider.dart';
 import 'package:haven/src/core/providers/selected_peer_provider.dart';
+import 'package:haven/src/core/providers/server_provider.dart';
 import 'package:haven/src/theme/haven_spacing.dart';
 import 'package:haven/src/theme/haven_theme.dart';
 import 'package:haven/src/theme/haven_typography.dart';
+import 'package:haven/src/ui/animations/haven_curves.dart';
 import 'package:haven/src/ui/chat/chat_pane.dart';
+import 'package:haven/src/ui/components/haven_pressable.dart';
+import 'package:haven/src/ui/components/haven_tooltip.dart';
+import 'package:haven/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:haven/src/ui/dialogs/invite_dialog.dart';
 import 'package:haven/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:haven/src/ui/shell/channel_sidebar.dart';
@@ -65,6 +73,9 @@ class _HavenShellState extends ConsumerState<HavenShell> {
     }
 
     await ref.read(nodeProvider.notifier).start();
+
+    // Load servers from local DB after node starts.
+    await ref.read(serverListProvider.notifier).loadFromDb();
   }
 
   Future<void> _createInvite() async {
@@ -102,6 +113,9 @@ class _HavenShellState extends ConsumerState<HavenShell> {
     required String? selectedPeerId,
     required NodeStatus nodeStatus,
     required String? activeRoom,
+    required ServerInfo? selectedServer,
+    required Map<String, ChannelInfo> channels,
+    required String? selectedChannelId,
     double? width = 240,
   }) {
     return ChannelSidebar(
@@ -121,6 +135,20 @@ class _HavenShellState extends ConsumerState<HavenShell> {
       roomController: _roomController,
       onJoinRoom: (input) => ref.read(roomProvider.notifier).join(input),
       onCreateInvite: _createInvite,
+      // Server mode props
+      selectedServer: selectedServer,
+      channels: channels,
+      selectedChannelId: selectedChannelId,
+      onChannelSelected: (channelId) {
+        ref.read(selectedChannelProvider.notifier).state = channelId;
+        // On mobile, switch to chat tab when channel is selected.
+        ref.read(mobileTabProvider.notifier).state = 1;
+      },
+      onCreateChannel: () {
+        if (selectedServer != null) {
+          showCreateChannelDialog(context, selectedServer.serverId);
+        }
+      },
     );
   }
 
@@ -146,11 +174,86 @@ class _HavenShellState extends ConsumerState<HavenShell> {
     );
   }
 
+  Widget _buildChannelPlaceholder(HavenTheme haven, ChannelInfo? channel) {
+    return Column(
+      children: [
+        // Channel header
+        Container(
+          height: 48,
+          padding: const EdgeInsets.symmetric(horizontal: HavenSpacing.lg),
+          decoration: BoxDecoration(
+            color: haven.surface,
+            border: Border(bottom: BorderSide(color: haven.border)),
+          ),
+          child: Row(
+            children: [
+              Icon(LucideIcons.hash, size: 20, color: haven.textSecondary),
+              const SizedBox(width: HavenSpacing.sm),
+              Text(
+                channel?.name ?? 'Unknown Channel',
+                style: HavenTypography.subheading.copyWith(
+                  color: haven.textPrimary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const Spacer(),
+              HavenTooltip(
+                message: 'Toggle member panel',
+                child: HavenPressable(
+                  onTap: () => ref
+                      .read(memberPanelProvider.notifier)
+                      .state = !ref.read(memberPanelProvider),
+                  borderRadius: BorderRadius.circular(haven.radiusSm),
+                  padding: const EdgeInsets.all(HavenSpacing.xs),
+                  child: Icon(LucideIcons.users,
+                      size: 20, color: haven.textSecondary),
+                ),
+              ),
+            ],
+          ),
+        ),
+        // Placeholder body
+        Expanded(
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(LucideIcons.hash,
+                    size: 64,
+                    color: haven.textSecondary.withValues(alpha: 0.3)),
+                const SizedBox(height: HavenSpacing.lg),
+                Text(
+                  'Welcome to #${channel?.name ?? "general"}',
+                  style: HavenTypography.heading
+                      .copyWith(color: haven.textPrimary),
+                ),
+                const SizedBox(height: HavenSpacing.sm),
+                Text(
+                  'Channel messages coming soon.',
+                  style: HavenTypography.body
+                      .copyWith(color: haven.textSecondary),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildChatOrEmpty({
     required HavenTheme haven,
     required String? selectedPeerId,
     required Map<String, dynamic> peers,
+    required String? selectedChannelId,
+    required Map<String, ChannelInfo> channels,
   }) {
+    // Server channel view
+    if (selectedChannelId != null) {
+      final channel = channels[selectedChannelId];
+      return _buildChannelPlaceholder(haven, channel);
+    }
+    // DM chat view
     if (selectedPeerId == null) return _buildEmptyChat(haven);
     final peer = (peers as Map)[selectedPeerId];
     return ChatPane(
@@ -193,6 +296,14 @@ class _HavenShellState extends ConsumerState<HavenShell> {
     final activeRoom = ref.watch(roomProvider);
     final memberPanelOpen = ref.watch(memberPanelProvider);
 
+    // Server/channel state
+    final servers = ref.watch(serverListProvider);
+    final selectedServerId = ref.watch(selectedServerProvider);
+    final channels = ref.watch(channelListProvider);
+    final selectedChannelId = ref.watch(selectedChannelProvider);
+    final selectedServer =
+        selectedServerId != null ? servers[selectedServerId] : null;
+
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
@@ -207,6 +318,9 @@ class _HavenShellState extends ConsumerState<HavenShell> {
             selectedPeerId: selectedPeerId,
             nodeStatus: nodeState.status,
             activeRoom: activeRoom,
+            selectedServer: selectedServer,
+            channels: channels,
+            selectedChannelId: selectedChannelId,
           );
         }
 
@@ -233,16 +347,28 @@ class _HavenShellState extends ConsumerState<HavenShell> {
                     selectedPeerId: selectedPeerId,
                     nodeStatus: nodeState.status,
                     activeRoom: activeRoom,
+                    selectedServer: selectedServer,
+                    channels: channels,
+                    selectedChannelId: selectedChannelId,
                   ),
 
-                  // Chat pane (expanded)
+                  // Chat pane (expanded) with crossfade on switch
                   Expanded(
-                    child: Container(
-                      color: haven.background,
-                      child: _buildChatOrEmpty(
-                        haven: haven,
-                        selectedPeerId: selectedPeerId,
-                        peers: peers,
+                    child: AnimatedSwitcher(
+                      duration: HavenDurations.normal,
+                      switchInCurve: HavenCurves.enter,
+                      switchOutCurve: HavenCurves.exit,
+                      child: Container(
+                        key: ValueKey(
+                            selectedChannelId ?? selectedPeerId ?? 'empty'),
+                        color: haven.background,
+                        child: _buildChatOrEmpty(
+                          haven: haven,
+                          selectedPeerId: selectedPeerId,
+                          peers: peers,
+                          selectedChannelId: selectedChannelId,
+                          channels: channels,
+                        ),
                       ),
                     ),
                   ),
@@ -277,6 +403,9 @@ class _HavenShellState extends ConsumerState<HavenShell> {
     required String? selectedPeerId,
     required NodeStatus nodeStatus,
     required String? activeRoom,
+    required ServerInfo? selectedServer,
+    required Map<String, ChannelInfo> channels,
+    required String? selectedChannelId,
   }) {
     final currentTab = ref.watch(mobileTabProvider);
 
@@ -289,15 +418,27 @@ class _HavenShellState extends ConsumerState<HavenShell> {
           selectedPeerId: selectedPeerId,
           nodeStatus: nodeStatus,
           activeRoom: activeRoom,
+          selectedServer: selectedServer,
+          channels: channels,
+          selectedChannelId: selectedChannelId,
           width: null,
         );
       case 1: // Chat
-        body = Container(
-          color: haven.background,
-          child: _buildChatOrEmpty(
-            haven: haven,
-            selectedPeerId: selectedPeerId,
-            peers: peers,
+        body = AnimatedSwitcher(
+          duration: HavenDurations.normal,
+          switchInCurve: HavenCurves.enter,
+          switchOutCurve: HavenCurves.exit,
+          child: Container(
+            key: ValueKey(
+                selectedChannelId ?? selectedPeerId ?? 'empty'),
+            color: haven.background,
+            child: _buildChatOrEmpty(
+              haven: haven,
+              selectedPeerId: selectedPeerId,
+              peers: peers,
+              selectedChannelId: selectedChannelId,
+              channels: channels,
+            ),
           ),
         );
       case 2: // Members (full width on mobile)
