@@ -4,10 +4,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/ui/app.dart';
+import 'package:haven/src/ui/shader_warmup.dart';
 import 'package:window_manager/window_manager.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Pre-compile GPU shaders before the first frame to eliminate
+  // shader compilation jank during animations.
+  await HavenShaderWarmUp().execute();
+
   await RustLib.init();
 
   // Custom window chrome on desktop — hide native title bar.

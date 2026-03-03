@@ -318,10 +318,12 @@ class _HavenShellState extends ConsumerState<HavenShell>
   }
 
   /// Wraps the chat pane with a fade for the startup reveal.
+  /// Always keeps the FadeTransition in the tree so the child's State
+  /// (e.g. AmbientBackground's AnimationController) is preserved when
+  /// the reveal completes — avoids resetting the ambient blob positions.
   Widget _chatRevealWrap(Widget child) {
-    if (_revealComplete) return child;
     return FadeTransition(
-      opacity: _chatReveal,
+      opacity: _revealComplete ? kAlwaysCompleteAnimation : _chatReveal,
       child: child,
     );
   }
@@ -399,23 +401,25 @@ class _HavenShellState extends ConsumerState<HavenShell>
                     // Chat pane (expanded) with crossfade on switch
                     Expanded(
                       child: _chatRevealWrap(
-                        AmbientBackground(
-                          color1: haven.accent,
-                          color2: const Color(0xFF6366F1), // indigo/purple
-                          child: AnimatedSwitcher(
-                            duration: HavenDurations.normal,
-                            switchInCurve: HavenCurves.enter,
-                            switchOutCurve: HavenCurves.exit,
-                            child: Container(
-                              key: ValueKey(
-                                  selectedChannelId ?? selectedPeerId ?? 'empty'),
-                              color: haven.background,
-                              child: _buildChatOrEmpty(
-                                haven: haven,
-                                selectedPeerId: selectedPeerId,
-                                peers: peers,
-                                selectedChannelId: selectedChannelId,
-                                channels: channels,
+                        RepaintBoundary(
+                          child: AmbientBackground(
+                            color1: haven.accent,
+                            color2: const Color(0xFF6366F1), // indigo/purple
+                            child: AnimatedSwitcher(
+                              duration: HavenDurations.normal,
+                              switchInCurve: HavenCurves.enter,
+                              switchOutCurve: HavenCurves.exit,
+                              child: Container(
+                                key: ValueKey(
+                                    selectedChannelId ?? selectedPeerId ?? 'empty'),
+                                color: haven.background,
+                                child: _buildChatOrEmpty(
+                                  haven: haven,
+                                  selectedPeerId: selectedPeerId,
+                                  peers: peers,
+                                  selectedChannelId: selectedChannelId,
+                                  channels: channels,
+                                ),
                               ),
                             ),
                           ),
