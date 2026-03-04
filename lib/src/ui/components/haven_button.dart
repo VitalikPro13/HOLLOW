@@ -223,10 +223,12 @@ class _HavenButtonState extends State<HavenButton>
           child: AnimatedBuilder(
             animation: _controller,
             builder: (context, child) {
-              return Opacity(
-                opacity: isDisabled ? 0.4 : _opacityAnimation.value,
-                child: Transform.scale(
-                  scale: _scaleAnimation.value,
+              return FadeTransition(
+                opacity: isDisabled
+                    ? const AlwaysStoppedAnimation(0.4)
+                    : _opacityAnimation,
+                child: ScaleTransition(
+                  scale: _scaleAnimation,
                   child: child,
                 ),
               );

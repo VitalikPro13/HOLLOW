@@ -67,8 +67,8 @@ class _HavenToggleState extends State<HavenToggle>
       onTap: isDisabled
           ? null
           : () => widget.onChanged!(!widget.value),
-      child: Opacity(
-        opacity: isDisabled ? 0.4 : 1.0,
+      child: FadeTransition(
+        opacity: AlwaysStoppedAnimation(isDisabled ? 0.4 : 1.0),
         child: MouseRegion(
           cursor: isDisabled
               ? SystemMouseCursors.basic

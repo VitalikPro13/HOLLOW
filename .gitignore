@@ -62,6 +62,7 @@ signaling/
 
 # Temporary files
 temporary_ssh_log.txt
+my_debug_logs.txt
 
 # Claude Code
 .claude/

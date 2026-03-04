@@ -125,12 +125,12 @@ class _HavenPressableState extends State<HavenPressable>
           child: AnimatedBuilder(
             animation: _controller,
             builder: (context, child) {
-              return Opacity(
+              return FadeTransition(
                 opacity: widget.disabled
-                    ? 0.4
-                    : _opacityAnimation.value,
-                child: Transform.scale(
-                  scale: _scaleAnimation.value,
+                    ? const AlwaysStoppedAnimation(0.4)
+                    : _opacityAnimation,
+                child: ScaleTransition(
+                  scale: _scaleAnimation,
                   child: child,
                 ),
               );

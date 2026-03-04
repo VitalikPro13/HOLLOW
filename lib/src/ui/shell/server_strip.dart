@@ -46,6 +46,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
           ref.read(selectedServerProvider.notifier).state = null;
           ref.read(channelListProvider.notifier).clear();
           ref.read(selectedChannelProvider.notifier).state = null;
+          ref.read(serverSettingsOpenProvider.notifier).state = false;
         },
         child: Text(
           'H',
@@ -131,6 +132,8 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
                           .loadForServer(server.serverId);
                       ref.read(selectedChannelProvider.notifier).state =
                           null;
+                      ref.read(serverSettingsOpenProvider.notifier).state =
+                          false;
                     },
                     child: Text(
                       _initialsFromName(server.name),
