@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/core/models/node_status.dart';
 import 'package:haven/src/core/providers/identity_provider.dart';
 import 'package:haven/src/core/providers/node_provider.dart';
+import 'package:haven/src/core/providers/peers_provider.dart';
+import 'package:haven/src/core/providers/server_provider.dart';
 import 'package:haven/src/core/providers/theme_provider.dart';
 import 'package:haven/src/theme/haven_spacing.dart';
 import 'package:haven/src/theme/haven_theme.dart';
@@ -21,25 +23,73 @@ import 'package:lucide_icons/lucide_icons.dart';
 class UserBar extends ConsumerWidget {
   const UserBar({super.key});
 
-  Color _statusColor(HavenTheme haven, NodeStatus status) {
-    return switch (status) {
-      NodeStatus.connected => haven.success,
-      NodeStatus.starting => haven.warning,
-      NodeStatus.loading => haven.textSecondary,
-      NodeStatus.error => haven.error,
-    };
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final haven = HavenTheme.of(context);
     final identity = ref.watch(identityProvider);
     final nodeState = ref.watch(nodeProvider);
+    final selectedServerId = ref.watch(selectedServerProvider);
 
     final localPeerId = identity.peerId;
     final shortPeerId = localPeerId != null && localPeerId.length > 8
         ? '${localPeerId.substring(0, 8)}...'
         : localPeerId ?? '---';
+
+    // Derive status: mirror channel pane when a server is selected.
+    String statusText;
+    Color statusColor;
+    bool statusPulse;
+
+    if (selectedServerId != null) {
+      final syncStatus =
+          ref.watch(serverSyncStatusProvider(selectedServerId));
+      final connectedPeers = ref.watch(peersProvider);
+      final membersAsync =
+          ref.watch(serverMembersProvider(selectedServerId));
+      final onlineCount = membersAsync.when(
+        data: (members) => members
+            .where((m) =>
+                m.peerId != localPeerId &&
+                connectedPeers.containsKey(m.peerId))
+            .length,
+        loading: () => 0,
+        error: (_, _) => 0,
+      );
+
+      final effectiveStatus = syncStatus == ServerSyncStatus.idle &&
+              onlineCount == 0
+          ? ServerSyncStatus.connecting
+          : syncStatus;
+
+      switch (effectiveStatus) {
+        case ServerSyncStatus.connecting:
+          statusText = 'Connecting...';
+          statusColor = haven.textSecondary;
+          statusPulse = true;
+        case ServerSyncStatus.syncing:
+          statusText = 'Syncing...';
+          statusColor = haven.accent;
+          statusPulse = true;
+        case ServerSyncStatus.synced:
+        case ServerSyncStatus.idle:
+          statusText = 'Online';
+          statusColor = haven.success;
+          statusPulse = true;
+        case ServerSyncStatus.retrying:
+          statusText = 'Retrying...';
+          statusColor = haven.warning;
+          statusPulse = true;
+        case ServerSyncStatus.failed:
+          statusText = 'Sync failed';
+          statusColor = haven.error;
+          statusPulse = false;
+      }
+    } else {
+      // No server selected — fall back to node-level status.
+      statusText = _statusText(nodeState.status);
+      statusColor = _statusColor(haven, nodeState.status);
+      statusPulse = nodeState.status == NodeStatus.connected;
+    }
 
     return Container(
       height: 52,
@@ -102,13 +152,13 @@ class UserBar extends ConsumerWidget {
                     Row(
                       children: [
                         StatusDot(
-                          color: _statusColor(haven, nodeState.status),
+                          color: statusColor,
                           size: 7,
-                          pulse: nodeState.status == NodeStatus.connected,
+                          pulse: statusPulse,
                         ),
                         const SizedBox(width: HavenSpacing.xs),
                         Text(
-                          _statusText(nodeState.status),
+                          statusText,
                           style: HavenTypography.caption.copyWith(
                             color: haven.textSecondary,
                           ),
@@ -120,20 +170,6 @@ class UserBar extends ConsumerWidget {
               ),
             ),
           ),
-
-          // Error indicator
-          if (nodeState.error != null)
-            HavenTooltip(
-              message: nodeState.error!,
-              child: Padding(
-                padding: const EdgeInsets.only(right: HavenSpacing.xs),
-                child: Icon(
-                  LucideIcons.alertTriangle,
-                  size: 16,
-                  color: haven.error,
-                ),
-              ),
-            ),
 
           // Theme toggle
           HavenTooltip(
@@ -173,6 +209,15 @@ class UserBar extends ConsumerWidget {
         ],
       ),
     );
+  }
+
+  Color _statusColor(HavenTheme haven, NodeStatus status) {
+    return switch (status) {
+      NodeStatus.connected => haven.success,
+      NodeStatus.starting => haven.warning,
+      NodeStatus.loading => haven.textSecondary,
+      NodeStatus.error => haven.error,
+    };
   }
 
   String _statusText(NodeStatus status) {

@@ -1505,6 +1505,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           serverId: dco_decode_String(raw[1]),
           error: dco_decode_String(raw[2]),
         );
+      case 24:
+        return NetworkEvent_MessageSyncProgress(
+          serverId: dco_decode_String(raw[1]),
+          channelId: dco_decode_String(raw[2]),
+          receivedCount: dco_decode_u_32(raw[3]),
+          totalCount: dco_decode_u_32(raw[4]),
+        );
       default:
         throw Exception("unreachable");
     }
@@ -1909,6 +1916,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         return NetworkEvent_MessageSyncFailed(
           serverId: var_serverId,
           error: var_error,
+        );
+      case 24:
+        var var_serverId = sse_decode_String(deserializer);
+        var var_channelId = sse_decode_String(deserializer);
+        var var_receivedCount = sse_decode_u_32(deserializer);
+        var var_totalCount = sse_decode_u_32(deserializer);
+        return NetworkEvent_MessageSyncProgress(
+          serverId: var_serverId,
+          channelId: var_channelId,
+          receivedCount: var_receivedCount,
+          totalCount: var_totalCount,
         );
       default:
         throw UnimplementedError('');
@@ -2332,6 +2350,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_i_32(23, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(error, serializer);
+      case NetworkEvent_MessageSyncProgress(
+        serverId: final serverId,
+        channelId: final channelId,
+        receivedCount: final receivedCount,
+        totalCount: final totalCount,
+      ):
+        sse_encode_i_32(24, serializer);
+        sse_encode_String(serverId, serializer);
+        sse_encode_String(channelId, serializer);
+        sse_encode_u_32(receivedCount, serializer);
+        sse_encode_u_32(totalCount, serializer);
     }
   }
 

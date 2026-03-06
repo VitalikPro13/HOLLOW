@@ -549,6 +549,25 @@ impl MessageStore {
         Ok(messages)
     }
 
+    /// Count channel messages newer than a given timestamp (for sync progress indication).
+    pub fn count_channel_messages_since(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        since_timestamp: i64,
+    ) -> Result<u32, String> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM channel_messages
+                 WHERE server_id = ?1 AND channel_id = ?2 AND timestamp > ?3",
+                params![server_id, channel_id, since_timestamp],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to count messages: {e}"))?;
+        Ok(count as u32)
+    }
+
     /// Load HLC state, if saved.
     pub fn load_hlc_state(&self) -> Result<Option<(u64, u32, String)>, String> {
         let mut stmt = self

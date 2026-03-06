@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/core/models/server_info.dart';
+import 'package:haven/src/core/providers/peers_provider.dart';
 import 'package:haven/src/rust/api/crdt.dart' as crdt_api;
 
 /// Manages the list of servers the user has joined.
@@ -106,3 +107,18 @@ final serverMembersProvider =
     FutureProvider.family<List<crdt_api.MemberFfi>, String>(
   (ref, serverId) => crdt_api.getServerMembers(serverId: serverId),
 );
+
+/// Returns the set of online member peer IDs for a server.
+final onlineMembersProvider =
+    Provider.family<Set<String>, String>((ref, serverId) {
+  final connectedPeers = ref.watch(peersProvider);
+  final membersAsync = ref.watch(serverMembersProvider(serverId));
+  return membersAsync.when(
+    data: (members) => members
+        .where((m) => connectedPeers.containsKey(m.peerId))
+        .map((m) => m.peerId)
+        .toSet(),
+    loading: () => {},
+    error: (_, _) => {},
+  );
+});

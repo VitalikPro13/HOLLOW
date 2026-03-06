@@ -87,12 +87,14 @@ Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection mana
 - Sync retry system: `MessageSyncFailed` event, `pending_sync_requests` retry after re-key, `flush_pending_sync_requests` helper
 - Granular sync UI: `ServerSyncStatus` enum (idle/connecting/syncing/synced/retrying/failed), `_ConnectionIndicator` with StatusDot + retry button
 - Graceful disconnect: `PeerDisconnecting` broadcast on app close, immediate `PeerDisconnected` event on receiver
+- Member presence: ASOT-style Online/Offline dividers, per-member sync spinning icon, offline 0.5 opacity, sync progress "Syncing 47/120...", user bar mirrors channel status, DM spinning icon for unestablished sessions
+- Perf optimization: eliminated Riverpod `ref`-passing anti-pattern in member panel (ConsumerWidget instead of passing ref)
 
 **Next up (Phase 3 remaining):**
-- Member presence (online/offline status via connected_peers × server membership) with ASOT-style dividers
 - Roles & permissions UI
 - MLS group encryption
 - Offline message queuing (push-based store-and-forward, builds on message sync)
+  - Message ordering: append at bottom (not insert by sender timestamp — abusable), sender timestamp = display metadata only
 - Device linking
 
 ## Haven Design System (Phase 2.75)
@@ -125,6 +127,9 @@ All UI interactions go through custom Haven widgets — no Material defaults any
 - Rust: follow standard `cargo clippy` recommendations
 - File naming: snake_case for Dart and Rust files
 - No Electron, no Node.js, no web frameworks — Flutter only for UI
+- **NEVER pass `WidgetRef ref` as a constructor parameter** to child widgets. Always use `ConsumerWidget` or `ConsumerStatefulWidget` instead. Passing `ref` causes cascade rebuilds (parent rebuilds ALL children on every provider change).
+- Use `AnimatedOpacity` (GPU-composited) for per-item opacity. Never use the `Opacity` widget.
+- **Keep Flutter updated:** Windows animation jank (choppy at all refresh rates) was caused by a Flutter engine bug present in 3.38.5, fixed in 3.41.4. No app-side hacks needed — just `flutter upgrade`. `windows/runner/main.cpp` is stock (no timer hacks).
 
 ## Rules
 - Never commit secrets, keys, or credentials

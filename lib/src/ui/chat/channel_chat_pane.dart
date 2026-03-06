@@ -5,6 +5,7 @@ import 'package:haven/src/core/providers/identity_provider.dart';
 import 'package:haven/src/core/providers/member_panel_provider.dart';
 import 'package:haven/src/core/providers/peers_provider.dart';
 import 'package:haven/src/core/providers/server_provider.dart';
+import 'package:haven/src/core/providers/sync_progress_provider.dart';
 import 'package:haven/src/theme/haven_spacing.dart';
 import 'package:haven/src/theme/haven_theme.dart';
 import 'package:haven/src/theme/haven_typography.dart';
@@ -241,7 +242,46 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   }
 }
 
-/// Shows how many server members are currently connected + sync status.
+/// A small continuously spinning refresh icon for sync indication.
+class _SpinningRefreshIcon extends StatefulWidget {
+  final double size;
+  final Color color;
+
+  const _SpinningRefreshIcon({required this.size, required this.color});
+
+  @override
+  State<_SpinningRefreshIcon> createState() => _SpinningRefreshIconState();
+}
+
+class _SpinningRefreshIconState extends State<_SpinningRefreshIcon>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1500),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RotationTransition(
+      turns: _controller,
+      child: Icon(LucideIcons.refreshCw, size: widget.size, color: widget.color),
+    );
+  }
+}
+
+/// Shows sync status in the channel header (no member count — that's in the member panel).
 class _ConnectionIndicator extends ConsumerStatefulWidget {
   final String serverId;
   final String channelId;
@@ -280,24 +320,16 @@ class _ConnectionIndicatorState extends ConsumerState<_ConnectionIndicator> {
     final membersAsync = ref.watch(serverMembersProvider(widget.serverId));
     final localPeerId = ref.watch(identityProvider).peerId;
     final syncStatus = ref.watch(serverSyncStatusProvider(widget.serverId));
+    final progress = ref.watch(syncProgressProvider)[widget.serverId];
 
     return membersAsync.when(
       data: (members) {
         final otherMembers =
             members.where((m) => m.peerId != localPeerId).toList();
-        if (otherMembers.isEmpty) return const SizedBox.shrink();
 
         final onlineCount = otherMembers
             .where((m) => connectedPeers.containsKey(m.peerId))
             .length;
-        final totalOthers = otherMembers.length;
-        final allOnline = onlineCount == totalOthers;
-
-        final connColor = onlineCount == 0
-            ? haven.error
-            : allOnline
-                ? haven.success
-                : haven.warning;
 
         // Derive effective status — show "Connecting..." when idle + no peers online.
         final effectiveStatus = syncStatus == ServerSyncStatus.idle &&
@@ -305,98 +337,76 @@ class _ConnectionIndicatorState extends ConsumerState<_ConnectionIndicator> {
             ? ServerSyncStatus.connecting
             : syncStatus;
 
-        // Sync/connection state display.
-        final bool showStatus = effectiveStatus != ServerSyncStatus.idle;
+        // Don't show anything when idle and peers are online (normal state).
+        if (effectiveStatus == ServerSyncStatus.idle) {
+          return const SizedBox.shrink();
+        }
+
         final Color dotColor;
-        final bool pulse;
+        final bool useSpinning;
         final String label;
         final bool showRetry;
 
         switch (effectiveStatus) {
           case ServerSyncStatus.connecting:
             dotColor = haven.textSecondary;
-            pulse = true;
+            useSpinning = false;
             label = 'Connecting...';
             showRetry = false;
           case ServerSyncStatus.syncing:
             dotColor = haven.accent;
-            pulse = true;
-            label = 'Syncing...';
+            useSpinning = true;
+            label = progress != null && progress.totalCount > 0
+                ? 'Syncing ${progress.receivedCount}/${progress.totalCount}...'
+                : 'Syncing...';
             showRetry = false;
           case ServerSyncStatus.synced:
             dotColor = haven.success;
-            pulse = false;
+            useSpinning = false;
             label = 'Synced';
             showRetry = false;
           case ServerSyncStatus.retrying:
             dotColor = haven.warning;
-            pulse = true;
+            useSpinning = true;
             label = 'Retrying...';
             showRetry = false;
           case ServerSyncStatus.failed:
             dotColor = haven.error;
-            pulse = false;
+            useSpinning = false;
             label = 'Sync failed';
             showRetry = true;
           case ServerSyncStatus.idle:
-            dotColor = connColor;
-            pulse = false;
-            label = '$onlineCount/$totalOthers';
-            showRetry = false;
+            return const SizedBox.shrink(); // Already handled above
         }
-
-        final connTooltip =
-            '$onlineCount of $totalOthers member${totalOthers == 1 ? '' : 's'} online';
 
         return Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Sync status (shown when not idle).
-            if (showStatus) ...[
-              HavenTooltip(
-                message: label,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    StatusDot(color: dotColor, pulse: pulse),
-                    const SizedBox(width: HavenSpacing.xs),
-                    Text(
-                      label,
-                      style:
-                          HavenTypography.caption.copyWith(color: dotColor),
-                    ),
-                    if (showRetry) ...[
-                      const SizedBox(width: HavenSpacing.xs),
-                      GestureDetector(
-                        onTap: _retry,
-                        child: Icon(
-                          LucideIcons.refreshCw,
-                          size: 12,
-                          color: haven.error,
-                        ),
-                      ),
-                    ],
-                  ],
+            if (useSpinning)
+              _SpinningRefreshIcon(size: 10, color: dotColor)
+            else
+              StatusDot(
+                color: dotColor,
+                pulse: effectiveStatus == ServerSyncStatus.connecting,
+              ),
+            const SizedBox(width: HavenSpacing.xs),
+            Text(
+              label,
+              style: HavenTypography.caption.copyWith(color: dotColor),
+            ),
+            if (showRetry) ...[
+              const SizedBox(width: HavenSpacing.xs),
+              HavenPressable(
+                onTap: _retry,
+                borderRadius: BorderRadius.circular(haven.radiusSm),
+                padding: const EdgeInsets.all(2),
+                child: Icon(
+                  LucideIcons.refreshCw,
+                  size: 12,
+                  color: haven.error,
                 ),
               ),
-              const SizedBox(width: HavenSpacing.sm),
             ],
-            // Connection count (always shown).
-            HavenTooltip(
-              message: connTooltip,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  StatusDot(color: connColor),
-                  const SizedBox(width: HavenSpacing.xs),
-                  Text(
-                    '$onlineCount/$totalOthers',
-                    style:
-                        HavenTypography.caption.copyWith(color: connColor),
-                  ),
-                ],
-              ),
-            ),
           ],
         );
       },

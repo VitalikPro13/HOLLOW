@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:haven/src/core/models/node_status.dart';
 import 'package:haven/src/core/providers/identity_provider.dart';
-import 'package:haven/src/core/providers/node_provider.dart';
 import 'package:haven/src/core/providers/peers_provider.dart';
 import 'package:haven/src/core/providers/server_provider.dart';
+import 'package:haven/src/core/providers/sync_progress_provider.dart';
 import 'package:haven/src/theme/haven_spacing.dart';
 import 'package:haven/src/theme/haven_theme.dart';
 import 'package:haven/src/theme/haven_typography.dart';
@@ -13,9 +11,6 @@ import 'package:haven/src/ui/animations/haven_curves.dart';
 import 'package:haven/src/ui/animations/reveal_widgets.dart';
 import 'package:haven/src/ui/animations/startup_reveal.dart';
 import 'package:haven/src/ui/components/haven_avatar.dart';
-import 'package:haven/src/ui/components/haven_pressable.dart';
-import 'package:haven/src/ui/components/haven_toast.dart';
-import 'package:haven/src/ui/components/haven_tooltip.dart';
 import 'package:haven/src/ui/components/status_dot.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
@@ -30,29 +25,9 @@ class MemberPanel extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final haven = HavenTheme.of(context);
     final selectedServerId = ref.watch(selectedServerProvider);
-    final nodeState = ref.watch(nodeProvider);
-    final identity = ref.watch(identityProvider);
 
     final panelReveal =
         StartupRevealScope.interval(context, 0.45, 0.60);
-    final connInfoReveal =
-        StartupRevealScope.interval(context, 0.75, 0.85);
-
-    Widget connInfo =
-        _buildConnectionInfo(context, haven, nodeState, identity);
-
-    if (connInfoReveal != null) {
-      connInfo = FadeTransition(
-        opacity: connInfoReveal,
-        child: SlideTransition(
-          position: Tween<Offset>(
-            begin: const Offset(0, 0.5),
-            end: Offset.zero,
-          ).animate(connInfoReveal),
-          child: connInfo,
-        ),
-      );
-    }
 
     Widget panel = Container(
       width: width,
@@ -62,33 +37,18 @@ class MemberPanel extends ConsumerWidget {
           left: BorderSide(color: haven.border),
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Content — crossfade between server members and peer members
-          Expanded(
-            child: AnimatedSwitcher(
-              duration: HavenDurations.normal,
-              switchInCurve: HavenCurves.enter,
-              switchOutCurve: HavenCurves.exit,
-              child: selectedServerId != null
-                  ? _ServerMemberContent(
-                      key: ValueKey('server-members-$selectedServerId'),
-                      ref: ref,
-                      haven: haven,
-                      serverId: selectedServerId,
-                    )
-                  : _PeerMemberContent(
-                      key: const ValueKey('peer-members'),
-                      ref: ref,
-                      haven: haven,
-                    ),
-            ),
-          ),
-
-          // Connection info section (shared, always at bottom)
-          connInfo,
-        ],
+      child: AnimatedSwitcher(
+        duration: HavenDurations.normal,
+        switchInCurve: HavenCurves.enter,
+        switchOutCurve: HavenCurves.exit,
+        child: selectedServerId != null
+            ? _ServerMemberContent(
+                key: ValueKey('server-members-$selectedServerId'),
+                serverId: selectedServerId,
+              )
+            : _PeerMemberContent(
+                key: const ValueKey('peer-members'),
+              ),
       ),
     );
 
@@ -99,110 +59,126 @@ class MemberPanel extends ConsumerWidget {
       child: panel,
     );
   }
-
-  // ---------- Shared ----------
-
-  Widget _buildConnectionInfo(
-    BuildContext context,
-    HavenTheme haven,
-    dynamic nodeState,
-    dynamic identity,
-  ) {
-    return Container(
-      padding: const EdgeInsets.all(HavenSpacing.md),
-      decoration: BoxDecoration(
-        border: Border(
-          top: BorderSide(color: haven.border),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Connection status
-          Row(
-            children: [
-              StatusDot(
-                color: _statusColor(haven, nodeState.status),
-                size: 7,
-                pulse: nodeState.status == NodeStatus.connected,
-              ),
-              const SizedBox(width: HavenSpacing.xs),
-              Text(
-                _statusText(nodeState.status),
-                style: HavenTypography.caption.copyWith(
-                  color: haven.textSecondary,
-                ),
-              ),
-            ],
-          ),
-          if (identity.peerId != null) ...[
-            const SizedBox(height: HavenSpacing.xs),
-            HavenTooltip(
-              message: 'Tap to copy full Peer ID',
-              child: HavenPressable(
-                borderRadius: BorderRadius.circular(haven.radiusSm),
-                onTap: () {
-                  Clipboard.setData(
-                      ClipboardData(text: identity.peerId!));
-                  HavenToast.show(
-                    context,
-                    'Peer ID copied',
-                    type: HavenToastType.success,
-                    duration: const Duration(seconds: 1),
-                  );
-                },
-                child: Text(
-                  identity.peerId!.length > 20
-                      ? '${identity.peerId!.substring(0, 20)}...'
-                      : identity.peerId!,
-                  style: HavenTypography.mono.copyWith(
-                    color: haven.textSecondary,
-                    fontSize: 10,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Color _statusColor(HavenTheme haven, NodeStatus status) {
-    return switch (status) {
-      NodeStatus.connected => haven.success,
-      NodeStatus.starting => haven.warning,
-      NodeStatus.loading => haven.textSecondary,
-      NodeStatus.error => haven.error,
-    };
-  }
-
-  String _statusText(NodeStatus status) {
-    return switch (status) {
-      NodeStatus.connected => 'Connected',
-      NodeStatus.starting => 'Connecting...',
-      NodeStatus.loading => 'Loading...',
-      NodeStatus.error => 'Connection error',
-    };
-  }
 }
 
-/// Server member list content (header + member list).
-class _ServerMemberContent extends StatelessWidget {
-  final WidgetRef ref;
-  final HavenTheme haven;
-  final String serverId;
+/// ASOT-style section divider: "Online ------------ 10"
+class _SectionDivider extends StatelessWidget {
+  final String label;
+  final int count;
+  final bool isOnline;
 
-  const _ServerMemberContent({
-    super.key,
-    required this.ref,
-    required this.haven,
-    required this.serverId,
+  const _SectionDivider({
+    required this.label,
+    required this.count,
+    required this.isOnline,
   });
 
   @override
   Widget build(BuildContext context) {
+    final haven = HavenTheme.of(context);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HavenSpacing.sm + 2,
+        vertical: HavenSpacing.sm,
+      ),
+      child: Row(
+        children: [
+          Text(
+            label,
+            style: HavenTypography.caption.copyWith(
+              color: haven.textSecondary,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.8,
+              fontSize: 11,
+            ),
+          ),
+          const SizedBox(width: HavenSpacing.sm),
+          Expanded(
+            child: Container(
+              height: 1,
+              decoration: BoxDecoration(
+                color: haven.border,
+                boxShadow: isOnline
+                    ? [
+                        BoxShadow(
+                          color: haven.accent.withValues(alpha: 0.3),
+                          blurRadius: 4,
+                        ),
+                      ]
+                    : null,
+              ),
+            ),
+          ),
+          const SizedBox(width: HavenSpacing.sm),
+          Text(
+            '$count',
+            style: HavenTypography.caption.copyWith(
+              color: haven.textSecondary,
+              fontWeight: FontWeight.w600,
+              fontSize: 11,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A small continuously spinning refresh icon for sync indication.
+class _SpinningRefreshIcon extends StatefulWidget {
+  final double size;
+  final Color color;
+
+  const _SpinningRefreshIcon({required this.size, required this.color});
+
+  @override
+  State<_SpinningRefreshIcon> createState() => _SpinningRefreshIconState();
+}
+
+class _SpinningRefreshIconState extends State<_SpinningRefreshIcon>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1500),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RotationTransition(
+      turns: _controller,
+      child: Icon(LucideIcons.refreshCw, size: widget.size, color: widget.color),
+    );
+  }
+}
+
+/// Server member list content (header + online/offline member list).
+class _ServerMemberContent extends ConsumerWidget {
+  final String serverId;
+
+  const _ServerMemberContent({
+    super.key,
+    required this.serverId,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final haven = HavenTheme.of(context);
     final membersAsync = ref.watch(serverMembersProvider(serverId));
+    final connectedPeers = ref.watch(peersProvider);
+    final localPeerId = ref.watch(identityProvider).peerId;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -246,33 +222,74 @@ class _ServerMemberContent extends StatelessWidget {
           ),
         ),
 
-        // Member list
+        // Member list with online/offline sections
         Expanded(
           child: membersAsync.when(
-            data: (members) => members.isEmpty
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(HavenSpacing.xl),
-                      child: Text(
-                        'No members',
-                        style: HavenTypography.bodySmall
-                            .copyWith(color: haven.textSecondary),
-                      ),
+            data: (members) {
+              if (members.isEmpty) {
+                return Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(HavenSpacing.xl),
+                    child: Text(
+                      'No members',
+                      style: HavenTypography.bodySmall
+                          .copyWith(color: haven.textSecondary),
                     ),
-                  )
-                : ListView.builder(
-                    itemCount: members.length,
-                    padding: const EdgeInsets.symmetric(
-                        vertical: HavenSpacing.sm),
-                    itemBuilder: (context, index) {
-                      final member = members[index];
-                      return _ServerMemberTile(
-                        peerId: member.peerId,
-                        displayName: member.displayName,
-                        role: member.role,
-                      );
-                    },
                   ),
+                );
+              }
+
+              // Split into online/offline
+              final online = members
+                  .where((m) =>
+                      m.peerId == localPeerId ||
+                      connectedPeers.containsKey(m.peerId))
+                  .toList();
+              final offline = members
+                  .where((m) =>
+                      m.peerId != localPeerId &&
+                      !connectedPeers.containsKey(m.peerId))
+                  .toList();
+
+              // Build flat item list
+              final items = <Widget>[];
+              if (online.isNotEmpty) {
+                items.add(_SectionDivider(
+                  label: 'Online',
+                  count: online.length,
+                  isOnline: true,
+                ));
+                for (final m in online) {
+                  items.add(_ServerMemberTile(
+                    peerId: m.peerId,
+                    displayName: m.displayName,
+                    role: m.role,
+                    isOnline: true,
+                  ));
+                }
+              }
+              if (offline.isNotEmpty) {
+                items.add(_SectionDivider(
+                  label: 'Offline',
+                  count: offline.length,
+                  isOnline: false,
+                ));
+                for (final m in offline) {
+                  items.add(_ServerMemberTile(
+                    peerId: m.peerId,
+                    displayName: m.displayName,
+                    role: m.role,
+                    isOnline: false,
+                  ));
+                }
+              }
+
+              return ListView(
+                padding: const EdgeInsets.symmetric(
+                    vertical: HavenSpacing.sm),
+                children: items,
+              );
+            },
             loading: () => const Center(
               child: SizedBox(
                 width: 24,
@@ -298,18 +315,12 @@ class _ServerMemberContent extends StatelessWidget {
 }
 
 /// Peer member list content (header + peer list).
-class _PeerMemberContent extends StatelessWidget {
-  final WidgetRef ref;
-  final HavenTheme haven;
-
-  const _PeerMemberContent({
-    super.key,
-    required this.ref,
-    required this.haven,
-  });
+class _PeerMemberContent extends ConsumerWidget {
+  const _PeerMemberContent({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final haven = HavenTheme.of(context);
     final peers = ref.watch(peersProvider);
     final headerReveal =
         StartupRevealScope.interval(context, 0.55, 0.65);
@@ -382,85 +393,102 @@ class _PeerMemberContent extends StatelessWidget {
 }
 
 /// A compact member row showing a server member with role badge.
-class _ServerMemberTile extends StatelessWidget {
+/// Shows online/offline status and per-peer sync icon.
+class _ServerMemberTile extends ConsumerWidget {
   final String peerId;
   final String displayName;
   final String role;
+  final bool isOnline;
 
   const _ServerMemberTile({
     required this.peerId,
     required this.displayName,
     required this.role,
+    required this.isOnline,
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final haven = HavenTheme.of(context);
+    final isSyncing = ref.watch(isPeerSyncingProvider(peerId));
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HavenSpacing.sm + 2,
-        vertical: HavenSpacing.xxs + 1,
-      ),
-      child: Row(
-        children: [
-          // Avatar with online dot
-          Stack(
-            children: [
-              HavenAvatar(peerId: peerId, size: 28),
-              Positioned(
-                right: -1,
-                bottom: -1,
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: haven.surface,
-                    shape: BoxShape.circle,
-                  ),
-                  padding: const EdgeInsets.all(1.5),
-                  child: StatusDot(color: haven.success, size: 7, pulse: true),
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(width: HavenSpacing.sm),
-
-          // Display name + role
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+    return AnimatedOpacity(
+      opacity: isOnline ? 1.0 : 0.5,
+      duration: HavenDurations.fast,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: HavenSpacing.sm + 2,
+          vertical: HavenSpacing.xxs + 1,
+        ),
+        child: Row(
+          children: [
+            // Avatar with status overlay
+            Stack(
               children: [
-                Text(
-                  displayName.isNotEmpty
-                      ? displayName
-                      : (peerId.length > 12
-                          ? '${peerId.substring(0, 12)}...'
-                          : peerId),
-                  style: HavenTypography.bodySmall.copyWith(
-                    color: haven.textPrimary,
-                    fontFamily: 'Consolas',
-                    fontSize: 12,
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-                if (role == 'owner')
-                  Text(
-                    'Owner',
-                    style: HavenTypography.caption.copyWith(
-                      color: haven.accent,
-                      fontSize: 10,
+                HavenAvatar(peerId: peerId, size: 28),
+                Positioned(
+                  right: -1,
+                  bottom: -1,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: haven.surface,
+                      shape: BoxShape.circle,
                     ),
+                    padding: const EdgeInsets.all(1.5),
+                    child: isSyncing
+                        ? _SpinningRefreshIcon(
+                            size: 9, color: haven.accent)
+                        : StatusDot(
+                            color: isOnline
+                                ? haven.success
+                                : haven.textSecondary,
+                            size: 7,
+                            pulse: isOnline,
+                          ),
                   ),
+                ),
               ],
             ),
-          ),
-        ],
+
+            const SizedBox(width: HavenSpacing.sm),
+
+            // Display name + role
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    displayName.isNotEmpty
+                        ? displayName
+                        : (peerId.length > 12
+                            ? '${peerId.substring(0, 12)}...'
+                            : peerId),
+                    style: HavenTypography.bodySmall.copyWith(
+                      color: haven.textPrimary,
+                      fontFamily: 'Consolas',
+                      fontSize: 12,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (role == 'owner')
+                    Text(
+                      'Owner',
+                      style: HavenTypography.caption.copyWith(
+                        color: haven.accent,
+                        fontSize: 10,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-/// A compact member row in the member panel (peer mode).
+/// A compact member row in the member panel (peer/DM mode).
 class _MemberTile extends StatelessWidget {
   final String peerId;
   final bool isEncrypted;
@@ -494,7 +522,8 @@ class _MemberTile extends StatelessWidget {
                     shape: BoxShape.circle,
                   ),
                   padding: const EdgeInsets.all(1.5),
-                  child: StatusDot(color: haven.success, size: 7, pulse: true),
+                  child: StatusDot(
+                      color: haven.success, size: 7, pulse: true),
                 ),
               ),
             ],
@@ -517,13 +546,15 @@ class _MemberTile extends StatelessWidget {
             ),
           ),
 
-          // Encryption badge
-          if (isEncrypted)
-            Icon(
-              LucideIcons.lock,
-              size: 12,
-              color: haven.success,
-            ),
+          // Encryption badge or spinning icon
+          isEncrypted
+              ? Icon(
+                  LucideIcons.lock,
+                  size: 12,
+                  color: haven.success,
+                )
+              : _SpinningRefreshIcon(
+                  size: 12, color: haven.textSecondary),
         ],
       ),
     );

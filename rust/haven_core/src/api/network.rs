@@ -43,6 +43,7 @@ pub enum NetworkEvent {
     MessageSyncStarted { server_id: String, peer_id: String },
     MessageSyncCompleted { server_id: String, new_message_count: u32 },
     MessageSyncFailed { server_id: String, error: String },
+    MessageSyncProgress { server_id: String, channel_id: String, received_count: u32, total_count: u32 },
 }
 
 /// Holds all mutable state for the running node.
@@ -145,6 +146,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::MessageSyncFailed { server_id, error } => {
             haven_log!("[HAVEN] Message sync failed for {server_id}: {error}");
         }
+        node::NetworkEvent::MessageSyncProgress { server_id, channel_id, received_count, total_count } => {
+            haven_log!("[HAVEN] Sync progress for {channel_id} in {server_id}: {received_count}/{total_count}");
+        }
         _ => {}
     }
     match event {
@@ -212,6 +216,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::MessageSyncFailed { server_id, error } => {
             NetworkEvent::MessageSyncFailed { server_id, error }
+        }
+        node::NetworkEvent::MessageSyncProgress { server_id, channel_id, received_count, total_count } => {
+            NetworkEvent::MessageSyncProgress { server_id, channel_id, received_count, total_count }
         }
     }
 }

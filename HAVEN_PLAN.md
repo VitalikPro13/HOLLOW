@@ -921,11 +921,23 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 - [X] Room gating — reject incoming CRDT state/ops for servers we haven't explicitly joined, prevent auto-sync of unknown servers to non-members
 - [X] Channel/server operation broadcast — channel creation, rename, and all CRDT mutations broadcast reliably to all server members (currently some operations only apply locally)
 - [X] Message history sync on reconnection — pull-based catch-up: on peer reconnect, request missed channel messages since last-seen timestamp, peers respond from local DB. Prerequisite for reliable distributed messaging
-- [ ] Member presence (online/offline status) — cross-reference `connected_peers` with server membership, emit presence events to UI, StatusDot integration in member panel. 🎞️ Animate: member join/leave fade+slide, online→offline transitions, presence dot pulse
+- [X] Member presence (online/offline status)
+  - Cross-reference `connected_peers` with server membership, emit presence events to UI
+  - ASOT-style dividers: "Online ------------ 10" / "Offline -------- 5" with accent glow on Online only
+  - Per-member sync icon: 12px spinning `refreshCw` on avatar bottom-right (Discord status dot position), replaces green/grey dot when syncing
+  - Offline members: 0.5 opacity on whole row
+  - Sync progress bar: `total_count` in ChannelSyncBatch envelope, "Syncing 47/120 messages..."
+  - User bar: mirror channel pane status (Connecting.../Online), remove warning icon
+  - DM peer list: spinning icon when peer discovered but Olm session not yet established (instead of no icon)
+  - Remove duplicate connection info from member panel bottom (already in user bar)
+  - Animate: member join/leave fade+slide, online->offline transitions, presence dot pulse
 - [ ] Roles and permissions system — uses CRDTs (LWW-Register with admin priority), UI for role assignment in server settings
 - [ ] MLS group encryption for channels — standalone crypto task, can parallel with UI work
-- [ ] Offline message queuing (store-and-forward via online peers) — peer B holds messages for offline peer A, delivers on reconnect. Builds on message history sync. 🎞️ Animate: queued message shimmer/pending state, delivery confirmation tick
-- [ ] Device linking via QR code (multi-device identity sync) — requires MLS + CRDTs. 🎞️ Animate: QR scan success celebration, device linked confirmation
+- [ ] Offline message queuing (store-and-forward via online peers)
+  - Peer B holds messages for offline peer A, delivers on reconnect. Builds on message history sync.
+  - MESSAGE ORDERING DECISION: Don't insert by sender timestamp (abusable — clock manipulation, spam injection). Instead: append offline messages at bottom with visual separator ("3 messages from Peer B while offline"). Sender timestamp = display metadata only ("sent at 10:12"), not sort position. Receive order = authoritative sequence for live messages.
+  - Animate: queued message shimmer/pending state, delivery confirmation tick
+- [ ] Device linking via QR code (multi-device identity sync) — requires MLS + CRDTs. Animate: QR scan success celebration, device linked confirmation
 
 **Deliverable:** A functional group chat platform with servers, channels, and multi-device support.
 

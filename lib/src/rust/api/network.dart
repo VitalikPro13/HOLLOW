@@ -177,4 +177,10 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String serverId,
     required String error,
   }) = NetworkEvent_MessageSyncFailed;
+  const factory NetworkEvent.messageSyncProgress({
+    required String serverId,
+    required String channelId,
+    required int receivedCount,
+    required int totalCount,
+  }) = NetworkEvent_MessageSyncProgress;
 }

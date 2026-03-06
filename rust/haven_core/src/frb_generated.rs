@@ -1551,6 +1551,18 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     error: var_error,
                 };
             }
+            24 => {
+                let mut var_serverId = <String>::sse_decode(deserializer);
+                let mut var_channelId = <String>::sse_decode(deserializer);
+                let mut var_receivedCount = <u32>::sse_decode(deserializer);
+                let mut var_totalCount = <u32>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::MessageSyncProgress {
+                    server_id: var_serverId,
+                    channel_id: var_channelId,
+                    received_count: var_receivedCount,
+                    total_count: var_totalCount,
+                };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -1966,6 +1978,19 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 error.into_into_dart().into_dart(),
             ]
             .into_dart(),
+            crate::api::network::NetworkEvent::MessageSyncProgress {
+                server_id,
+                channel_id,
+                received_count,
+                total_count,
+            } => [
+                24.into_dart(),
+                server_id.into_into_dart().into_dart(),
+                channel_id.into_into_dart().into_dart(),
+                received_count.into_into_dart().into_dart(),
+                total_count.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -2342,6 +2367,18 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 <i32>::sse_encode(23, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(error, serializer);
+            }
+            crate::api::network::NetworkEvent::MessageSyncProgress {
+                server_id,
+                channel_id,
+                received_count,
+                total_count,
+            } => {
+                <i32>::sse_encode(24, serializer);
+                <String>::sse_encode(server_id, serializer);
+                <String>::sse_encode(channel_id, serializer);
+                <u32>::sse_encode(received_count, serializer);
+                <u32>::sse_encode(total_count, serializer);
             }
             _ => {
                 unimplemented!("");

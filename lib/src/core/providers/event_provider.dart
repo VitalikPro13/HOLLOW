@@ -10,6 +10,7 @@ import 'package:haven/src/core/providers/peers_provider.dart';
 import 'package:haven/src/core/providers/selected_peer_provider.dart';
 import 'package:haven/src/core/providers/server_provider.dart';
 import 'package:haven/src/core/providers/service_providers.dart';
+import 'package:haven/src/core/providers/sync_progress_provider.dart';
 import 'package:haven/src/rust/api/network.dart';
 
 /// Listens to the Rust event stream and dispatches events
@@ -162,6 +163,7 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_MessageSyncStarted(:final serverId, :final peerId):
         debugPrint('[HAVEN] Message sync started for $serverId with $peerId');
+        ref.read(syncingPeersProvider.notifier).addPeer(serverId, peerId);
         final current = ref.read(serverSyncStatusProvider(serverId));
         ref.read(syncStatusProvider.notifier).setStatus(
           serverId,
@@ -174,6 +176,8 @@ class EventStreamNotifier extends Notifier<bool> {
             :final serverId, :final newMessageCount):
         debugPrint(
             '[HAVEN] Message sync: $newMessageCount new messages for $serverId');
+        ref.read(syncingPeersProvider.notifier).clearServer(serverId);
+        ref.read(syncProgressProvider.notifier).clearServer(serverId);
         ref.read(syncStatusProvider.notifier).setStatus(
             serverId, ServerSyncStatus.synced);
         if (newMessageCount > 0) {
@@ -193,8 +197,17 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_MessageSyncFailed(:final serverId, :final error):
         debugPrint('[HAVEN] Message sync failed for $serverId: $error');
+        ref.read(syncingPeersProvider.notifier).clearServer(serverId);
+        ref.read(syncProgressProvider.notifier).clearServer(serverId);
         ref.read(syncStatusProvider.notifier).setStatus(
             serverId, ServerSyncStatus.failed);
+
+      case NetworkEvent_MessageSyncProgress(
+            :final serverId, :final channelId, :final receivedCount, :final totalCount):
+        debugPrint(
+            '[HAVEN] Sync progress: $receivedCount/$totalCount for $channelId in $serverId');
+        ref.read(syncProgressProvider.notifier).updateProgress(
+            serverId, receivedCount, totalCount);
     }
   }
 }

@@ -111,6 +111,7 @@ pub(crate) enum NetworkEvent {
     MessageSyncStarted { server_id: String, peer_id: String },
     MessageSyncCompleted { server_id: String, new_message_count: u32 },
     MessageSyncFailed { server_id: String, error: String },
+    MessageSyncProgress { server_id: String, channel_id: String, received_count: u32, total_count: u32 },
 }
 
 /// Commands the FFI layer can send into the swarm event loop.
@@ -219,6 +220,9 @@ enum MessageEnvelope {
         sid: String,
         cid: String,
         messages: Vec<SyncMessageItem>,
+        /// Total messages available since requested timestamp (for progress indication).
+        #[serde(default)]
+        total: u32,
     },
 }
 
@@ -1853,8 +1857,10 @@ async fn run_swarm(
                             // Only on FIRST connection to this peer (not duplicate TCP/QUIC/relay).
                             if num_established.get() == 1 {
                                 let reconnected_peer_str = peer_id.to_string();
+                                let mut is_server_member = false;
                                 for (sid, state) in server_states.iter() {
                                     if state.members.contains_key(&reconnected_peer_str) {
+                                        is_server_member = true;
                                         // CRDT state sync (channels, members, roles).
                                         let our_vector = StateVector::from_server_state(state);
                                         if let Ok(sv_json) = serde_json::to_string(&our_vector) {
@@ -1894,6 +1900,27 @@ async fn run_swarm(
                                             server_id: sid.clone(),
                                             peer_id: reconnected_peer_str.clone(),
                                         }).await;
+                                    }
+                                }
+
+                                // Ensure server members show as online in UI even if
+                                // they weren't in expected_peers (e.g., discovered via
+                                // CRDT membership, not signaling bootstrap).
+                                if is_server_member && !expected_peers.contains(&peer_id) {
+                                    let _ = event_tx
+                                        .send(NetworkEvent::PeerDiscovered {
+                                            peer: DiscoveredPeer {
+                                                peer_id: reconnected_peer_str.clone(),
+                                                addresses: vec![format!("{endpoint:?}")],
+                                            },
+                                        })
+                                        .await;
+                                    if olm.has_session(&reconnected_peer_str) {
+                                        let _ = event_tx
+                                            .send(NetworkEvent::SessionEstablished {
+                                                peer_id: reconnected_peer_str,
+                                            })
+                                            .await;
                                     }
                                 }
                             }
@@ -2492,10 +2519,11 @@ async fn handle_incoming_request(
                             .await;
                     }
                 }
-                Ok(MessageEnvelope::ChannelSyncBatch { sid, cid, messages }) => {
-                    haven_log!("[HAVEN-SYNC] Received {} sync messages for {cid} in {sid}", messages.len());
+                Ok(MessageEnvelope::ChannelSyncBatch { sid, cid, messages, total }) => {
+                    haven_log!("[HAVEN-SYNC] Received {} sync messages for {cid} in {sid} (total: {total})", messages.len());
                     let local_peer = swarm.local_peer_id().to_string();
                     let mut new_count = 0u32;
+                    let received_count = messages.len() as u32;
 
                     let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
@@ -2512,6 +2540,16 @@ async fn handle_incoming_request(
                                 }
                             }
                         }
+                    }
+
+                    // Emit progress so the UI can show "Syncing 47/120..."
+                    if total > 0 {
+                        let _ = event_tx.send(NetworkEvent::MessageSyncProgress {
+                            server_id: sid.clone(),
+                            channel_id: cid.clone(),
+                            received_count,
+                            total_count: total,
+                        }).await;
                     }
 
                     // Always emit so the UI clears the "Syncing..." state.
@@ -2829,12 +2867,17 @@ async fn handle_incoming_request(
                             }
                         }).collect();
 
+                        let total = store.count_channel_messages_since(
+                            &server_id, &channel_id, since_timestamp,
+                        ).unwrap_or(items.len() as u32);
+
                         let server_id_for_err = server_id.clone();
                         let channel_id_for_err = channel_id.clone();
                         let envelope = MessageEnvelope::ChannelSyncBatch {
                             sid: server_id,
                             cid: channel_id,
                             messages: items,
+                            total,
                         };
                         let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
@@ -3003,10 +3046,15 @@ async fn flush_pending_sync_requests(
                     }
                 }).collect();
 
+                let total = store.count_channel_messages_since(
+                    &server_id, &channel_id, since_timestamp,
+                ).unwrap_or(items.len() as u32);
+
                 let envelope = MessageEnvelope::ChannelSyncBatch {
                     sid: server_id.clone(),
                     cid: channel_id,
                     messages: items,
+                    total,
                 };
                 let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
