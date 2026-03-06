@@ -51,6 +51,21 @@ Future<void> sendChannelMessage({
   text: text,
 );
 
+/// Request message sync for a specific channel from all connected server members.
+/// Called when the user opens a channel to catch up on missed messages.
+Future<void> requestChannelSync({
+  required String serverId,
+  required String channelId,
+}) => RustLib.instance.api.crateApiNetworkRequestChannelSync(
+  serverId: serverId,
+  channelId: channelId,
+);
+
+/// Notify all connected peers that we're shutting down gracefully.
+/// Call this before closing the app so peers can immediately update their state.
+Future<void> notifyShutdown() =>
+    RustLib.instance.api.crateApiNetworkNotifyShutdown();
+
 /// Join a room via the signaling service.
 /// Registers our addresses and bootstraps from other peers in the room.
 Future<void> joinRoom({required String roomCode}) =>
@@ -150,4 +165,16 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String serverId,
     required String name,
   }) = NetworkEvent_ServerJoined;
+  const factory NetworkEvent.messageSyncStarted({
+    required String serverId,
+    required String peerId,
+  }) = NetworkEvent_MessageSyncStarted;
+  const factory NetworkEvent.messageSyncCompleted({
+    required String serverId,
+    required int newMessageCount,
+  }) = NetworkEvent_MessageSyncCompleted;
+  const factory NetworkEvent.messageSyncFailed({
+    required String serverId,
+    required String error,
+  }) = NetworkEvent_MessageSyncFailed;
 }

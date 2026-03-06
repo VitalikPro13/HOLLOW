@@ -159,6 +159,42 @@ class EventStreamNotifier extends Notifier<bool> {
             .loadForServer(serverId);
         ref.read(selectedChannelProvider.notifier).state = null;
         ref.read(serverSettingsOpenProvider.notifier).state = false;
+
+      case NetworkEvent_MessageSyncStarted(:final serverId, :final peerId):
+        debugPrint('[HAVEN] Message sync started for $serverId with $peerId');
+        final current = ref.read(serverSyncStatusProvider(serverId));
+        ref.read(syncStatusProvider.notifier).setStatus(
+          serverId,
+          current == ServerSyncStatus.failed
+              ? ServerSyncStatus.retrying
+              : ServerSyncStatus.syncing,
+        );
+
+      case NetworkEvent_MessageSyncCompleted(
+            :final serverId, :final newMessageCount):
+        debugPrint(
+            '[HAVEN] Message sync: $newMessageCount new messages for $serverId');
+        ref.read(syncStatusProvider.notifier).setStatus(
+            serverId, ServerSyncStatus.synced);
+        if (newMessageCount > 0) {
+          // Clear in-memory cache so loadHistory re-reads from DB.
+          ref
+              .read(channelChatProvider.notifier)
+              .clearServerCache(serverId);
+          // Reload the active channel if the user is viewing this server.
+          final selectedServer = ref.read(selectedServerProvider);
+          final selectedChannel = ref.read(selectedChannelProvider);
+          if (selectedServer == serverId && selectedChannel != null) {
+            ref
+                .read(channelChatProvider.notifier)
+                .loadHistory(serverId, selectedChannel);
+          }
+        }
+
+      case NetworkEvent_MessageSyncFailed(:final serverId, :final error):
+        debugPrint('[HAVEN] Message sync failed for $serverId: $error');
+        ref.read(syncStatusProvider.notifier).setStatus(
+            serverId, ServerSyncStatus.failed);
     }
   }
 }

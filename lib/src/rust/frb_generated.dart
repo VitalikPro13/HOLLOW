@@ -70,7 +70,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 1829470729;
+  int get rustContentHash => -226081624;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -133,6 +133,8 @@ abstract class RustLibApi extends BaseApi {
 
   Future<IdentityInfo> crateApiIdentityLoadOrCreateIdentity();
 
+  Future<void> crateApiNetworkNotifyShutdown();
+
   Future<void> crateApiStorageOpenMessageStore();
 
   Future<NetworkEvent?> crateApiNetworkPollNetworkEvent();
@@ -151,6 +153,11 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiCrdtRenameServer({
     required String serverId,
     required String newName,
+  });
+
+  Future<void> crateApiNetworkRequestChannelSync({
+    required String serverId,
+    required String channelId,
   });
 
   Future<IdentityInfo> crateApiIdentityRestoreIdentityFromMnemonic({
@@ -712,7 +719,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "load_or_create_identity", argNames: []);
 
   @override
-  Future<void> crateApiStorageOpenMessageStore() {
+  Future<void> crateApiNetworkNotifyShutdown() {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
@@ -721,6 +728,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             generalizedFrbRustBinding,
             serializer,
             funcId: 18,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNetworkNotifyShutdownConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNetworkNotifyShutdownConstMeta =>
+      const TaskConstMeta(debugName: "notify_shutdown", argNames: []);
+
+  @override
+  Future<void> crateApiStorageOpenMessageStore() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 19,
             port: port_,
           );
         },
@@ -747,7 +781,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 19,
+            funcId: 20,
             port: port_,
           );
         },
@@ -779,7 +813,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 20,
+            funcId: 21,
             port: port_,
           );
         },
@@ -815,7 +849,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 22,
             port: port_,
           );
         },
@@ -849,7 +883,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 23,
             port: port_,
           );
         },
@@ -870,6 +904,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<void> crateApiNetworkRequestChannelSync({
+    required String serverId,
+    required String channelId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          sse_encode_String(channelId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 24,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNetworkRequestChannelSyncConstMeta,
+        argValues: [serverId, channelId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNetworkRequestChannelSyncConstMeta =>
+      const TaskConstMeta(
+        debugName: "request_channel_sync",
+        argNames: ["serverId", "channelId"],
+      );
+
+  @override
   Future<IdentityInfo> crateApiIdentityRestoreIdentityFromMnemonic({
     required String phrase,
   }) {
@@ -881,7 +950,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 25,
             port: port_,
           );
         },
@@ -924,7 +993,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 24,
+            funcId: 26,
             port: port_,
           );
         },
@@ -970,7 +1039,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 25,
+            funcId: 27,
             port: port_,
           );
         },
@@ -1006,7 +1075,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 26,
+            funcId: 28,
             port: port_,
           );
         },
@@ -1041,7 +1110,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 27,
+            funcId: 29,
             port: port_,
           );
         },
@@ -1070,7 +1139,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 28,
+            funcId: 30,
             port: port_,
           );
         },
@@ -1097,7 +1166,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 29,
+            funcId: 31,
             port: port_,
           );
         },
@@ -1131,7 +1200,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 30,
+            funcId: 32,
             port: port_,
           );
         },
@@ -1164,7 +1233,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 31,
+              funcId: 33,
               port: port_,
             );
           },
@@ -1420,6 +1489,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         return NetworkEvent_ServerJoined(
           serverId: dco_decode_String(raw[1]),
           name: dco_decode_String(raw[2]),
+        );
+      case 21:
+        return NetworkEvent_MessageSyncStarted(
+          serverId: dco_decode_String(raw[1]),
+          peerId: dco_decode_String(raw[2]),
+        );
+      case 22:
+        return NetworkEvent_MessageSyncCompleted(
+          serverId: dco_decode_String(raw[1]),
+          newMessageCount: dco_decode_u_32(raw[2]),
+        );
+      case 23:
+        return NetworkEvent_MessageSyncFailed(
+          serverId: dco_decode_String(raw[1]),
+          error: dco_decode_String(raw[2]),
         );
       default:
         throw Exception("unreachable");
@@ -1804,6 +1888,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         return NetworkEvent_ServerJoined(
           serverId: var_serverId,
           name: var_name,
+        );
+      case 21:
+        var var_serverId = sse_decode_String(deserializer);
+        var var_peerId = sse_decode_String(deserializer);
+        return NetworkEvent_MessageSyncStarted(
+          serverId: var_serverId,
+          peerId: var_peerId,
+        );
+      case 22:
+        var var_serverId = sse_decode_String(deserializer);
+        var var_newMessageCount = sse_decode_u_32(deserializer);
+        return NetworkEvent_MessageSyncCompleted(
+          serverId: var_serverId,
+          newMessageCount: var_newMessageCount,
+        );
+      case 23:
+        var var_serverId = sse_decode_String(deserializer);
+        var var_error = sse_decode_String(deserializer);
+        return NetworkEvent_MessageSyncFailed(
+          serverId: var_serverId,
+          error: var_error,
         );
       default:
         throw UnimplementedError('');
@@ -2206,6 +2311,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_i_32(20, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(name, serializer);
+      case NetworkEvent_MessageSyncStarted(
+        serverId: final serverId,
+        peerId: final peerId,
+      ):
+        sse_encode_i_32(21, serializer);
+        sse_encode_String(serverId, serializer);
+        sse_encode_String(peerId, serializer);
+      case NetworkEvent_MessageSyncCompleted(
+        serverId: final serverId,
+        newMessageCount: final newMessageCount,
+      ):
+        sse_encode_i_32(22, serializer);
+        sse_encode_String(serverId, serializer);
+        sse_encode_u_32(newMessageCount, serializer);
+      case NetworkEvent_MessageSyncFailed(
+        serverId: final serverId,
+        error: final error,
+      ):
+        sse_encode_i_32(23, serializer);
+        sse_encode_String(serverId, serializer);
+        sse_encode_String(error, serializer);
     }
   }
 

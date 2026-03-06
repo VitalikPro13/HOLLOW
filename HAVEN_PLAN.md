@@ -920,7 +920,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 - [X] Message deduplication — sender timestamp in envelope, UNIQUE DB constraint, Rust-side dedup before emitting events
 - [X] Room gating — reject incoming CRDT state/ops for servers we haven't explicitly joined, prevent auto-sync of unknown servers to non-members
 - [X] Channel/server operation broadcast — channel creation, rename, and all CRDT mutations broadcast reliably to all server members (currently some operations only apply locally)
-- [ ] Message history sync on reconnection — pull-based catch-up: on peer reconnect, request missed channel messages since last-seen timestamp, peers respond from local DB. Prerequisite for reliable distributed messaging
+- [X] Message history sync on reconnection — pull-based catch-up: on peer reconnect, request missed channel messages since last-seen timestamp, peers respond from local DB. Prerequisite for reliable distributed messaging
 - [ ] Member presence (online/offline status) — cross-reference `connected_peers` with server membership, emit presence events to UI, StatusDot integration in member panel. 🎞️ Animate: member join/leave fade+slide, online→offline transitions, presence dot pulse
 - [ ] Roles and permissions system — uses CRDTs (LWW-Register with admin priority), UI for role assignment in server settings
 - [ ] MLS group encryption for channels — standalone crypto task, can parallel with UI work
@@ -1017,20 +1017,27 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 ### Phase ???: Fight Government Censorship
 
-**Goal:** Bypass networks.
+**Goal:** Allow Haven to work in countries with advanced DPI censorship (Russia, China, Iran).
 
 **Explanation:**
 
-The hard truth: Russia's TSPU (DPI system) is one of the most advanced censorship systems in the world. It doesn't just look at port numbers — it analyzes traffic patterns, packet sizes, and timing. Even though our WSS goes through TLS on port 443, the libp2p protocol fingerprint inside the WebSocket frames is detectable. This is the same reason Tor needed pluggable transports (obfs4, meek, snowflake) — plain TLS wrapping isn't enough against sophisticated DPI.
+Russia's TSPU (DPI system) is one of the most advanced censorship systems in the world. It doesn't just look at port numbers — it analyzes traffic patterns, packet sizes, and timing. Even though our WSS goes through TLS on port 443, the libp2p protocol fingerprint inside the WebSocket frames is detectable. This is the same reason Tor needed pluggable transports (obfs4, meek, snowflake) — plain TLS wrapping isn't enough against sophisticated DPI.
 
-Fighting this properly would require:
-- Traffic obfuscation (like obfs4 — randomizing packet sizes and timing)
-- Domain fronting (making traffic look like it's going to Google/Amazon)
-- Custom protocol that mimics real HTTPS browsing patterns
+**Proven solutions exist (used by people in Russia/China/Iran right now):**
+- **VLESS + Reality (XRay):** Makes traffic indistinguishable from a real TLS connection to a legitimate website (e.g., google.com). Gold standard for DPI bypass.
+- **Shadowsocks (Outline):** Traffic looks like random noise. Simple to deploy, still effective against most DPI.
+- **AmneziaWG:** Modified WireGuard with junk packets and header obfuscation.
 
-This is months of specialized anti-censorship engineering — it's what entire teams at Tor Project and V2Ray work on full-time.
+**Implementation approaches (from easiest to hardest):**
+1. **Documentation only** — Guide for users to set up their own VLESS/Shadowsocks proxy, Haven connects through it normally. Zero code changes.
+2. **Relay-side proxy** — Run XRay/Shadowsocks on our VPS alongside the relay. Censored users connect to the obfuscated proxy, which tunnels to the Haven relay internally. Minimal Haven code changes.
+3. **Built-in transport** — Integrate a Shadowsocks or VLESS client directly into Haven's Rust backend. Auto-detect censorship (connection failures on WSS) and fall back to obfuscated tunnel. Best UX, most work.
 
-- [] WSS is implemented but it doesn't work. Implement HARD bypassers.
+**Checklist:**
+- [ ] Research: test VLESS+Reality from Russian network to confirm it works
+- [ ] Option 1: Write user-facing guide for external proxy setup
+- [ ] Option 2: Deploy XRay/Shadowsocks proxy on relay VPS, add Haven config for proxy endpoint
+- [ ] Option 3: Integrate obfuscated transport into Rust backend (long-term)
 
 ---
 

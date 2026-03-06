@@ -40,6 +40,9 @@ pub enum NetworkEvent {
     MemberLeft { server_id: String, peer_id: String },
     SyncCompleted { server_id: String, ops_applied: u32 },
     ServerJoined { server_id: String, name: String },
+    MessageSyncStarted { server_id: String, peer_id: String },
+    MessageSyncCompleted { server_id: String, new_message_count: u32 },
+    MessageSyncFailed { server_id: String, error: String },
 }
 
 /// Holds all mutable state for the running node.
@@ -133,6 +136,15 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::ServerJoined { server_id, name } => {
             haven_log!("[HAVEN] Server joined: {name} ({server_id})");
         }
+        node::NetworkEvent::MessageSyncStarted { server_id, peer_id } => {
+            haven_log!("[HAVEN] Message sync started for {server_id} with {peer_id}");
+        }
+        node::NetworkEvent::MessageSyncCompleted { server_id, new_message_count } => {
+            haven_log!("[HAVEN] Message sync completed for {server_id}: {new_message_count} new messages");
+        }
+        node::NetworkEvent::MessageSyncFailed { server_id, error } => {
+            haven_log!("[HAVEN] Message sync failed for {server_id}: {error}");
+        }
         _ => {}
     }
     match event {
@@ -191,6 +203,15 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::ServerJoined { server_id, name } => {
             NetworkEvent::ServerJoined { server_id, name }
+        }
+        node::NetworkEvent::MessageSyncStarted { server_id, peer_id } => {
+            NetworkEvent::MessageSyncStarted { server_id, peer_id }
+        }
+        node::NetworkEvent::MessageSyncCompleted { server_id, new_message_count } => {
+            NetworkEvent::MessageSyncCompleted { server_id, new_message_count }
+        }
+        node::NetworkEvent::MessageSyncFailed { server_id, error } => {
+            NetworkEvent::MessageSyncFailed { server_id, error }
         }
     }
 }
@@ -381,6 +402,43 @@ pub fn send_channel_message(
             channel_id,
             text,
         }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+/// Request message sync for a specific channel from all connected server members.
+/// Called when the user opens a channel to catch up on missed messages.
+#[frb]
+pub fn request_channel_sync(server_id: String, channel_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(
+        state.cmd_tx.send(node::NodeCommand::RequestChannelSync {
+            server_id,
+            channel_id,
+        }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+/// Notify all connected peers that we're shutting down gracefully.
+/// Call this before closing the app so peers can immediately update their state.
+#[frb]
+pub fn notify_shutdown() -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(
+        state.cmd_tx.send(node::NodeCommand::NotifyShutdown),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
 

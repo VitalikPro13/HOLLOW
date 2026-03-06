@@ -80,16 +80,20 @@ Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection mana
 - Room gating: reject incoming CRDT state/ops for servers not joined or pending join
 - Channel/server operation broadcast: all CRDT mutations broadcast to server members only (not all connected peers), receive handler emits specific events (ChannelAdded/Removed/Renamed, MemberJoined/Left)
 - Connection status indicator: per-server online member count in channel header (green/yellow/red dot + X/Y count)
+- Message history sync on reconnection: pull-based catch-up (`ChannelSyncRequest`/`ChannelSyncBatch`), `INSERT OR IGNORE` dedup, triggers on reconnect + on-demand channel open
+- Peer reconnection: `disconnected_peers` cleared every 60s, CRDT sync on reconnect via `ConnectionEstablished`
+- Olm session race fix: 3-layer PreKey defense (`try_decrypt_prekey_with_existing` → `create_inbound_session` → auto re-key)
+- Olm session preservation: stopped destroying sessions on transport failure (`OutboundFailure`), preventing dual-outbound race
+- Sync retry system: `MessageSyncFailed` event, `pending_sync_requests` retry after re-key, `flush_pending_sync_requests` helper
+- Granular sync UI: `ServerSyncStatus` enum (idle/connecting/syncing/synced/retrying/failed), `_ConnectionIndicator` with StatusDot + retry button
+- Graceful disconnect: `PeerDisconnecting` broadcast on app close, immediate `PeerDisconnected` event on receiver
 
 **Next up (Phase 3 remaining):**
-- Message history sync on reconnection (pull-based catch-up: request missed messages since last timestamp on reconnect)
-- Member presence (online/offline status via connected_peers × server membership)
+- Member presence (online/offline status via connected_peers × server membership) with ASOT-style dividers
 - Roles & permissions UI
 - MLS group encryption
 - Offline message queuing (push-based store-and-forward, builds on message sync)
 - Device linking
-
-**Known issue:** Peers can lose connection silently (one side sees 1/1 connected, other sees 0/1). Messages sent during disconnection are lost. Needs: reconnection detection + message history sync on reconnect.
 
 ## Haven Design System (Phase 2.75)
 All UI interactions go through custom Haven widgets — no Material defaults anywhere. Change behavior in one place, applies everywhere.

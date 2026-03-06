@@ -479,6 +479,76 @@ impl MessageStore {
         Ok(messages)
     }
 
+    /// Get the most recent message timestamp for a channel (for sync requests).
+    pub fn get_latest_channel_timestamp(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+    ) -> Result<Option<i64>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT MAX(timestamp) FROM channel_messages
+                 WHERE server_id = ?1 AND channel_id = ?2",
+            )
+            .map_err(|e| format!("Failed to prepare latest timestamp query: {e}"))?;
+        let mut rows = stmt
+            .query_map(params![server_id, channel_id], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .map_err(|e| format!("Failed to query latest timestamp: {e}"))?;
+        match rows.next() {
+            Some(Ok(ts)) => Ok(ts),
+            Some(Err(e)) => Err(format!("Failed to read latest timestamp: {e}")),
+            None => Ok(None),
+        }
+    }
+
+    /// Get channel messages newer than a given timestamp (for sync responses).
+    pub fn get_channel_messages_since(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        since_timestamp: i64,
+        limit: i32,
+    ) -> Result<Vec<StoredChannelMessage>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp
+                 FROM channel_messages
+                 WHERE server_id = ?1 AND channel_id = ?2 AND timestamp > ?3
+                 ORDER BY timestamp ASC
+                 LIMIT ?4",
+            )
+            .map_err(|e| format!("Failed to prepare messages_since query: {e}"))?;
+
+        let rows = stmt
+            .query_map(
+                params![server_id, channel_id, since_timestamp, limit],
+                |row| {
+                    Ok(StoredChannelMessage {
+                        id: row.get(0)?,
+                        server_id: row.get(1)?,
+                        channel_id: row.get(2)?,
+                        sender_id: row.get(3)?,
+                        text: row.get(4)?,
+                        is_mine: row.get::<_, i32>(5)? != 0,
+                        timestamp: row.get(6)?,
+                    })
+                },
+            )
+            .map_err(|e| format!("Failed to query messages_since: {e}"))?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(
+                row.map_err(|e| format!("Failed to read messages_since row: {e}"))?,
+            );
+        }
+        Ok(messages)
+    }
+
     /// Load HLC state, if saved.
     pub fn load_hlc_state(&self) -> Result<Option<(u64, u32, String)>, String> {
         let mut stmt = self

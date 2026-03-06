@@ -76,6 +76,31 @@ final selectedServerProvider = StateProvider<String?>((ref) => null);
 /// Whether the server settings panel is open (replaces chat pane).
 final serverSettingsOpenProvider = StateProvider<bool>((ref) => false);
 
+/// Sync status for a server's message sync process.
+enum ServerSyncStatus { idle, connecting, syncing, synced, retrying, failed }
+
+/// Manages per-server sync status.
+class SyncStatusNotifier extends Notifier<Map<String, ServerSyncStatus>> {
+  @override
+  Map<String, ServerSyncStatus> build() => {};
+
+  void setStatus(String serverId, ServerSyncStatus status) {
+    final updated = Map.of(state);
+    updated[serverId] = status;
+    state = updated;
+  }
+}
+
+final syncStatusProvider =
+    NotifierProvider<SyncStatusNotifier, Map<String, ServerSyncStatus>>(
+        SyncStatusNotifier.new);
+
+/// Convenience: read the sync status for a single server.
+final serverSyncStatusProvider =
+    Provider.family<ServerSyncStatus, String>((ref, serverId) {
+  return ref.watch(syncStatusProvider)[serverId] ?? ServerSyncStatus.idle;
+});
+
 /// Fetches server members on demand. Invalidate to force refresh.
 final serverMembersProvider =
     FutureProvider.family<List<crdt_api.MemberFfi>, String>(

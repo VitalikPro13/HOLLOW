@@ -153,6 +153,26 @@ impl OlmManager {
             .map_err(|e| format!("Decryption failed: {e}"))
     }
 
+    /// Try to decrypt a PreKey message using an existing session.
+    /// This handles the race where we already established a session from a previous
+    /// PreKey, and a second PreKey arrives (e.g. sync batch + regular message overlap).
+    /// Returns Ok(plaintext) if the existing session can handle it, Err otherwise.
+    pub fn try_decrypt_prekey_with_existing(
+        &mut self,
+        peer_id: &str,
+        ciphertext_bytes: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let session = self
+            .sessions
+            .get_mut(peer_id)
+            .ok_or_else(|| format!("No session for peer {peer_id}"))?;
+        let olm_msg = OlmMessage::from_parts(0, ciphertext_bytes)
+            .map_err(|e| format!("Failed to decode PreKey OlmMessage: {e}"))?;
+        session
+            .decrypt(&olm_msg)
+            .map_err(|e| format!("PreKey decrypt with existing session failed: {e}"))
+    }
+
     /// Check if we have an established session with a peer.
     pub fn has_session(&self, peer_id: &str) -> bool {
         self.sessions.contains_key(peer_id)
@@ -272,5 +292,77 @@ mod tests {
             .create_inbound_session("alice", &alice_identity, &ciphertext)
             .unwrap();
         assert_eq!(plaintext, b"After restore");
+    }
+
+    #[test]
+    fn test_multiple_prekeys_from_same_session() {
+        // vodozemac produces PreKey (type 0) for ALL messages on an outbound
+        // session until the peer responds. Verify this behavior and that
+        // the second PreKey can be decrypted with the existing inbound session.
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+
+        let bob_identity = bob.identity_key_base64();
+        let bob_otk = bob.generate_one_time_key();
+
+        alice
+            .create_outbound_session("bob", &bob_identity, &bob_otk)
+            .unwrap();
+
+        // Alice encrypts two messages back-to-back.
+        // Both are PreKey (type 0) — this is vodozemac's behavior.
+        let (msg_type1, ct1) = alice.encrypt("bob", b"Message 1").unwrap();
+        assert_eq!(msg_type1, 0, "First message should be PreKey");
+        let (msg_type2, ct2) = alice.encrypt("bob", b"Message 2").unwrap();
+        assert_eq!(msg_type2, 0, "Second message is also PreKey until peer responds");
+
+        // Bob receives and processes PreKey #1 — creates inbound session.
+        let alice_id = alice.identity_key_base64();
+        let pt1 = bob.create_inbound_session("alice", &alice_id, &ct1).unwrap();
+        assert_eq!(pt1, b"Message 1");
+
+        // Bob now has a session. PreKey #2 from the same outbound session
+        // should be decryptable with try_decrypt_prekey_with_existing.
+        let pt2 = bob.try_decrypt_prekey_with_existing("alice", &ct2).unwrap();
+        assert_eq!(pt2, b"Message 2");
+    }
+
+    #[test]
+    fn test_dual_prekey_creates_incompatible_sessions() {
+        // When both peers create outbound sessions simultaneously, they end up
+        // with incompatible sessions after processing each other's PreKeys.
+        // This test verifies the sessions are incompatible (which is why the
+        // swarm code needs to handle this with re-keying).
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+
+        let alice_id = alice.identity_key_base64();
+        let bob_id = bob.identity_key_base64();
+        let alice_otk = alice.generate_one_time_key();
+        let bob_otk = bob.generate_one_time_key();
+
+        alice.create_outbound_session("bob", &bob_id, &bob_otk).unwrap();
+        bob.create_outbound_session("alice", &alice_id, &alice_otk).unwrap();
+
+        let (at, act) = alice.encrypt("bob", b"Hello from Alice").unwrap();
+        let (bt, bct) = bob.encrypt("alice", b"Hello from Bob").unwrap();
+        assert_eq!(at, 0);
+        assert_eq!(bt, 0);
+
+        // Bob processes Alice's PreKey — replaces his outbound session.
+        bob.remove_session("alice");
+        let pt_a = bob.create_inbound_session("alice", &alice_id, &act).unwrap();
+        assert_eq!(pt_a, b"Hello from Alice");
+
+        // Alice processes Bob's PreKey — replaces her outbound session.
+        alice.remove_session("bob");
+        let pt_b = alice.create_inbound_session("bob", &bob_id, &bct).unwrap();
+        assert_eq!(pt_b, b"Hello from Bob");
+
+        // Sessions are now incompatible — Bob's reply will fail to decrypt on Alice's side.
+        // This is expected and the swarm code handles it via re-keying (KeyRequest).
+        let (_rt, rct) = bob.encrypt("alice", b"Reply from Bob").unwrap();
+        let result = alice.decrypt("bob", 1, &rct);
+        assert!(result.is_err(), "Dual-PreKey sessions should be incompatible");
     }
 }

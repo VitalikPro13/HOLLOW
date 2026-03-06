@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/core/models/channel_chat_message.dart';
 import 'package:haven/src/core/providers/identity_provider.dart';
 import 'package:haven/src/core/providers/service_providers.dart';
+import 'package:haven/src/rust/api/network.dart' as network_api;
 
 /// Manages channel message state, keyed by "serverId:channelId".
 class ChannelChatNotifier
@@ -61,9 +62,14 @@ class ChannelChatNotifier
   }
 
   /// Load history for a channel from SQLCipher.
+  /// Also requests a background sync from connected peers.
   Future<void> loadHistory(String serverId, String channelId) async {
-    final key = _key(serverId, channelId);
-    if (state[key]?.isNotEmpty == true) return;
+    // Always request sync from connected peers when opening a channel.
+    // New messages arrive via MessageSyncCompleted → cache clear → reload.
+    try {
+      network_api.requestChannelSync(
+          serverId: serverId, channelId: channelId);
+    } catch (_) {}
 
     try {
       final stored =
@@ -84,6 +90,7 @@ class ChannelChatNotifier
             .toList();
 
         // Replace state entirely — DB is the source of truth.
+        final key = _key(serverId, channelId);
         final updated = Map.of(state);
         updated[key] = messages;
         state = updated;
@@ -91,6 +98,13 @@ class ChannelChatNotifier
     } catch (e) {
       debugPrint('[HAVEN] Failed to load channel history: $e');
     }
+  }
+
+  /// Clear cached messages for a server (forces reload from DB on next view).
+  void clearServerCache(String serverId) {
+    final updated = Map.of(state);
+    updated.removeWhere((key, _) => key.startsWith('$serverId:'));
+    state = updated;
   }
 
   void _addMessage(

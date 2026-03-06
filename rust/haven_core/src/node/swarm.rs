@@ -108,6 +108,9 @@ pub(crate) enum NetworkEvent {
     MemberLeft { server_id: String, peer_id: String },
     SyncCompleted { server_id: String, ops_applied: u32 },
     ServerJoined { server_id: String, name: String },
+    MessageSyncStarted { server_id: String, peer_id: String },
+    MessageSyncCompleted { server_id: String, new_message_count: u32 },
+    MessageSyncFailed { server_id: String, error: String },
 }
 
 /// Commands the FFI layer can send into the swarm event loop.
@@ -124,6 +127,8 @@ pub(crate) enum NodeCommand {
     UpdateServerSetting { server_id: String, key: String, value: String },
     DeleteServer { server_id: String },
     JoinServer { server_id: String },
+    RequestChannelSync { server_id: String, channel_id: String },
+    NotifyShutdown,
 }
 
 // -- Wire protocol types (v2: encrypted) --
@@ -181,6 +186,17 @@ enum HavenMessage {
     ServerDeleteBroadcast {
         server_id: String,
     },
+
+    #[serde(rename = "ch_sync_req")]
+    ChannelSyncRequest {
+        server_id: String,
+        channel_id: String,
+        since_timestamp: i64,
+    },
+
+    /// Sent to all connected peers when the app is shutting down.
+    #[serde(rename = "disconnecting")]
+    PeerDisconnecting,
 }
 
 /// Envelope for the plaintext body inside an Encrypted message.
@@ -198,6 +214,23 @@ enum MessageEnvelope {
         /// Sender-generated timestamp (millis since epoch).
         ts: i64,
     },
+    #[serde(rename = "ch_sync")]
+    ChannelSyncBatch {
+        sid: String,
+        cid: String,
+        messages: Vec<SyncMessageItem>,
+    },
+}
+
+/// A single message in a sync batch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SyncMessageItem {
+    /// sender peer ID
+    s: String,
+    /// message text
+    t: String,
+    /// timestamp (millis since epoch)
+    ts: i64,
 }
 
 /// JSON codec for the Haven v2 protocol.
@@ -694,6 +727,10 @@ async fn run_swarm(
 
     // Track server_ids we're trying to join (waiting for SyncResponse from existing members).
     let mut pending_server_joins: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Track failed sync requests per peer — retried after session re-establishment.
+    // Maps peer_id_str → Vec<(server_id, channel_id, since_timestamp)>
+    let mut pending_sync_requests: HashMap<String, Vec<(String, String, i64)>> = HashMap::new();
 
     // Re-bootstrap timer (60 seconds) for mutual peer discovery.
     // Fires unconditionally — BootstrapPeers handler skips connected
@@ -1234,6 +1271,50 @@ async fn run_swarm(
                             );
                         }
                     }
+
+                    NodeCommand::RequestChannelSync { server_id, channel_id } => {
+                        // On-demand sync when user opens a channel.
+                        if let Some(state) = server_states.get(&server_id) {
+                            let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                            if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
+                                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                    let since = store
+                                        .get_latest_channel_timestamp(&server_id, &channel_id)
+                                        .unwrap_or(None)
+                                        .unwrap_or(0);
+                                    let local_peer = swarm.local_peer_id().to_string();
+                                    for member_peer_str in state.members.keys() {
+                                        if member_peer_str == &local_peer { continue; }
+                                        if let Ok(pid) = member_peer_str.parse::<PeerId>() {
+                                            if connected_peers.contains(&pid) {
+                                                swarm.behaviour_mut().messaging.send_request(
+                                                    &pid,
+                                                    HavenMessage::ChannelSyncRequest {
+                                                        server_id: server_id.clone(),
+                                                        channel_id: channel_id.clone(),
+                                                        since_timestamp: since,
+                                                    },
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    NodeCommand::NotifyShutdown => {
+                        // Broadcast graceful disconnect to all connected peers.
+                        haven_log!("[HAVEN-SWARM] Notifying {} peers of shutdown", connected_peers.len());
+                        for pid in connected_peers.iter() {
+                            if relay_peer_id() == Some(*pid) { continue; }
+                            swarm.behaviour_mut().messaging.send_request(
+                                pid,
+                                HavenMessage::PeerDisconnecting,
+                            );
+                        }
+                    }
                 }
             }
             // Handle swarm events.
@@ -1364,6 +1445,7 @@ async fn run_swarm(
                                             &bundle_keypair,
                                             &connected_peers,
                                             &mut pending_server_joins,
+                                            &mut pending_sync_requests,
                                             peer,
                                             request,
                                             channel,
@@ -1379,6 +1461,8 @@ async fn run_swarm(
                                             &mut outbound_message_text,
                                             &mut pending_messages,
                                             &mut key_request_in_flight,
+                                            &mut pending_sync_requests,
+                                            &bundle_keypair,
                                             request_id,
                                             response,
                                         ).await;
@@ -1397,14 +1481,11 @@ async fn run_swarm(
                                             .entry(to_peer.clone())
                                             .or_default()
                                             .push(original_text);
-
-                                        // Also remove stale session — if the connection failed,
-                                        // the session state may be out of sync.
-                                        if olm.has_session(&to_peer) {
-                                            olm.remove_session(&to_peer);
-                                            persist_crypto_state(&olm, &crypto_store, &to_peer);
-                                            haven_log!("[HAVEN-SWARM] Removed stale session for {to_peer}");
-                                        }
+                                        // Don't remove the Olm session here — transport failures
+                                        // (relay timeout, connection drop) don't mean the crypto
+                                        // session is broken. Removing it causes a dual-outbound
+                                        // race on reconnect where both peers create new sessions
+                                        // from DHT prekeys and neither can decrypt the other's.
                                     } else {
                                         // Not a message send (was a KeyRequest or similar) — report failure.
                                         let _ = event_tx
@@ -1499,6 +1580,15 @@ async fn run_swarm(
                                                                             &pid, &target_peer, &text, &event_tx,
                                                                         ).await;
                                                                     }
+                                                                }
+                                                                // Retry failed sync batches after re-key.
+                                                                if let Ok(pid) = target_peer.parse::<PeerId>() {
+                                                                    flush_pending_sync_requests(
+                                                                        &mut pending_sync_requests, &target_peer, &pid,
+                                                                        &mut swarm, &mut olm, &crypto_store,
+                                                                        &mut pending_requests, &mut outbound_message_text,
+                                                                        &bundle_keypair, &event_tx,
+                                                                    ).await;
                                                                 }
                                                                 used = true;
                                                             }
@@ -1733,9 +1823,16 @@ async fn run_swarm(
                                     // Re-emit SessionEstablished so the lock icon appears.
                                     let _ = event_tx
                                         .send(NetworkEvent::SessionEstablished {
-                                            peer_id: peer_id_str,
+                                            peer_id: peer_id_str.clone(),
                                         })
                                         .await;
+                                    // Retry any failed sync batches on reconnect.
+                                    flush_pending_sync_requests(
+                                        &mut pending_sync_requests, &peer_id_str, &peer_id,
+                                        &mut swarm, &mut olm, &crypto_store,
+                                        &mut pending_requests, &mut outbound_message_text,
+                                        &bundle_keypair, &event_tx,
+                                    ).await;
                                 } else if !key_request_in_flight.contains(&peer_id_str)
                                     && !dht_fetch_in_flight.contains(&peer_id_str)
                                 {
@@ -1749,6 +1846,55 @@ async fn run_swarm(
                                         .get_record(record_key);
                                     pending_prekey_fetches.insert(query_id, peer_id_str.clone());
                                     dht_fetch_in_flight.insert(peer_id_str);
+                                }
+                            }
+
+                            // -- Trigger CRDT sync + message sync for shared servers --
+                            // Only on FIRST connection to this peer (not duplicate TCP/QUIC/relay).
+                            if num_established.get() == 1 {
+                                let reconnected_peer_str = peer_id.to_string();
+                                for (sid, state) in server_states.iter() {
+                                    if state.members.contains_key(&reconnected_peer_str) {
+                                        // CRDT state sync (channels, members, roles).
+                                        let our_vector = StateVector::from_server_state(state);
+                                        if let Ok(sv_json) = serde_json::to_string(&our_vector) {
+                                            swarm.behaviour_mut().messaging.send_request(
+                                                &peer_id,
+                                                HavenMessage::SyncRequest {
+                                                    server_id: sid.clone(),
+                                                    state_vector_json: sv_json,
+                                                },
+                                            );
+                                        }
+
+                                        // Channel message sync — request missed messages.
+                                        let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                        if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
+                                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                                for (cid, _) in state.channels.iter() {
+                                                    let since = store
+                                                        .get_latest_channel_timestamp(sid, cid)
+                                                        .unwrap_or(None)
+                                                        .unwrap_or(0);
+                                                    swarm.behaviour_mut().messaging.send_request(
+                                                        &peer_id,
+                                                        HavenMessage::ChannelSyncRequest {
+                                                            server_id: sid.clone(),
+                                                            channel_id: cid.clone(),
+                                                            since_timestamp: since,
+                                                        },
+                                                    );
+                                                }
+                                            }
+                                        }
+
+                                        let _ = event_tx.send(NetworkEvent::MessageSyncStarted {
+                                            server_id: sid.clone(),
+                                            peer_id: reconnected_peer_str.clone(),
+                                        }).await;
+                                    }
                                 }
                             }
                         }
@@ -1987,9 +2133,13 @@ async fn run_swarm(
             }
 
             // Periodic re-bootstrap for mutual peer discovery.
-            // BootstrapPeers handler skips connected_peers and disconnected_peers,
-            // so this only processes genuinely new peers joining after us.
             _ = rebootstrap_timer.tick() => {
+                // Clear stale disconnected peers so they can be re-discovered.
+                // 60s cooldown is sufficient to prevent reconnect storms.
+                if !disconnected_peers.is_empty() {
+                    haven_log!("[HAVEN-SWARM] Clearing {} disconnected peers for re-discovery", disconnected_peers.len());
+                    disconnected_peers.clear();
+                }
                 if let Some(room) = &active_room {
                     let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
                         room_code: room.clone(),
@@ -2040,6 +2190,7 @@ async fn run_swarm(
 }
 
 /// Encrypt and send a message to a peer with an established session.
+/// Returns `true` on success, `false` if encryption failed.
 async fn send_encrypted_message(
     swarm: &mut libp2p::Swarm<HavenBehaviour>,
     olm: &mut OlmManager,
@@ -2050,7 +2201,7 @@ async fn send_encrypted_message(
     peer_id_str: &str,
     text: &str,
     event_tx: &mpsc::Sender<NetworkEvent>,
-) {
+) -> bool {
     match olm.encrypt(peer_id_str, text.as_bytes()) {
         Ok((msg_type, ciphertext)) => {
             // Persist crypto state.
@@ -2073,6 +2224,7 @@ async fn send_encrypted_message(
             pending_requests.insert(req_id, peer_id_str.to_string());
             // Track original text so we can re-queue on delivery failure.
             outbound_message_text.insert(req_id, (peer_id_str.to_string(), text.to_string()));
+            true
         }
         Err(e) => {
             let _ = event_tx
@@ -2081,6 +2233,7 @@ async fn send_encrypted_message(
                     error: format!("Encryption failed: {e}"),
                 })
                 .await;
+            false
         }
     }
 }
@@ -2099,6 +2252,7 @@ async fn handle_incoming_request(
     bundle_keypair: &identity::Keypair,
     connected_peers: &std::collections::HashSet<PeerId>,
     pending_server_joins: &mut std::collections::HashSet<String>,
+    pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
     peer: PeerId,
     request: HavenMessage,
     channel: request_response::ResponseChannel<HavenMessage>,
@@ -2154,41 +2308,107 @@ async fn handle_incoming_request(
                     }
                 };
 
-                // Race condition: if we already have an outbound session and receive a
-                // PreKeyMessage, the sender "wins" — replace our session.
-                if olm.has_session(&peer_str) {
-                    olm.remove_session(&peer_str);
-                }
+                let had_existing_session = olm.has_session(&peer_str);
 
-                match olm.create_inbound_session(&peer_str, their_identity, &ciphertext) {
-                    Ok(pt) => {
-                        let _ = event_tx
-                            .send(NetworkEvent::SessionEstablished {
-                                peer_id: peer_str.clone(),
-                            })
-                            .await;
-
-                        // Flush any pending messages we were waiting to send.
-                        key_request_in_flight.remove(&peer_str);
-                        if let Some(queued) = pending_messages.remove(&peer_str) {
-                            for text in queued {
-                                send_encrypted_message(
-                                    swarm, olm, crypto_store, pending_requests,
-                                    outbound_message_text, &peer, &peer_str, &text, event_tx,
-                                ).await;
+                if had_existing_session {
+                    // We already have a session with this peer. Try to decrypt the
+                    // PreKey message using the existing session first. This handles
+                    // the race where two encrypted messages arrive as PreKeys
+                    // (e.g. sync batch response + regular channel message overlap).
+                    // The first creates a new session, the second should decrypt
+                    // with it rather than trying (and failing) to create another.
+                    match olm.try_decrypt_prekey_with_existing(&peer_str, &ciphertext) {
+                        Ok(pt) => {
+                            haven_log!("[HAVEN-CRYPTO] Decrypted PreKey with existing session for {peer_str}");
+                            pt
+                        }
+                        Err(_) => {
+                            // Existing session can't handle this PreKey — it's a
+                            // genuinely new session from the peer (e.g. they re-keyed).
+                            // Replace our session with the new inbound one.
+                            olm.remove_session(&peer_str);
+                            match olm.create_inbound_session(&peer_str, their_identity, &ciphertext) {
+                                Ok(pt) => {
+                                    let _ = event_tx
+                                        .send(NetworkEvent::SessionEstablished {
+                                            peer_id: peer_str.clone(),
+                                        })
+                                        .await;
+                                    key_request_in_flight.remove(&peer_str);
+                                    if let Some(queued) = pending_messages.remove(&peer_str) {
+                                        for text in queued {
+                                            send_encrypted_message(
+                                                swarm, olm, crypto_store, pending_requests,
+                                                outbound_message_text, &peer, &peer_str, &text, event_tx,
+                                            ).await;
+                                        }
+                                    }
+                                    flush_pending_sync_requests(
+                                        pending_sync_requests, &peer_str, &peer,
+                                        swarm, olm, crypto_store,
+                                        pending_requests, outbound_message_text,
+                                        bundle_keypair, event_tx,
+                                    ).await;
+                                    pt
+                                }
+                                Err(e2) => {
+                                    haven_log!("[HAVEN-CRYPTO] PreKey session creation also failed for {peer_str}: {e2} — initiating re-key");
+                                    // Both paths failed. Initiate a clean re-key.
+                                    if !key_request_in_flight.contains(&peer_str) {
+                                        key_request_in_flight.insert(peer_str.clone());
+                                        let req_id = swarm.behaviour_mut().messaging.send_request(
+                                            &peer,
+                                            HavenMessage::KeyRequest,
+                                        );
+                                        pending_requests.insert(req_id, peer_str.clone());
+                                    }
+                                    persist_crypto_state(olm, crypto_store, &peer_str);
+                                    let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
+                                    return;
+                                }
                             }
                         }
-
-                        pt
                     }
-                    Err(e) => {
-                        let _ = event_tx
-                            .send(NetworkEvent::Error {
-                                message: format!("Failed to create inbound session with {peer_str}: {e}"),
-                            })
-                            .await;
-                        let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
-                        return;
+                } else {
+                    // No existing session — standard path: create inbound session.
+                    match olm.create_inbound_session(&peer_str, their_identity, &ciphertext) {
+                        Ok(pt) => {
+                            let _ = event_tx
+                                .send(NetworkEvent::SessionEstablished {
+                                    peer_id: peer_str.clone(),
+                                })
+                                .await;
+                            key_request_in_flight.remove(&peer_str);
+                            if let Some(queued) = pending_messages.remove(&peer_str) {
+                                for text in queued {
+                                    send_encrypted_message(
+                                        swarm, olm, crypto_store, pending_requests,
+                                        outbound_message_text, &peer, &peer_str, &text, event_tx,
+                                    ).await;
+                                }
+                            }
+                            flush_pending_sync_requests(
+                                pending_sync_requests, &peer_str, &peer,
+                                swarm, olm, crypto_store,
+                                pending_requests, outbound_message_text,
+                                bundle_keypair, event_tx,
+                            ).await;
+                            pt
+                        }
+                        Err(e) => {
+                            haven_log!("[HAVEN-CRYPTO] PreKey session creation failed for {peer_str}: {e} — initiating re-key");
+                            if !key_request_in_flight.contains(&peer_str) {
+                                key_request_in_flight.insert(peer_str.clone());
+                                let req_id = swarm.behaviour_mut().messaging.send_request(
+                                    &peer,
+                                    HavenMessage::KeyRequest,
+                                );
+                                pending_requests.insert(req_id, peer_str.clone());
+                            }
+                            persist_crypto_state(olm, crypto_store, &peer_str);
+                            let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
+                            return;
+                        }
                     }
                 }
             } else {
@@ -2206,6 +2426,17 @@ async fn handle_incoming_request(
                                 message: format!("Stale session with {peer_str}, re-keying..."),
                             })
                             .await;
+
+                        // Emit MessageSyncFailed for any servers where this peer is a member
+                        // so the UI doesn't stay stuck on "Syncing...".
+                        for (sid, state) in server_states.iter() {
+                            if state.members.contains_key(&peer_str) {
+                                let _ = event_tx.send(NetworkEvent::MessageSyncFailed {
+                                    server_id: sid.clone(),
+                                    error: format!("Decrypt failed with {peer_str}, re-keying"),
+                                }).await;
+                            }
+                        }
 
                         // Send a KeyRequest to re-establish the session.
                         if !key_request_in_flight.contains(&peer_str) {
@@ -2261,6 +2492,34 @@ async fn handle_incoming_request(
                             .await;
                     }
                 }
+                Ok(MessageEnvelope::ChannelSyncBatch { sid, cid, messages }) => {
+                    haven_log!("[HAVEN-SYNC] Received {} sync messages for {cid} in {sid}", messages.len());
+                    let local_peer = swarm.local_peer_id().to_string();
+                    let mut new_count = 0u32;
+
+                    let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
+                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                            for msg in &messages {
+                                let is_mine = msg.s == local_peer;
+                                match store.insert_channel_message(
+                                    &sid, &cid, &msg.s, &msg.t, is_mine, msg.ts,
+                                ) {
+                                    Ok(1) => { new_count += 1; }
+                                    _ => {} // Duplicate or error — skip.
+                                }
+                            }
+                        }
+                    }
+
+                    // Always emit so the UI clears the "Syncing..." state.
+                    let _ = event_tx.send(NetworkEvent::MessageSyncCompleted {
+                        server_id: sid,
+                        new_message_count: new_count,
+                    }).await;
+                }
                 Ok(MessageEnvelope::DirectMessage { text: msg_text }) => {
                     let _ = event_tx
                         .send(NetworkEvent::MessageReceived {
@@ -2308,17 +2567,8 @@ async fn handle_incoming_request(
                     }
                 }
 
-                // Also send our own SyncRequest back (bidirectional sync)
-                let our_vector = StateVector::from_server_state(state);
-                if let Ok(sv_json) = serde_json::to_string(&our_vector) {
-                    swarm.behaviour_mut().messaging.send_request(
-                        &peer,
-                        HavenMessage::SyncRequest {
-                            server_id,
-                            state_vector_json: sv_json,
-                        },
-                    );
-                }
+                // No bidirectional SyncRequest here — both peers trigger
+                // sync in ConnectionEstablished, so both sides already initiate.
             }
         }
 
@@ -2553,6 +2803,73 @@ async fn handle_incoming_request(
             }
         }
 
+        HavenMessage::ChannelSyncRequest { server_id, channel_id, since_timestamp } => {
+            haven_log!("[HAVEN-SYNC] ChannelSyncRequest from {peer_str} for {channel_id} in {server_id} since {since_timestamp}");
+            let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
+
+            // Room gating: only respond for servers we're a member of.
+            if !server_states.contains_key(&server_id) {
+                return;
+            }
+
+            let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+            if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
+                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                    if let Ok(messages) = store.get_channel_messages_since(
+                        &server_id, &channel_id, since_timestamp, 200,
+                    ) {
+                        haven_log!("[HAVEN-SYNC] Sending {} sync messages for {channel_id}", messages.len());
+                        let items: Vec<SyncMessageItem> = messages.iter().map(|m| {
+                            SyncMessageItem {
+                                s: m.sender_id.clone(),
+                                t: m.text.clone(),
+                                ts: m.timestamp,
+                            }
+                        }).collect();
+
+                        let server_id_for_err = server_id.clone();
+                        let channel_id_for_err = channel_id.clone();
+                        let envelope = MessageEnvelope::ChannelSyncBatch {
+                            sid: server_id,
+                            cid: channel_id,
+                            messages: items,
+                        };
+                        let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
+
+                        // Send encrypted (E2EE).
+                        let ok = send_encrypted_message(
+                            swarm, olm, crypto_store,
+                            pending_requests, outbound_message_text,
+                            &peer, &peer_str, &envelope_json, event_tx,
+                        ).await;
+
+                        if !ok {
+                            haven_log!("[HAVEN-SYNC] Encryption failed for sync batch to {peer_str}, queuing retry");
+                            pending_sync_requests
+                                .entry(peer_str.clone())
+                                .or_default()
+                                .push((server_id_for_err.clone(), channel_id_for_err, since_timestamp));
+                            let _ = event_tx.send(NetworkEvent::MessageSyncFailed {
+                                server_id: server_id_for_err,
+                                error: "Sync batch encryption failed".to_string(),
+                            }).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        HavenMessage::PeerDisconnecting => {
+            haven_log!("[HAVEN-SWARM] Peer {peer_str} is disconnecting gracefully");
+            let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
+            // Emit PeerDisconnected immediately so the UI updates right away.
+            let _ = event_tx.send(NetworkEvent::PeerDisconnected {
+                peer_id: peer_str,
+            }).await;
+        }
+
         // KeyBundle and Ack shouldn't arrive as requests, but handle gracefully.
         _ => {
             let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
@@ -2570,6 +2887,8 @@ async fn handle_incoming_response(
     outbound_message_text: &mut HashMap<request_response::OutboundRequestId, (String, String)>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     key_request_in_flight: &mut std::collections::HashSet<String>,
+    pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
+    bundle_keypair: &identity::Keypair,
     request_id: request_response::OutboundRequestId,
     response: HavenMessage,
 ) {
@@ -2601,11 +2920,11 @@ async fn handle_incoming_response(
                 .await;
 
             // Flush all pending messages for this peer.
+            let peer_id: PeerId = match to_peer.parse() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
             if let Some(queued) = pending_messages.remove(&to_peer) {
-                let peer_id: PeerId = match to_peer.parse() {
-                    Ok(p) => p,
-                    Err(_) => return,
-                };
                 for text in queued {
                     send_encrypted_message(
                         swarm, olm, crypto_store, pending_requests,
@@ -2613,6 +2932,14 @@ async fn handle_incoming_response(
                     ).await;
                 }
             }
+
+            // Retry any sync batches that failed due to encryption before re-key.
+            flush_pending_sync_requests(
+                pending_sync_requests, &to_peer, &peer_id,
+                swarm, olm, crypto_store,
+                pending_requests, outbound_message_text,
+                bundle_keypair, event_tx,
+            ).await;
         }
 
         HavenMessage::Ack => {
@@ -2625,6 +2952,81 @@ async fn handle_incoming_response(
 
         _ => {
             // Unexpected response type — ignore.
+        }
+    }
+}
+
+/// Retry failed sync-batch sends after a session is (re-)established with a peer.
+/// Drains all queued (server_id, channel_id, since_timestamp) entries for the peer,
+/// re-queries the DB, and re-sends encrypted ChannelSyncBatch responses.
+async fn flush_pending_sync_requests(
+    pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
+    peer_str: &str,
+    peer: &PeerId,
+    swarm: &mut libp2p::Swarm<HavenBehaviour>,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    pending_requests: &mut HashMap<request_response::OutboundRequestId, String>,
+    outbound_message_text: &mut HashMap<request_response::OutboundRequestId, (String, String)>,
+    bundle_keypair: &identity::Keypair,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+) {
+    let Some(entries) = pending_sync_requests.remove(peer_str) else {
+        return;
+    };
+    if entries.is_empty() {
+        return;
+    }
+
+    haven_log!("[HAVEN-SYNC] Flushing {} pending sync requests for {peer_str}", entries.len());
+
+    let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+    let Ok(proto) = bundle_keypair.to_protobuf_encoding() else { return };
+    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+    let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) else { return };
+
+    for (server_id, channel_id, since_timestamp) in entries {
+        let _ = event_tx.send(NetworkEvent::MessageSyncStarted {
+            server_id: server_id.clone(),
+            peer_id: peer_str.to_string(),
+        }).await;
+
+        match store.get_channel_messages_since(&server_id, &channel_id, since_timestamp, 200) {
+            Ok(messages) => {
+                haven_log!("[HAVEN-SYNC] Retry: sending {} messages for {channel_id} to {peer_str}", messages.len());
+                let items: Vec<SyncMessageItem> = messages.iter().map(|m| {
+                    SyncMessageItem {
+                        s: m.sender_id.clone(),
+                        t: m.text.clone(),
+                        ts: m.timestamp,
+                    }
+                }).collect();
+
+                let envelope = MessageEnvelope::ChannelSyncBatch {
+                    sid: server_id.clone(),
+                    cid: channel_id,
+                    messages: items,
+                };
+                let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
+
+                let ok = send_encrypted_message(
+                    swarm, olm, crypto_store,
+                    pending_requests, outbound_message_text,
+                    peer, peer_str, &envelope_json, event_tx,
+                ).await;
+
+                if !ok {
+                    haven_log!("[HAVEN-SYNC] Retry also failed for {server_id} — giving up");
+                    let _ = event_tx.send(NetworkEvent::MessageSyncFailed {
+                        server_id,
+                        error: "Retry after re-key also failed".to_string(),
+                    }).await;
+                }
+            }
+            Err(e) => {
+                haven_log!("[HAVEN-SYNC] DB query failed during retry for {server_id}: {e}");
+            }
         }
     }
 }
