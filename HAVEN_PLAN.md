@@ -934,7 +934,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 - [X] Roles and permissions system — uses CRDTs (LWW-Register with admin priority), UI for role assignment in server settings
 - [X] Per-message signing
 - [X] MLS group encryption for channels — standalone crypto task, can parallel with UI work
-- [ ] Offline message queuing (store-and-forward via online peers)
+- [X] Offline message queuing (store-and-forward via online peers)
   - Peer B holds messages for offline peer A, delivers on reconnect. Builds on message history sync.
   - MESSAGE ORDERING DECISION: Don't insert by sender timestamp (abusable — clock manipulation, spam injection). Instead: append offline messages at bottom with visual separator ("3 messages from Peer B while offline"). Sender timestamp = display metadata only ("sent at 10:12"), not sort position. Receive order = authoritative sequence for live messages.
   - Animate: queued message shimmer/pending state, delivery confirmation tick

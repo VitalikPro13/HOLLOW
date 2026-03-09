@@ -297,11 +297,17 @@ enum MessageEnvelope {
         /// Total messages available since requested timestamp (for progress indication).
         #[serde(default)]
         total: u32,
+        /// If true, more messages are available — receiver should send a follow-up request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        has_more: Option<bool>,
     },
     /// DM sync batch — carries missed DMs from the sender.
     #[serde(rename = "dm_sync")]
     DmSyncBatch {
         messages: Vec<DmSyncItem>,
+        /// If true, more DMs are available — receiver should send a follow-up request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        has_more: Option<bool>,
     },
 }
 
@@ -988,6 +994,10 @@ async fn run_swarm(
     // Track failed sync requests per peer — retried after session re-establishment.
     // Maps peer_id_str → Vec<(server_id, channel_id, since_timestamp)>
     let mut pending_sync_requests: HashMap<String, Vec<(String, String, i64)>> = HashMap::new();
+
+    // Track server_ids for which we've already requested MLS bootstrap (KeyPackage sent to owner).
+    // Prevents spamming the owner on every MlsChannelMessage for an unknown group.
+    let mut mls_bootstrap_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Re-bootstrap timer (30 seconds) for mutual peer discovery.
     // Fires unconditionally — BootstrapPeers handler skips connected
@@ -2066,6 +2076,7 @@ async fn run_swarm(
                                             &mut discovered_peers,
                                             &mut disconnected_peers,
                                             &mut pending_disconnects,
+                                            &mut mls_bootstrap_requested,
                                             peer,
                                             request,
                                             channel,
@@ -3049,6 +3060,7 @@ async fn handle_incoming_request(
     discovered_peers: &mut std::collections::HashSet<PeerId>,
     disconnected_peers: &mut HashMap<PeerId, std::time::Instant>,
     pending_disconnects: &mut HashMap<PeerId, std::time::Instant>,
+    mls_bootstrap_requested: &mut std::collections::HashSet<String>,
     peer: PeerId,
     request: HavenMessage,
     channel: request_response::ResponseChannel<HavenMessage>,
@@ -3299,8 +3311,8 @@ async fn handle_incoming_request(
                             .await;
                     }
                 }
-                Ok(MessageEnvelope::ChannelSyncBatch { sid, cid, messages, total }) => {
-                    haven_log!("[HAVEN-SYNC] Received {} sync messages for {cid} in {sid} (total: {total})", messages.len());
+                Ok(MessageEnvelope::ChannelSyncBatch { sid, cid, messages, total, has_more }) => {
+                    haven_log!("[HAVEN-SYNC] Received {} sync messages for {cid} in {sid} (total: {total}, has_more: {has_more:?})", messages.len());
                     let local_peer = swarm.local_peer_id().to_string();
                     let mut new_count = 0u32;
                     let received_count = messages.len() as u32;
@@ -3330,6 +3342,28 @@ async fn handle_incoming_request(
                                     _ => {} // Duplicate or error — skip.
                                 }
                             }
+
+                            // Pagination: if has_more, send a follow-up ChannelSyncRequest
+                            // with updated per-sender timestamps from our DB.
+                            if has_more == Some(true) {
+                                let sender_ts = store
+                                    .get_per_sender_timestamps(&sid, &cid)
+                                    .unwrap_or_default();
+                                let since = store
+                                    .get_latest_channel_timestamp(&sid, &cid)
+                                    .unwrap_or(None)
+                                    .unwrap_or(0);
+                                haven_log!("[HAVEN-SYNC] Requesting next page for {cid} in {sid}");
+                                swarm.behaviour_mut().messaging.send_request(
+                                    &peer,
+                                    HavenMessage::ChannelSyncRequest {
+                                        server_id: sid.clone(),
+                                        channel_id: cid.clone(),
+                                        since_timestamp: since,
+                                        sender_timestamps: sender_ts,
+                                    },
+                                );
+                            }
                         }
                     }
 
@@ -3343,11 +3377,13 @@ async fn handle_incoming_request(
                         }).await;
                     }
 
-                    // Always emit so the UI clears the "Syncing..." state.
-                    let _ = event_tx.send(NetworkEvent::MessageSyncCompleted {
-                        server_id: sid,
-                        new_message_count: new_count,
-                    }).await;
+                    // Only emit completion when there are no more pages.
+                    if has_more != Some(true) {
+                        let _ = event_tx.send(NetworkEvent::MessageSyncCompleted {
+                            server_id: sid,
+                            new_message_count: new_count,
+                        }).await;
+                    }
                 }
                 Ok(MessageEnvelope::DirectMessage { text: msg_text, ts, sig, pk }) => {
                     // Verify DM signature if present.
@@ -3393,8 +3429,8 @@ async fn handle_incoming_request(
                             .await;
                     }
                 }
-                Ok(MessageEnvelope::DmSyncBatch { messages }) => {
-                    haven_log!("[HAVEN-SYNC] Received {} DM sync messages from {peer_str}", messages.len());
+                Ok(MessageEnvelope::DmSyncBatch { messages, has_more }) => {
+                    haven_log!("[HAVEN-SYNC] Received {} DM sync messages from {peer_str} (has_more: {has_more:?})", messages.len());
                     let local_peer = swarm.local_peer_id().to_string();
                     let mut new_count = 0u32;
 
@@ -3427,6 +3463,21 @@ async fn handle_incoming_request(
                                     _ => {} // Duplicate or error — skip.
                                 }
                             }
+
+                            // Pagination: if has_more, send follow-up DmSyncRequest.
+                            if has_more == Some(true) {
+                                let since = store
+                                    .get_latest_dm_timestamp(&peer_str)
+                                    .unwrap_or(None)
+                                    .unwrap_or(0);
+                                haven_log!("[HAVEN-SYNC] Requesting next DM page from {peer_str} since {since}");
+                                swarm.behaviour_mut().messaging.send_request(
+                                    &peer,
+                                    HavenMessage::DmSyncRequest {
+                                        since_timestamp: since,
+                                    },
+                                );
+                            }
                         }
                     }
 
@@ -3434,10 +3485,13 @@ async fn handle_incoming_request(
                     // Always emit DmSyncCompleted — even with 0 new messages.
                     // Dart may have cleared its in-memory cache on disconnect;
                     // this tells it to reload from DB regardless.
-                    let _ = event_tx.send(NetworkEvent::DmSyncCompleted {
-                        peer_id: peer_str,
-                        new_message_count: new_count,
-                    }).await;
+                    // Only emit completion when there are no more pages.
+                    if has_more != Some(true) {
+                        let _ = event_tx.send(NetworkEvent::DmSyncCompleted {
+                            peer_id: peer_str,
+                            new_message_count: new_count,
+                        }).await;
+                    }
                 }
                 Err(_) => {
                     // Legacy raw-text DM (backward compatible).
@@ -3559,6 +3613,40 @@ async fn handle_incoming_request(
                                                 pending_requests.insert(req_id, member.peer_id.clone());
                                                 key_request_in_flight.insert(member.peer_id.clone());
                                             }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // MLS: if we don't have the MLS group after joining,
+                            // the MlsWelcome was lost. Send our KeyPackage to the
+                            // owner so they can re-add us to the MLS group.
+                            if let Some(mls_mgr) = mls.as_ref() {
+                                if !mls_mgr.has_group(&server_id) {
+                                    haven_log!("[HAVEN-MLS] No MLS group after join, sending KeyPackage to owner for MLS bootstrap");
+                                    // Find the owner and send KeyPackage.
+                                    let local_id = swarm.local_peer_id().to_string();
+                                    for member in state.members_list() {
+                                        if member.peer_id == local_id { continue; }
+                                        let is_owner = state.roles.get(&member.peer_id)
+                                            .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+                                            .unwrap_or(false);
+                                        if is_owner {
+                                            if let Ok(owner_pid) = member.peer_id.parse::<PeerId>() {
+                                                if connected_peers.contains(&owner_pid) {
+                                                    if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                                        let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                                        swarm.behaviour_mut().messaging.send_request(
+                                                            &owner_pid,
+                                                            HavenMessage::MlsKeyPackage {
+                                                                server_id: server_id.clone(),
+                                                                key_package: kp_b64,
+                                                            },
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            break;
                                         }
                                     }
                                 }
@@ -3860,13 +3948,17 @@ async fn handle_incoming_request(
                             ).unwrap_or(items.len() as u32)
                         };
 
-                        let server_id_for_err = server_id.clone();
-                        let channel_id_for_err = channel_id.clone();
+                        let has_more = if items.len() >= 200 && total > 200 {
+                            Some(true)
+                        } else {
+                            None
+                        };
                         let envelope = MessageEnvelope::ChannelSyncBatch {
                             sid: server_id,
                             cid: channel_id,
                             messages: items,
                             total,
+                            has_more,
                         };
                         let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
@@ -3878,15 +3970,11 @@ async fn handle_incoming_request(
                         ).await;
 
                         if !ok {
-                            haven_log!("[HAVEN-SYNC] Encryption failed for sync batch to {peer_str}, queuing retry");
-                            pending_sync_requests
-                                .entry(peer_str.clone())
-                                .or_default()
-                                .push((server_id_for_err.clone(), channel_id_for_err, since_timestamp));
-                            let _ = event_tx.send(NetworkEvent::MessageSyncFailed {
-                                server_id: server_id_for_err,
-                                error: "Sync batch encryption failed".to_string(),
-                            }).await;
+                            haven_log!("[HAVEN-SYNC] Encryption failed for sync batch to {peer_str}");
+                            // Don't queue retry here — the requester will send a new
+                            // ChannelSyncRequest after re-key completes. Queuing retries
+                            // on the responder side causes an infinite loop:
+                            // SessionEstablished → flush → encrypt fail → re-key → SessionEstablished → ...
                         }
                     }
                 }
@@ -3915,8 +4003,14 @@ async fn handle_incoming_request(
                         }).collect();
 
                         if !items.is_empty() {
+                            let has_more = if items.len() >= 200 {
+                                Some(true)
+                            } else {
+                                None
+                            };
                             let envelope = MessageEnvelope::DmSyncBatch {
                                 messages: items,
+                                has_more,
                             };
                             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
@@ -3954,6 +4048,41 @@ async fn handle_incoming_request(
             if let Some(mls_mgr) = mls {
                 if !mls_mgr.has_group(&server_id) {
                     haven_log!("[HAVEN-MLS] Received MlsChannelMessage for unknown group {server_id}");
+
+                    // If we're a member of this server but don't have the MLS group,
+                    // the Welcome was lost. Send KeyPackage to the owner to bootstrap.
+                    // Only do this once per server to avoid spamming the owner.
+                    if !mls_bootstrap_requested.contains(&server_id) {
+                        if let Some(state) = server_states.get(&server_id) {
+                            let local_peer = swarm.local_peer_id().to_string();
+                            for member in state.members_list() {
+                                if member.peer_id == local_peer { continue; }
+                                let is_owner = state.roles.get(&member.peer_id)
+                                    .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+                                    .unwrap_or(false);
+                                if is_owner {
+                                    if let Ok(owner_pid) = member.peer_id.parse::<PeerId>() {
+                                        if connected_peers.contains(&owner_pid) {
+                                            haven_log!("[HAVEN-MLS] Sending KeyPackage to owner for MLS bootstrap (triggered by message)");
+                                            if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                                let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                                swarm.behaviour_mut().messaging.send_request(
+                                                    &owner_pid,
+                                                    HavenMessage::MlsKeyPackage {
+                                                        server_id: server_id.clone(),
+                                                        key_package: kp_b64,
+                                                    },
+                                                );
+                                                mls_bootstrap_requested.insert(server_id.clone());
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
                     return;
                 }
 
@@ -4108,6 +4237,7 @@ async fn handle_incoming_request(
                 match mls_mgr.join_from_welcome(&server_id, &welcome_bytes) {
                     Ok(()) => {
                         persist_mls_state(mls_mgr, bundle_keypair);
+                        mls_bootstrap_requested.remove(&server_id);
                         haven_log!("[HAVEN-MLS] Joined MLS group for server {server_id}");
                     }
                     Err(e) => haven_log!("[HAVEN-MLS] Failed to join from Welcome: {e}"),
@@ -4309,11 +4439,17 @@ async fn flush_pending_sync_requests(
                     ).unwrap_or(items.len() as u32)
                 };
 
+                let has_more = if items.len() >= 200 && total > 200 {
+                    Some(true)
+                } else {
+                    None
+                };
                 let envelope = MessageEnvelope::ChannelSyncBatch {
                     sid: server_id.clone(),
                     cid: channel_id,
                     messages: items,
                     total,
+                    has_more,
                 };
                 let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
