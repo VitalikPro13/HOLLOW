@@ -69,6 +69,8 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
                   isMe: m.isMine,
                   timestamp:
                       DateTime.fromMillisecondsSinceEpoch(m.timestamp),
+                  signature: m.signature,
+                  publicKey: m.publicKey,
                 ))
             .toList();
 

@@ -215,7 +215,18 @@ enum HavenMessage {
 #[serde(tag = "t")]
 enum MessageEnvelope {
     #[serde(rename = "dm")]
-    DirectMessage { text: String },
+    DirectMessage {
+        text: String,
+        /// Sender-generated timestamp (millis since epoch).
+        #[serde(default)]
+        ts: i64,
+        /// Ed25519 signature (base64) over canonical payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sig: Option<String>,
+        /// Sender's Ed25519 public key (base64 protobuf).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pk: Option<String>,
+    },
     #[serde(rename = "ch")]
     ChannelMessage {
         sid: String,
@@ -223,6 +234,12 @@ enum MessageEnvelope {
         text: String,
         /// Sender-generated timestamp (millis since epoch).
         ts: i64,
+        /// Ed25519 signature (base64) over canonical payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sig: Option<String>,
+        /// Sender's Ed25519 public key (base64 protobuf).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pk: Option<String>,
     },
     #[serde(rename = "ch_sync")]
     ChannelSyncBatch {
@@ -244,6 +261,12 @@ struct SyncMessageItem {
     t: String,
     /// timestamp (millis since epoch)
     ts: i64,
+    /// Ed25519 signature (base64) over canonical payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sig: Option<String>,
+    /// Sender's Ed25519 public key (base64 protobuf).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pk: Option<String>,
 }
 
 /// JSON codec for the Haven v2 protocol.
@@ -411,6 +434,77 @@ fn verify_prekey_bundle(bundle: &PrekeyBundle) -> Result<bool, String> {
     }
 
     Ok(true)
+}
+
+// -- Per-message Ed25519 signing helpers --
+
+/// Build canonical payload for message signing.
+/// Format: "haven-msg:{type}:{context}:{sender}:{ts}:{text}"
+/// - Channel: type="ch", context="{sid}:{cid}"
+/// - DM:      type="dm", context="{recipient_peer_id}"
+fn message_signing_payload(
+    msg_type: &str,
+    context: &str,
+    sender: &str,
+    ts: i64,
+    text: &str,
+) -> String {
+    format!("haven-msg:{msg_type}:{context}:{sender}:{ts}:{text}")
+}
+
+/// Sign a message payload with the local keypair.
+/// Returns (signature_base64, public_key_base64).
+fn sign_message(
+    keypair: &identity::Keypair,
+    pub_key_b64: &str,
+    payload: &str,
+) -> (Option<String>, Option<String>) {
+    match keypair.sign(payload.as_bytes()) {
+        Ok(sig) => {
+            let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig);
+            (Some(sig_b64), Some(pub_key_b64.to_string()))
+        }
+        Err(e) => {
+            haven_log!("[HAVEN-CRYPTO] Failed to sign message: {e}");
+            (None, None)
+        }
+    }
+}
+
+/// Verify an Ed25519 signature on a message.
+/// Checks: public key decodes, PeerId matches sender, signature is valid.
+fn verify_message_signature(
+    sender_peer_str: &str,
+    sig_b64: Option<&str>,
+    pk_b64: Option<&str>,
+    payload: &str,
+) -> bool {
+    let (sig, pk) = match (sig_b64, pk_b64) {
+        (Some(s), Some(p)) => (s, p),
+        _ => return false,
+    };
+
+    let Ok(pk_bytes) = base64::engine::general_purpose::STANDARD.decode(pk) else {
+        return false;
+    };
+    let Ok(public_key) = identity::PublicKey::try_decode_protobuf(&pk_bytes) else {
+        return false;
+    };
+
+    // Verify PeerId matches the public key.
+    let expected_pid = PeerId::from_public_key(&public_key);
+    let Ok(claimed_pid) = sender_peer_str.parse::<PeerId>() else {
+        return false;
+    };
+    if expected_pid != claimed_pid {
+        return false;
+    }
+
+    // Verify the signature.
+    let Ok(sig_bytes) = base64::engine::general_purpose::STANDARD.decode(sig) else {
+        return false;
+    };
+    public_key.verify(payload.as_bytes(), &sig_bytes)
 }
 
 /// Publish our prekey bundle to the Kademlia DHT.
@@ -805,6 +899,25 @@ async fn run_swarm(
                         let peer_id_str = peer_id.to_string();
                         haven_log!("[HAVEN-SWARM] SendMessage received for {peer_id_str}");
 
+                        // Wrap DM in signed envelope.
+                        let local_peer = swarm.local_peer_id().to_string();
+                        let dm_timestamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64;
+                        let signing_payload = message_signing_payload(
+                            "dm", &peer_id_str, &local_peer, dm_timestamp, &text,
+                        );
+                        let (sig, pk) = sign_message(&bundle_keypair, &pub_key_b64, &signing_payload);
+                        let envelope = MessageEnvelope::DirectMessage {
+                            text: text.clone(),
+                            ts: dm_timestamp,
+                            sig,
+                            pk,
+                        };
+                        let envelope_json = serde_json::to_string(&envelope)
+                            .unwrap_or_else(|_| text.clone());
+
                         if olm.has_session(&peer_id_str) {
                             // Session exists — encrypt and send.
                             send_encrypted_message(
@@ -815,15 +928,15 @@ async fn run_swarm(
                                 &mut outbound_message_text,
                                 &peer_id,
                                 &peer_id_str,
-                                &text,
+                                &envelope_json,
                                 &event_tx,
                             ).await;
                         } else {
-                            // No session — queue the message and try DHT prekey fetch first.
+                            // No session — queue the signed envelope and try DHT prekey fetch first.
                             pending_messages
                                 .entry(peer_id_str.clone())
                                 .or_default()
-                                .push(text);
+                                .push(envelope_json);
 
                             if !key_request_in_flight.contains(&peer_id_str)
                                 && !dht_fetch_in_flight.contains(&peer_id_str)
@@ -863,11 +976,21 @@ async fn run_swarm(
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_millis() as i64;
+
+                        // Sign the message before encryption.
+                        let signing_payload = message_signing_payload(
+                            "ch", &format!("{}:{}", server_id, channel_id),
+                            &local_peer, timestamp, &text,
+                        );
+                        let (sig, pk) = sign_message(&bundle_keypair, &pub_key_b64, &signing_payload);
+
                         let envelope = MessageEnvelope::ChannelMessage {
                             sid: server_id.clone(),
                             cid: channel_id.clone(),
                             text: text.clone(),
                             ts: timestamp,
+                            sig: sig.clone(),
+                            pk: pk.clone(),
                         };
                         let envelope_json = serde_json::to_string(&envelope)
                             .unwrap_or_else(|_| text.clone());
@@ -897,6 +1020,7 @@ async fn run_swarm(
                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
                             let _ = store.insert_channel_message(
                                 &server_id, &channel_id, &local_peer, &text, true, timestamp,
+                                sig.as_deref(), pk.as_deref(),
                             );
                         }
                     }
@@ -2701,7 +2825,17 @@ async fn handle_incoming_request(
             // Detect message envelope and route accordingly.
             let text = String::from_utf8_lossy(&plaintext).to_string();
             match serde_json::from_str::<MessageEnvelope>(&text) {
-                Ok(MessageEnvelope::ChannelMessage { sid, cid, text: msg_text, ts }) => {
+                Ok(MessageEnvelope::ChannelMessage { sid, cid, text: msg_text, ts, sig, pk }) => {
+                    // Verify Ed25519 signature if present.
+                    if sig.is_some() {
+                        let payload = message_signing_payload(
+                            "ch", &format!("{sid}:{cid}"), &peer_str, ts, &msg_text,
+                        );
+                        if !verify_message_signature(&peer_str, sig.as_deref(), pk.as_deref(), &payload) {
+                            haven_log!("[HAVEN-CRYPTO] Signature verification FAILED for channel message from {peer_str}");
+                        }
+                    }
+
                     // Persist channel message using sender's timestamp.
                     // INSERT OR IGNORE deduplicates via UNIQUE(server_id, channel_id, sender_id, timestamp, text).
                     let mut is_new = true;
@@ -2712,6 +2846,7 @@ async fn handle_incoming_request(
                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
                             match store.insert_channel_message(
                                 &sid, &cid, &peer_str, &msg_text, false, ts,
+                                sig.as_deref(), pk.as_deref(),
                             ) {
                                 Ok(0) => { is_new = false; } // INSERT OR IGNORE skipped — duplicate
                                 Ok(_) => {}
@@ -2745,9 +2880,20 @@ async fn handle_incoming_request(
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
                             for msg in &messages {
+                                // Verify signature on each synced message.
+                                if msg.sig.is_some() {
+                                    let payload = message_signing_payload(
+                                        "ch", &format!("{sid}:{cid}"), &msg.s, msg.ts, &msg.t,
+                                    );
+                                    if !verify_message_signature(&msg.s, msg.sig.as_deref(), msg.pk.as_deref(), &payload) {
+                                        haven_log!("[HAVEN-CRYPTO] Signature verification FAILED for synced message from {}", msg.s);
+                                    }
+                                }
+
                                 let is_mine = msg.s == local_peer;
                                 match store.insert_channel_message(
                                     &sid, &cid, &msg.s, &msg.t, is_mine, msg.ts,
+                                    msg.sig.as_deref(), msg.pk.as_deref(),
                                 ) {
                                     Ok(1) => { new_count += 1; }
                                     _ => {} // Duplicate or error — skip.
@@ -2772,7 +2918,17 @@ async fn handle_incoming_request(
                         new_message_count: new_count,
                     }).await;
                 }
-                Ok(MessageEnvelope::DirectMessage { text: msg_text }) => {
+                Ok(MessageEnvelope::DirectMessage { text: msg_text, ts: _ts, sig, pk }) => {
+                    // Verify DM signature if present.
+                    if sig.is_some() {
+                        let local_peer = swarm.local_peer_id().to_string();
+                        let payload = message_signing_payload(
+                            "dm", &local_peer, &peer_str, _ts, &msg_text,
+                        );
+                        if !verify_message_signature(&peer_str, sig.as_deref(), pk.as_deref(), &payload) {
+                            haven_log!("[HAVEN-CRYPTO] Signature verification FAILED for DM from {peer_str}");
+                        }
+                    }
                     let _ = event_tx
                         .send(NetworkEvent::MessageReceived {
                             from_peer: peer_str,
@@ -3161,6 +3317,8 @@ async fn handle_incoming_request(
                                 s: m.sender_id.clone(),
                                 t: m.text.clone(),
                                 ts: m.timestamp,
+                                sig: m.signature.clone(),
+                                pk: m.public_key.clone(),
                             }
                         }).collect();
 
@@ -3340,6 +3498,8 @@ async fn flush_pending_sync_requests(
                         s: m.sender_id.clone(),
                         t: m.text.clone(),
                         ts: m.timestamp,
+                        sig: m.signature.clone(),
+                        pk: m.public_key.clone(),
                     }
                 }).collect();
 

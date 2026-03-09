@@ -10,11 +10,15 @@ class StorageService {
     required String text,
     required bool isMine,
     required PlatformInt64 timestamp,
+    String? signature,
+    String? publicKey,
   }) => ffi.saveMessage(
     peerId: peerId,
     text: text,
     isMine: isMine,
     timestamp: timestamp,
+    signature: signature,
+    publicKey: publicKey,
   );
 
   Future<List<ffi.StoredMessage>> loadMessages({
@@ -29,6 +33,8 @@ class StorageService {
     required String text,
     required bool isMine,
     required PlatformInt64 timestamp,
+    String? signature,
+    String? publicKey,
   }) => ffi.saveChannelMessage(
     serverId: serverId,
     channelId: channelId,
@@ -36,6 +42,8 @@ class StorageService {
     text: text,
     isMine: isMine,
     timestamp: timestamp,
+    signature: signature,
+    publicKey: publicKey,
   );
 
   Future<List<ffi.StoredChannelMessage>> loadChannelMessages({

@@ -186,6 +186,8 @@ abstract class RustLibApi extends BaseApi {
     required String text,
     required bool isMine,
     required PlatformInt64 timestamp,
+    String? signature,
+    String? publicKey,
   });
 
   Future<PlatformInt64> crateApiStorageSaveMessage({
@@ -193,6 +195,8 @@ abstract class RustLibApi extends BaseApi {
     required String text,
     required bool isMine,
     required PlatformInt64 timestamp,
+    String? signature,
+    String? publicKey,
   });
 
   Future<void> crateApiNetworkSendChannelMessage({
@@ -1124,6 +1128,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required String text,
     required bool isMine,
     required PlatformInt64 timestamp,
+    String? signature,
+    String? publicKey,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -1135,6 +1141,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(text, serializer);
           sse_encode_bool(isMine, serializer);
           sse_encode_i_64(timestamp, serializer);
+          sse_encode_opt_String(signature, serializer);
+          sse_encode_opt_String(publicKey, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -1147,7 +1155,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiStorageSaveChannelMessageConstMeta,
-        argValues: [serverId, channelId, senderId, text, isMine, timestamp],
+        argValues: [
+          serverId,
+          channelId,
+          senderId,
+          text,
+          isMine,
+          timestamp,
+          signature,
+          publicKey,
+        ],
         apiImpl: this,
       ),
     );
@@ -1163,6 +1180,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "text",
           "isMine",
           "timestamp",
+          "signature",
+          "publicKey",
         ],
       );
 
@@ -1172,6 +1191,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required String text,
     required bool isMine,
     required PlatformInt64 timestamp,
+    String? signature,
+    String? publicKey,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -1181,6 +1202,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(text, serializer);
           sse_encode_bool(isMine, serializer);
           sse_encode_i_64(timestamp, serializer);
+          sse_encode_opt_String(signature, serializer);
+          sse_encode_opt_String(publicKey, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -1193,7 +1216,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiStorageSaveMessageConstMeta,
-        argValues: [peerId, text, isMine, timestamp],
+        argValues: [peerId, text, isMine, timestamp, signature, publicKey],
         apiImpl: this,
       ),
     );
@@ -1201,7 +1224,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiStorageSaveMessageConstMeta => const TaskConstMeta(
     debugName: "save_message",
-    argNames: ["peerId", "text", "isMine", "timestamp"],
+    argNames: [
+      "peerId",
+      "text",
+      "isMine",
+      "timestamp",
+      "signature",
+      "publicKey",
+    ],
   );
 
   @override
@@ -1698,8 +1728,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   StoredChannelMessage dco_decode_stored_channel_message(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return StoredChannelMessage(
       id: dco_decode_i_64(arr[0]),
       serverId: dco_decode_String(arr[1]),
@@ -1708,6 +1738,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       text: dco_decode_String(arr[4]),
       isMine: dco_decode_bool(arr[5]),
       timestamp: dco_decode_i_64(arr[6]),
+      signature: dco_decode_opt_String(arr[7]),
+      publicKey: dco_decode_opt_String(arr[8]),
     );
   }
 
@@ -1715,14 +1747,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   StoredMessage dco_decode_stored_message(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return StoredMessage(
       id: dco_decode_i_64(arr[0]),
       peerId: dco_decode_String(arr[1]),
       text: dco_decode_String(arr[2]),
       isMine: dco_decode_bool(arr[3]),
       timestamp: dco_decode_i_64(arr[4]),
+      signature: dco_decode_opt_String(arr[5]),
+      publicKey: dco_decode_opt_String(arr[6]),
     );
   }
 
@@ -2144,6 +2178,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_text = sse_decode_String(deserializer);
     var var_isMine = sse_decode_bool(deserializer);
     var var_timestamp = sse_decode_i_64(deserializer);
+    var var_signature = sse_decode_opt_String(deserializer);
+    var var_publicKey = sse_decode_opt_String(deserializer);
     return StoredChannelMessage(
       id: var_id,
       serverId: var_serverId,
@@ -2152,6 +2188,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       text: var_text,
       isMine: var_isMine,
       timestamp: var_timestamp,
+      signature: var_signature,
+      publicKey: var_publicKey,
     );
   }
 
@@ -2163,12 +2201,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_text = sse_decode_String(deserializer);
     var var_isMine = sse_decode_bool(deserializer);
     var var_timestamp = sse_decode_i_64(deserializer);
+    var var_signature = sse_decode_opt_String(deserializer);
+    var var_publicKey = sse_decode_opt_String(deserializer);
     return StoredMessage(
       id: var_id,
       peerId: var_peerId,
       text: var_text,
       isMine: var_isMine,
       timestamp: var_timestamp,
+      signature: var_signature,
+      publicKey: var_publicKey,
     );
   }
 
@@ -2578,6 +2620,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.text, serializer);
     sse_encode_bool(self.isMine, serializer);
     sse_encode_i_64(self.timestamp, serializer);
+    sse_encode_opt_String(self.signature, serializer);
+    sse_encode_opt_String(self.publicKey, serializer);
   }
 
   @protected
@@ -2588,6 +2632,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.text, serializer);
     sse_encode_bool(self.isMine, serializer);
     sse_encode_i_64(self.timestamp, serializer);
+    sse_encode_opt_String(self.signature, serializer);
+    sse_encode_opt_String(self.publicKey, serializer);
   }
 
   @protected

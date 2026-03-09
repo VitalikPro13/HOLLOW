@@ -86,6 +86,8 @@ class ChannelChatNotifier
                   isMe: m.isMine,
                   timestamp:
                       DateTime.fromMillisecondsSinceEpoch(m.timestamp),
+                  signature: m.signature,
+                  publicKey: m.publicKey,
                 ))
             .toList();
 

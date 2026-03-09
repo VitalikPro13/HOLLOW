@@ -9,6 +9,8 @@ pub(crate) struct StoredMessage {
     pub text: String,
     pub is_mine: bool,
     pub timestamp: i64,
+    pub signature: Option<String>,
+    pub public_key: Option<String>,
 }
 
 /// A stored channel message.
@@ -20,6 +22,8 @@ pub(crate) struct StoredChannelMessage {
     pub text: String,
     pub is_mine: bool,
     pub timestamp: i64,
+    pub signature: Option<String>,
+    pub public_key: Option<String>,
 }
 
 /// Encrypted SQLite message store.
@@ -166,6 +170,22 @@ impl MessageStore {
         )
         .map_err(|e| format!("Failed to create hlc_state table: {e}"))?;
 
+        // -- Migration: Ed25519 signature columns --
+        // ALTER TABLE ADD COLUMN is safe for nullable columns in SQLite.
+        // Silently ignore if columns already exist.
+        conn.execute_batch(
+            "ALTER TABLE channel_messages ADD COLUMN signature TEXT;"
+        ).unwrap_or(());
+        conn.execute_batch(
+            "ALTER TABLE channel_messages ADD COLUMN public_key TEXT;"
+        ).unwrap_or(());
+        conn.execute_batch(
+            "ALTER TABLE messages ADD COLUMN signature TEXT;"
+        ).unwrap_or(());
+        conn.execute_batch(
+            "ALTER TABLE messages ADD COLUMN public_key TEXT;"
+        ).unwrap_or(());
+
         Ok(MessageStore { conn })
     }
 
@@ -176,11 +196,13 @@ impl MessageStore {
         text: &str,
         is_mine: bool,
         timestamp: i64,
+        signature: Option<&str>,
+        public_key: Option<&str>,
     ) -> Result<i64, String> {
         self.conn
             .execute(
-                "INSERT INTO messages (peer_id, text, is_mine, timestamp) VALUES (?1, ?2, ?3, ?4)",
-                params![peer_id, text, is_mine as i32, timestamp],
+                "INSERT INTO messages (peer_id, text, is_mine, timestamp, signature, public_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![peer_id, text, is_mine as i32, timestamp, signature, public_key],
             )
             .map_err(|e| format!("Failed to insert message: {e}"))?;
         Ok(self.conn.last_insert_rowid())
@@ -270,7 +292,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, peer_id, text, is_mine, timestamp
+                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key
                  FROM messages
                  WHERE peer_id = ?1
                  ORDER BY timestamp DESC
@@ -286,6 +308,8 @@ impl MessageStore {
                     text: row.get(2)?,
                     is_mine: row.get::<_, i32>(3)? != 0,
                     timestamp: row.get(4)?,
+                    signature: row.get(5)?,
+                    public_key: row.get(6)?,
                 })
             })
             .map_err(|e| format!("Failed to query messages: {e}"))?;
@@ -428,12 +452,14 @@ impl MessageStore {
         text: &str,
         is_mine: bool,
         timestamp: i64,
+        signature: Option<&str>,
+        public_key: Option<&str>,
     ) -> Result<usize, String> {
         let rows = self.conn
             .execute(
-                "INSERT OR IGNORE INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![server_id, channel_id, sender_id, text, is_mine as i32, timestamp],
+                "INSERT OR IGNORE INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![server_id, channel_id, sender_id, text, is_mine as i32, timestamp, signature, public_key],
             )
             .map_err(|e| format!("Failed to insert channel message: {e}"))?;
         Ok(rows)
@@ -449,7 +475,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp
+                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key
                  FROM channel_messages
                  WHERE server_id = ?1 AND channel_id = ?2
                  ORDER BY timestamp DESC
@@ -467,6 +493,8 @@ impl MessageStore {
                     text: row.get(4)?,
                     is_mine: row.get::<_, i32>(5)? != 0,
                     timestamp: row.get(6)?,
+                    signature: row.get(7)?,
+                    public_key: row.get(8)?,
                 })
             })
             .map_err(|e| format!("Failed to query channel_messages: {e}"))?;
@@ -515,7 +543,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp
+                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key
                  FROM channel_messages
                  WHERE server_id = ?1 AND channel_id = ?2 AND timestamp > ?3
                  ORDER BY timestamp ASC
@@ -535,6 +563,8 @@ impl MessageStore {
                         text: row.get(4)?,
                         is_mine: row.get::<_, i32>(5)? != 0,
                         timestamp: row.get(6)?,
+                        signature: row.get(7)?,
+                        public_key: row.get(8)?,
                     })
                 },
             )

@@ -1051,6 +1051,8 @@ fn wire__crate__api__storage__save_channel_message_impl(
             let api_text = <String>::sse_decode(&mut deserializer);
             let api_is_mine = <bool>::sse_decode(&mut deserializer);
             let api_timestamp = <i64>::sse_decode(&mut deserializer);
+            let api_signature = <Option<String>>::sse_decode(&mut deserializer);
+            let api_public_key = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
@@ -1061,6 +1063,8 @@ fn wire__crate__api__storage__save_channel_message_impl(
                         api_text,
                         api_is_mine,
                         api_timestamp,
+                        api_signature,
+                        api_public_key,
                     )?;
                     Ok(output_ok)
                 })())
@@ -1094,6 +1098,8 @@ fn wire__crate__api__storage__save_message_impl(
             let api_text = <String>::sse_decode(&mut deserializer);
             let api_is_mine = <bool>::sse_decode(&mut deserializer);
             let api_timestamp = <i64>::sse_decode(&mut deserializer);
+            let api_signature = <Option<String>>::sse_decode(&mut deserializer);
+            let api_public_key = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
@@ -1102,6 +1108,8 @@ fn wire__crate__api__storage__save_message_impl(
                         api_text,
                         api_is_mine,
                         api_timestamp,
+                        api_signature,
+                        api_public_key,
                     )?;
                     Ok(output_ok)
                 })())
@@ -1769,6 +1777,8 @@ impl SseDecode for crate::api::storage::StoredChannelMessage {
         let mut var_text = <String>::sse_decode(deserializer);
         let mut var_isMine = <bool>::sse_decode(deserializer);
         let mut var_timestamp = <i64>::sse_decode(deserializer);
+        let mut var_signature = <Option<String>>::sse_decode(deserializer);
+        let mut var_publicKey = <Option<String>>::sse_decode(deserializer);
         return crate::api::storage::StoredChannelMessage {
             id: var_id,
             server_id: var_serverId,
@@ -1777,6 +1787,8 @@ impl SseDecode for crate::api::storage::StoredChannelMessage {
             text: var_text,
             is_mine: var_isMine,
             timestamp: var_timestamp,
+            signature: var_signature,
+            public_key: var_publicKey,
         };
     }
 }
@@ -1789,12 +1801,16 @@ impl SseDecode for crate::api::storage::StoredMessage {
         let mut var_text = <String>::sse_decode(deserializer);
         let mut var_isMine = <bool>::sse_decode(deserializer);
         let mut var_timestamp = <i64>::sse_decode(deserializer);
+        let mut var_signature = <Option<String>>::sse_decode(deserializer);
+        let mut var_publicKey = <Option<String>>::sse_decode(deserializer);
         return crate::api::storage::StoredMessage {
             id: var_id,
             peer_id: var_peerId,
             text: var_text,
             is_mine: var_isMine,
             timestamp: var_timestamp,
+            signature: var_signature,
+            public_key: var_publicKey,
         };
     }
 }
@@ -2205,6 +2221,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::storage::StoredChannelMessage
             self.text.into_into_dart().into_dart(),
             self.is_mine.into_into_dart().into_dart(),
             self.timestamp.into_into_dart().into_dart(),
+            self.signature.into_into_dart().into_dart(),
+            self.public_key.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -2229,6 +2247,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::storage::StoredMessage {
             self.text.into_into_dart().into_dart(),
             self.is_mine.into_into_dart().into_dart(),
             self.timestamp.into_into_dart().into_dart(),
+            self.signature.into_into_dart().into_dart(),
+            self.public_key.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -2603,6 +2623,8 @@ impl SseEncode for crate::api::storage::StoredChannelMessage {
         <String>::sse_encode(self.text, serializer);
         <bool>::sse_encode(self.is_mine, serializer);
         <i64>::sse_encode(self.timestamp, serializer);
+        <Option<String>>::sse_encode(self.signature, serializer);
+        <Option<String>>::sse_encode(self.public_key, serializer);
     }
 }
 
@@ -2614,6 +2636,8 @@ impl SseEncode for crate::api::storage::StoredMessage {
         <String>::sse_encode(self.text, serializer);
         <bool>::sse_encode(self.is_mine, serializer);
         <i64>::sse_encode(self.timestamp, serializer);
+        <Option<String>>::sse_encode(self.signature, serializer);
+        <Option<String>>::sse_encode(self.public_key, serializer);
     }
 }
 

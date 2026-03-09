@@ -99,13 +99,13 @@ Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection mana
 - Role colors: Owner = golden yellow (FBBF24), Admin = purple (A78BFA), Moderator = orange (lerp warning/error)
 - Sync recovery: SessionEstablished clears failed sync status + auto-retriggers channel sync. No more stuck "Sync failed" after re-key.
 - Permission loading: ServerSettingsPanel waits for myPermissionsProvider before rendering tabs (prevents flash of owner-level UI on non-owner peers)
+- Per-message Ed25519 signing: canonical payload signing (`haven-msg:{type}:{context}:{sender}:{ts}:{text}`), sign before Olm encryption, verify after decryption, `sig`+`pk` fields in MessageEnvelope + SyncMessageItem (backward-compatible via `Option`), DB columns (`signature TEXT`, `public_key TEXT`) on both `channel_messages` and `messages`, DMs now wrapped in `MessageEnvelope::DirectMessage` with signing, Dart models carry `signature`/`publicKey` for future evidence export UI
 
 **Next up (Phase 3 remaining):**
-1. Per-message Ed25519 signing — cryptographic proof of authorship for "The Rat Files" evidence recovery. Sign before encryption, store signature with message. Sender public key known via CRDT membership.
-2. MLS group encryption for channels — replaces Olm fan-out. DMs stay on Olm (1:1 Double Ratchet).
-3. Offline message queuing (store-and-forward via online peers)
+1. MLS group encryption for channels — replaces Olm fan-out. DMs stay on Olm (1:1 Double Ratchet).
+2. Offline message queuing (store-and-forward via online peers)
    - Message ordering: append at bottom (not insert by sender timestamp — abusable), sender timestamp = display metadata only
-4. Device linking via QR code — requires MLS + CRDTs
+3. Device linking via QR code — requires MLS + CRDTs
 
 ## Haven Design System (Phase 2.75)
 All UI interactions go through custom Haven widgets — no Material defaults anywhere. Change behavior in one place, applies everywhere.

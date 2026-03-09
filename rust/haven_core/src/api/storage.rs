@@ -12,6 +12,8 @@ pub struct StoredMessage {
     pub text: String,
     pub is_mine: bool,
     pub timestamp: i64,
+    pub signature: Option<String>,
+    pub public_key: Option<String>,
 }
 
 // Global message store: None = not opened, Some = ready.
@@ -68,11 +70,13 @@ pub fn save_message(
     text: String,
     is_mine: bool,
     timestamp: i64,
+    signature: Option<String>,
+    public_key: Option<String>,
 ) -> Result<i64, String> {
     let store = get_store();
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.insert(&peer_id, &text, is_mine, timestamp)
+    ms.insert(&peer_id, &text, is_mine, timestamp, signature.as_deref(), public_key.as_deref())
 }
 
 /// Load recent messages for a peer from the local database.
@@ -92,6 +96,8 @@ pub fn load_messages(peer_id: String, limit: i32) -> Result<Vec<StoredMessage>, 
             text: r.text,
             is_mine: r.is_mine,
             timestamp: r.timestamp,
+            signature: r.signature,
+            public_key: r.public_key,
         })
         .collect())
 }
@@ -105,6 +111,8 @@ pub struct StoredChannelMessage {
     pub text: String,
     pub is_mine: bool,
     pub timestamp: i64,
+    pub signature: Option<String>,
+    pub public_key: Option<String>,
 }
 
 /// Save a channel message to the local database.
@@ -116,11 +124,13 @@ pub fn save_channel_message(
     text: String,
     is_mine: bool,
     timestamp: i64,
+    signature: Option<String>,
+    public_key: Option<String>,
 ) -> Result<i64, String> {
     let store = get_store();
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.insert_channel_message(&server_id, &channel_id, &sender_id, &text, is_mine, timestamp)
+    ms.insert_channel_message(&server_id, &channel_id, &sender_id, &text, is_mine, timestamp, signature.as_deref(), public_key.as_deref())
         .map(|n| n as i64)
 }
 
@@ -147,6 +157,8 @@ pub fn load_channel_messages(
             text: r.text,
             is_mine: r.is_mine,
             timestamp: r.timestamp,
+            signature: r.signature,
+            public_key: r.public_key,
         })
         .collect())
 }

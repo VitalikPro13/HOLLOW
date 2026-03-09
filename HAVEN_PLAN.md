@@ -932,7 +932,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - Remove duplicate connection info from member panel bottom (already in user bar)
   - Animate: member join/leave fade+slide, online->offline transitions, presence dot pulse
 - [X] Roles and permissions system — uses CRDTs (LWW-Register with admin priority), UI for role assignment in server settings
-- [ ] Per-message signing
+- [X] Per-message signing
 - [ ] MLS group encryption for channels — standalone crypto task, can parallel with UI work
 - [ ] Offline message queuing (store-and-forward via online peers)
   - Peer B holds messages for offline peer A, delivers on reconnect. Builds on message history sync.

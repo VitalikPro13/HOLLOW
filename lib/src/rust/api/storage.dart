@@ -19,11 +19,15 @@ Future<PlatformInt64> saveMessage({
   required String text,
   required bool isMine,
   required PlatformInt64 timestamp,
+  String? signature,
+  String? publicKey,
 }) => RustLib.instance.api.crateApiStorageSaveMessage(
   peerId: peerId,
   text: text,
   isMine: isMine,
   timestamp: timestamp,
+  signature: signature,
+  publicKey: publicKey,
 );
 
 /// Load recent messages for a peer from the local database.
@@ -44,6 +48,8 @@ Future<PlatformInt64> saveChannelMessage({
   required String text,
   required bool isMine,
   required PlatformInt64 timestamp,
+  String? signature,
+  String? publicKey,
 }) => RustLib.instance.api.crateApiStorageSaveChannelMessage(
   serverId: serverId,
   channelId: channelId,
@@ -51,6 +57,8 @@ Future<PlatformInt64> saveChannelMessage({
   text: text,
   isMine: isMine,
   timestamp: timestamp,
+  signature: signature,
+  publicKey: publicKey,
 );
 
 /// Load recent channel messages from the local database.
@@ -74,6 +82,8 @@ class StoredChannelMessage {
   final String text;
   final bool isMine;
   final PlatformInt64 timestamp;
+  final String? signature;
+  final String? publicKey;
 
   const StoredChannelMessage({
     required this.id,
@@ -83,6 +93,8 @@ class StoredChannelMessage {
     required this.text,
     required this.isMine,
     required this.timestamp,
+    this.signature,
+    this.publicKey,
   });
 
   @override
@@ -93,7 +105,9 @@ class StoredChannelMessage {
       senderId.hashCode ^
       text.hashCode ^
       isMine.hashCode ^
-      timestamp.hashCode;
+      timestamp.hashCode ^
+      signature.hashCode ^
+      publicKey.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -106,7 +120,9 @@ class StoredChannelMessage {
           senderId == other.senderId &&
           text == other.text &&
           isMine == other.isMine &&
-          timestamp == other.timestamp;
+          timestamp == other.timestamp &&
+          signature == other.signature &&
+          publicKey == other.publicKey;
 }
 
 /// A message returned to Dart from the local database.
@@ -116,6 +132,8 @@ class StoredMessage {
   final String text;
   final bool isMine;
   final PlatformInt64 timestamp;
+  final String? signature;
+  final String? publicKey;
 
   const StoredMessage({
     required this.id,
@@ -123,6 +141,8 @@ class StoredMessage {
     required this.text,
     required this.isMine,
     required this.timestamp,
+    this.signature,
+    this.publicKey,
   });
 
   @override
@@ -131,7 +151,9 @@ class StoredMessage {
       peerId.hashCode ^
       text.hashCode ^
       isMine.hashCode ^
-      timestamp.hashCode;
+      timestamp.hashCode ^
+      signature.hashCode ^
+      publicKey.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -142,5 +164,7 @@ class StoredMessage {
           peerId == other.peerId &&
           text == other.text &&
           isMine == other.isMine &&
-          timestamp == other.timestamp;
+          timestamp == other.timestamp &&
+          signature == other.signature &&
+          publicKey == other.publicKey;
 }
