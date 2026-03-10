@@ -72,11 +72,11 @@ Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection mana
 - User settings dialog: two-column layout (live profile preview card with centered banner/avatar/name/about-me on left, edit fields + dark mode toggle on right), `showHavenDialog` glassmorphism entrance, settings gear icon replaces theme toggle in user bar
 - Member panel slide animation: `_MemberPanelSlider` with ClipRect + Align(widthFactor) + FadeTransition (GPU-composited), `ProviderScope` override freezes `selectedServerProvider` during close animation (prevents "No peers online" flash), chat pane crossfade via single AnimatedSwitcher
 - Server nicknames: CRDT-based per-server nicknames (`NicknameChanged` payload, `AdminLwwReg<String>` in `ServerState.nicknames`), `set_nickname()` FFI, `serverDisplayNameFor()` (nickname → profile name → short peer ID), `serverNicknamesProvider` derived from members. Overview tab restructured: "SERVER SETTINGS" (admin+) above "YOUR IDENTITY" (all members). Name resolution: server context uses nickname, DM context uses display name only.
+- Profile card popup: reusable overlay (`profile_card_popup.dart`), scale+fade entrance animation, centered layout matching settings preview style. Banner, avatar, nickname/name, role badge, status (italic), about me, peer ID footer (copy on tap). User bar → card above, member panel → card to the left (Discord-style). "Edit Profile" button for self.
 
 **Phase 3.5 remaining:**
-1. Profile card popup on member click
-2. Chat Essentials: message editing & deletion, reply chains, emoji reactions, typing indicators, markdown rendering, pinned messages
-3. QoL: notifications, search, keyboard shortcuts, basic P2P file sharing (WebP internal format)
+1. Chat Essentials: message editing & deletion, reply chains, emoji reactions, typing indicators, markdown rendering, pinned messages
+2. QoL: notifications, search, keyboard shortcuts, basic P2P file sharing (WebP internal format)
 
 ## Haven Design System (Phase 2.75)
 All UI interactions go through custom Haven widgets — no Material defaults anywhere. Change behavior in one place, applies everywhere.

@@ -22,6 +22,7 @@ class HavenTextField extends StatefulWidget {
   final int maxLines;
   final FocusNode? focusNode;
   final double? borderRadius;
+  final int? maxLength;
 
   const HavenTextField({
     super.key,
@@ -38,6 +39,7 @@ class HavenTextField extends StatefulWidget {
     this.maxLines = 1,
     this.focusNode,
     this.borderRadius,
+    this.maxLength,
   });
 
   @override
@@ -48,6 +50,7 @@ class _HavenTextFieldState extends State<HavenTextField>
     with SingleTickerProviderStateMixin {
   late final FocusNode _focusNode;
   bool _isFocused = false;
+  int _charCount = 0;
 
   // Shake animation for error state.
   AnimationController? _shakeController;
@@ -58,10 +61,17 @@ class _HavenTextFieldState extends State<HavenTextField>
     super.initState();
     _focusNode = widget.focusNode ?? FocusNode();
     _focusNode.addListener(_onFocusChange);
+    _charCount = widget.controller?.text.length ?? 0;
+    widget.controller?.addListener(_onTextChanged);
   }
 
   void _onFocusChange() {
     setState(() => _isFocused = _focusNode.hasFocus);
+  }
+
+  void _onTextChanged() {
+    final len = widget.controller?.text.length ?? 0;
+    if (len != _charCount) setState(() => _charCount = len);
   }
 
   @override
@@ -92,6 +102,7 @@ class _HavenTextFieldState extends State<HavenTextField>
 
   @override
   void dispose() {
+    widget.controller?.removeListener(_onTextChanged);
     _focusNode.removeListener(_onFocusChange);
     if (widget.focusNode == null) _focusNode.dispose();
     _shakeController?.dispose();
@@ -114,6 +125,7 @@ class _HavenTextFieldState extends State<HavenTextField>
       autofocus: widget.autofocus,
       obscureText: widget.obscureText,
       maxLines: widget.maxLines,
+      maxLength: widget.maxLength,
       onSubmitted: widget.onSubmitted,
       onChanged: widget.onChanged,
       cursorColor: haven.accent,
@@ -122,6 +134,11 @@ class _HavenTextFieldState extends State<HavenTextField>
           HavenTypography.body.copyWith(
             color: haven.textPrimary,
           ),
+      buildCounter: (context,
+              {required currentLength,
+              required isFocused,
+              required maxLength}) =>
+          null,
       selectionControls: MaterialTextSelectionControls(),
       decoration: InputDecoration(
         hintText: widget.hintText,
@@ -196,18 +213,41 @@ class _HavenTextFieldState extends State<HavenTextField>
       child: field,
     );
 
-    // Add error text below.
-    if (hasError) {
+    // Counter / error row below field.
+    if (widget.maxLength != null || hasError) {
+      final nearLimit = widget.maxLength != null &&
+          _charCount >= widget.maxLength! * 0.8;
       return Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           field,
-          const SizedBox(height: HavenSpacing.xs),
-          Text(
-            widget.errorText!,
-            style: HavenTypography.caption.copyWith(
-              color: haven.error,
+          Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: Row(
+              children: [
+                if (hasError)
+                  Expanded(
+                    child: Text(
+                      widget.errorText!,
+                      style: HavenTypography.caption.copyWith(
+                        color: haven.error,
+                      ),
+                    ),
+                  )
+                else
+                  const Spacer(),
+                if (widget.maxLength != null)
+                  Text(
+                    '$_charCount/${widget.maxLength}',
+                    style: HavenTypography.caption.copyWith(
+                      color: nearLimit
+                          ? haven.warning
+                          : haven.textSecondary.withValues(alpha: 0.4),
+                      fontSize: 10,
+                    ),
+                  ),
+              ],
             ),
           ),
         ],

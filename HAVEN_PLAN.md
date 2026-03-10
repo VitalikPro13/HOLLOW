@@ -948,8 +948,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 **Identity & Profiles:**
 - [X] User profiles (avatar, status message, about me). Display name (global, user-changeable) already exists — acts as the nickname. Peer ID shown under display name as the immutable identity tag. Avatar stored locally for now, synced to peers' encrypted DBs once basic file sharing is built. 🎞️ Animate: profile card pop-up with scale+fade, status change transitions
 - [X] Server nicknames — per-server display name override via CRDT LWW-Register per member. Falls back to global display name when unset
-- [ ] Profile card popup on member click — shows avatar, display name, server nickname, role, peer ID snippet, status. 🎞️ Animate: scale+fade entrance from click origin
-- [ ] Identity design: no tag system (no central registry). Ed25519 key IS identity. Display names are decorative, not unique. Disambiguate via short peer ID suffix (e.g., "Alex · hVn8x") when needed
+- [X] Profile card popup on member click — shows avatar, display name, server nickname, role, peer ID snippet, status. 🎞️ Animate: scale+fade entrance from click origin
 
 **Chat Essentials:**
 - [ ] Message editing — CRDT op (EditMessage with original message ID + new text), broadcast to server members, update in local DB + UI. Edited messages show "(edited)" indicator. 🎞️ Animate: edit highlight flash

@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/core/models/node_status.dart';
 import 'package:haven/src/core/providers/identity_provider.dart';
@@ -12,8 +11,8 @@ import 'package:haven/src/theme/haven_theme.dart';
 import 'package:haven/src/theme/haven_typography.dart';
 import 'package:haven/src/ui/components/haven_avatar.dart';
 import 'package:haven/src/ui/components/haven_pressable.dart';
-import 'package:haven/src/ui/components/haven_toast.dart';
 import 'package:haven/src/ui/components/haven_tooltip.dart';
+import 'package:haven/src/ui/components/profile_card_popup.dart';
 import 'package:haven/src/ui/components/status_dot.dart';
 import 'package:haven/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:haven/src/ui/dialogs/user_settings_dialog.dart';
@@ -127,12 +126,17 @@ class UserBar extends ConsumerWidget {
                 borderRadius: BorderRadius.circular(haven.radiusSm),
                 onTap: () {
                   if (localPeerId != null) {
-                    Clipboard.setData(ClipboardData(text: localPeerId));
-                    HavenToast.show(
-                      context,
-                      'Peer ID copied',
-                      type: HavenToastType.success,
-                      duration: const Duration(seconds: 1),
+                    final box = context.findRenderObject() as RenderBox?;
+                    final pos = box?.localToGlobal(Offset.zero) ?? Offset.zero;
+                    // Show card above the user bar, left-aligned with the bar
+                    showProfileCardPopup(
+                      context: context,
+                      ref: ref,
+                      peerId: localPeerId,
+                      anchor: Offset(
+                        pos.dx,
+                        pos.dy - 280, // well above the bar
+                      ),
                     );
                   }
                 },

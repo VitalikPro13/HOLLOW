@@ -193,6 +193,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                 child: HavenTextField(
                   controller: _nameController,
                   hintText: 'Server name',
+                  maxLength: 32,
                   onSubmitted: (_) => _saveName(),
                 ),
               ),
@@ -216,6 +217,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             controller: _descController,
             hintText: 'What is this server about?',
             maxLines: 3,
+            maxLength: 256,
             onSubmitted: (_) => _saveDescription(),
           ),
           const SizedBox(height: HavenSpacing.sm),
@@ -307,6 +309,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               child: HavenTextField(
                 controller: _nicknameController,
                 hintText: 'Nickname (optional)',
+                maxLength: 32,
                 onSubmitted: (_) => _saveNickname(),
               ),
             ),

@@ -70,25 +70,30 @@ class _UserSettingsContent extends ConsumerStatefulWidget {
 }
 
 class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
-  // Track live display name for the preview card.
+  // Track live fields for the preview card.
   String _liveDisplayName = '';
+  String _liveStatus = '';
 
   @override
   void initState() {
     super.initState();
     _liveDisplayName = widget.displayNameController.text;
-    widget.displayNameController.addListener(_onDisplayNameChanged);
+    _liveStatus = widget.statusController.text;
+    widget.displayNameController.addListener(_onFieldChanged);
+    widget.statusController.addListener(_onFieldChanged);
   }
 
-  void _onDisplayNameChanged() {
+  void _onFieldChanged() {
     setState(() {
       _liveDisplayName = widget.displayNameController.text;
+      _liveStatus = widget.statusController.text;
     });
   }
 
   @override
   void dispose() {
-    widget.displayNameController.removeListener(_onDisplayNameChanged);
+    widget.displayNameController.removeListener(_onFieldChanged);
+    widget.statusController.removeListener(_onFieldChanged);
     super.dispose();
   }
 
@@ -160,7 +165,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                       children: [
                         // Left: Profile preview card
                         SizedBox(
-                          width: 200,
+                          width: 220,
                           child: Container(
                             decoration: BoxDecoration(
                               color: haven.surface,
@@ -174,7 +179,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                               children: [
                                 // Banner
                                 Container(
-                                  height: 60,
+                                  height: 80,
                                   decoration: BoxDecoration(
                                     gradient: LinearGradient(
                                       begin: Alignment.topLeft,
@@ -189,7 +194,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
 
                                 // Avatar overlapping banner
                                 Transform.translate(
-                                  offset: const Offset(0, -24),
+                                  offset: const Offset(0, -32),
                                   child: Padding(
                                     padding: const EdgeInsets.symmetric(
                                       horizontal: HavenSpacing.md,
@@ -211,44 +216,44 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                                           ),
                                           child: HavenAvatar(
                                             peerId: widget.localPeerId,
-                                            size: 48,
+                                            size: 64,
                                           ),
                                         ),
 
                                         const SizedBox(
-                                            height: HavenSpacing.sm),
+                                            height: HavenSpacing.xs + 2),
 
                                         // Display name
                                         Text(
                                           previewName,
-                                          style:
-                                              HavenTypography.body.copyWith(
-                                            color: haven.textPrimary,
-                                            fontWeight: FontWeight.w600,
-                                            fontSize: 14,
-                                          ),
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          textAlign: TextAlign.center,
-                                        ),
-
-                                        const SizedBox(
-                                            height: HavenSpacing.xxs),
-
-                                        // Peer ID
-                                        Text(
-                                          widget.localPeerId.length > 20
-                                              ? '${widget.localPeerId.substring(0, 20)}...'
-                                              : widget.localPeerId,
-                                          style: HavenTypography.caption
+                                          style: HavenTypography.subheading
                                               .copyWith(
-                                            color: haven.textSecondary,
-                                            fontSize: 9,
+                                            color: haven.textPrimary,
+                                            fontWeight: FontWeight.w700,
+                                            fontSize: 15,
                                           ),
                                           maxLines: 1,
                                           overflow: TextOverflow.ellipsis,
                                           textAlign: TextAlign.center,
                                         ),
+
+                                        // Status (before divider)
+                                        if (_liveStatus.trim().isNotEmpty) ...[
+                                          const SizedBox(
+                                              height: HavenSpacing.xs),
+                                          Text(
+                                            _liveStatus.trim(),
+                                            style: HavenTypography.caption
+                                                .copyWith(
+                                              color: haven.textSecondary,
+                                              fontSize: 11,
+                                              fontStyle: FontStyle.italic,
+                                            ),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            textAlign: TextAlign.center,
+                                          ),
+                                        ],
 
                                         const SizedBox(
                                             height: HavenSpacing.sm),
@@ -256,44 +261,69 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                                           height: 1,
                                           color: haven.border,
                                         ),
-                                        const SizedBox(
-                                            height: HavenSpacing.sm),
 
                                         // About Me preview
-                                        Text(
-                                          'ABOUT ME',
-                                          style: HavenTypography.caption
-                                              .copyWith(
-                                            color: haven.textSecondary,
-                                            fontWeight: FontWeight.w700,
-                                            letterSpacing: 0.5,
-                                            fontSize: 9,
+                                        if (widget.aboutMeController.text
+                                            .trim()
+                                            .isNotEmpty) ...[
+                                          const SizedBox(
+                                              height: HavenSpacing.sm),
+                                          Text(
+                                            'ABOUT ME',
+                                            style: HavenTypography.caption
+                                                .copyWith(
+                                              color: haven.textSecondary,
+                                              fontWeight: FontWeight.w700,
+                                              letterSpacing: 0.5,
+                                              fontSize: 9,
+                                            ),
                                           ),
-                                        ),
+                                          const SizedBox(
+                                              height: HavenSpacing.xxs),
+                                          Text(
+                                            widget.aboutMeController.text
+                                                .trim(),
+                                            style: HavenTypography.caption
+                                                .copyWith(
+                                              color: haven.textSecondary,
+                                              fontSize: 11,
+                                            ),
+                                            maxLines: 4,
+                                            overflow: TextOverflow.ellipsis,
+                                            textAlign: TextAlign.center,
+                                          ),
+                                        ],
+
+                                        // Peer ID footer
                                         const SizedBox(
-                                            height: HavenSpacing.xs),
-                                        Text(
-                                          widget.aboutMeController.text
-                                                  .trim()
-                                                  .isEmpty
-                                              ? 'Nothing here yet...'
-                                              : widget
-                                                  .aboutMeController.text
-                                                  .trim(),
-                                          style: HavenTypography.caption
-                                              .copyWith(
-                                            color: widget.aboutMeController
-                                                    .text
-                                                    .trim()
-                                                    .isEmpty
-                                                ? haven.textSecondary
-                                                    .withValues(alpha: 0.5)
-                                                : haven.textSecondary,
-                                            fontSize: 11,
-                                          ),
-                                          maxLines: 4,
-                                          overflow: TextOverflow.ellipsis,
-                                          textAlign: TextAlign.center,
+                                            height: HavenSpacing.sm),
+                                        Row(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          children: [
+                                            Icon(
+                                              LucideIcons.copy,
+                                              size: 8,
+                                              color: haven.textSecondary
+                                                  .withValues(alpha: 0.35),
+                                            ),
+                                            const SizedBox(width: 3),
+                                            Text(
+                                              widget.localPeerId.length > 16
+                                                  ? widget.localPeerId
+                                                      .substring(
+                                                          widget.localPeerId
+                                                                  .length -
+                                                              8)
+                                                  : widget.localPeerId,
+                                              style: HavenTypography.mono
+                                                  .copyWith(
+                                                color: haven.textSecondary
+                                                    .withValues(alpha: 0.35),
+                                                fontSize: 8,
+                                              ),
+                                            ),
+                                          ],
                                         ),
                                       ],
                                     ),
@@ -319,6 +349,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                                     widget.displayNameController,
                                 hintText: 'Enter a display name',
                                 autofocus: true,
+                                maxLength: 32,
                               ),
 
                               const SizedBox(height: HavenSpacing.lg),
@@ -328,6 +359,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                               HavenTextField(
                                 controller: widget.statusController,
                                 hintText: 'What are you up to?',
+                                maxLength: 48,
                               ),
 
                               const SizedBox(height: HavenSpacing.lg),
@@ -338,6 +370,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                                 controller: widget.aboutMeController,
                                 hintText: 'Tell us about yourself',
                                 maxLines: 3,
+                                maxLength: 128,
                                 onChanged: (_) => setState(() {}),
                               ),
 

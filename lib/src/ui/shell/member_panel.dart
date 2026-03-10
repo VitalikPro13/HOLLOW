@@ -12,6 +12,8 @@ import 'package:haven/src/ui/animations/haven_curves.dart';
 import 'package:haven/src/ui/animations/reveal_widgets.dart';
 import 'package:haven/src/ui/animations/startup_reveal.dart';
 import 'package:haven/src/ui/components/haven_avatar.dart';
+import 'package:haven/src/ui/components/haven_pressable.dart';
+import 'package:haven/src/ui/components/profile_card_popup.dart';
 import 'package:haven/src/ui/components/status_dot.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
@@ -546,7 +548,23 @@ class _ServerMemberTile extends ConsumerWidget {
     return AnimatedOpacity(
       opacity: isOnline ? 1.0 : 0.5,
       duration: HavenDurations.fast,
-      child: Padding(
+      child: HavenPressable(
+        subtle: true,
+        borderRadius: BorderRadius.circular(haven.radiusSm),
+        onTap: () {
+          final box = context.findRenderObject() as RenderBox?;
+          if (box == null) return;
+          final pos = box.localToGlobal(Offset.zero);
+          // Show card to the left of member panel (like Discord)
+          showProfileCardPopup(
+            context: context,
+            ref: ref,
+            peerId: peerId,
+            nickname: nickname.isNotEmpty ? nickname : null,
+            role: role,
+            anchor: Offset(pos.dx - 270, pos.dy - 100),
+          );
+        },
         padding: const EdgeInsets.symmetric(
           horizontal: HavenSpacing.sm + 2,
           vertical: HavenSpacing.xxs + 1,
@@ -630,7 +648,21 @@ class _MemberTile extends ConsumerWidget {
     final profiles = ref.watch(profileProvider);
     final peerName = displayNameFor(profiles, peerId);
 
-    return Padding(
+    return HavenPressable(
+      subtle: true,
+      borderRadius: BorderRadius.circular(haven.radiusSm),
+      onTap: () {
+        final box = context.findRenderObject() as RenderBox?;
+        if (box == null) return;
+        final pos = box.localToGlobal(Offset.zero);
+        // Show card to the left of member panel (like Discord)
+        showProfileCardPopup(
+          context: context,
+          ref: ref,
+          peerId: peerId,
+          anchor: Offset(pos.dx - 270, pos.dy - 100),
+        );
+      },
       padding: const EdgeInsets.symmetric(
         horizontal: HavenSpacing.sm + 2,
         vertical: HavenSpacing.xxs + 1,
