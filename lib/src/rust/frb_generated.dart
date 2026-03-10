@@ -70,7 +70,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 1986465843;
+  int get rustContentHash => 315246086;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -212,6 +212,12 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiNetworkSendMessage({
     required String peerId,
     required String text,
+  });
+
+  Future<void> crateApiCrdtSetNickname({
+    required String serverId,
+    required String peerId,
+    required String nickname,
   });
 
   Future<String> crateApiNetworkStartNode();
@@ -1371,6 +1377,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<void> crateApiCrdtSetNickname({
+    required String serverId,
+    required String peerId,
+    required String nickname,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          sse_encode_String(peerId, serializer);
+          sse_encode_String(nickname, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 36,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCrdtSetNicknameConstMeta,
+        argValues: [serverId, peerId, nickname],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCrdtSetNicknameConstMeta => const TaskConstMeta(
+    debugName: "set_nickname",
+    argNames: ["serverId", "peerId", "nickname"],
+  );
+
+  @override
   Future<String> crateApiNetworkStartNode() {
     return handler.executeNormal(
       NormalTask(
@@ -1379,7 +1421,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 36,
+            funcId: 37,
             port: port_,
           );
         },
@@ -1406,7 +1448,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 37,
+            funcId: 38,
             port: port_,
           );
         },
@@ -1440,7 +1482,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 38,
+            funcId: 39,
             port: port_,
           );
         },
@@ -1477,7 +1519,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 39,
+            funcId: 40,
             port: port_,
           );
         },
@@ -1510,7 +1552,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 40,
+              funcId: 41,
               port: port_,
             );
           },
@@ -1682,12 +1724,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   MemberFfi dco_decode_member_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
     return MemberFfi(
       peerId: dco_decode_String(arr[0]),
       displayName: dco_decode_String(arr[1]),
       role: dco_decode_String(arr[2]),
+      nickname: dco_decode_String(arr[3]),
     );
   }
 
@@ -2115,10 +2158,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_peerId = sse_decode_String(deserializer);
     var var_displayName = sse_decode_String(deserializer);
     var var_role = sse_decode_String(deserializer);
+    var var_nickname = sse_decode_String(deserializer);
     return MemberFfi(
       peerId: var_peerId,
       displayName: var_displayName,
       role: var_role,
+      nickname: var_nickname,
     );
   }
 
@@ -2635,6 +2680,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.peerId, serializer);
     sse_encode_String(self.displayName, serializer);
     sse_encode_String(self.role, serializer);
+    sse_encode_String(self.nickname, serializer);
   }
 
   @protected

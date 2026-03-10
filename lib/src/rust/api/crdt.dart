@@ -116,6 +116,17 @@ Future<void> kickMember({required String serverId, required String peerId}) =>
       peerId: peerId,
     );
 
+/// Set a member's server nickname. Pass an empty string to clear.
+Future<void> setNickname({
+  required String serverId,
+  required String peerId,
+  required String nickname,
+}) => RustLib.instance.api.crateApiCrdtSetNickname(
+  serverId: serverId,
+  peerId: peerId,
+  nickname: nickname,
+);
+
 /// Delete a server entirely (removes from local DB and memory).
 Future<void> deleteServer({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtDeleteServer(serverId: serverId);
@@ -150,15 +161,21 @@ class MemberFfi {
   final String peerId;
   final String displayName;
   final String role;
+  final String nickname;
 
   const MemberFfi({
     required this.peerId,
     required this.displayName,
     required this.role,
+    required this.nickname,
   });
 
   @override
-  int get hashCode => peerId.hashCode ^ displayName.hashCode ^ role.hashCode;
+  int get hashCode =>
+      peerId.hashCode ^
+      displayName.hashCode ^
+      role.hashCode ^
+      nickname.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -167,7 +184,8 @@ class MemberFfi {
           runtimeType == other.runtimeType &&
           peerId == other.peerId &&
           displayName == other.displayName &&
-          role == other.role;
+          role == other.role &&
+          nickname == other.nickname;
 }
 
 /// Server info for FFI (Dart-visible).

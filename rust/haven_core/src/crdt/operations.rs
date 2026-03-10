@@ -60,6 +60,12 @@ pub enum CrdtPayload {
         role: MemberRole,
         priority: u8,
     },
+
+    // Nickname operations
+    NicknameChanged {
+        peer_id: String,
+        nickname: String,
+    },
 }
 
 /// Member roles with hierarchical priority.

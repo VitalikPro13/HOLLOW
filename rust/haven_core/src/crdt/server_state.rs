@@ -32,6 +32,8 @@ pub struct ServerState {
     pub channels: HashMap<String, ChannelInfo>,
     pub members: HashMap<String, MemberInfo>,
     pub roles: HashMap<String, AdminLwwReg<MemberRole>>,
+    #[serde(default)]
+    pub nicknames: HashMap<String, AdminLwwReg<String>>,
     pub settings: HashMap<String, AdminLwwReg<String>>,
     pub op_log: Vec<CrdtOp>,
     #[serde(skip)]
@@ -77,6 +79,7 @@ impl ServerState {
             channels,
             members,
             roles,
+            nicknames: HashMap::new(),
             settings: HashMap::new(),
             op_log: Vec::new(),
             hlc: Some(hlc),
@@ -217,6 +220,7 @@ impl ServerState {
             CrdtPayload::MemberRemoved { peer_id } => {
                 self.members.remove(peer_id);
                 self.roles.remove(peer_id);
+                self.nicknames.remove(peer_id);
             }
 
             CrdtPayload::RoleChanged {
@@ -231,6 +235,17 @@ impl ServerState {
                     AdminLwwReg::new(role.clone(), op.hlc.clone(), *priority)
                 });
                 let remote = AdminLwwReg::new(role.clone(), op.hlc.clone(), *priority);
+                entry.merge(&remote);
+            }
+
+            CrdtPayload::NicknameChanged { peer_id, nickname } => {
+                // Any member can set their own nickname. Use author's priority
+                // so admins can also change others' nicknames.
+                let priority = self.author_priority(&op.author);
+                let entry = self.nicknames.entry(peer_id.clone()).or_insert_with(|| {
+                    AdminLwwReg::new(nickname.clone(), op.hlc.clone(), priority)
+                });
+                let remote = AdminLwwReg::new(nickname.clone(), op.hlc.clone(), priority);
                 entry.merge(&remote);
             }
         }
@@ -270,6 +285,14 @@ impl ServerState {
     /// Get the server name.
     pub fn name(&self) -> &str {
         self.name.read()
+    }
+
+    /// Get a member's server nickname (empty string = no nickname set).
+    pub fn get_nickname(&self, peer_id: &str) -> String {
+        self.nicknames
+            .get(peer_id)
+            .map(|reg| reg.read().clone())
+            .unwrap_or_default()
     }
 
     /// Look up author's priority from their role in this server.

@@ -59,6 +59,7 @@ final profileProvider =
 );
 
 /// Get a display name for a peer. Falls back to short peer ID.
+/// Used in DM context (no nicknames).
 String displayNameFor(
   Map<String, storage_api.UserProfile> profiles,
   String peerId,
@@ -69,4 +70,15 @@ String displayNameFor(
   }
   // Fallback: first 8 chars of peer ID.
   return peerId.length > 8 ? '${peerId.substring(0, 8)}...' : peerId;
+}
+
+/// Get a display name for a peer in a server context.
+/// Resolution order: nickname → profile display name → short peer ID.
+String serverDisplayNameFor(
+  Map<String, storage_api.UserProfile> profiles,
+  String peerId, {
+  String nickname = '',
+}) {
+  if (nickname.isNotEmpty) return nickname;
+  return displayNameFor(profiles, peerId);
 }

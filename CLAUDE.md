@@ -71,12 +71,12 @@ Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection mana
 - User profiles: Rust `user_profiles` SQLCipher table, `ProfileUpdate` HavenMessage broadcast, timestamp-gated upsert, auto-exchange on `ConnectionEstablished`, `ProfileNotifier` Dart provider, `displayNameFor()` helper used everywhere (user_bar, member_panel, channel_message_bubble, peer_card, chat_pane)
 - User settings dialog: two-column layout (live profile preview card with centered banner/avatar/name/about-me on left, edit fields + dark mode toggle on right), `showHavenDialog` glassmorphism entrance, settings gear icon replaces theme toggle in user bar
 - Member panel slide animation: `_MemberPanelSlider` with ClipRect + Align(widthFactor) + FadeTransition (GPU-composited), `ProviderScope` override freezes `selectedServerProvider` during close animation (prevents "No peers online" flash), chat pane crossfade via single AnimatedSwitcher
+- Server nicknames: CRDT-based per-server nicknames (`NicknameChanged` payload, `AdminLwwReg<String>` in `ServerState.nicknames`), `set_nickname()` FFI, `serverDisplayNameFor()` (nickname → profile name → short peer ID), `serverNicknamesProvider` derived from members. Overview tab restructured: "SERVER SETTINGS" (admin+) above "YOUR IDENTITY" (all members). Name resolution: server context uses nickname, DM context uses display name only.
 
 **Phase 3.5 remaining:**
-1. Server nicknames via CRDT (LWW-Register per server)
-2. Profile card popup on member click
-3. Chat Essentials: message editing & deletion, reply chains, emoji reactions, typing indicators, markdown rendering, pinned messages
-4. QoL: notifications, search, keyboard shortcuts, basic P2P file sharing (WebP internal format)
+1. Profile card popup on member click
+2. Chat Essentials: message editing & deletion, reply chains, emoji reactions, typing indicators, markdown rendering, pinned messages
+3. QoL: notifications, search, keyboard shortcuts, basic P2P file sharing (WebP internal format)
 
 ## Haven Design System (Phase 2.75)
 All UI interactions go through custom Haven widgets — no Material defaults anywhere. Change behavior in one place, applies everywhere.
@@ -111,6 +111,7 @@ All UI interactions go through custom Haven widgets — no Material defaults any
 - **NEVER pass `WidgetRef ref` as a constructor parameter** to child widgets. Always use `ConsumerWidget` or `ConsumerStatefulWidget` instead. Passing `ref` causes cascade rebuilds (parent rebuilds ALL children on every provider change).
 - Use `AnimatedOpacity` (GPU-composited) for per-item opacity. Never use the `Opacity` widget.
 - **Keep Flutter updated:** Windows animation jank (choppy at all refresh rates) was caused by a Flutter engine bug present in 3.38.5, fixed in 3.41.4. No app-side hacks needed — just `flutter upgrade`. `windows/runner/main.cpp` is stock (no timer hacks).
+- **CRITICAL — Backward-compatible DB schema:** ALWAYS add `#[serde(default)]` to ANY new field added to a persisted Rust struct (e.g., `ServerState`, any struct stored as JSON in SQLCipher). Without it, old data lacking the new field will fail to deserialize and silently disappear (servers vanish, data lost). This applies to ALL `#[derive(Serialize, Deserialize)]` structs that touch the DB.
 
 ## Rules
 - Never commit secrets, keys, or credentials

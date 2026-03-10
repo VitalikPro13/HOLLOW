@@ -23,6 +23,7 @@ pub struct MemberFfi {
     pub peer_id: String,
     pub display_name: String,
     pub role: String,
+    pub nickname: String,
 }
 
 /// Create a new server. Returns the server_id.
@@ -198,6 +199,7 @@ pub fn get_server_members(server_id: String) -> Result<Vec<MemberFfi>, String> {
             peer_id: m.peer_id.clone(),
             display_name: m.display_name.clone(),
             role: state.get_role(&m.peer_id).as_str().to_string(),
+            nickname: state.get_nickname(&m.peer_id),
         })
         .collect();
 
@@ -413,6 +415,26 @@ pub fn kick_member(server_id: String, peer_id: String) -> Result<(), String> {
         state.cmd_tx.send(node::NodeCommand::KickMember {
             server_id,
             peer_id,
+        }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+/// Set a member's server nickname. Pass an empty string to clear.
+#[frb]
+pub fn set_nickname(server_id: String, peer_id: String, nickname: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(
+        state.cmd_tx.send(node::NodeCommand::SetNickname {
+            server_id,
+            peer_id,
+            nickname,
         }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;

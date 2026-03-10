@@ -133,6 +133,25 @@ final myPermissionsProvider = FutureProvider.family<int, String>(
   (ref, serverId) => crdt_api.getMyPermissions(serverId: serverId),
 );
 
+/// Extracts nicknames from server members: peerId → nickname (non-empty only).
+final serverNicknamesProvider =
+    Provider.family<Map<String, String>, String>((ref, serverId) {
+  final membersAsync = ref.watch(serverMembersProvider(serverId));
+  return membersAsync.when(
+    data: (members) {
+      final map = <String, String>{};
+      for (final m in members) {
+        if (m.nickname.isNotEmpty) {
+          map[m.peerId] = m.nickname;
+        }
+      }
+      return map;
+    },
+    loading: () => {},
+    error: (_, _) => {},
+  );
+});
+
 /// Permission bitmask constants (must match Rust Permission struct).
 class Permission {
   static const int manageServer = 1 << 0;

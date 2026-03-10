@@ -10,6 +10,7 @@ import 'package:haven/src/ui/components/haven_avatar.dart';
 import 'package:haven/src/ui/components/haven_button.dart';
 import 'package:haven/src/ui/components/haven_dialog.dart';
 import 'package:haven/src/ui/components/haven_toast.dart';
+import 'package:haven/src/core/providers/profile_provider.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
 /// Members tab — view members with their roles. Admins+ can change roles & kick.
@@ -59,6 +60,7 @@ class MembersTab extends ConsumerWidget {
               displayName: member.displayName,
               peerId: member.peerId,
               role: member.role,
+              nickname: member.nickname,
               myRole: myRole,
             );
           },
@@ -114,6 +116,7 @@ class _MemberRow extends ConsumerWidget {
   final String displayName;
   final String peerId;
   final String role;
+  final String nickname;
   final String myRole;
 
   const _MemberRow({
@@ -121,6 +124,7 @@ class _MemberRow extends ConsumerWidget {
     required this.displayName,
     required this.peerId,
     required this.role,
+    required this.nickname,
     required this.myRole,
   });
 
@@ -131,6 +135,9 @@ class _MemberRow extends ConsumerWidget {
     final isMe = peerId == localPeerId;
     final info = _roleInfo(role, haven);
     final canManage = !isMe && _canManageRole(myRole, role);
+    final profiles = ref.watch(profileProvider);
+    final resolvedName =
+        serverDisplayNameFor(profiles, peerId, nickname: nickname);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: HavenSpacing.sm),
@@ -155,7 +162,7 @@ class _MemberRow extends ConsumerWidget {
                     children: [
                       Flexible(
                         child: Text(
-                          displayName,
+                          resolvedName,
                           style: HavenTypography.body
                               .copyWith(color: haven.textPrimary),
                           overflow: TextOverflow.ellipsis,

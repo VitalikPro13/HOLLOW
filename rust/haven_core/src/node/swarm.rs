@@ -135,6 +135,7 @@ pub(crate) enum NodeCommand {
     RequestChannelSync { server_id: String, channel_id: String },
     ChangeRole { server_id: String, peer_id: String, new_role: String },
     KickMember { server_id: String, peer_id: String },
+    SetNickname { server_id: String, peer_id: String, nickname: String },
     NotifyShutdown,
     // -- Profile commands (Phase 3.5) --
     UpdateProfile { display_name: String, status: String, about_me: String },
@@ -1890,6 +1891,61 @@ async fn run_swarm(
                                             }
                                         }
                                         Err(e) => haven_log!("[HAVEN-MLS] Failed to remove member from MLS group: {e}"),
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    NodeCommand::SetNickname { server_id, peer_id, nickname } => {
+                        if let Some(state) = server_states.get_mut(&server_id) {
+                            let local_peer = swarm.local_peer_id().to_string();
+
+                            // Members can set their own nickname. Admins+ can set others'.
+                            if peer_id != local_peer && !state.has_permission(&local_peer, crate::crdt::operations::Permission::MANAGE_ROLES) {
+                                haven_log!("[HAVEN-CRDT] Permission denied: cannot set nickname for {peer_id}");
+                                continue;
+                            }
+
+                            haven_log!("[HAVEN-CRDT] Setting nickname for {peer_id} to '{nickname}' in {server_id}");
+                            let op = state.create_op(CrdtPayload::NicknameChanged {
+                                peer_id: peer_id.clone(),
+                                nickname: nickname.clone(),
+                            });
+                            let _ = state.apply_op(&op);
+
+                            // Persist
+                            if let Ok(json) = serde_json::to_string(&state) {
+                                let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                    let _ = store.save_server_state(&server_id, &json);
+                                    let _ = store.insert_crdt_op(&op);
+                                }
+                            }
+
+                            // Emit event so Dart refreshes member list
+                            let _ = event_tx.send(NetworkEvent::MemberJoined {
+                                server_id: server_id.clone(),
+                                peer_id: peer_id.clone(),
+                            }).await;
+
+                            // Broadcast to connected server members
+                            if let Ok(op_json) = serde_json::to_string(&op) {
+                                for member_peer_str in state.members.keys() {
+                                    if member_peer_str == &local_peer { continue; }
+                                    if let Ok(pid) = member_peer_str.parse::<PeerId>() {
+                                        if connected_peers.contains(&pid) {
+                                            swarm.behaviour_mut().messaging.send_request(
+                                                &pid,
+                                                HavenMessage::CrdtOpBroadcast {
+                                                    server_id: server_id.clone(),
+                                                    op_json: op_json.clone(),
+                                                },
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -3825,6 +3881,13 @@ async fn handle_incoming_request(
                                 server_id: server_id.clone(),
                                 peer_id: peer_id.clone(),
                                 new_role: role.as_str().to_string(),
+                            }).await;
+                        }
+                        CrdtPayload::NicknameChanged { peer_id, .. } => {
+                            // Re-use MemberJoined to trigger member list refresh in Dart
+                            let _ = event_tx.send(NetworkEvent::MemberJoined {
+                                server_id: server_id.clone(),
+                                peer_id: peer_id.clone(),
                             }).await;
                         }
                         _ => {

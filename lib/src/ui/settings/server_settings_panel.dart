@@ -31,14 +31,12 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
       int permissions) {
     final tabs = <({IconData icon, String label, bool isDanger})>[];
 
-    // Overview — only for server managers (rename, description)
-    if (permissions & Permission.manageServer != 0) {
-      tabs.add((
-        icon: LucideIcons.info,
-        label: 'Overview',
-        isDanger: false,
-      ));
-    }
+    // Overview — always visible (nickname for all, server settings for admins)
+    tabs.add((
+      icon: LucideIcons.info,
+      label: 'Overview',
+      isDanger: false,
+    ));
 
     // Channels — only for channel managers
     if (permissions & Permission.manageChannels != 0) {
@@ -71,12 +69,15 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
   Widget _buildTabContent(
     ServerInfo server,
     List<({IconData icon, String label, bool isDanger})> tabs,
+    int permissions,
   ) {
     if (_selectedTab >= tabs.length) return const SizedBox.shrink();
     final tab = tabs[_selectedTab];
     return switch (tab.label) {
       'Overview' => OverviewTab(
-          key: const ValueKey('overview'), server: server),
+          key: const ValueKey('overview'),
+          server: server,
+          canManageServer: permissions & Permission.manageServer != 0),
       'Channels' => ChannelsTab(
           key: const ValueKey('channels'), serverId: server.serverId),
       'Members' => MembersTab(
@@ -213,7 +214,7 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
         Expanded(
           child: AnimatedSwitcher(
             duration: const Duration(milliseconds: 200),
-            child: _buildTabContent(currentServer, tabs),
+            child: _buildTabContent(currentServer, tabs, permissions),
           ),
         ),
       ],

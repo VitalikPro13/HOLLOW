@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/core/models/channel_chat_message.dart';
 import 'package:haven/src/core/providers/profile_provider.dart';
+import 'package:haven/src/core/providers/server_provider.dart';
 import 'package:haven/src/theme/haven_spacing.dart';
 import 'package:haven/src/theme/haven_theme.dart';
 import 'package:haven/src/theme/haven_typography.dart';
@@ -10,14 +11,24 @@ import 'package:haven/src/ui/components/haven_avatar.dart';
 
 class ChannelMessageBubble extends ConsumerWidget {
   final ChannelChatMessage message;
+  final String serverId;
 
-  const ChannelMessageBubble({super.key, required this.message});
+  const ChannelMessageBubble({
+    super.key,
+    required this.message,
+    required this.serverId,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final haven = HavenTheme.of(context);
     final profiles = ref.watch(profileProvider);
-    final senderName = displayNameFor(profiles, message.senderId);
+    final nicknames = ref.watch(serverNicknamesProvider(serverId));
+    final senderName = serverDisplayNameFor(
+      profiles,
+      message.senderId,
+      nickname: nicknames[message.senderId] ?? '',
+    );
     final isMe = message.isMe;
     final time =
         '${message.timestamp.hour.toString().padLeft(2, '0')}:${message.timestamp.minute.toString().padLeft(2, '0')}';

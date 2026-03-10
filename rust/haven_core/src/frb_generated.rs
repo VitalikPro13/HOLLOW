@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1986465843;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 315246086;
 
 // Section: executor
 
@@ -1255,6 +1255,42 @@ fn wire__crate__api__network__send_message_impl(
         },
     )
 }
+fn wire__crate__api__crdt__set_nickname_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_nickname",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_server_id = <String>::sse_decode(&mut deserializer);
+            let api_peer_id = <String>::sse_decode(&mut deserializer);
+            let api_nickname = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok =
+                        crate::api::crdt::set_nickname(api_server_id, api_peer_id, api_nickname)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__network__start_node_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1624,10 +1660,12 @@ impl SseDecode for crate::api::crdt::MemberFfi {
         let mut var_peerId = <String>::sse_decode(deserializer);
         let mut var_displayName = <String>::sse_decode(deserializer);
         let mut var_role = <String>::sse_decode(deserializer);
+        let mut var_nickname = <String>::sse_decode(deserializer);
         return crate::api::crdt::MemberFfi {
             peer_id: var_peerId,
             display_name: var_displayName,
             role: var_role,
+            nickname: var_nickname,
         };
     }
 }
@@ -2063,11 +2101,12 @@ fn pde_ffi_dispatcher_primary_impl(
             wire__crate__api__network__send_channel_message_impl(port, ptr, rust_vec_len, data_len)
         }
         35 => wire__crate__api__network__send_message_impl(port, ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__network__start_node_impl(port, ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__network__stop_node_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__network__update_profile_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__crdt__update_server_setting_impl(port, ptr, rust_vec_len, data_len),
-        40 => {
+        36 => wire__crate__api__crdt__set_nickname_impl(port, ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__network__start_node_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__network__stop_node_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__network__update_profile_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__crdt__update_server_setting_impl(port, ptr, rust_vec_len, data_len),
+        41 => {
             wire__crate__api__network__watch_network_events_impl(port, ptr, rust_vec_len, data_len)
         }
         _ => unreachable!(),
@@ -2157,6 +2196,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::crdt::MemberFfi {
             self.peer_id.into_into_dart().into_dart(),
             self.display_name.into_into_dart().into_dart(),
             self.role.into_into_dart().into_dart(),
+            self.nickname.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -2625,6 +2665,7 @@ impl SseEncode for crate::api::crdt::MemberFfi {
         <String>::sse_encode(self.peer_id, serializer);
         <String>::sse_encode(self.display_name, serializer);
         <String>::sse_encode(self.role, serializer);
+        <String>::sse_encode(self.nickname, serializer);
     }
 }
 

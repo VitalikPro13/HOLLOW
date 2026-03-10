@@ -380,6 +380,7 @@ class _ServerMemberContent extends ConsumerWidget {
                       peerId: m.peerId,
                       displayName: m.displayName,
                       role: m.role,
+                      nickname: m.nickname,
                       isOnline: isOnline,
                     ));
                   }
@@ -405,6 +406,7 @@ class _ServerMemberContent extends ConsumerWidget {
                       peerId: m.peerId,
                       displayName: m.displayName,
                       role: m.role,
+                      nickname: m.nickname,
                       isOnline: true,
                     ));
                   }
@@ -424,6 +426,7 @@ class _ServerMemberContent extends ConsumerWidget {
                     peerId: m.peerId,
                     displayName: m.displayName,
                     role: m.role,
+                    nickname: m.nickname,
                     isOnline: false,
                   ));
                 }
@@ -520,12 +523,14 @@ class _ServerMemberTile extends ConsumerWidget {
   final String peerId;
   final String displayName;
   final String role;
+  final String nickname;
   final bool isOnline;
 
   const _ServerMemberTile({
     required this.peerId,
     required this.displayName,
     required this.role,
+    required this.nickname,
     required this.isOnline,
   });
 
@@ -533,9 +538,10 @@ class _ServerMemberTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final haven = HavenTheme.of(context);
     final isSyncing = ref.watch(isPeerSyncingProvider(peerId));
-    // Prefer profile display name over CRDT display name.
+    // Resolution: nickname → profile display name → short peer ID.
     final profiles = ref.watch(profileProvider);
-    final resolvedName = displayNameFor(profiles, peerId);
+    final resolvedName =
+        serverDisplayNameFor(profiles, peerId, nickname: nickname);
 
     return AnimatedOpacity(
       opacity: isOnline ? 1.0 : 0.5,

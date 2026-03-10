@@ -194,7 +194,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                     itemCount: messages.length,
                     itemBuilder: (context, index) {
                       return ChannelMessageBubble(
-                          message: messages[index]);
+                        message: messages[index],
+                        serverId: widget.serverId,
+                      );
                     },
                   ),
           ),
