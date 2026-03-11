@@ -6,7 +6,6 @@ import 'package:haven/src/theme/haven_spacing.dart';
 import 'package:haven/src/theme/haven_theme.dart';
 import 'package:haven/src/theme/haven_typography.dart';
 import 'package:haven/src/ui/components/haven_pressable.dart';
-import 'package:haven/src/ui/components/haven_tooltip.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
 /// Coordinates action bar visibility across all messages in a list.
@@ -368,17 +367,14 @@ class _ActionBarContent extends StatelessWidget {
           ),
         ],
       ),
-      child: HavenTooltip(
-        message: 'Edit',
-        child: HavenPressable(
-          onTap: onEdit,
-          borderRadius: BorderRadius.circular(haven.radiusSm),
-          padding: const EdgeInsets.all(6),
-          child: Icon(
-            LucideIcons.pencil,
-            size: 14,
-            color: haven.textSecondary,
-          ),
+      child: HavenPressable(
+        onTap: onEdit,
+        borderRadius: BorderRadius.circular(haven.radiusSm),
+        padding: const EdgeInsets.all(6),
+        child: Icon(
+          LucideIcons.pencil,
+          size: 14,
+          color: haven.textSecondary,
         ),
       ),
     );

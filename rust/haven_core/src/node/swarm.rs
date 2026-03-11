@@ -277,6 +277,29 @@ enum HavenMessage {
         about_me: String,
         updated_at: i64,
     },
+
+    // -- Multi-peer fan-out sync (Phase 3.5) --
+
+    /// Lightweight probe: "what's your latest timestamp for this channel?"
+    /// Used to skip channels that have no new messages before sending a full sync request.
+    #[serde(rename = "ch_sync_probe")]
+    ChannelSyncProbe {
+        server_id: String,
+        channel_id: String,
+        /// Our latest timestamp for this channel (so the peer can quickly compare).
+        our_latest: i64,
+    },
+
+    /// Response to a sync probe: the peer's latest timestamp for the channel.
+    #[serde(rename = "ch_sync_probe_resp")]
+    ChannelSyncProbeResponse {
+        server_id: String,
+        channel_id: String,
+        /// Peer's latest timestamp for this channel.
+        their_latest: i64,
+        /// Total message count the peer has for this channel (for load estimation).
+        msg_count: u32,
+    },
 }
 
 /// Envelope for the plaintext body inside an Encrypted message.
@@ -405,6 +428,153 @@ struct DmSyncItem {
     /// Edit timestamp (if message was edited).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     edited_at: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Peer Fan-Out Sync Coordinator (Phase 3.5)
+// ---------------------------------------------------------------------------
+//
+// Instead of syncing every channel from one peer (ConnectionEstablished),
+// the coordinator spreads channel sync across ALL available peers evenly.
+//
+// Flow:
+// 1. ConnectionEstablished → register peer with coordinator
+// 2. After 500ms collection window → assign channels to peers round-robin
+// 3. Send lightweight ChannelSyncProbe to each assigned peer
+// 4. Probe response: if timestamps differ → fire full ChannelSyncRequest
+//    If timestamps match → skip (no new messages)
+// 5. Result: parallel sync, spread evenly, zero wasted bandwidth
+
+/// Tracks a server that needs sync after reconnection.
+struct PendingServerSync {
+    /// Peer IDs available for sync (connected members of this server).
+    available_peers: Vec<PeerId>,
+    /// Channels that need sync: (channel_id, our_latest_timestamp).
+    channels: Vec<(String, i64)>,
+    /// When the first peer for this server was registered.
+    started_at: std::time::Instant,
+    /// Whether we've already dispatched probes for this server.
+    dispatched: bool,
+}
+
+/// Coordinates multi-peer fan-out sync across servers and channels.
+struct SyncCoordinator {
+    /// Servers waiting for sync: server_id → PendingServerSync.
+    pending: HashMap<String, PendingServerSync>,
+    /// How long to wait after first peer connects before dispatching probes.
+    /// Allows more peers to connect, giving us better spread.
+    collection_window: Duration,
+}
+
+impl SyncCoordinator {
+    fn new() -> Self {
+        Self {
+            pending: HashMap::new(),
+            collection_window: Duration::from_millis(500),
+        }
+    }
+
+    /// Register a newly connected peer for a server's sync.
+    /// Called from ConnectionEstablished instead of directly sending sync requests.
+    fn register_peer(
+        &mut self,
+        server_id: &str,
+        peer: PeerId,
+        channels_with_timestamps: Vec<(String, i64)>,
+    ) {
+        let entry = self.pending.entry(server_id.to_string()).or_insert_with(|| {
+            PendingServerSync {
+                available_peers: Vec::new(),
+                channels: channels_with_timestamps.clone(),
+                started_at: std::time::Instant::now(),
+                dispatched: false,
+            }
+        });
+        if !entry.available_peers.contains(&peer) {
+            entry.available_peers.push(peer);
+        }
+        // Update channels if this registration provides more channels
+        // (e.g., server state updated between connections).
+        if entry.channels.len() < channels_with_timestamps.len() {
+            entry.channels = channels_with_timestamps;
+        }
+    }
+
+    /// Check which servers are ready to dispatch (collection window elapsed).
+    /// Returns: Vec<(server_id, assignments)> where assignments = Vec<(peer_id, Vec<(channel_id, our_latest)>)>
+    fn collect_ready(&mut self) -> Vec<(String, Vec<(PeerId, Vec<(String, i64)>)>)> {
+        let now = std::time::Instant::now();
+        let mut ready = Vec::new();
+
+        for (server_id, sync) in self.pending.iter_mut() {
+            if sync.dispatched {
+                continue;
+            }
+            if now.duration_since(sync.started_at) >= self.collection_window
+                && !sync.available_peers.is_empty()
+                && !sync.channels.is_empty()
+            {
+                sync.dispatched = true;
+
+                // Assign channels to peers using round-robin.
+                // Each channel gets assigned to up to 2 peers (primary + backup)
+                // for redundancy, unless we have very few peers.
+                let peers = &sync.available_peers;
+                let peer_count = peers.len();
+                let use_backup = peer_count >= 3; // Only use backup peers if we have enough
+
+                let mut assignments: HashMap<PeerId, Vec<(String, i64)>> = HashMap::new();
+
+                for (i, (cid, ts)) in sync.channels.iter().enumerate() {
+                    // Primary peer: round-robin by channel index
+                    let primary_idx = i % peer_count;
+                    assignments
+                        .entry(peers[primary_idx])
+                        .or_default()
+                        .push((cid.clone(), *ts));
+
+                    // Backup peer: offset by half the peer count for maximum spread
+                    if use_backup {
+                        let backup_idx = (i + peer_count / 2 + 1) % peer_count;
+                        if backup_idx != primary_idx {
+                            assignments
+                                .entry(peers[backup_idx])
+                                .or_default()
+                                .push((cid.clone(), *ts));
+                        }
+                    }
+                }
+
+                let assignment_vec: Vec<(PeerId, Vec<(String, i64)>)> =
+                    assignments.into_iter().collect();
+                ready.push((server_id.clone(), assignment_vec));
+            }
+        }
+
+        ready
+    }
+
+    /// Remove completed servers from the pending map.
+    fn remove_server(&mut self, server_id: &str) {
+        self.pending.remove(server_id);
+    }
+
+    /// Check if any servers are pending dispatch.
+    fn has_pending(&self) -> bool {
+        self.pending.values().any(|s| !s.dispatched)
+    }
+
+    /// Clean up dispatched entries older than 30 seconds (sync should be done by then).
+    fn cleanup_stale(&mut self) {
+        let now = std::time::Instant::now();
+        self.pending.retain(|_, sync| {
+            if sync.dispatched {
+                now.duration_since(sync.started_at) < Duration::from_secs(30)
+            } else {
+                true
+            }
+        });
+    }
 }
 
 /// JSON codec for the Haven v2 protocol.
@@ -1060,6 +1230,14 @@ async fn run_swarm(
     // Track server_ids for which we've already requested MLS bootstrap (KeyPackage sent to owner).
     // Prevents spamming the owner on every MlsChannelMessage for an unknown group.
     let mut mls_bootstrap_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Multi-peer fan-out sync coordinator.
+    // Collects connected peers for 500ms, then assigns channels evenly across peers.
+    let mut sync_coordinator = SyncCoordinator::new();
+
+    // Sync coordinator dispatch timer (100ms tick — checks if collection window has elapsed).
+    let mut sync_dispatch_timer = tokio::time::interval(Duration::from_millis(100));
+    sync_dispatch_timer.tick().await; // consume immediate first tick
 
     // Re-bootstrap timer (30 seconds) for mutual peer discovery.
     // Fires unconditionally — BootstrapPeers handler skips connected
@@ -2852,37 +3030,29 @@ async fn run_swarm(
                                             );
                                         }
 
-                                        // Channel message sync — request missed messages with per-sender timestamps.
-                                        let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
-                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                        if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                                for (cid, _) in state.channels.iter() {
-                                                    let since = store
-                                                        .get_latest_channel_timestamp(sid, cid)
-                                                        .unwrap_or(None)
-                                                        .unwrap_or(0);
-                                                    let sender_ts = store
-                                                        .get_per_sender_timestamps(sid, cid)
-                                                        .unwrap_or_default();
-                                                    swarm.behaviour_mut().messaging.send_request(
-                                                        &peer_id,
-                                                        HavenMessage::ChannelSyncRequest {
-                                                            server_id: sid.clone(),
-                                                            channel_id: cid.clone(),
-                                                            since_timestamp: since,
-                                                            sender_timestamps: sender_ts,
-                                                        },
-                                                    );
+                                        // Channel message sync — register with fan-out coordinator.
+                                        // Instead of syncing every channel from this one peer,
+                                        // the coordinator collects peers for 500ms, then assigns
+                                        // channels evenly across all available peers.
+                                        {
+                                            let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                            if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
+                                                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                                    let channels_ts: Vec<(String, i64)> = state.channels.keys()
+                                                        .map(|cid| {
+                                                            let ts = store
+                                                                .get_latest_channel_timestamp(sid, cid)
+                                                                .unwrap_or(None)
+                                                                .unwrap_or(0);
+                                                            (cid.clone(), ts)
+                                                        })
+                                                        .collect();
+                                                    sync_coordinator.register_peer(sid, peer_id, channels_ts);
                                                 }
                                             }
                                         }
-
-                                        let _ = event_tx.send(NetworkEvent::MessageSyncStarted {
-                                            server_id: sid.clone(),
-                                            peer_id: reconnected_peer_str.clone(),
-                                        }).await;
 
                                         // MLS: if we're the owner and this peer isn't in the MLS group yet,
                                         // request their KeyPackage so we can add them.
@@ -3254,6 +3424,42 @@ async fn run_swarm(
                         room_code: sid.clone(),
                     }).await;
                 }
+            }
+
+            // Multi-peer fan-out sync coordinator dispatch.
+            // Checks every 100ms if any servers have passed the 500ms collection window
+            // and are ready to dispatch channel sync probes across peers.
+            _ = sync_dispatch_timer.tick() => {
+                let ready = sync_coordinator.collect_ready();
+                for (server_id, assignments) in &ready {
+                    let total_channels: usize = assignments.iter().map(|(_, chs)| chs.len()).sum();
+                    let total_peers = assignments.len();
+                    haven_log!(
+                        "[HAVEN-SYNC] Fan-out dispatch for server {server_id}: {total_channels} channel probes across {total_peers} peers"
+                    );
+
+                    for (peer, channels) in assignments {
+                        for (channel_id, our_latest) in channels {
+                            swarm.behaviour_mut().messaging.send_request(
+                                peer,
+                                HavenMessage::ChannelSyncProbe {
+                                    server_id: server_id.clone(),
+                                    channel_id: channel_id.clone(),
+                                    our_latest: *our_latest,
+                                },
+                            );
+                        }
+                    }
+
+                    // Emit sync started for UI feedback.
+                    let _ = event_tx.send(NetworkEvent::MessageSyncStarted {
+                        server_id: server_id.clone(),
+                        peer_id: "fan-out".to_string(),
+                    }).await;
+                }
+
+                // Clean up stale entries (dispatched > 30s ago).
+                sync_coordinator.cleanup_stale();
             }
 
             // Flush pending disconnects that have passed the debounce window.
@@ -4384,6 +4590,91 @@ async fn handle_incoming_request(
                             // on the responder side causes an infinite loop:
                             // SessionEstablished → flush → encrypt fail → re-key → SessionEstablished → ...
                         }
+                    }
+                }
+            }
+        }
+
+        // -- Multi-peer fan-out sync probe handlers --
+
+        HavenMessage::ChannelSyncProbe { server_id, channel_id, our_latest } => {
+            let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
+
+            // Room gating: only respond for servers we're a member of.
+            if !server_states.contains_key(&server_id) {
+                return;
+            }
+
+            let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+            if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
+                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                    let their_latest = store
+                        .get_latest_channel_timestamp(&server_id, &channel_id)
+                        .unwrap_or(None)
+                        .unwrap_or(0);
+                    let msg_count = store
+                        .count_channel_messages_since(&server_id, &channel_id, 0)
+                        .unwrap_or(0);
+
+                    haven_log!(
+                        "[HAVEN-SYNC] Probe from {peer_str} for {channel_id}: ours={their_latest} theirs={our_latest} (count={msg_count})"
+                    );
+
+                    swarm.behaviour_mut().messaging.send_request(
+                        &peer,
+                        HavenMessage::ChannelSyncProbeResponse {
+                            server_id,
+                            channel_id,
+                            their_latest,
+                            msg_count,
+                        },
+                    );
+                }
+            }
+        }
+
+        HavenMessage::ChannelSyncProbeResponse { server_id, channel_id, their_latest, msg_count } => {
+            let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
+
+            // Compare: if the peer has newer messages than us, fire a full sync request.
+            let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+            if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
+                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                    let our_latest = store
+                        .get_latest_channel_timestamp(&server_id, &channel_id)
+                        .unwrap_or(None)
+                        .unwrap_or(0);
+
+                    if their_latest > our_latest || (msg_count > 0 && our_latest == 0) {
+                        // Peer has newer messages — fire full sync request.
+                        let sender_ts = store
+                            .get_per_sender_timestamps(&server_id, &channel_id)
+                            .unwrap_or_default();
+                        haven_log!(
+                            "[HAVEN-SYNC] Probe response: {channel_id} needs sync (ours={our_latest} peer={their_latest}, peer_count={msg_count}). Requesting from {peer_str}"
+                        );
+                        swarm.behaviour_mut().messaging.send_request(
+                            &peer,
+                            HavenMessage::ChannelSyncRequest {
+                                server_id: server_id.clone(),
+                                channel_id: channel_id.clone(),
+                                since_timestamp: our_latest,
+                                sender_timestamps: sender_ts,
+                            },
+                        );
+                    } else {
+                        haven_log!(
+                            "[HAVEN-SYNC] Probe response: {channel_id} is up to date (ours={our_latest} peer={their_latest}). Skipping."
+                        );
+                        // Emit completion for this channel so UI knows sync is done.
+                        let _ = event_tx.send(NetworkEvent::MessageSyncCompleted {
+                            server_id,
+                            new_message_count: 0,
+                        }).await;
                     }
                 }
             }

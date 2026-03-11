@@ -562,7 +562,7 @@ class _ServerMemberTile extends ConsumerWidget {
             peerId: peerId,
             nickname: nickname.isNotEmpty ? nickname : null,
             role: role,
-            anchor: Offset(pos.dx - 270, pos.dy - 100),
+            anchor: Offset(pos.dx - 290, pos.dy - 100),
           );
         },
         padding: const EdgeInsets.symmetric(
@@ -660,7 +660,7 @@ class _MemberTile extends ConsumerWidget {
           context: context,
           ref: ref,
           peerId: peerId,
-          anchor: Offset(pos.dx - 270, pos.dy - 100),
+          anchor: Offset(pos.dx - 290, pos.dy - 100),
         );
       },
       padding: const EdgeInsets.symmetric(

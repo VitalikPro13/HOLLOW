@@ -135,7 +135,7 @@ class UserBar extends ConsumerWidget {
                       peerId: localPeerId,
                       anchor: Offset(
                         pos.dx,
-                        pos.dy - 280, // well above the bar
+                        pos.dy - 310, // well above the bar
                       ),
                     );
                   }

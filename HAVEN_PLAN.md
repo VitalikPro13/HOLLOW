@@ -952,7 +952,8 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 **Chat Essentials:**
 - [X] Chat Redesign — flat stacked layout.
-- [ ] Message editing — CRDT op (EditMessage with original message ID + new text), broadcast to server members, update in local DB + UI. Edited messages show "(edited)" indicator. 🎞️ Animate: edit highlight flash
+- [X] Message editing — CRDT op (EditMessage with original message ID + new text), broadcast to server members, update in local DB + UI. Edited messages show "(edited)" indicator. 🎞️ Animate: edit highlight flash
+- [X] Multi-Peer Fan-out Sync — SyncCoordinator collects connected peers for 500ms, assigns channels round-robin across all available peers (primary + backup), sends lightweight ChannelSyncProbe (timestamp comparison) before full sync. Channels with no new messages are skipped entirely. Equal load distribution: the more peers online, the lighter the load per peer. On-demand RequestChannelSync (user opens channel) still fans out to all peers for immediacy
 - [ ] Message deletion — Channel: soft-delete (deleted_at timestamp, row stays in DB for Rat Files evidence preservation). DM: hard delete from local DB only (other peer keeps their copy). UI shows "Message deleted" placeholder. 🎞️ Animate: delete shrink+fade-out
 - [ ] Reply chains — reference parent message ID in envelope, render with quoted preview above reply. Clicking quote scrolls to original. 🎞️ Animate: reply chain indent slide
 - [ ] Emoji reactions — PN-Counter CRDT per emoji per message, broadcast to server members. 🎞️ Animate: reaction pop-in with spring bounce, count increment/decrement
@@ -983,6 +984,8 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 - [ ] File upload → encrypt → erasure-code → distribute pipeline. 🎞️ Animate: upload progress with encrypt→split→distribute step visualization
 - [ ] Image/file preview and download from distributed storage. 🎞️ Animate: image load shimmer placeholder → fade-in, download progress reconstruction
 - [ ] Storage tier configuration (retention policies per data type)
+- [ ] Connection subset management — limit persistent connections to 6-12 peers per server (not all members). Prefer peers with high uptime, low latency, good bandwidth. Rotate periodically for network diversity. Critical for 1,000+ member servers where full-mesh connections would overwhelm libp2p.
+- [ ] Channel-level CRDT sharding — split server CRDT state into per-channel documents instead of one monolithic ServerState. Reduces sync payload and memory footprint for servers with 5,000+ members and many channels. Each peer only needs full CRDT state for channels they participate in.
 
 **Deliverable:** Server data lives distributed across members. No single point of failure.
 
@@ -1025,7 +1028,6 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 - [ ] Device linking via QR code (multi-device identity sync) — requires MLS + CRDTs. 🎞️ Animate: QR scan success celebration, device linked confirmation
 - [ ] Mobile platform testing & platform-specific fixes (adaptive layout built in Phase 2.5)
 - [ ] Accessibility (screen reader support, high contrast)
-- [ ] 🎞️ Animation final pass — sweep all existing UI: hover micro-interactions on every button/card, panel slide transitions (sidebar open/close, member panel toggle), message appearance animations (staggered fade+slide on load, instant append on new), smooth theme switching crossfade, page/route transitions, loading skeletons replacing spinners
 
 **Deliverable:** A polished, feature-complete communication platform ready for public release.
 
