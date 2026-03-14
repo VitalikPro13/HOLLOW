@@ -86,9 +86,14 @@ Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection mana
 - Server/DM state management fix: Server strip `onTap` clears `selectedPeerProvider` (hides DM chat on server switch). `lastChannelPerServerProvider` remembers last viewed channel per server. Auto-selects first channel when no prior selection exists. Channel selection saved on click for recall.
 - Connection progress bar: `ConnectionProgress` widget (`connection_progress.dart`) with animated 3-stage progress bar — Connecting (33%, gray) → Encrypting (66%, accent) → fills to 100%, fades out, replaced by lock + "Encrypted". Used in both DM headers and channel headers. Channel header: `_ChannelConnectionStatus` replaces static "E2E Encrypted" + old `_ConnectionIndicator`. Checks online members vs encrypted sessions. Sync indicator (Syncing/Synced/Failed) shown alongside after encryption. DM header: watches `peersProvider` directly instead of static `isEncrypted` prop.
 - Shader warmup: Added `ImageFilter.blur` pre-compilation for glassmorphism dialog animations (was missing, caused jank on first dialog open).
+- Rich text / markdown: Lightweight parser (`message_text_parser.dart`) — **bold**, *italic*, ~~strikethrough~~, `inline code`, ```code blocks```, ||spoilers|| (tap to reveal). Pure Dart, no dependencies. Both DM and channel bubbles use `buildMessageText()`. No HTML, images, or links — secure by design.
+- Multiline input: Chat input auto-grows up to 5 lines (`maxLines: 5, minLines: 1`). Enter sends, Shift+Enter inserts newline. `onSubmitted` replaced with `Focus(onKeyEvent:)` wrapper. Inline edit field also multiline with same Enter/Shift+Enter behavior.
+- Formatting shortcuts: Ctrl+B (bold), Ctrl+I (italic), Ctrl+E (code), Ctrl+Shift+X (strikethrough), Ctrl+Shift+S (spoiler). Wraps selection or inserts markers at cursor. Shared `handleChatInputKey()` in `chat_input_shortcuts.dart`.
+- Avatar alignment fix: 5px top padding on message avatars for proper vertical centering with name/text row.
+- Send button hover fix: `HavenPressable` with `backgroundColor` now lightens 15% toward white on hover instead of replacing with dark `elevated` color. Prevents dark-on-dark icon visibility issue.
 
 **Phase 3.5 remaining:**
-1. Chat Essentials: markdown rendering, pinned messages
+1. Chat Essentials: pinned messages
 2. QoL: notifications, search, keyboard shortcuts, basic P2P file sharing (WebP internal format)
 
 ## Haven Design System (Phase 2.75)

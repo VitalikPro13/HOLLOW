@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:haven/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/core/providers/chat_provider.dart';
 import 'package:haven/src/core/providers/identity_provider.dart';
@@ -491,17 +492,23 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           child: Row(
             children: [
               Expanded(
-                child: HavenTextField(
-                  controller: _controller,
-                  focusNode: _focusNode,
-                  hintText: 'Type a message...',
-                  autofocus: true,
-                  style: HavenTypography.body.copyWith(
-                    color: haven.textPrimary,
+                child: Focus(
+                  onKeyEvent: (_, event) => handleChatInputKey(
+                    event, _controller, _focusNode, _handleSend,
                   ),
-                  borderRadius: haven.radiusLg,
-                  onChanged: _onTextChanged,
-                  onSubmitted: (_) => _handleSend(),
+                  child: HavenTextField(
+                    controller: _controller,
+                    focusNode: _focusNode,
+                    hintText: 'Type a message...',
+                    autofocus: true,
+                    maxLines: 5,
+                    minLines: 1,
+                    style: HavenTypography.body.copyWith(
+                      color: haven.textPrimary,
+                    ),
+                    borderRadius: haven.radiusLg,
+                    onChanged: _onTextChanged,
+                  ),
                 ),
               ),
               const SizedBox(width: HavenSpacing.sm),

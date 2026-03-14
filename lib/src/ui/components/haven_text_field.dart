@@ -19,7 +19,8 @@ class HavenTextField extends StatefulWidget {
   final bool autofocus;
   final String? errorText;
   final bool obscureText;
-  final int maxLines;
+  final int? maxLines;
+  final int? minLines;
   final FocusNode? focusNode;
   final double? borderRadius;
   final int? maxLength;
@@ -37,6 +38,7 @@ class HavenTextField extends StatefulWidget {
     this.errorText,
     this.obscureText = false,
     this.maxLines = 1,
+    this.minLines,
     this.focusNode,
     this.borderRadius,
     this.maxLength,
@@ -125,6 +127,7 @@ class _HavenTextFieldState extends State<HavenTextField>
       autofocus: widget.autofocus,
       obscureText: widget.obscureText,
       maxLines: widget.maxLines,
+      minLines: widget.minLines,
       maxLength: widget.maxLength,
       onSubmitted: widget.onSubmitted,
       onChanged: widget.onChanged,

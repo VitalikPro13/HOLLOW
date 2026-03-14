@@ -12,6 +12,7 @@ import 'package:haven/src/theme/haven_spacing.dart';
 import 'package:haven/src/theme/haven_theme.dart';
 import 'package:haven/src/theme/haven_typography.dart';
 import 'package:haven/src/ui/chat/channel_message_bubble.dart';
+import 'package:haven/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:haven/src/ui/chat/chat_pane.dart';
 import 'package:haven/src/ui/chat/message_action_bar.dart';
 import 'package:haven/src/ui/components/connection_progress.dart';
@@ -453,16 +454,22 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           child: Row(
             children: [
               Expanded(
-                child: HavenTextField(
-                  controller: _controller,
-                  focusNode: _focusNode,
-                  hintText: 'Message #${widget.channelName}',
-                  autofocus: true,
-                  style: HavenTypography.body
-                      .copyWith(color: haven.textPrimary),
-                  borderRadius: haven.radiusLg,
-                  onChanged: _onTextChanged,
-                  onSubmitted: (_) => _handleSend(),
+                child: Focus(
+                  onKeyEvent: (_, event) => handleChatInputKey(
+                    event, _controller, _focusNode, _handleSend,
+                  ),
+                  child: HavenTextField(
+                    controller: _controller,
+                    focusNode: _focusNode,
+                    hintText: 'Message #${widget.channelName}',
+                    autofocus: true,
+                    maxLines: 5,
+                    minLines: 1,
+                    style: HavenTypography.body
+                        .copyWith(color: haven.textPrimary),
+                    borderRadius: haven.radiusLg,
+                    onChanged: _onTextChanged,
+                  ),
                 ),
               ),
               const SizedBox(width: HavenSpacing.sm),

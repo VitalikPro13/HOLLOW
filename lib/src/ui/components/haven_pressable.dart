@@ -140,7 +140,10 @@ class _HavenPressableState extends State<HavenPressable>
               curve: HavenCurves.subtle,
               decoration: BoxDecoration(
                 color: _hovering && isInteractive
-                    ? effectiveHoverColor
+                    ? (widget.backgroundColor != null
+                        ? Color.lerp(
+                            widget.backgroundColor!, Colors.white, 0.15)!
+                        : effectiveHoverColor)
                     : (widget.backgroundColor ?? Colors.transparent),
                 borderRadius: widget.borderRadius,
                 boxShadow: _hovering &&

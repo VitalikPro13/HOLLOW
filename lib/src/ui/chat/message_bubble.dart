@@ -6,6 +6,7 @@ import 'package:haven/src/core/providers/profile_provider.dart';
 import 'package:haven/src/theme/haven_spacing.dart';
 import 'package:haven/src/theme/haven_theme.dart';
 import 'package:haven/src/theme/haven_typography.dart';
+import 'package:haven/src/ui/chat/message_text_parser.dart';
 import 'package:haven/src/ui/chat/reaction_bar.dart';
 import 'package:haven/src/ui/components/haven_avatar.dart';
 
@@ -101,22 +102,20 @@ class MessageBubble extends ConsumerWidget {
           )
         : null;
 
-    final messageTextWidget = Text.rich(
-      TextSpan(
-        text: message.text,
-        style: HavenTypography.body.copyWith(color: haven.textPrimary),
-        children: isEdited
-            ? [
-                TextSpan(
-                  text: ' (edited)',
-                  style: HavenTypography.caption.copyWith(
-                    color: haven.textSecondary.withValues(alpha: 0.5),
-                    fontSize: 10,
-                  ),
+    final messageTextWidget = buildMessageText(
+      message.text,
+      context,
+      suffixSpans: isEdited
+          ? [
+              TextSpan(
+                text: ' (edited)',
+                style: HavenTypography.caption.copyWith(
+                  color: haven.textSecondary.withValues(alpha: 0.5),
+                  fontSize: 10,
                 ),
-              ]
-            : null,
-      ),
+              ),
+            ]
+          : null,
     );
 
     final reactionBarWidget = message.reactions.isNotEmpty && onToggleReaction != null
@@ -145,7 +144,10 @@ class MessageBubble extends ConsumerWidget {
         child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              HavenAvatar(peerId: senderId, size: avatarSize),
+              Padding(
+                padding: const EdgeInsets.only(top: 5),
+                child: HavenAvatar(peerId: senderId, size: avatarSize),
+              ),
               const SizedBox(width: avatarGap),
               Expanded(
                 child: Column(

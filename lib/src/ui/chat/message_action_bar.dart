@@ -113,9 +113,31 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
     _editController = TextEditingController(text: widget.currentText);
     _editFocusNode = FocusNode(
       onKeyEvent: (node, event) {
-        if (event is KeyDownEvent &&
-            event.logicalKey == LogicalKeyboardKey.escape) {
+        if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+          return KeyEventResult.ignored;
+        }
+        if (event.logicalKey == LogicalKeyboardKey.escape) {
           widget.onEditCancel?.call();
+          return KeyEventResult.handled;
+        }
+        // Enter to save, Shift+Enter for newline.
+        if (event.logicalKey == LogicalKeyboardKey.enter) {
+          if (HardwareKeyboard.instance.isShiftPressed) {
+            final sel = _editController.selection;
+            final text = _editController.text;
+            final newText = text.replaceRange(sel.start, sel.end, '\n');
+            _editController.value = TextEditingValue(
+              text: newText,
+              selection: TextSelection.collapsed(offset: sel.start + 1),
+            );
+            return KeyEventResult.handled;
+          }
+          final trimmed = _editController.text.trim();
+          if (trimmed.isNotEmpty && trimmed != widget.currentText) {
+            widget.onEditSubmit?.call(trimmed);
+          } else {
+            widget.onEditCancel?.call();
+          }
           return KeyEventResult.handled;
         }
         return KeyEventResult.ignored;
@@ -329,7 +351,8 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
             controller: _editController,
             focusNode: _editFocusNode,
             style: HavenTypography.body.copyWith(color: haven.textPrimary),
-            maxLines: 1,
+            maxLines: 5,
+            minLines: 1,
             decoration: InputDecoration(
               filled: true,
               fillColor: haven.elevated,
@@ -351,18 +374,10 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
               ),
             ),
             onTapOutside: (_) => widget.onEditCancel?.call(),
-            onSubmitted: (text) {
-              final trimmed = text.trim();
-              if (trimmed.isNotEmpty && trimmed != widget.currentText) {
-                widget.onEditSubmit?.call(trimmed);
-              } else {
-                widget.onEditCancel?.call();
-              }
-            },
           ),
           const SizedBox(height: 4),
           Text(
-            'escape to cancel  •  enter to save',
+            'escape to cancel  •  enter to save  •  shift+enter for new line',
             style: HavenTypography.caption.copyWith(
               color: haven.textSecondary.withValues(alpha: 0.5),
               fontSize: 10,
