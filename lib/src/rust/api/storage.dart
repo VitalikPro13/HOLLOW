@@ -60,6 +60,31 @@ Future<String?> loadSetting({required String key}) =>
 Future<List<FriendFfi>> loadFriends({String? status}) =>
     RustLib.instance.api.crateApiStorageLoadFriends(status: status);
 
+/// A single reaction on a message, returned to Dart.
+/// Search channel messages by text.
+Future<List<StoredChannelMessage>> searchChannelMessages({
+  required String serverId,
+  required String channelId,
+  required String query,
+  required int limit,
+}) => RustLib.instance.api.crateApiStorageSearchChannelMessages(
+  serverId: serverId,
+  channelId: channelId,
+  query: query,
+  limit: limit,
+);
+
+/// Search DM messages by text.
+Future<List<StoredMessage>> searchDmMessages({
+  required String peerId,
+  required String query,
+  required int limit,
+}) => RustLib.instance.api.crateApiStorageSearchDmMessages(
+  peerId: peerId,
+  query: query,
+  limit: limit,
+);
+
 /// Load all reactions for a list of message IDs.
 /// Returns reactions grouped by message_id for efficient bulk loading.
 Future<List<StoredReaction>> loadReactions({
@@ -263,7 +288,6 @@ class StoredMessage {
           replyToMid == other.replyToMid;
 }
 
-/// A single reaction on a message, returned to Dart.
 class StoredReaction {
   final String messageId;
   final String emoji;

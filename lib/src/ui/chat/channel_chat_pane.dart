@@ -23,6 +23,7 @@ import 'package:haven/src/ui/components/haven_text_field.dart';
 import 'package:haven/src/ui/components/haven_tooltip.dart';
 import 'package:haven/src/ui/components/status_dot.dart';
 import 'package:haven/src/rust/api/network.dart' as network_api;
+import 'package:haven/src/rust/api/storage.dart' as storage_api;
 import 'package:lucide_icons/lucide_icons.dart';
 
 class ChannelChatPane extends ConsumerStatefulWidget {
@@ -52,6 +53,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   String? _replyToText;
   String? _replyToSenderName;
   DateTime? _lastTypingSent;
+  bool _searchOpen = false;
+  final _searchController = TextEditingController();
+  List<dynamic> _searchResults = [];
 
   String get _stateKey => '${widget.serverId}:${widget.channelId}';
 
@@ -76,6 +80,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     _controller.dispose();
     _scrollController.dispose();
     _focusNode.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
@@ -236,6 +241,22 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     );
   }
 
+  Future<void> _onSearch(String query) async {
+    if (query.trim().isEmpty) {
+      setState(() => _searchResults = []);
+      return;
+    }
+    try {
+      final results = await storage_api.searchChannelMessages(
+        serverId: widget.serverId,
+        channelId: widget.channelId,
+        query: query.trim(),
+        limit: 20,
+      );
+      if (mounted) setState(() => _searchResults = results);
+    } catch (_) {}
+  }
+
   void _onTextChanged(String text) {
     if (text.isEmpty) return;
     final now = DateTime.now();
@@ -341,6 +362,20 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
               }),
               const SizedBox(width: HavenSpacing.sm),
               HavenTooltip(
+                message: 'Search messages',
+                child: HavenPressable(
+                  onTap: () => setState(() => _searchOpen = !_searchOpen),
+                  borderRadius: BorderRadius.circular(haven.radiusSm),
+                  padding: const EdgeInsets.all(HavenSpacing.xs),
+                  child: Icon(
+                    LucideIcons.search,
+                    size: 18,
+                    color: _searchOpen ? haven.accent : haven.textSecondary,
+                  ),
+                ),
+              ),
+              const SizedBox(width: HavenSpacing.sm),
+              HavenTooltip(
                 message: 'Toggle member panel',
                 child: HavenPressable(
                   onTap: () => ref.read(memberPanelProvider.notifier).state =
@@ -359,6 +394,120 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             ],
           ),
         ),
+
+        // Search bar
+        if (_searchOpen)
+          Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: HavenSpacing.md,
+              vertical: HavenSpacing.sm,
+            ),
+            decoration: BoxDecoration(
+              color: haven.surface,
+              border: Border(bottom: BorderSide(color: haven.border)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                HavenTextField(
+                  controller: _searchController,
+                  hintText: 'Search in #${widget.channelName}...',
+                  autofocus: true,
+                  isDense: true,
+                  prefixIcon: Icon(LucideIcons.search, size: 16),
+                  onChanged: _onSearch,
+                  style: HavenTypography.body.copyWith(
+                    color: haven.textPrimary,
+                    fontSize: 13,
+                  ),
+                ),
+                if (_searchResults.isNotEmpty)
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 200),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: _searchResults.length,
+                      itemBuilder: (_, index) {
+                        final msg = _searchResults[index];
+                        final profiles = ref.watch(profileProvider);
+                        final nicknames = ref.watch(
+                            serverNicknamesProvider(widget.serverId));
+                        final name = serverDisplayNameFor(
+                          profiles,
+                          msg.senderId,
+                          nickname: nicknames[msg.senderId] ?? '',
+                        );
+                        final time = DateTime.fromMillisecondsSinceEpoch(
+                            msg.timestamp);
+                        final timeStr =
+                            '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+                        return Padding(
+                          padding: const EdgeInsets.only(
+                              top: HavenSpacing.xs),
+                          child: HavenPressable(
+                            subtle: true,
+                            onTap: () {
+                              setState(() {
+                                _searchOpen = false;
+                                _searchController.clear();
+                                _searchResults = [];
+                              });
+                            },
+                            borderRadius:
+                                BorderRadius.circular(haven.radiusSm),
+                            hoverColor: haven.elevated,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: HavenSpacing.sm,
+                              vertical: HavenSpacing.xs,
+                            ),
+                            child: Column(
+                              crossAxisAlignment:
+                                  CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Text(
+                                      name,
+                                      style: HavenTypography.caption
+                                          .copyWith(
+                                        color: haven.accent,
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 11,
+                                      ),
+                                    ),
+                                    const SizedBox(
+                                        width: HavenSpacing.sm),
+                                    Text(
+                                      timeStr,
+                                      style: HavenTypography.caption
+                                          .copyWith(
+                                        color: haven.textSecondary
+                                            .withValues(alpha: 0.5),
+                                        fontSize: 10,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  msg.text,
+                                  style: HavenTypography.body.copyWith(
+                                    color: haven.textPrimary,
+                                    fontSize: 12,
+                                  ),
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            ),
+          ),
 
         // Messages list
         Expanded(

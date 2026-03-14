@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -934059773;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -279915777;
 
 // Section: executor
 
@@ -1835,6 +1835,83 @@ fn wire__crate__api__storage__save_setting_impl(
         },
     )
 }
+fn wire__crate__api__storage__search_channel_messages_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "search_channel_messages",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_server_id = <String>::sse_decode(&mut deserializer);
+            let api_channel_id = <String>::sse_decode(&mut deserializer);
+            let api_query = <String>::sse_decode(&mut deserializer);
+            let api_limit = <i32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::storage::search_channel_messages(
+                        api_server_id,
+                        api_channel_id,
+                        api_query,
+                        api_limit,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__storage__search_dm_messages_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "search_dm_messages",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_peer_id = <String>::sse_decode(&mut deserializer);
+            let api_query = <String>::sse_decode(&mut deserializer);
+            let api_limit = <i32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok =
+                        crate::api::storage::search_dm_messages(api_peer_id, api_query, api_limit)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__network__send_channel_message_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -3196,24 +3273,31 @@ fn pde_ffi_dispatcher_primary_impl(
         }
         50 => wire__crate__api__storage__save_message_impl(port, ptr, rust_vec_len, data_len),
         51 => wire__crate__api__storage__save_setting_impl(port, ptr, rust_vec_len, data_len),
-        52 => {
+        52 => wire__crate__api__storage__search_channel_messages_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        53 => wire__crate__api__storage__search_dm_messages_impl(port, ptr, rust_vec_len, data_len),
+        54 => {
             wire__crate__api__network__send_channel_message_impl(port, ptr, rust_vec_len, data_len)
         }
-        53 => {
+        55 => {
             wire__crate__api__network__send_friend_request_impl(port, ptr, rust_vec_len, data_len)
         }
-        54 => wire__crate__api__network__send_message_impl(port, ptr, rust_vec_len, data_len),
-        55 => {
+        56 => wire__crate__api__network__send_message_impl(port, ptr, rust_vec_len, data_len),
+        57 => {
             wire__crate__api__network__send_typing_indicator_impl(port, ptr, rust_vec_len, data_len)
         }
-        56 => wire__crate__api__crdt__set_nickname_impl(port, ptr, rust_vec_len, data_len),
-        57 => wire__crate__api__network__start_node_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__network__stop_node_impl(port, ptr, rust_vec_len, data_len),
-        59 => wire__crate__api__crdt__unpin_message_impl(port, ptr, rust_vec_len, data_len),
-        60 => wire__crate__api__crdt__update_channel_layout_impl(port, ptr, rust_vec_len, data_len),
-        61 => wire__crate__api__network__update_profile_impl(port, ptr, rust_vec_len, data_len),
-        62 => wire__crate__api__crdt__update_server_setting_impl(port, ptr, rust_vec_len, data_len),
-        63 => {
+        58 => wire__crate__api__crdt__set_nickname_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__network__start_node_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__network__stop_node_impl(port, ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__crdt__unpin_message_impl(port, ptr, rust_vec_len, data_len),
+        62 => wire__crate__api__crdt__update_channel_layout_impl(port, ptr, rust_vec_len, data_len),
+        63 => wire__crate__api__network__update_profile_impl(port, ptr, rust_vec_len, data_len),
+        64 => wire__crate__api__crdt__update_server_setting_impl(port, ptr, rust_vec_len, data_len),
+        65 => {
             wire__crate__api__network__watch_network_events_impl(port, ptr, rust_vec_len, data_len)
         }
         _ => unreachable!(),

@@ -207,6 +207,69 @@ pub fn load_friends(status: Option<String>) -> Result<Vec<FriendFfi>, String> {
 }
 
 /// A single reaction on a message, returned to Dart.
+/// Search channel messages by text.
+#[frb]
+pub fn search_channel_messages(
+    server_id: String,
+    channel_id: String,
+    query: String,
+    limit: i32,
+) -> Result<Vec<StoredChannelMessage>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    ms.search_channel_messages(&server_id, &channel_id, &query, limit)
+        .map(|rows| {
+            rows.into_iter()
+                .map(|m| StoredChannelMessage {
+                    id: m.id,
+                    server_id: m.server_id,
+                    channel_id: m.channel_id,
+                    sender_id: m.sender_id,
+                    text: m.text,
+                    is_mine: m.is_mine,
+                    timestamp: m.timestamp,
+                    signature: m.signature,
+                    public_key: m.public_key,
+                    message_id: m.message_id,
+                    edited_at: m.edited_at,
+                    hidden_at: m.hidden_at,
+                    reply_to_mid: m.reply_to_mid,
+                })
+                .collect()
+        })
+}
+
+/// Search DM messages by text.
+#[frb]
+pub fn search_dm_messages(
+    peer_id: String,
+    query: String,
+    limit: i32,
+) -> Result<Vec<StoredMessage>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    ms.search_dm_messages(&peer_id, &query, limit)
+        .map(|rows| {
+            rows.into_iter()
+                .map(|m| StoredMessage {
+                    id: m.id,
+                    peer_id: m.peer_id,
+                    text: m.text,
+                    is_mine: m.is_mine,
+                    timestamp: m.timestamp,
+                    signature: m.signature,
+                    public_key: m.public_key,
+                    message_id: m.message_id,
+                    edited_at: m.edited_at,
+                    hidden_at: m.hidden_at,
+                    reply_to_mid: m.reply_to_mid,
+                })
+                .collect()
+        })
+}
+
 pub struct StoredReaction {
     pub message_id: String,
     pub emoji: String,

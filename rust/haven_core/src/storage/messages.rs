@@ -523,6 +523,8 @@ impl MessageStore {
     }
 
     /// Get the latest DM timestamp for a peer (for DM sync requests).
+    /// Only considers received messages (is_mine=0) since sync only sends
+    /// the other peer's sent messages (their is_mine=1 = our is_mine=0).
     pub fn get_latest_dm_timestamp(
         &self,
         peer_id: &str,
@@ -530,7 +532,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT MAX(timestamp) FROM messages WHERE peer_id = ?1",
+                "SELECT MAX(timestamp) FROM messages WHERE peer_id = ?1 AND is_mine = 0",
             )
             .map_err(|e| format!("Failed to prepare dm latest timestamp query: {e}"))?;
         let mut rows = stmt
@@ -1557,6 +1559,101 @@ impl MessageStore {
     // ── App Settings ──────────────────────────────────────────────
 
     /// Save a key-value setting (insert or update).
+    // ── Search ────────────────────────────────────────────────────
+
+    /// Search channel messages by text content. Returns matching messages.
+    pub fn search_channel_messages(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        query: &str,
+        limit: i32,
+    ) -> Result<Vec<StoredChannelMessage>, String> {
+        let pattern = format!("%{}%", query);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid
+                 FROM channel_messages
+                 WHERE server_id = ?1 AND channel_id = ?2 AND hidden_at IS NULL AND text LIKE ?3
+                 ORDER BY id DESC
+                 LIMIT ?4",
+            )
+            .map_err(|e| format!("Failed to prepare search query: {e}"))?;
+
+        let rows = stmt
+            .query_map(params![server_id, channel_id, pattern, limit], |row| {
+                Ok(StoredChannelMessage {
+                    id: row.get(0)?,
+                    server_id: row.get(1)?,
+                    channel_id: row.get(2)?,
+                    sender_id: row.get(3)?,
+                    text: row.get(4)?,
+                    is_mine: row.get::<_, i32>(5)? != 0,
+                    timestamp: row.get(6)?,
+                    signature: row.get(7)?,
+                    public_key: row.get(8)?,
+                    message_id: row.get(9)?,
+                    edited_at: row.get(10)?,
+                    hidden_at: row.get(11)?,
+                    reply_to_mid: row.get(12)?,
+                })
+            })
+            .map_err(|e| format!("Failed to search messages: {e}"))?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row.map_err(|e| format!("Failed to read search row: {e}"))?);
+        }
+        messages.reverse();
+        Ok(messages)
+    }
+
+    /// Search DM messages by text content.
+    pub fn search_dm_messages(
+        &self,
+        peer_id: &str,
+        query: &str,
+        limit: i32,
+    ) -> Result<Vec<StoredMessage>, String> {
+        let pattern = format!("%{}%", query);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid
+                 FROM messages
+                 WHERE peer_id = ?1 AND hidden_at IS NULL AND text LIKE ?2
+                 ORDER BY id DESC
+                 LIMIT ?3",
+            )
+            .map_err(|e| format!("Failed to prepare DM search query: {e}"))?;
+
+        let rows = stmt
+            .query_map(params![peer_id, pattern, limit], |row| {
+                Ok(StoredMessage {
+                    id: row.get(0)?,
+                    peer_id: row.get(1)?,
+                    text: row.get(2)?,
+                    is_mine: row.get::<_, i32>(3)? != 0,
+                    timestamp: row.get(4)?,
+                    signature: row.get(5)?,
+                    public_key: row.get(6)?,
+                    message_id: row.get(7)?,
+                    edited_at: row.get(8)?,
+                    hidden_at: row.get(9)?,
+                    reply_to_mid: row.get(10)?,
+                })
+            })
+            .map_err(|e| format!("Failed to search DM messages: {e}"))?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row.map_err(|e| format!("Failed to read DM search row: {e}"))?);
+        }
+        messages.reverse();
+        Ok(messages)
+    }
+
     // ── Friends ───────────────────────────────────────────────────
 
     /// Save or update a friend entry.
