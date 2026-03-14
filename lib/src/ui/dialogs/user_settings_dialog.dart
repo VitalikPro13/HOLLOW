@@ -80,6 +80,9 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
 
   // Pending toggle states (applied only on Save).
   late bool _pendingDarkMode;
+  bool _pendingMinimizeToTray = true;
+  bool _initialMinimizeToTray = true;
+  bool _trayInitialized = false;
   bool _pendingProxy = false;
   bool _initialProxy = false;
   bool _proxyInitialized = false;
@@ -96,6 +99,13 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
         ref.read(themeModeProvider) == ThemeMode.dark;
 
     // If already loaded, use the value directly.
+    final trayAsync = ref.read(minimizeToTrayProvider);
+    if (trayAsync.hasValue) {
+      _pendingMinimizeToTray = trayAsync.value!;
+      _initialMinimizeToTray = _pendingMinimizeToTray;
+      _trayInitialized = true;
+    }
+
     final proxyAsync = ref.read(proxyEnabledProvider);
     if (proxyAsync.hasValue) {
       _pendingProxy = proxyAsync.value!;
@@ -126,6 +136,13 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     // Apply theme change.
     ref.read(themeModeProvider.notifier).state =
         _pendingDarkMode ? ThemeMode.dark : ThemeMode.light;
+
+    // Apply minimize to tray change.
+    if (_pendingMinimizeToTray != _initialMinimizeToTray) {
+      await ref
+          .read(minimizeToTrayProvider.notifier)
+          .setEnabled(_pendingMinimizeToTray);
+    }
 
     // Apply proxy change.
     final proxyChanged = _pendingProxy != _initialProxy;
@@ -160,6 +177,19 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
 
   @override
   Widget build(BuildContext context) {
+    // Update pending minimize-to-tray once the async value resolves.
+    if (!_trayInitialized) {
+      ref.listen(minimizeToTrayProvider, (prev, next) {
+        if (next.hasValue && !_trayInitialized) {
+          setState(() {
+            _pendingMinimizeToTray = next.value!;
+            _initialMinimizeToTray = _pendingMinimizeToTray;
+            _trayInitialized = true;
+          });
+        }
+      });
+    }
+
     // Update pending proxy once the async value resolves.
     if (!_proxyInitialized) {
       ref.listen(proxyEnabledProvider, (prev, next) {
@@ -489,6 +519,43 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                               ),
 
                               const SizedBox(height: HavenSpacing.md),
+
+                              // Minimize to tray toggle
+                              if (Platform.isWindows ||
+                                  Platform.isLinux ||
+                                  Platform.isMacOS)
+                                Row(
+                                  children: [
+                                    Icon(
+                                      LucideIcons.minimize2,
+                                      size: 16,
+                                      color: haven.textSecondary,
+                                    ),
+                                    const SizedBox(width: HavenSpacing.sm),
+                                    Expanded(
+                                      child: Text(
+                                        'Minimize to Tray',
+                                        style:
+                                            HavenTypography.body.copyWith(
+                                          color: haven.textPrimary,
+                                        ),
+                                      ),
+                                    ),
+                                    HavenToggle(
+                                      value: _pendingMinimizeToTray,
+                                      onChanged: (value) {
+                                        setState(() {
+                                          _pendingMinimizeToTray = value;
+                                        });
+                                      },
+                                    ),
+                                  ],
+                                ),
+
+                              if (Platform.isWindows ||
+                                  Platform.isLinux ||
+                                  Platform.isMacOS)
+                                const SizedBox(height: HavenSpacing.md),
 
                               // Proxy toggle
                               Row(

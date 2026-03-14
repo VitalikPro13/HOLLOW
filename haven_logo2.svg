@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="1000" height="1000">
+  <defs>
+    <!-- Background radial glow — spreads to edges, intense center -->
+    <radialGradient id="bgGlow" cx="50%" cy="50%" r="75%">
+      <stop offset="0%" stop-color="#1A3D36"/>
+      <stop offset="30%" stop-color="#122B27"/>
+      <stop offset="60%" stop-color="#0E1820"/>
+      <stop offset="100%" stop-color="#0D0F14"/>
+    </radialGradient>
+
+    <!-- Teal glow behind the H — spreads wide -->
+    <radialGradient id="tealGlow" cx="50%" cy="50%" r="75%">
+      <stop offset="0%" stop-color="#00BFA6" stop-opacity="0.22"/>
+      <stop offset="25%" stop-color="#00BFA6" stop-opacity="0.12"/>
+      <stop offset="55%" stop-color="#00BFA6" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#00BFA6" stop-opacity="0.01"/>
+    </radialGradient>
+
+    <!-- Outer glow — fills to edges -->
+    <radialGradient id="outerGlow" cx="50%" cy="50%" r="80%">
+      <stop offset="40%" stop-color="#00BFA6" stop-opacity="0"/>
+      <stop offset="70%" stop-color="#00BFA6" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#00BFA6" stop-opacity="0.02"/>
+    </radialGradient>
+
+    <!-- H letter gradient -->
+    <linearGradient id="hGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00E5C3"/>
+      <stop offset="100%" stop-color="#009980"/>
+    </linearGradient>
+
+    <!-- Lock body gradient -->
+    <linearGradient id="lockGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00D4B0"/>
+      <stop offset="100%" stop-color="#008A72"/>
+    </linearGradient>
+
+    <!-- Shackle gradient -->
+    <linearGradient id="shackleGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00E5C3"/>
+      <stop offset="100%" stop-color="#00BFA6"/>
+    </linearGradient>
+
+  </defs>
+
+  <!-- Full square background -->
+  <g>
+    <!-- Dark background -->
+    <rect width="1000" height="1000" fill="url(#bgGlow)"/>
+
+    <!-- Ambient teal glow layers — spread to fill square -->
+    <circle cx="500" cy="480" r="800" fill="url(#tealGlow)"/>
+    <circle cx="500" cy="500" r="800" fill="url(#outerGlow)"/>
+
+    <!-- Scattered particles — small -->
+    <circle cx="145" cy="195" r="3.5" fill="#00BFA6" opacity="0.4"/>
+    <circle cx="855" cy="165" r="3" fill="#00BFA6" opacity="0.35"/>
+    <circle cx="130" cy="780" r="4.5" fill="#00BFA6" opacity="0.3"/>
+    <circle cx="870" cy="820" r="3" fill="#00BFA6" opacity="0.35"/>
+    <circle cx="280" cy="130" r="2.5" fill="#00BFA6" opacity="0.45"/>
+    <circle cx="720" cy="870" r="3.5" fill="#00BFA6" opacity="0.3"/>
+    <circle cx="900" cy="480" r="3" fill="#00BFA6" opacity="0.35"/>
+    <circle cx="100" cy="500" r="3" fill="#00BFA6" opacity="0.3"/>
+    <circle cx="370" cy="880" r="2.5" fill="#00BFA6" opacity="0.35"/>
+    <circle cx="630" cy="120" r="3" fill="#00BFA6" opacity="0.4"/>
+    <circle cx="200" cy="380" r="2" fill="#00BFA6" opacity="0.3"/>
+    <circle cx="800" cy="350" r="2.5" fill="#00BFA6" opacity="0.35"/>
+    <circle cx="160" cy="620" r="2" fill="#00BFA6" opacity="0.25"/>
+    <circle cx="840" cy="630" r="2.5" fill="#00BFA6" opacity="0.3"/>
+    <circle cx="450" cy="900" r="2" fill="#00BFA6" opacity="0.3"/>
+    <circle cx="550" cy="100" r="2.5" fill="#00BFA6" opacity="0.35"/>
+    <circle cx="920" cy="270" r="2" fill="#00BFA6" opacity="0.25"/>
+    <circle cx="80" cy="300" r="2.5" fill="#00BFA6" opacity="0.3"/>
+
+    <!-- Larger soft blobs -->
+    <circle cx="230" cy="320" r="70" fill="#00BFA6" opacity="0.03"/>
+    <circle cx="770" cy="680" r="90" fill="#00BFA6" opacity="0.03"/>
+    <circle cx="680" cy="250" r="50" fill="#00BFA6" opacity="0.025"/>
+    <circle cx="320" cy="720" r="60" fill="#00BFA6" opacity="0.025"/>
+
+    <!-- ===== THE H WITH LOCK — single unified shape ===== -->
+
+    <!--
+      One continuous path: H pillars + crossbar + lock body + shackle.
+
+      Layout (Y coords):
+        Pillars: 220 to 780 (height 560), width 78, rounded ends
+        Crossbar: y=448 to y=536 (height 88), from pillar inner edges
+        Lock body: x=400 to x=600, y=440 to y=590 (centered on crossbar)
+        Shackle: from lock body top, arching up to y=320, radius 84
+
+      The path traces the full outer outline as one shape.
+    -->
+    <!--
+      Crossbar: y=448 to y=536 (88px, same as original)
+      Lock body: y=422 to y=562 (140px, centered on crossbar center y=492)
+      Shackle: from y=422 up, arch to ~y=330
+      Keyhole: centered at y=492
+    -->
+    <path d="
+      M 260 234
+      A 14 14 0 0 1 274 220
+      L 324 220
+      A 14 14 0 0 1 338 234
+      L 338 448
+      L 400 448
+      L 400 412
+      L 414 412
+      L 414 335
+      A 86 86 0 0 1 586 335
+      L 586 412
+      L 600 412
+      L 600 448
+      L 662 448
+      L 662 234
+      A 14 14 0 0 1 676 220
+      L 726 220
+      A 14 14 0 0 1 740 234
+      L 740 766
+      A 14 14 0 0 1 726 780
+      L 676 780
+      A 14 14 0 0 1 662 766
+      L 662 536
+      L 600 536
+      L 600 552
+      A 16 16 0 0 1 584 568
+      L 416 568
+      A 16 16 0 0 1 400 552
+      L 400 536
+      L 338 536
+      L 338 766
+      A 14 14 0 0 1 324 780
+      L 274 780
+      A 14 14 0 0 1 260 766
+      L 260 234
+
+      Z
+
+      M 450 412
+      L 450 335
+      A 50 50 0 0 1 550 335
+      L 550 412
+      Z
+    "
+    fill="url(#hGrad)"
+    fill-rule="evenodd"
+    />
+
+    <!-- Keyhole — centered on crossbar (y=492) -->
+    <circle cx="500" cy="477" r="18" fill="#0D0F14"/>
+    <rect x="493" y="487" width="14" height="34" rx="4" fill="#0D0F14"/>
+    <!-- Keyhole inner glow -->
+    <circle cx="500" cy="475" r="5" fill="#00BFA6" opacity="0.5"/>
+  </g>
+
+</svg>

@@ -97,7 +97,7 @@ Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection mana
 - Channel organization: CRDT-based `ChannelLayoutUpdated` op with `channel_layout: Vec<ChannelLayoutItem>` on ServerState. Three item types: `Category` (collapsible folder), `Channel` (reference), `Separator` (break). Channels tab rewritten with drag-and-drop `ReorderableListView`, tree connectors for nested channels, Save/Discard buttons. Sidebar renders layout with collapsible categories (`AnimatedSize`), separators as dividers. Layout only updates for all members on Save. `channelLayoutProvider` loads from DB. Computed `_dirty` getter compares current vs saved layout. `HavenButton` icon/text alignment fixed (height: 1.0).
 
 **Phase 3.5 remaining:**
-1. QoL: notifications, search, keyboard shortcuts, basic P2P file sharing (WebP internal format)
+1. QoL: system tray (minimize to tray on close, maintain connection), friends system & DM overhaul (replace room system with peer ID friend requests, persistent friends list, offline/online status), notifications (system-level, configurable per server/channel), search (local full-text over SQLCipher), keyboard shortcuts, basic P2P file sharing (WebP internal format, direct transfer via libp2p)
 
 ## Haven Design System (Phase 2.75)
 All UI interactions go through custom Haven widgets — no Material defaults anywhere. Change behavior in one place, applies everywhere.
