@@ -101,9 +101,11 @@ Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection mana
 - Friends system & DM overhaul: `friends` SQLCipher table (peer_id, status, direction, requested_at, updated_at). Wire: `FriendRequest`/`FriendAccept`/`FriendReject`/`FriendRemove` (plaintext). DM room codes via SHA-256 hash for signaling discovery without shared servers. Room codes registered on friend request send, receive, accept, and on startup for all friends. Room system UI removed, replaced with "Add Friend" dialog (paste peer ID). Sidebar shows friends list (online-first sort) with pending section (accept/reject for incoming, clock for outgoing). `PeerCard` has `isOnline` prop. Chat stays open on peer disconnect. `loadHistory` always reloads from DB (removed stale guard). Message ordering uses `ORDER BY id` (insertion order) not timestamp (immune to clock skew).
 - Haven logo: custom SVG (H + integrated lock), ICO for Windows app/tray icon.
 - Server dialog: two-panel (Join by link/ID on left, Create on right).
+- Search: local full-text search over SQLCipher (`LIKE` query). `search_channel_messages()` / `search_dm_messages()` in storage + FFI. Search button in channel header, expandable search bar with live results dropdown (max 20 results, sender name + time + text preview).
+- DM sync pagination fix: `get_latest_dm_timestamp()` now filters `is_mine = 0` (received messages only). Previous bug: included sent messages (higher timestamps) causing follow-up sync requests to skip remaining messages. Fixed 200-message cap on DM sync — now correctly paginates through all messages.
 
 **Phase 3.5 remaining:**
-1. QoL: notifications (system-level, configurable per server/channel), search (local full-text over SQLCipher), keyboard shortcuts, basic P2P file sharing (WebP internal format, direct transfer via libp2p)
+1. QoL: notifications (system-level, configurable per server/channel), keyboard shortcuts, basic P2P file sharing (WebP internal format, direct transfer via libp2p)
 2. Device linking deferred to Phase 6
 
 ## Haven Design System (Phase 2.75)
