@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/core/models/channel_chat_message.dart';
@@ -23,6 +25,7 @@ class ChannelMessageBubble extends ConsumerWidget {
   final bool showHeader;
   final String? replyToSenderName;
   final String? replyToText;
+  final String? replyToImagePath;
   final void Function(String emoji)? onToggleReaction;
 
   const ChannelMessageBubble({
@@ -32,6 +35,7 @@ class ChannelMessageBubble extends ConsumerWidget {
     required this.showHeader,
     this.replyToSenderName,
     this.replyToText,
+    this.replyToImagePath,
     this.onToggleReaction,
   });
 
@@ -95,6 +99,19 @@ class ChannelMessageBubble extends ConsumerWidget {
                     ],
                   ),
                 ),
+                if (replyToImagePath != null && File(replyToImagePath!).existsSync())
+                  Padding(
+                    padding: const EdgeInsets.only(left: HavenSpacing.sm),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: Image.file(
+                        File(replyToImagePath!),
+                        width: 32,
+                        height: 32,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                  ),
               ],
             ),
           )

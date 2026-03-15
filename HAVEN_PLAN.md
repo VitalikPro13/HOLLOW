@@ -971,6 +971,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 - [X] Keyboard shortcuts (navigate channels, servers, quick-switch, mark as read)
 - [X] Only one process instead of two apps being opened at the same time
 - [X] Basic file sharing — direct P2P transfer via libp2p, encrypt with MLS/Olm before sending, store locally on receiver. Image/file preview in chat. No erasure coding yet (that's Phase 4). All images auto-converted to lossless WebP on send (25-35% smaller than PNG/JPEG, Flutter decodes natively, Rust `image` crate encodes). "Save as" option converts to user's chosen format (PNG/JPEG/WebP). 🎞️ Animate: upload progress, image shimmer placeholder → fade-in
+- [ ] Click reply context to scroll to original message
 
 **Deliverable:** Haven feels like a complete, polished chat app. Ready for daily use with friends.
 

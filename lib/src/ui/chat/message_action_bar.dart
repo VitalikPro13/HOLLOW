@@ -28,6 +28,13 @@ class MessageActionBarController extends ChangeNotifier {
       _activeClose = null;
     }
   }
+
+  /// Dismiss the active hover overlay (e.g., on scroll).
+  void dismissAll() {
+    _activeClose?.call();
+    _activeKey = null;
+    _activeClose = null;
+  }
 }
 
 /// Place this above the message ListView to provide the shared controller.

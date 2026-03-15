@@ -61,12 +61,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   String? _replyToMessageId;
   String? _replyToText;
   String? _replyToSenderName;
+  String? _replyToImagePath;
   DateTime? _lastTypingSent;
   final _searchController = TextEditingController();
   List<dynamic> _searchResults = [];
   final _searchFocusNode = FocusNode();
 
   String get _stateKey => '${widget.serverId}:${widget.channelId}';
+
 
   @override
   void initState() {
@@ -248,8 +250,28 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                                 ],
                               ),
                               const SizedBox(height: 2),
+                              if (msg.fileAttachment != null) ...[
+                                if (msg.fileAttachment!.isImage &&
+                                    msg.fileAttachment!.diskPath != null &&
+                                    File(msg.fileAttachment!.diskPath!).existsSync())
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(haven.radiusSm),
+                                    child: Image.file(
+                                      File(msg.fileAttachment!.diskPath!),
+                                      height: 80,
+                                      fit: BoxFit.cover,
+                                    ),
+                                  )
+                                else
+                                  Text(
+                                    msg.fileAttachment!.isImage ? '📷 Image' : '📎 ${msg.fileAttachment!.fileName}',
+                                    style: HavenTypography.body.copyWith(
+                                      color: haven.textSecondary,
+                                    ),
+                                  ),
+                              ] else
                               Text(
-                                msg.text,
+                                msg.text.startsWith('[file:') ? '📎 File' : msg.text,
                                 style: HavenTypography.body.copyWith(
                                   color: haven.textPrimary,
                                 ),
@@ -313,6 +335,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       _replyToMessageId = null;
       _replyToText = null;
       _replyToSenderName = null;
+      _replyToImagePath = null;
     });
     await ref
         .read(channelChatProvider.notifier)
@@ -677,7 +700,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         // Messages list
         Expanded(
           child: MessageActionBarScope(
-          child: Container(
+          child: Builder(builder: (scopeContext) =>
+          NotificationListener<ScrollNotification>(
+            onNotification: (notification) {
+              if (notification is ScrollUpdateNotification) {
+                MessageActionBarScope.of(scopeContext)?.dismissAll();
+              }
+              return false;
+            },
+            child: Container(
             color: haven.background,
             child: messages.isEmpty
                 ? Center(
@@ -765,6 +796,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                                       ? (msg.fileAttachment!.isImage ? '📷 Image' : '📎 ${msg.fileAttachment!.fileName}')
                                       : msg.text;
                                   _replyToSenderName = senderName;
+                                  _replyToImagePath = msg.fileAttachment?.isImage == true
+                                      ? msg.fileAttachment?.diskPath
+                                      : null;
                                 });
                                 _focusNode.requestFocus();
                               }
@@ -829,12 +863,24 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                               );
                             }
                           }
+                          String? replyImagePath;
+                          if (msg.replyToMid != null) {
+                            final idx = messages.indexWhere(
+                                (m) => m.messageId == msg.replyToMid);
+                            if (idx != -1) {
+                              final orig = messages[idx];
+                              if (orig.fileAttachment?.isImage == true) {
+                                replyImagePath = orig.fileAttachment?.diskPath;
+                              }
+                            }
+                          }
                           return ChannelMessageBubble(
                             message: msg,
                             serverId: widget.serverId,
                             showHeader: showHeader,
                             replyToSenderName: replySender,
                             replyToText: replyText,
+                            replyToImagePath: replyImagePath,
                             onToggleReaction: msg.messageId != null
                                 ? (emoji) {
                                     final hasReacted =
@@ -862,6 +908,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                     },
                   ),
                   ),
+          ),
+          ),
           ),
           ),
         ),
@@ -913,14 +961,32 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                           fontSize: 11,
                         ),
                       ),
-                      Text(
-                        _replyToText ?? '',
-                        style: HavenTypography.body.copyWith(
-                          color: haven.textSecondary,
-                          fontSize: 12,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                      Row(
+                        children: [
+                          if (_replyToImagePath != null && File(_replyToImagePath!).existsSync()) ...[
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(4),
+                              child: Image.file(
+                                File(_replyToImagePath!),
+                                width: 32,
+                                height: 32,
+                                fit: BoxFit.cover,
+                              ),
+                            ),
+                            const SizedBox(width: HavenSpacing.xs),
+                          ],
+                          Expanded(
+                            child: Text(
+                              _replyToText ?? '',
+                              style: HavenTypography.body.copyWith(
+                                color: haven.textSecondary,
+                                fontSize: 12,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -930,6 +996,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                     _replyToMessageId = null;
                     _replyToText = null;
                     _replyToSenderName = null;
+      _replyToImagePath = null;
                   }),
                   padding: const EdgeInsets.all(HavenSpacing.xs),
                   child: Icon(LucideIcons.x,

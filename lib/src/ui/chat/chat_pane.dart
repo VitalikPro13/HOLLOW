@@ -72,6 +72,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   String? _replyToMessageId;
   String? _replyToText;
   String? _replyToSenderName;
+  String? _replyToImagePath;
   DateTime? _lastTypingSent;
 
   @override
@@ -166,6 +167,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       _replyToMessageId = null;
       _replyToText = null;
       _replyToSenderName = null;
+      _replyToImagePath = null;
     });
     await ref
         .read(chatProvider.notifier)
@@ -403,7 +405,15 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         // Messages list
         Expanded(
           child: MessageActionBarScope(
-          child: Container(
+          child: Builder(builder: (scopeContext) =>
+          NotificationListener<ScrollNotification>(
+            onNotification: (notification) {
+              if (notification is ScrollUpdateNotification) {
+                MessageActionBarScope.of(scopeContext)?.dismissAll();
+              }
+              return false;
+            },
+            child: Container(
             color: haven.background,
             child: messages.isEmpty
                 ? Center(
@@ -482,6 +492,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                                       : msg.text;
                                   _replyToSenderName =
                                       displayNameFor(profiles, senderId);
+                                  _replyToImagePath = msg.fileAttachment?.isImage == true
+                                      ? msg.fileAttachment?.diskPath
+                                      : null;
                                 });
                                 _focusNode.requestFocus();
                               }
@@ -521,12 +534,25 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                                   displayNameFor(profiles, origSenderId);
                             }
                           }
+                          // Get reply image path if the original is an image.
+                          String? replyImagePath;
+                          if (msg.replyToMid != null) {
+                            final idx = messages.indexWhere(
+                                (m) => m.messageId == msg.replyToMid);
+                            if (idx != -1) {
+                              final orig = messages[idx];
+                              if (orig.fileAttachment?.isImage == true) {
+                                replyImagePath = orig.fileAttachment?.diskPath;
+                              }
+                            }
+                          }
                           return MessageBubble(
                             message: msg,
                             peerId: widget.peerId,
                             showHeader: showHeader,
                             replyToSenderName: replySender,
                             replyToText: replyText,
+                            replyToImagePath: replyImagePath,
                             onToggleReaction: msg.messageId != null
                                 ? (emoji) {
                                     final hasReacted =
@@ -554,6 +580,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                     },
                   ),
                   ),
+          ),
+          ),
           ),
           ),
         ),
@@ -598,14 +626,32 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                           fontSize: 11,
                         ),
                       ),
-                      Text(
-                        _replyToText ?? '',
-                        style: HavenTypography.body.copyWith(
-                          color: haven.textSecondary,
-                          fontSize: 12,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                      Row(
+                        children: [
+                          if (_replyToImagePath != null && File(_replyToImagePath!).existsSync()) ...[
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(4),
+                              child: Image.file(
+                                File(_replyToImagePath!),
+                                width: 32,
+                                height: 32,
+                                fit: BoxFit.cover,
+                              ),
+                            ),
+                            const SizedBox(width: HavenSpacing.xs),
+                          ],
+                          Expanded(
+                            child: Text(
+                              _replyToText ?? '',
+                              style: HavenTypography.body.copyWith(
+                                color: haven.textSecondary,
+                                fontSize: 12,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -615,6 +661,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                     _replyToMessageId = null;
                     _replyToText = null;
                     _replyToSenderName = null;
+      _replyToImagePath = null;
                   }),
                   padding: const EdgeInsets.all(HavenSpacing.xs),
                   child: Icon(LucideIcons.x,
