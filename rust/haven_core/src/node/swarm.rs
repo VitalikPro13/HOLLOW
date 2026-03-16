@@ -236,6 +236,8 @@ pub(crate) enum NodeCommand {
     // -- Pinned messages (Phase 3.5) --
     PinMessage { server_id: String, channel_id: String, message_id: String },
     UnpinMessage { server_id: String, channel_id: String, message_id: String },
+    // -- Storage pledge (Phase 4) --
+    SetStoragePledge { server_id: String, pledge_bytes: u64 },
     // -- File sharing (Phase 3.5) --
     SendFile {
         peer_id: Option<PeerId>,          // For DMs (None for channels)
@@ -1865,6 +1867,29 @@ async fn run_swarm(
                         }
 
                         server_states.insert(server_id.clone(), state);
+
+                        // Auto-pledge default storage (512 MB) for the owner
+                        if let Some(state) = server_states.get_mut(&server_id) {
+                            let owner_peer = swarm.local_peer_id().to_string();
+                            let default_pledge = 512u64 * 1024 * 1024;
+                            let pledge_op = state.create_op(CrdtPayload::StoragePledgeChanged {
+                                peer_id: owner_peer,
+                                pledge_bytes: default_pledge,
+                            });
+                            let _ = state.apply_op(&pledge_op);
+
+                            // Re-persist with pledge included
+                            if let Ok(json) = serde_json::to_string(&state) {
+                                let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                    let _ = store.save_server_state(&server_id, &json);
+                                    let _ = store.insert_crdt_op(&pledge_op);
+                                }
+                            }
+                        }
 
                         // Create MLS group for this server (owner is sole member).
                         if let Some(ref mut mls_mgr) = mls {
@@ -3593,6 +3618,52 @@ async fn run_swarm(
                                 server_id: server_id.clone(),
                                 channel_id: channel_id.clone(),
                                 message_id: message_id.clone(),
+                            }).await;
+
+                            if let Ok(op_json) = serde_json::to_string(&op) {
+                                for member_peer_str in state.members.keys() {
+                                    if member_peer_str == &local_peer { continue; }
+                                    if let Ok(pid) = member_peer_str.parse::<PeerId>() {
+                                        if connected_peers.contains(&pid) {
+                                            swarm.behaviour_mut().messaging.send_request(
+                                                &pid,
+                                                HavenMessage::CrdtOpBroadcast {
+                                                    server_id: server_id.clone(),
+                                                    op_json: op_json.clone(),
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // -- Storage pledge (Phase 4) --
+                    NodeCommand::SetStoragePledge { server_id, pledge_bytes } => {
+                        if let Some(state) = server_states.get_mut(&server_id) {
+                            let local_peer = swarm.local_peer_id().to_string();
+
+                            haven_log!("[HAVEN-VAULT] Setting storage pledge to {pledge_bytes} bytes in {server_id}");
+                            let op = state.create_op(CrdtPayload::StoragePledgeChanged {
+                                peer_id: local_peer.clone(),
+                                pledge_bytes,
+                            });
+                            let _ = state.apply_op(&op);
+
+                            if let Ok(json) = serde_json::to_string(&state) {
+                                let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                    let _ = store.save_server_state(&server_id, &json);
+                                    let _ = store.insert_crdt_op(&op);
+                                }
+                            }
+
+                            let _ = event_tx.send(NetworkEvent::ServerUpdated {
+                                server_id: server_id.clone(),
                             }).await;
 
                             if let Ok(op_json) = serde_json::to_string(&op) {
@@ -6125,6 +6196,49 @@ async fn handle_incoming_request(
                                 name: server_name,
                             }).await;
 
+                            // Auto-pledge min_pledge_mb for the newly joined server
+                            {
+                                let local_peer = swarm.local_peer_id().to_string();
+                                if state.get_storage_pledge(&local_peer) == 0 {
+                                    let min_pledge_bytes = state.min_pledge_mb() * 1024 * 1024;
+                                    haven_log!("[HAVEN-VAULT] Auto-pledging {} MB for server {server_id}", min_pledge_bytes / (1024 * 1024));
+                                    let pledge_op = state.create_op(CrdtPayload::StoragePledgeChanged {
+                                        peer_id: local_peer.clone(),
+                                        pledge_bytes: min_pledge_bytes,
+                                    });
+                                    let _ = state.apply_op(&pledge_op);
+
+                                    if let Ok(json) = serde_json::to_string(&state) {
+                                        let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                            let _ = store.save_server_state(&server_id, &json);
+                                            let _ = store.insert_crdt_op(&pledge_op);
+                                        }
+                                    }
+
+                                    // Broadcast pledge to connected members
+                                    if let Ok(op_json) = serde_json::to_string(&pledge_op) {
+                                        for member in state.members_list() {
+                                            if member.peer_id == local_peer { continue; }
+                                            if let Ok(pid) = member.peer_id.parse::<PeerId>() {
+                                                if connected_peers.contains(&pid) {
+                                                    swarm.behaviour_mut().messaging.send_request(
+                                                        &pid,
+                                                        HavenMessage::CrdtOpBroadcast {
+                                                            server_id: server_id.clone(),
+                                                            op_json: op_json.clone(),
+                                                        },
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             // Establish Olm session with all server members we're
                             // connected to but don't have sessions with yet.
                             // Also emit PeerDiscovered so they show as online.
@@ -6262,6 +6376,10 @@ async fn handle_incoming_request(
                         CrdtPayload::MessagePinned { .. }
                         | CrdtPayload::MessageUnpinned { .. } => {
                             (sender_perms & Permission::MANAGE_CHANNELS) != 0
+                        }
+                        CrdtPayload::StoragePledgeChanged { peer_id, .. } => {
+                            // Members can change own pledge, admins can change anyone's
+                            peer_id == &peer_str || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
                         }
                         CrdtPayload::ServerCreated { .. } => true,
                     };

@@ -106,7 +106,7 @@ A communication platform where **every member collectively hosts the server they
 | **Client Framework** | Flutter (Dart) | Single codebase → native Windows, macOS, Linux, Android, iOS, Web. No Electron. |
 | **P2P Networking** | rust-libp2p via `flutter_rust_bridge` FFI | Most mature P2P networking stack. No Dart implementation exists, but the Rust lib is excellent and FFI bridging is well-supported in Flutter. |
 | **Data Sync** | Automerge (Rust) via FFI | Best CRDT library. Handles merging concurrent edits, message ordering, channel state. Rust implementation is fast. |
-| **Distributed Storage** | Custom erasure coding (Reed-Solomon) | Split data into n shards, any k reconstruct the original. 1.5x overhead instead of 3x for triple replication. |
+| **Distributed Storage** | Adaptive Reed-Solomon erasure coding + full replication | <6 members: full replication (every member gets every file). 6+: adaptive erasure coding — k/m scale with member count (1.5x overhead). Files/media only. |
 | **E2EE (Messages)** | vodozemac (Olm/Double Ratchet) via Rust FFI for 1:1, MLS for groups | vodozemac is Matrix's audited Olm implementation (X3DH-like + Double Ratchet). MLS (RFC 9420) for group channels — scales O(log n) on member changes. |
 | **E2EE (Calls)** | DTLS-SRTP + SFrame | WebRTC native encryption + inner E2EE layer via SFrame for group calls through relay. |
 | **Voice/Video** | flutter_webrtc + LiveKit protocol | Mature WebRTC for Flutter. Mesh for small calls (2-4), SFU-like "super peer" for larger groups. |
@@ -129,38 +129,65 @@ This is the same pattern used by major apps (e.g., Signal uses Rust for its cryp
 
 ## 4. Distributed Storage System — "Shared Vault"
 
-This is the core innovation. Every member donates storage. The server's data lives across everyone's devices.
+This is the core innovation. Every member donates storage. The server's files live distributed across everyone's devices. The vault is **always on** — the storage mode adapts automatically based on server size. Vault handles **files and media only** — text messages, CRDTs, and server config use the existing sync system.
+
+### Design Decisions
+
+- **Vault scope:** Files/media only. Text messages and CRDTs already have their own sync+storage system and are negligible in size. Vault is not needed for them.
+- **DMs stay direct P2P.** No vault involvement — DMs are 1:1, erasure coding has no benefit. Full sync between the two peers as-is.
+- **Automatic mode selection:** Below 6 members → full replication (every member gets every file). 6+ members → erasure coding with adaptive k/m. No admin toggle needed — "just works."
+- **Manifests broadcast to all members** (like CRDT ops). Manifests are tiny (~200 bytes), full replication is simpler and more reliable than erasure coding them.
+- **Rat Files consent for small-server cleanup:** In full-replication mode (<6 members), file deletion requires **unanimous consent** from all members. Any member can propose cleanup (e.g., "delete files older than 90 days"), all must approve before execution. Malicious owner cannot unilaterally destroy data.
 
 ### How It Works
 
 #### 4.1 Storage Pledge
 
-When joining a server, each member pledges a minimum amount of storage (set by the server admin, e.g., 1 GB). Members can optionally donate more.
+When joining a server, each member automatically pledges a minimum amount of storage (set by the server admin, default 512 MB). Members can optionally donate more.
 
 ```
 Server: "Cozy Community"
 Members: 100
-Minimum pledge: 1 GB
-Total raw pool: 100 GB (minimum) + voluntary donations
-Usable capacity: ~60 GB (after erasure coding overhead)
+Minimum pledge: 512 MB
+Total raw pool: 50 GB (minimum) + voluntary donations
+Usable capacity: ~33 GB (after erasure coding overhead)
 ```
 
-#### 4.2 Erasure Coding (Reed-Solomon)
+#### 4.2 Adaptive Storage Modes
 
-Instead of storing 3 full copies of everything (3x overhead), use erasure coding:
+**Small servers (<6 members) — Full Replication:**
+- Every file is synced to every member (same as current P2P file sharing, but managed by the vault storage/cache layer)
+- Simple, reliable, fast — everyone has everything
+- Storage overhead: Nx (where N = member count), but for 3-5 people with small files this is negligible
+- File deletion requires unanimous consent (Rat Files philosophy)
 
-- Split each piece of data into **k** data shards
+**Larger servers (6+ members) — Erasure Coding (Reed-Solomon):**
+
+Instead of storing N full copies of everything, use erasure coding:
+
+- Split each file into **k** data shards
 - Generate **m** parity shards (using Reed-Solomon coding)
 - Total **n = k + m** shards
-- Any **k** of the **n** shards can reconstruct the original data
+- Any **k** of the **n** shards can reconstruct the original file
 
-**Example configuration for a 100-member server:**
-- k = 10 data shards, m = 5 parity shards (n = 15 total)
-- Overhead: 1.5x (vs 3x for triple replication)
-- Tolerance: up to 5 of the 15 shard-holders can be offline simultaneously
-- Each shard is stored on a different member's device
+**Adaptive k/m based on member count** — computed automatically:
 
-For critical data (server config, role definitions, channel list), use higher redundancy: k = 10, m = 10 (2x overhead, tolerates 10 offline members).
+| Members | k | m | n (total shards) | Tolerance | Overhead |
+|---|---|---|---|---|---|
+| < 6 | — | — | — (full replication) | all but 1 | Nx |
+| 6-8 | 3 | 2 | 5 | 2 offline | 1.67x |
+| 9-15 | 5 | 3 | 8 | 3 offline | 1.60x |
+| 16-30 | 8 | 4 | 12 | 4 offline | 1.50x |
+| 31-60 | 10 | 5 | 15 | 5 offline | 1.50x |
+| 61-150 | 12 | 6 | 18 | 6 offline | 1.50x |
+| 151-500 | 16 | 8 | 24 | 8 offline | 1.50x |
+| 500+ | 20 | 10 | 30 | 10 offline | 1.50x |
+
+Pattern: k scales with log(member_count), m = ceil(k/2), overhead converges to 1.5x. Total shards n never exceeds 30 — distributing 30 shards across thousands of members is trivial. Pure function: `compute_adaptive_params(member_count) -> (k, m)`.
+
+When members join/leave and cross a threshold, **new content uses the new k/m**. Existing content stays at its original k/m — re-encoding everything would be prohibitively expensive. The rebalancer only repairs missing shards, not re-encodes.
+
+Storage tier multiplier adjusts m relative to the base: standard tier uses base m, higher tiers increase m proportionally.
 
 #### 4.3 Content-Addressed Storage
 
@@ -203,23 +230,22 @@ When a new member joins:
 
 #### 4.6 Storage Tiers
 
-Different data types have different importance and retention policies:
+Tiers apply only to files/media in the vault. k/m values below are base values for a 31-60 member server — actual values are computed adaptively from member count, then scaled by tier multiplier.
 
-| Data Type | Redundancy | Retention | Priority |
+| Data Type | Tier Multiplier (on m) | Retention | Priority |
 |---|---|---|---|
-| Server config, roles, permissions | Very high (k=10, m=10) | Permanent | Critical |
-| Channel metadata, pinned messages | High (k=10, m=8) | Permanent | High |
-| Text messages | Standard (k=10, m=5) | Configurable (default: permanent) | Medium |
-| Images and files | Standard (k=10, m=5) | Configurable (default: 1 year) | Medium |
-| Voice message recordings | Lower (k=10, m=3) | Configurable (default: 90 days) | Low |
-| Temporary/ephemeral messages | Minimal (k=5, m=2) | Auto-delete after read/time | Low |
+| Images and files | 1.0x (standard) | Configurable (default: 1 year) | Standard |
+| Voice message recordings | 0.6x (lower m) | Configurable (default: 90 days) | Low |
+
+Note: Server config, roles, channel metadata, text messages, and CRDTs are **not vault-stored** — they use the existing CRDT sync system which already replicates to all connected members.
 
 #### 4.7 Local Cache
 
-Each member also maintains a local cache of recently accessed content (outside their pledge). This means:
-- Channels you actively read are fast to load (local)
-- Scrolling back loads from the distributed network
-- Going offline? You still have your recent history locally
+Each member also maintains a local cache of recently accessed files (outside their pledge). This means:
+- Files in channels you actively use are fast to load (local)
+- Scrolling back loads files from the distributed network
+- Going offline? You still have your recently viewed files locally
+- Sender sees their uploaded file immediately from local cache while shards distribute in background
 
 ---
 
@@ -1018,101 +1044,128 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 ### Phase 4: Shared Vault — Distributed Storage
 
-**Goal:** The core innovation — distributed storage across members.
+**Goal:** The core innovation — distributed file storage across members. Vault handles **files/media only** (not messages/CRDTs). Automatic mode: full replication for <6 members, erasure coding for 6+. DMs stay direct P2P. See section 4 for design details.
 
-- [ ] **Reed-Solomon erasure coding engine** — foundation for all distributed storage
-  - [ ] Add `reed-solomon-erasure` crate to Cargo.toml (pure Rust, no C deps, SIMD-accelerated)
-  - [ ] New module `vault/erasure.rs`: `encode(data, k, m) -> Vec<Vec<u8>>` (pad, split into k data shards, generate m parity shards), `decode(shards: &mut [Option<Vec<u8>>], k, m) -> Vec<u8>` (reconstruct from any k of n shards)
-  - [ ] `ShardMetadata` struct: shard_index, content_id, k, m, shard_size, total_data_size — self-describing header prepended to each stored shard
-  - [ ] Unit tests: encode+decode all shards, decode with exactly k shards (drop each combination of m), fewer than k fails, empty/single-byte/large (1MB+) inputs
-  - [ ] Benchmark: target >100MB/s encode/decode throughput for 1MB payload at k=10/m=5
+- [X] **Reed-Solomon erasure coding engine** — foundation for all distributed storage
+  - [X] Add `reed-solomon-erasure` crate to Cargo.toml (pure Rust, no C deps, SIMD-accelerated)
+  - [X] New module `vault/erasure.rs`: `encode(data, k, m) -> Vec<Vec<u8>>` (pad, split into k data shards, generate m parity shards), `decode(shards: &mut [Option<Vec<u8>>], k, m) -> Vec<u8>` (reconstruct from any k of n shards)
+  - [X] `ShardMetadata` struct: shard_index, content_id, k, m, shard_size, total_data_size — self-describing header prepended to each stored shard
+  - [X] Unit tests: encode+decode all shards, decode with exactly k shards (drop each combination of m), fewer than k fails, empty/single-byte/large (1MB+) inputs
+  - [X] Benchmark: target >100MB/s encode/decode throughput for 1MB payload at k=10/m=5 — achieved 648 MB/s encode, 1085 MB/s decode
 
-- [ ] **Content-addressed storage layer** — local shard storage on disk
-  - [ ] New module `vault/content_store.rs`
-  - [ ] `content_id(data) -> String`: SHA-256 hash of encrypted data, hex-encoded (reuses existing `sha2` crate)
-  - [ ] `shard_key(content_id, shard_index) -> String`: SHA-256(content_id || shard_index as big-endian u16), hex-encoded — used as DHT key and local filename
-  - [ ] Local shard directory: `~/.haven/vault/{server_id}/` with shards as `{shard_key}.shard` files
-  - [ ] CRUD operations: `store_shard()`, `read_shard()`, `delete_shard()`, `list_shards()`, `total_storage_used()`
-  - [ ] Integrity verification on read: recompute SHA-256 of shard data, compare to expected shard_key (detect corruption/tampering)
-  - [ ] New SQLCipher table `vault_shards`: shard_key (PK), server_id, content_id, shard_index, k, m, shard_size, total_data_size, stored_at, last_verified, storage_tier
-  - [ ] Indexes on (server_id, content_id) and (server_id, storage_tier)
+- [X] **Content-addressed storage layer** — local shard storage on disk
+  - [X] New module `vault/content_store.rs`
+  - [X] `content_id(data) -> String`: SHA-256 hash of encrypted data, hex-encoded (reuses existing `sha2` crate)
+  - [X] `shard_key(content_id, shard_index) -> String`: SHA-256(content_id || shard_index as big-endian u16), hex-encoded — used as DHT key and local filename
+  - [X] Local shard directory: `~/.haven/vault/{server_id}/` with shards as `{shard_key}.shard` files
+  - [X] CRUD operations: `store_shard()`, `read_shard()`, `delete_shard()`, `list_shards()`, `total_storage_used()` + extras (delete_content, list_content_shards, has_shard, get_shard_record, verify_server_shards, etc.)
+  - [X] Integrity verification on read: `data_hash` column (SHA-256 of shard data at store time), verified on read — real tamper/corruption detection
+  - [X] New SQLCipher table `vault_shards`: shard_key (PK), server_id, content_id, shard_index, k, m, shard_size, total_data_size, stored_at, last_verified, storage_tier, data_hash — own Connection to messages.db
+  - [X] Indexes on (server_id, content_id) and (server_id, storage_tier)
+  - [X] `StorageTier` enum (Standard, Low) — 26 unit tests passing
 
-- [ ] **Storage pledge system** — CRDT-backed per-member storage commitment
-  - [ ] New `CrdtPayload::StoragePledgeChanged { peer_id, pledge_bytes }` variant
-  - [ ] New field `storage_pledges: HashMap<String, AdminLwwReg<u64>>` on ServerState with `#[serde(default)]` (backward-compatible)
-  - [ ] LWW merge: members can change own pledge, admins can change anyone's
-  - [ ] CRDT server settings: `min_pledge_mb` (admin-controlled, default 512MB), `vault_enabled` (admin-controlled, default "false" — master toggle gating all vault behavior)
-  - [ ] Auto-pledge on server join: when `vault_enabled` is true, new member automatically pledges `min_pledge_mb`
-  - [ ] FFI: `set_storage_pledge(server_id, pledge_bytes)`, `get_storage_stats(server_id) -> StorageStats { total_pledged, total_used, my_pledge, my_used, member_count, online_members, health_score }`
-  - [ ] `NodeCommand::SetStoragePledge` → creates CRDT op, broadcasts, applies locally
+- [X] **Storage pledge system** — CRDT-backed per-member storage commitment
+  - [X] New `CrdtPayload::StoragePledgeChanged { peer_id, pledge_bytes }` variant
+  - [X] New field `storage_pledges: HashMap<String, AdminLwwReg<u64>>` on ServerState with `#[serde(default)]` (backward-compatible)
+  - [X] LWW merge: members can change own pledge, admins can change anyone's (AdminLwwReg priority-based conflict resolution)
+  - [X] CRDT server settings: `min_pledge_mb` (uses existing `update_server_setting("min_pledge_mb", "512")`, default 512MB via `min_pledge_mb()` helper)
+  - [X] Auto-pledge on server join: new member automatically pledges `min_pledge_mb` (also auto-pledges on server creation for owner)
+  - [X] FFI: `set_storage_pledge(server_id, pledge_bytes)`, `get_storage_stats(server_id) -> StorageStatsFfi { total_pledged_bytes, total_used_bytes, my_pledge_bytes, my_used_bytes, member_count, min_pledge_mb }` — lean struct, Dart computes online_members/vault_mode/health from its own providers
+  - [X] `NodeCommand::SetStoragePledge` → creates CRDT op, broadcasts, applies locally
+  - [X] Permission check in receive handler: self-change or Owner/Admin (same as NicknameChanged)
+  - [X] MemberRemoved cleanup: pledge removed when member kicked
+  - [X] 3 unit tests: pledge set/read, pledge removed with member, serde backward compat
 
-- [ ] **DHT-based shard placement** — deterministic mapping of shards to peers
-  - [ ] New module `vault/placement.rs`
-  - [ ] `compute_shard_placements(content_id, n, server_members, pledges) -> Vec<(u16, PeerId)>`: for each shard 0..n, compute shard_key, XOR-distance to each member's peer ID, pick closest member with sufficient remaining pledge capacity
-  - [ ] Weighted placement: members with larger pledges hold proportionally more shards
-  - [ ] Self-placement: shards mapping closest to our own peer ID stored locally (no network transfer)
-  - [ ] Deterministic: any peer can independently compute canonical placement from same inputs
-  - [ ] New SQLCipher table `vault_placement`: content_id, shard_index, target_peer, server_id, stored_at, confirmed — PRIMARY KEY (content_id, shard_index)
+- [X] **Adaptive k/m engine** — automatic erasure coding parameters based on server size
+  - [X] New module `vault/adaptive.rs`
+  - [X] `compute_adaptive_params(member_count) -> VaultMode`: returns `FullReplication` if <6, or `ErasureCoding { k, m }` using the adaptive table (6-8: k=3/m=2, 9-15: k=5/m=3, 16-30: k=8/m=4, 31-60: k=10/m=5, 61-150: k=12/m=6, 151-500: k=16/m=8, 500+: k=20/m=10)
+  - [X] `apply_tier_multiplier(k, m, tier) -> (k, m)`: standard tier = 1.0x m, low tier = 0.6x m (rounded up, min m=1)
+  - [X] `StorageTier` reused from `content_store.rs` (already has Standard/Low variants) — no duplication
+  - [X] `determine_tier(mime_type) -> StorageTier`: audio/* → Low, everything else → Standard
+  - [X] 15 unit tests: all member count brackets, tier multiplier rounding, edge cases, MIME type classification
 
-- [ ] **Store protocol** — distributing shards to target peers
+- [X] **DHT-based shard placement** — deterministic mapping of shards to peers
+  - [X] New module `vault/placement.rs`: XOR distance (SHA-256 normalized), `ShardPlacement` struct, `compute_shard_placements()`, `compute_full_replication_placements()`, `place()` unified entry, `local_placements()`/`remote_placements()` helpers
+  - [X] XOR-distance placement: for each shard, hash peer_id with SHA-256 to normalize into 256-bit keyspace, XOR with shard_key, sort ascending, pick closest with capacity
+  - [X] Weighted placement: per-member shard cap = ceil(n * peer_pledge / total_pledge), min 1. Members with larger pledges get proportionally more shards
+  - [X] Self-placement: `local_placements()` filter identifies shards targeting our peer (no network transfer needed)
+  - [X] Deterministic: members sorted alphabetically for tie-breaking, integer-only cap arithmetic (u128 ceiling division), CRDT-replicated pledges
+  - [X] New SQLCipher table `vault_placement` in ContentStore: content_id, shard_index, target_peer, server_id, shard_key, stored_at, confirmed. 6 CRUD methods (save/load/confirm/delete/list_server/unconfirmed_count)
+  - [X] Full-replication mode: returns all eligible members with shard_index=0
+  - [X] 17 unit tests (placement) + 3 DB tests (content_store). 83 total vault tests passing
+
+- [ ] **Store protocol** — distributing shards (or full files) to target peers
   - [ ] New wire messages: `HavenMessage::ShardStore { server_id, content_id, shard_index, shard_key, metadata_json, data (base64) }`, `ShardStoreAck { server_id, content_id, shard_index, success }`
+  - [ ] Full-replication mode: `shard_index = 0`, `shard_key = content_id`, data = full encrypted file — same wire message, simpler path
   - [ ] Receive handler: verify server membership, check pledge capacity, store via content_store, send ack
-  - [ ] Store coordinator: after encoding, send shards to targets in parallel (Olm-encrypted), track acks, retry 3x with 5s backoff
+  - [ ] Store coordinator: after encoding (or in replication mode, after encryption), send shards to targets in parallel (Olm-encrypted), track acks, retry 3x with 5s backoff
   - [ ] Large shard chunking: shards >256KB split into 256KB pieces (reuse existing FileChunk mechanism), reassemble on receiver
   - [ ] Rate limiting: max 10 concurrent outbound shard stores per server
+
+- [ ] **Storage tier configuration** — retention policies per data type
+  - [ ] Retention policies as CRDT settings: `retention_files` (default "365d"), `retention_voice` (default "90d"). Values: "permanent", "365d", "180d", "90d", "30d"
+  - [ ] `determine_tier(mime_type) -> StorageTier` used by upload pipeline to assign tier to each file
+  - [ ] Background retention enforcement: check `created_at` on vault manifests, delete expired content and broadcast `ShardDelete` to peers
+  - [ ] New wire message: `ShardDelete { server_id, content_id, shard_indices }` — admin-only, permission-gated (MANAGE_SERVER)
+  - [ ] **Rat Files consent system** (full-replication servers <6 members): `CleanupProposal` CRDT — any member can propose file deletion (by age, size, etc.), all members must consent (unanimous), execution only when `consents.len() == member_count`. Malicious owner cannot unilaterally destroy files
+  - [ ] Server Settings UI: "Storage" tab with retention policy dropdowns (MANAGE_SERVER permission)
 
 - [ ] **Retrieve protocol** — fetching shards from peers for reconstruction
   - [ ] New wire messages: `ShardRequest { server_id, content_id, shard_indices }`, `ShardResponse { server_id, content_id, shard_index, data, not_found }`, `ShardProbe { server_id, content_ids }`, `ShardProbeResponse { server_id, available: Vec<(content_id, Vec<shard_index>)> }`
   - [ ] Receive handler: look up shards in local store, send ShardResponse for each
   - [ ] Retrieval coordinator: compute placement, request k shards in parallel, collect responses. If peer responds not_found, fallback to broadcast ShardProbe to all connected server members
+  - [ ] Full-replication mode: request from any single peer (no reconstruction needed — any peer has the full file)
   - [ ] 10s timeout per peer — mark unavailable, try next closest peer
   - [ ] `NodeCommand::RetrieveContent { server_id, content_id }` → `NetworkEvent::ContentRetrieved { server_id, content_id, data }` / `ContentRetrieveFailed { server_id, content_id, error }`
 
 - [ ] **File upload pipeline** — encrypt → erasure-code → distribute. 🎞️ Animate: upload progress with encrypt→split→distribute step visualization
   - [ ] New module `vault/pipeline.rs` — orchestrates full upload flow
-  - [ ] Upload flow: (1) AES-256-GCM encrypt with random per-file key, (2) content_id = SHA-256(ciphertext), (3) erasure-encode into k+m shards, (4) compute placements, (5) store shards on targets, (6) create VaultManifest encrypted with MLS group key, erasure-code manifest itself at higher redundancy (k=3, m=3)
-  - [ ] `VaultManifest` struct: content_id, encryption_key, nonce, original_size, k, m, shard_count, file_name, mime_type, storage_tier, created_at, creator_peer_id
+  - [ ] Upload flow (erasure mode): (1) AES-256-GCM encrypt with random per-file key, (2) content_id = SHA-256(ciphertext), (3) erasure-encode into k+m shards, (4) compute placements, (5) store shards on targets, (6) create VaultManifest, broadcast to all members (encrypted with MLS group key)
+  - [ ] Upload flow (replication mode): (1) AES-256-GCM encrypt, (2) content_id = SHA-256(ciphertext), (3) send full encrypted file to all members via store protocol, (4) create VaultManifest, broadcast to all
+  - [ ] `VaultManifest` struct: content_id, encryption_key, nonce, original_size, k, m, shard_count, file_name, mime_type, storage_tier, created_at, creator_peer_id. For replication mode: k=0, m=0, shard_count=0 (sentinel values indicating full-replication)
   - [ ] New SQLCipher table `vault_manifests`: content_id (PK), server_id, channel_id, manifest_encrypted (BLOB), k, m, original_size, storage_tier, created_at, creator_peer_id
-  - [ ] Integration: when `vault_enabled` is true, channel file attachments go through vault pipeline instead of direct P2P. `file_id` on message becomes vault `content_id`. Direct P2P continues for DMs and servers with vault disabled (backward compatible)
+  - [ ] Integration: channel file attachments go through vault pipeline. `file_id` on message becomes vault `content_id`. Direct P2P continues for DMs only (backward compatible)
+  - [ ] Sender sees file immediately from local cache — distribution happens in background
   - [ ] FFI: `vault_upload_file(server_id, channel_id, file_path, message_id) -> content_id`
   - [ ] `NetworkEvent::VaultUploadProgress { server_id, content_id, phase ("encrypting"/"encoding"/"distributing"), progress (0.0-1.0) }`, `VaultUploadComplete`, `VaultUploadFailed`
 
 - [ ] **File download pipeline** — locate shards, retrieve k, reconstruct, decrypt. 🎞️ Animate: image load shimmer placeholder → fade-in, download progress reconstruction
-  - [ ] Download flow: (1) lookup VaultManifest by content_id (local DB or retrieve from vault), (2) decrypt manifest with MLS group key, (3) compute shard placements, (4) request k shards from placed peers, (5) erasure-decode, (6) AES-256-GCM decrypt with key from manifest, (7) write to disk, (8) cache locally
+  - [ ] Download flow (erasure mode): (1) lookup VaultManifest by content_id (local DB), (2) decrypt manifest with MLS group key, (3) compute shard placements, (4) request k shards from placed peers, (5) erasure-decode, (6) AES-256-GCM decrypt with key from manifest, (7) write to disk, (8) cache locally
+  - [ ] Download flow (replication mode): (1) lookup VaultManifest, (2) decrypt manifest, (3) request full file from any online peer, (4) AES-256-GCM decrypt, (5) write to disk, (6) cache locally
   - [ ] Local cache: `~/.haven/vault_cache/{content_id}.{ext}` — LRU eviction when cache exceeds configurable size (default 1GB, outside pledge space)
   - [ ] Cache-first retrieval: check local cache before network fetch (instant for recently viewed files)
   - [ ] FFI: `vault_download_file(server_id, content_id) -> disk_path`
   - [ ] `NetworkEvent::VaultDownloadProgress { phase ("locating"/"fetching"/"reconstructing"/"decrypting"), progress }`, `VaultDownloadComplete { disk_path }`, `VaultDownloadFailed`
   - [ ] Dart: `VaultFileWidget` (shimmer placeholder during download, fade-in on completion), `VaultNotifier` provider (tracks active uploads/downloads, progress, completion)
 
+- [ ] **Vault status indicators** — rich UI feedback for vault operations. 🎞️ Animate: progress phases, health pulse
+  - [ ] **Per-file indicators in chat**: upload "Encrypting..." → "Distributing (7/15 shards)..." → checkmark "Distributed". Download: shimmer → "Fetching (5/10 shards)..." → image fade-in. Replication mode: "Syncing to 4/5 members..." → checkmark "Synced"
+  - [ ] **Channel header vault health dot**: green (all recent files fully distributed), yellow (some files distributing or some peers offline but data safe), red (data at risk — not enough peers for reconstruction). Same position as encryption lock icon
+  - [ ] **Vault status in member panel**: per-member shard count, online/offline, last seen, storage used/pledged
+  - [ ] Dart: `VaultStatusProvider` (aggregates upload/download/health state), `VaultHealthDot` widget, `FileDistributionIndicator` widget
+
 - [ ] **Rebalancing on member join/leave**. 🎞️ Animate: rebalancing progress indicator, shard migration visualization
   - [ ] New module `vault/rebalancer.rs` — background task monitoring member status
   - [ ] Departure detection: track `last_seen` per member in `vault_member_status` SQLCipher table. After 7 days offline (configurable via CRDT setting `offline_threshold_days`), mark departed — their shards are under-replicated
   - [ ] Under-replication scan: every 30 minutes, check all content — if fewer than k+m shards confirmed stored, content is under-replicated
   - [ ] Repair: surviving members with any shards reconstruct missing ones (fetch k, re-encode, distribute new parity shards to new targets). Repair distributed round-robin across online members (same pattern as SyncCoordinator fan-out)
-  - [ ] New member join: recompute placements, gradually migrate shards that now map closer to new member (max 10MB/min to avoid bandwidth spikes)
+  - [ ] New member join: recompute placements, gradually migrate shards that now map closer to new member (adaptive bandwidth — based on measured throughput, not fixed 10MB/min cap)
   - [ ] Pledge change: over-capacity member's excess shards migrated to members with available space
+  - [ ] Mode transition: when server crosses 6-member threshold (either direction), new content uses new mode. Existing content stays as-is (no re-encoding)
   - [ ] New wire message: `ShardMigrate { server_id, content_id, shard_index, data }` — proactive migration during rebalancing
   - [ ] `NetworkEvent::RebalanceStarted { shards_to_move }`, `RebalanceProgress { moved, total }`, `RebalanceCompleted`
 
-- [ ] **Storage tier configuration** — retention policies per data type
-  - [ ] Tier k/m as CRDT server settings (admin-configurable): critical (default 10/10 — server config, roles), high (10/8 — channel metadata, pins), standard (10/5 — messages, files), low (10/3 — voice recordings), ephemeral (5/2 — temporary messages)
-  - [ ] Retention policies as CRDT settings: `retention_messages` (default "permanent"), `retention_files` (default "365d"), `retention_voice` (default "90d"). Values: "permanent", "365d", "180d", "90d", "30d"
-  - [ ] Automatic tier assignment: `determine_tier(context, mime_type) -> StorageTier` — text messages → standard, images/files → standard, server config → critical, channel metadata → high
-  - [ ] Background retention enforcement: check `created_at` on vault manifests, delete expired content and broadcast `ShardDelete` to peers
-  - [ ] New wire message: `ShardDelete { server_id, content_id, shard_indices }` — admin-only, permission-gated
-  - [ ] Server Settings UI: "Storage" tab with tier k/m sliders and retention policy dropdowns (MANAGE_SERVER permission)
-
 - [ ] **Storage dashboard UI**. 🎞️ Animate: animated donut/bar charts, pool fill-up animation, health pulse indicators
   - [ ] New `lib/src/ui/settings/storage_tab.dart` in server settings panel
-  - [ ] Overview: animated donut chart (pledged vs used vs free), total capacity
+  - [ ] Overview: animated donut chart (pledged vs used vs free), total capacity, current vault mode label ("Full Replication" or "Erasure Coding k/m")
   - [ ] Member contributions: sorted bar chart (each member's pledge + usage)
-  - [ ] Health indicators: per-tier health score — green (all shards placed), yellow (some peers offline but k shards available), red (fewer than k available — data at risk)
+  - [ ] Health indicators: overall health score — green (all files fully distributed), yellow (some peers offline but all data reconstructable), red (data at risk). Per-file health in detailed view
   - [ ] "My contribution" section: pledge amount + slider to adjust, personal usage bar
-  - [ ] FFI: `get_vault_health(server_id) -> VaultHealth` (per-tier stats), `get_member_storage_stats(server_id) -> Vec<MemberStorageStats>`
+  - [ ] **Small-server cleanup** (<6 members): "Propose Cleanup" button — select criteria (age, size), sends `CleanupProposal` to all members, shows consent status per member, executes on unanimous consent
+  - [ ] FFI: `get_vault_health(server_id) -> VaultHealth` (overall + per-file stats), `get_member_storage_stats(server_id) -> Vec<MemberStorageStats>`, `propose_cleanup(server_id, criteria)`, `consent_cleanup(server_id, proposal_id)`
   - [ ] Dart: `VaultStatsProvider` (Riverpod notifier, refreshes every 60s and on events)
 
-- [ ] **Connection subset management** — limit persistent connections for large servers
+- [ ] **Connection subset management** — limit persistent connections for large servers (defer until scaling pain)
   - [ ] Target: 6-12 peers per server (not full mesh). Total across all servers capped at 50 (configurable)
   - [ ] Peer scoring: `PeerScore { uptime_ratio, avg_latency_ms, bandwidth_score, shard_overlap }` — computed from ping RTT history, connection duration, shared shard count
   - [ ] Rotation: every 5 minutes, drop lowest-scoring peer, connect to highest-scoring unconnected peer. Max 1 rotation per cycle for stability
@@ -1120,7 +1173,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [ ] Gossip peer exchange: `HavenMessage::PeerExchange { server_id, peers }` — connected peers share known peer lists for the server
   - [ ] Fallback: <6 reachable peers → connect to all available. Shard access requires more → temporarily exceed limit
 
-- [ ] **Channel-level CRDT sharding** — split monolithic ServerState for scale
+- [ ] **Channel-level CRDT sharding** — split monolithic ServerState for scale (defer until ServerState is too large)
   - [ ] Split into `ServerCoreState` (name, members, roles, settings, pledges, channel_layout — small, synced by all) + per-channel `ChannelState` (pinned_messages, channel-specific settings — synced only by members who access the channel)
   - [ ] New SQLCipher table `channel_states`: server_id, channel_id, state_json, updated_at — PRIMARY KEY (server_id, channel_id)
   - [ ] Migration: on first load after upgrade, extract channel-specific data from existing ServerState into ChannelState objects
@@ -1128,7 +1181,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [ ] Lazy loading: channel state loaded from DB on demand (user navigates to channel), not all at once
   - [ ] Memory budget: max 20 ChannelState objects in memory, LRU eviction to DB, active (open in UI) channels pinned
 
-**Deliverable:** Server data lives distributed across members. No single point of failure.
+**Deliverable:** Server files live distributed across members. No single point of failure. Automatic mode selection — small groups get full sync, larger servers get space-efficient erasure coding. Rich status indicators keep users informed.
 
 ### Phase 4.5: Account Recovery & Backup
 

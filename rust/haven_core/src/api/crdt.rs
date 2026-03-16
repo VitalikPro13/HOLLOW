@@ -26,6 +26,16 @@ pub struct MemberFfi {
     pub nickname: String,
 }
 
+/// Storage stats for a server, returned to Dart via FFI.
+pub struct StorageStatsFfi {
+    pub total_pledged_bytes: u64,
+    pub total_used_bytes: u64,
+    pub my_pledge_bytes: u64,
+    pub my_used_bytes: u64,
+    pub member_count: u32,
+    pub min_pledge_mb: u64,
+}
+
 /// Create a new server. Returns the server_id.
 #[frb]
 pub fn create_server(name: String) -> Result<String, String> {
@@ -579,4 +589,77 @@ pub fn delete_server(server_id: String) -> Result<(), String> {
     .map_err(|e| format!("Failed to send command: {e}"))?;
 
     Ok(())
+}
+
+/// Set the local user's storage pledge for a server (in bytes).
+#[frb]
+pub fn set_storage_pledge(server_id: String, pledge_bytes: u64) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(
+        state.cmd_tx.send(node::NodeCommand::SetStoragePledge {
+            server_id,
+            pledge_bytes,
+        }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+/// Get storage stats for a server (pledges from CRDT state, usage from vault_shards table).
+#[frb]
+pub fn get_storage_stats(server_id: String) -> Result<StorageStatsFfi, String> {
+    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
+    let haven_dir = data_dir.join("haven");
+    let db_path = haven_dir
+        .join("messages.db")
+        .to_str()
+        .ok_or("Invalid path")?
+        .to_string();
+
+    let id = crate::identity::load_or_create_identity()?;
+    let proto = id
+        .keypair
+        .to_protobuf_encoding()
+        .map_err(|e| format!("Failed to encode keypair: {e}"))?;
+    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+
+    // Load CRDT state for pledge data
+    let store = crate::storage::MessageStore::open(&db_path, &passphrase)?;
+    let state_json = store
+        .load_server_state(&server_id)?
+        .ok_or(format!("Server {server_id} not found"))?;
+
+    let state =
+        serde_json::from_str::<crate::crdt::server_state::ServerState>(&state_json)
+            .map_err(|e| format!("Failed to parse server state: {e}"))?;
+
+    let peer_id = id.peer_id.to_string();
+    let total_pledged_bytes = state.total_pledged_bytes();
+    let my_pledge_bytes = state.get_storage_pledge(&peer_id);
+    let member_count = state.members.len() as u32;
+    let min_pledge_mb = state.min_pledge_mb();
+
+    // Load vault shard usage data
+    let vault_dir = haven_dir.join("vault");
+    let total_used_bytes = if let Ok(content_store) =
+        crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir)
+    {
+        content_store.total_storage_used(&server_id).unwrap_or(0)
+    } else {
+        0
+    };
+
+    Ok(StorageStatsFfi {
+        total_pledged_bytes,
+        total_used_bytes,
+        my_pledge_bytes,
+        my_used_bytes: total_used_bytes,
+        member_count,
+        min_pledge_mb,
+    })
 }

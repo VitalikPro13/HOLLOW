@@ -50,6 +50,8 @@ pub struct ServerState {
     pub pinned_messages: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub channel_layout: Vec<ChannelLayoutItem>,
+    #[serde(default)]
+    pub storage_pledges: HashMap<String, AdminLwwReg<u64>>,
     pub settings: HashMap<String, AdminLwwReg<String>>,
     pub op_log: Vec<CrdtOp>,
     #[serde(skip)]
@@ -98,6 +100,7 @@ impl ServerState {
             nicknames: HashMap::new(),
             pinned_messages: HashMap::new(),
             channel_layout: Vec::new(),
+            storage_pledges: HashMap::new(),
             settings: HashMap::new(),
             op_log: Vec::new(),
             hlc: Some(hlc),
@@ -239,6 +242,7 @@ impl ServerState {
                 self.members.remove(peer_id);
                 self.roles.remove(peer_id);
                 self.nicknames.remove(peer_id);
+                self.storage_pledges.remove(peer_id);
             }
 
             CrdtPayload::RoleChanged {
@@ -287,6 +291,15 @@ impl ServerState {
                         self.pinned_messages.remove(channel_id);
                     }
                 }
+            }
+
+            CrdtPayload::StoragePledgeChanged { peer_id, pledge_bytes } => {
+                let priority = self.author_priority(&op.author);
+                let entry = self.storage_pledges.entry(peer_id.clone()).or_insert_with(|| {
+                    AdminLwwReg::new(*pledge_bytes, op.hlc.clone(), priority)
+                });
+                let remote = AdminLwwReg::new(*pledge_bytes, op.hlc.clone(), priority);
+                entry.merge(&remote);
             }
         }
 
@@ -349,6 +362,27 @@ impl ServerState {
             .get(channel_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Get a member's storage pledge in bytes. Returns 0 if not set.
+    pub fn get_storage_pledge(&self, peer_id: &str) -> u64 {
+        self.storage_pledges
+            .get(peer_id)
+            .map(|reg| *reg.read())
+            .unwrap_or(0)
+    }
+
+    /// Get the total storage pledged by all members (bytes).
+    pub fn total_pledged_bytes(&self) -> u64 {
+        self.storage_pledges.values().map(|reg| *reg.read()).sum()
+    }
+
+    /// Get the minimum pledge setting (MB). Returns 512 if not configured.
+    pub fn min_pledge_mb(&self) -> u64 {
+        self.settings
+            .get("min_pledge_mb")
+            .and_then(|reg| reg.read().parse::<u64>().ok())
+            .unwrap_or(512)
     }
 
     /// Look up author's priority from their role in this server.
@@ -680,5 +714,63 @@ mod tests {
         assert!(MemberRole::Moderator.outranks(&MemberRole::Member));
         assert!(!MemberRole::Member.outranks(&MemberRole::Moderator));
         assert!(!MemberRole::Moderator.outranks(&MemberRole::Admin));
+    }
+
+    #[test]
+    fn storage_pledge_set_and_read() {
+        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        assert_eq!(state.get_storage_pledge("owner"), 0);
+        assert_eq!(state.total_pledged_bytes(), 0);
+
+        let op = state.create_op(CrdtPayload::StoragePledgeChanged {
+            peer_id: "owner".into(),
+            pledge_bytes: 512 * 1024 * 1024,
+        });
+        state.apply_op(&op).unwrap();
+
+        assert_eq!(state.get_storage_pledge("owner"), 512 * 1024 * 1024);
+        assert_eq!(state.total_pledged_bytes(), 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn storage_pledge_removed_with_member() {
+        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let op = state.create_op(CrdtPayload::MemberAdded {
+            peer_id: "peer_b".into(),
+            display_name: "B".into(),
+        });
+        state.apply_op(&op).unwrap();
+
+        let op = state.create_op(CrdtPayload::StoragePledgeChanged {
+            peer_id: "peer_b".into(),
+            pledge_bytes: 1024 * 1024 * 1024,
+        });
+        state.apply_op(&op).unwrap();
+        assert_eq!(state.get_storage_pledge("peer_b"), 1024 * 1024 * 1024);
+
+        let op = state.create_op(CrdtPayload::MemberRemoved {
+            peer_id: "peer_b".into(),
+        });
+        state.apply_op(&op).unwrap();
+        assert_eq!(state.get_storage_pledge("peer_b"), 0);
+        assert_eq!(state.total_pledged_bytes(), 0);
+    }
+
+    #[test]
+    fn storage_pledge_serde_default() {
+        // Simulate old JSON without storage_pledges field
+        let json = r#"{
+            "server_id": "s1",
+            "name": {"value": "Test", "priority": 3, "hlc": {"physical_ms": 1000, "counter": 0, "actor": "owner"}},
+            "channels": {},
+            "members": {},
+            "roles": {},
+            "settings": {},
+            "op_log": []
+        }"#;
+        let state: ServerState = serde_json::from_str(json).unwrap();
+        assert!(state.storage_pledges.is_empty());
+        assert_eq!(state.get_storage_pledge("anyone"), 0);
+        assert_eq!(state.total_pledged_bytes(), 0);
     }
 }

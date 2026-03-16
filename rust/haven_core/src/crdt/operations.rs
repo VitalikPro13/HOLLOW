@@ -81,6 +81,12 @@ pub enum CrdtPayload {
         channel_id: String,
         message_id: String,
     },
+
+    // Storage pledge (Phase 4)
+    StoragePledgeChanged {
+        peer_id: String,
+        pledge_bytes: u64,
+    },
 }
 
 /// Member roles with hierarchical priority.

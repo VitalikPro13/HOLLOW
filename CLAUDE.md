@@ -63,9 +63,28 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 ```
 
 ## Current Phase
-**Phase 3.75: COMPLETE.** Phase 4 up next.
+**Phase 4: Shared Vault — IN PROGRESS.** Phases 1-3.75 all COMPLETE.
 
-Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection management, invite links), 2.5 (UI Foundation), 2.75 (Haven Design System v2), UI Polish Pass, 3 (Servers & Channels), 3.5 (Daily Driver), 3.75 (Security Hardening) — all COMPLETE. WSS transport deployed. Phase 4 up next.
+Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection management, invite links), 2.5 (UI Foundation), 2.75 (Haven Design System v2), UI Polish Pass, 3 (Servers & Channels), 3.5 (Daily Driver), 3.75 (Security Hardening) — all COMPLETE. WSS transport deployed.
+
+**Phase 4 — Shared Vault — Distributed Storage (started Mar 16, 2026):**
+Distributed file storage across server members. 14 major items, ~90 sub-tasks. Key design decisions:
+- **Vault = files/media only.** Messages, CRDTs, server config use existing sync system.
+- **Automatic mode:** <6 members → full replication (every member gets every file). 6+ members → adaptive Reed-Solomon erasure coding.
+- **Adaptive k/m:** scales with member count (k=3/m=2 at 6 members → k=20/m=10 at 500+). New content uses current params, existing stays as-is.
+- **DMs stay direct P2P.** No vault involvement.
+- **Manifests broadcast to all** (like CRDT ops, not erasure-coded — they're tiny).
+- **Rat Files consent:** Small servers (<6), file deletion requires unanimous member consent.
+- **Rich vault indicators:** per-file progress in chat, channel header health dot, member panel shard info, full storage dashboard.
+- Last 2 items (connection subset management, CRDT sharding) deferred until scaling pain.
+- **No VPS deployment needed** — vault is entirely client-side.
+
+**Phase 4 completed so far:**
+- Reed-Solomon erasure coding engine (`vault/erasure.rs`): encode/decode with ShardMetadata packing. 22 tests. 648 MB/s encode, 1085 MB/s decode.
+- Content-addressed storage layer (`vault/content_store.rs`): ContentStore with own SQLCipher connection, `content_id()`/`shard_key()` pure SHA-256 functions, disk CRUD with integrity verification (data_hash), `StorageTier` enum (Standard/Low), `vault_shards` table. 26 tests.
+- Storage pledge system: `CrdtPayload::StoragePledgeChanged`, `storage_pledges` field on ServerState (`AdminLwwReg<u64>`), auto-pledge on create+join (512MB default), `SetStoragePledge` NodeCommand + handler, permission check (self or admin), `set_storage_pledge()`/`get_storage_stats()` FFI, `StorageStatsFfi` struct. 3 tests.
+- Adaptive k/m engine (`vault/adaptive.rs`): `VaultMode` enum (FullReplication/<6, ErasureCoding/6+), `compute_adaptive_params()` with full adaptive table, `apply_tier_multiplier()` (Standard 1.0x, Low 0.6x), `determine_tier()` (audio→Low, else Standard). 15 tests.
+- DHT-based shard placement (`vault/placement.rs`): XOR distance (SHA-256 normalized into 256-bit keyspace), `ShardPlacement` struct, `compute_shard_placements()` with weighted per-member caps (pledge-proportional), `place()` unified entry point, `local_placements()`/`remote_placements()` helpers. `vault_placement` SQLCipher table + 6 CRUD methods in ContentStore. 20 tests. 83 total vault tests.
 
 **Phase 3.75 — Security Hardening (Mar 16, 2026) — COMPLETE:**
 Full security audit of the codebase. 3 critical, 4 high, 6 medium, 8 low vulnerabilities found and fixed. Relay server hardened.
