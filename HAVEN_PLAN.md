@@ -1,6 +1,6 @@
 # Haven — A Fully Distributed, Encrypted Discord Alternative
 
-> **Status:** Active Development — Phases 1-3.5 Complete. Phase 4 (Shared Vault — Distributed Storage) Up Next.
+> **Status:** Active Development — Phases 1-3.75 Complete. Phase 4 (Shared Vault — Distributed Storage) Up Next.
 > **Author:** Designed through technical discussion, February 2026.
 > **Philosophy:** No central servers. No Electron. No Node.js hosting. The members ARE the server.
 
@@ -986,8 +986,8 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 **HIGH — resource exhaustion & validation:**
 - [X] **Message size limit on HavenCodec** — `read_to_end` has no size cap. A peer can send a multi-GB message to cause OOM. Fix: use `io.take(MAX_MESSAGE_SIZE)` before `read_to_end` (e.g., 50MB max).
-- [ ] **Per-peer rate limiting** — no rate limits on any incoming message type. A peer can flood CRDT ops, messages, reactions, sync requests, file chunks. Fix: token-bucket rate limiter per peer (e.g., 100 messages/sec burst, 20/sec sustained). Excess messages dropped with log warning.
-- [ ] **Op log compaction** — `op_log: Vec<CrdtOp>` in ServerState grows without bound, serialized to JSON on every persist. Fix: implement periodic compaction — snapshot current state, prune ops older than the snapshot. Keep last N ops (e.g., 1000) for recent sync, discard the rest.
+- [X] **Per-peer rate limiting** — no rate limits on any incoming message type. A peer can flood CRDT ops, messages, reactions, sync requests, file chunks. Fix: token-bucket rate limiter per peer (e.g., 100 messages/sec burst, 20/sec sustained). Excess messages dropped with log warning.
+- [X] **Op log compaction** — `op_log: Vec<CrdtOp>` in ServerState grows without bound, serialized to JSON on every persist. Fix: implement periodic compaction — snapshot current state, prune ops older than the snapshot. Keep last N ops (e.g., 1000) for recent sync, discard the rest.
 - [X] **Incoming FileHeader size validation** — receiver trusts declared `size` and `chunks` without checking server's max file size setting. Fix: validate `FileHeader.size <= max_file_size_mb` from ServerState settings before accepting. Reject oversized headers.
 
 **MEDIUM — message integrity & access control:**
@@ -1009,12 +1009,10 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 - [X] **`getrandom::fill().unwrap()` panic** — extremely rare but would crash the app. Fix: handle error gracefully or use `expect` with descriptive message.
 
 **INFRASTRUCTURE — relay server hardening:**
-- [ ] **Disable password SSH** — switch to SSH key-only authentication. Password SSH is the #1 attack vector for VPS servers (automated bots try common passwords 24/7). Edit `/etc/ssh/sshd_config`: `PasswordAuthentication no`, `PubkeyAuthentication yes`. Add your public key to `~/.ssh/authorized_keys` first.
-- [ ] **Change default SSH user** — create a new non-root user with sudo, disable `ubuntu` default login. Attackers specifically target `root` and `ubuntu` usernames.
-- [ ] **Firewall rules (UFW)** — allow only: 22/tcp (SSH), 443/tcp (WSS/Nginx), 4001/tcp (libp2p relay), 9001/tcp (internal only, Nginx→relay). Deny all other inbound. Currently unknown what ports are open.
-- [ ] **Fail2ban** — auto-ban IPs after 5 failed SSH attempts. Blocks brute-force attacks.
-- [ ] **Relay connection rate limiting** — the relay binary itself should limit connections per IP (e.g., max 50 concurrent from same IP, max 100 new connections/min per IP). Prevents a single attacker from exhausting relay capacity and DoS-ing all users.
-- [ ] **Relay resource limits** — systemd `LimitNOFILE`, `MemoryMax`, `CPUQuota` on the haven-relay service. Prevents a misbehaving relay from taking down the entire VPS.
+- [X] **Disable password SSH** — switch to SSH key-only authentication. Password SSH is the #1 attack vector for VPS servers (automated bots try common passwords 24/7). Edit `/etc/ssh/sshd_config`: `PasswordAuthentication no`, `PubkeyAuthentication yes`. Add your public key to `~/.ssh/authorized_keys` first.
+- [X] **Firewall rules (UFW)** — allow only: 22/tcp (SSH), 443/tcp (WSS/Nginx), 4001/tcp (libp2p relay), 9001/tcp (internal only, Nginx→relay). Deny all other inbound. Currently unknown what ports are open.
+- [X] **Fail2ban** — auto-ban IPs after 5 failed SSH attempts. Blocks brute-force attacks.
+- [X] **Relay resource limits** — systemd `LimitNOFILE`, `MemoryMax`, `CPUQuota` on the haven-relay service. Prevents a misbehaving relay from taking down the entire VPS.
 
 **Deliverable:** All known security vulnerabilities patched. Wire protocol hardened against malicious peers. Relay server hardened against unauthorized access and DoS. Ready for distributed storage (Phase 4) where peers store shards on each other's devices — trust boundaries are enforced.
 
