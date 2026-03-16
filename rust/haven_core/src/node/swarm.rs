@@ -1565,6 +1565,12 @@ async fn run_swarm(
     let mut sync_dispatch_timer = tokio::time::interval(Duration::from_millis(100));
     sync_dispatch_timer.tick().await; // consume immediate first tick
 
+    // SECURITY: Per-peer rate limiter — token bucket (100 burst, refill 20/sec).
+    // Prevents message flooding from malicious peers.
+    let mut peer_rate_tokens: HashMap<PeerId, (u32, std::time::Instant)> = HashMap::new();
+    const RATE_LIMIT_BURST: u32 = 100;
+    const RATE_LIMIT_REFILL: u32 = 20; // tokens per second
+
     // Re-bootstrap timer (30 seconds) for mutual peer discovery.
     // Fires unconditionally — BootstrapPeers handler skips connected
     // and disconnected peers, so only genuinely new peers get processed.
@@ -4125,6 +4131,24 @@ async fn run_swarm(
                             request_response::Event::Message { peer, message, .. } => {
                                 match message {
                                     request_response::Message::Request { request, channel, .. } => {
+                                        // SECURITY: Per-peer rate limiting.
+                                        {
+                                            let (tokens, last_refill) = peer_rate_tokens
+                                                .entry(peer)
+                                                .or_insert((RATE_LIMIT_BURST, std::time::Instant::now()));
+                                            let elapsed = last_refill.elapsed().as_secs_f64();
+                                            let refill = (elapsed * RATE_LIMIT_REFILL as f64) as u32;
+                                            if refill > 0 {
+                                                *tokens = (*tokens + refill).min(RATE_LIMIT_BURST);
+                                                *last_refill = std::time::Instant::now();
+                                            }
+                                            if *tokens == 0 {
+                                                haven_log!("[HAVEN-SECURITY] Rate limited peer {peer} — dropping message");
+                                                let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
+                                                continue;
+                                            }
+                                            *tokens -= 1;
+                                        }
                                         handle_incoming_request(
                                             &mut swarm,
                                             &mut olm,

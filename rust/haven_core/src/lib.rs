@@ -12,6 +12,23 @@ pub(crate) mod log {
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("haven_debug.log")))
             .unwrap_or_else(|| std::path::PathBuf::from("haven_debug.log"));
+
+        // Log rotation: if file exceeds 10MB, keep only the last 2MB.
+        const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
+        const KEEP_SIZE: usize = 2 * 1024 * 1024;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > MAX_LOG_SIZE {
+                if let Ok(data) = std::fs::read(&path) {
+                    let start = data.len().saturating_sub(KEEP_SIZE);
+                    // Find the next newline after the cut point to avoid partial lines.
+                    let start = data[start..].iter().position(|&b| b == b'\n')
+                        .map(|p| start + p + 1)
+                        .unwrap_or(start);
+                    let _ = std::fs::write(&path, &data[start..]);
+                }
+            }
+        }
+
         if let Ok(file) = OpenOptions::new().create(true).append(true).open(&path) {
             let _ = LOG_FILE.set(Mutex::new(file));
         }

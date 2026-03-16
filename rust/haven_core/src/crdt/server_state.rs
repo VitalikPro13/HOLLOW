@@ -297,6 +297,14 @@ impl ServerState {
             .unwrap_or_else(|pos| pos);
         self.op_log.insert(insert_pos, op.clone());
 
+        // SECURITY: Compact op log to prevent unbounded growth.
+        // Keep last 1000 ops — older ops are already applied to state.
+        const MAX_OP_LOG: usize = 1000;
+        if self.op_log.len() > MAX_OP_LOG {
+            let drain_count = self.op_log.len() - MAX_OP_LOG;
+            self.op_log.drain(..drain_count);
+        }
+
         Ok(())
     }
 
