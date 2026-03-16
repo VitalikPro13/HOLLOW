@@ -50,6 +50,78 @@ bool shouldGroup({
   return currentTime.difference(previousTime).inMinutes.abs() < 5;
 }
 
+/// Whether a date separator should be shown between two timestamps.
+bool shouldShowDateSeparator(DateTime current, DateTime? previous) {
+  if (previous == null) return true; // First message always gets a date header.
+  return current.year != previous.year ||
+      current.month != previous.month ||
+      current.day != previous.day;
+}
+
+/// ASOT-style date separator: ——— February 16, 2026 ———
+class DateSeparator extends StatelessWidget {
+  final DateTime date;
+  const DateSeparator({super.key, required this.date});
+
+  @override
+  Widget build(BuildContext context) {
+    final haven = HavenTheme.of(context);
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final messageDay = DateTime(date.year, date.month, date.day);
+    final diff = today.difference(messageDay).inDays;
+
+    final String label;
+    if (diff == 0) {
+      label = 'Today';
+    } else if (diff == 1) {
+      label = 'Yesterday';
+    } else {
+      const months = [
+        'January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December',
+      ];
+      label = '${months[date.month - 1]} ${date.day}, ${date.year}';
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(
+        top: HavenSpacing.md + 2,
+        bottom: HavenSpacing.sm,
+        left: HavenSpacing.lg,
+        right: HavenSpacing.lg,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Container(
+              height: 1,
+              color: haven.border,
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: HavenSpacing.md),
+            child: Text(
+              label,
+              style: HavenTypography.caption.copyWith(
+                color: haven.textSecondary.withValues(alpha: 0.6),
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Container(
+              height: 1,
+              color: haven.border,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class ChatPane extends ConsumerStatefulWidget {
   final String peerId;
 
@@ -426,25 +498,27 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             child: Container(
             color: haven.background,
             child: messages.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          LucideIcons.messageCircle,
-                          size: 48,
-                          color: haven.textSecondary.withValues(alpha: 0.3),
+                ? (_historyLoaded
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              LucideIcons.messageCircle,
+                              size: 48,
+                              color: haven.textSecondary.withValues(alpha: 0.3),
+                            ),
+                            const SizedBox(height: HavenSpacing.md),
+                            Text(
+                              'No messages yet. Say hello!',
+                              style: HavenTypography.body.copyWith(
+                                color: haven.textSecondary,
+                              ),
+                            ),
+                          ],
                         ),
-                        const SizedBox(height: HavenSpacing.md),
-                        Text(
-                          'No messages yet. Say hello!',
-                          style: HavenTypography.body.copyWith(
-                            color: haven.textSecondary,
-                          ),
-                        ),
-                      ],
-                    ),
-                  )
+                      )
+                    : const SizedBox.shrink())
                 : ScrollConfiguration(
                     behavior: ScrollConfiguration.of(context)
                         .copyWith(scrollbars: false),
@@ -460,8 +534,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                     ),
                     itemCount: messages.length + 1,
                     itemBuilder: (context, index) {
-                      // Sentinel item at the end — tiny invisible spacer that
-                      // lets us align "bottom of last message" to viewport bottom.
+                      // Sentinel item at the end — lets us align
+                      // "bottom of last message" to viewport bottom.
                       if (index >= messages.length) {
                         return const SizedBox.shrink();
                       }
@@ -588,13 +662,29 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                           );
                         }),
                       );
-                      if (showHeader) {
-                        return Padding(
-                          padding: const EdgeInsets.only(top: HavenSpacing.sm + 2),
-                          child: wrapper,
+                      // Date separator between messages on different days.
+                      final showDate = shouldShowDateSeparator(
+                        msg.timestamp,
+                        index > 0 ? messages[index - 1].timestamp : null,
+                      );
+
+                      final messageWidget = showHeader
+                          ? Padding(
+                              padding: const EdgeInsets.only(top: HavenSpacing.sm + 2),
+                              child: wrapper,
+                            )
+                          : wrapper;
+
+                      if (showDate) {
+                        return Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            DateSeparator(date: msg.timestamp),
+                            messageWidget,
+                          ],
                         );
                       }
-                      return wrapper;
+                      return messageWidget;
                     },
                   ),
                   ),
@@ -729,6 +819,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                     autofocus: true,
                     maxLines: 5,
                     minLines: 1,
+                    maxLength: 4000,
+                    showCounter: false,
                     style: HavenTypography.body.copyWith(
                       color: haven.textPrimary,
                     ),

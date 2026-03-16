@@ -90,6 +90,16 @@ impl Hlc {
     /// Ensures our next `now()` will be strictly greater.
     pub fn witness(&mut self, other: &HlcTimestamp) {
         let wall = wall_clock_ms();
+
+        // SECURITY: Reject timestamps more than 5 minutes ahead of wall clock.
+        // Prevents a malicious peer from advancing our HLC to the far future,
+        // which would give their LWW values permanent precedence.
+        const MAX_DRIFT_MS: u64 = 5 * 60 * 1000; // 5 minutes
+        if other.physical_ms > wall + MAX_DRIFT_MS {
+            haven_log!("[HAVEN-SECURITY] HLC drift rejected: remote physical_ms {} is {} ms ahead of wall clock {}", other.physical_ms, other.physical_ms - wall, wall);
+            return;
+        }
+
         let max_physical = wall.max(self.latest.physical_ms).max(other.physical_ms);
 
         if max_physical == self.latest.physical_ms

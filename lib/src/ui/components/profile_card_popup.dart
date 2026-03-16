@@ -40,7 +40,7 @@ void showProfileCardPopup({
       role: role,
       anchor: anchor,
       anchorBottom: anchorBottom,
-      onDismiss: () => entry.remove(),
+      onDismiss: () { entry.remove(); entry.dispose(); },
     ),
   );
 

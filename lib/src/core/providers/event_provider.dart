@@ -56,6 +56,9 @@ class EventStreamNotifier extends Notifier<bool> {
   }
 
   void _dispatch(NetworkEvent event) {
+    // SECURITY: Wrap dispatch in try-catch to prevent unhandled exceptions
+    // from killing the event loop.
+    try {
     switch (event) {
       case NetworkEvent_PeerDiscovered(:final peer):
         debugPrint(
@@ -434,6 +437,9 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HAVEN] File failed: $fileId — $error');
         ref.read(fileTransferProvider.notifier).onFileFailed(
               fileId, error);
+    }
+    } catch (e, st) {
+      debugPrint('[HAVEN] Unhandled dispatch error: $e\n$st');
     }
   }
 

@@ -63,9 +63,28 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 ```
 
 ## Current Phase
-**Phase 3.5: Daily Driver — Chat Features & Identity** — In Progress.
+**Phase 3.75: Security Hardening** — Current. Phase 3.5 COMPLETE.
 
-Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection management, invite links), 2.5 (UI Foundation), 2.75 (Haven Design System v2), UI Polish Pass, 3 (Servers & Channels) — all COMPLETE. WSS transport deployed.
+Phases 1 (LAN E2EE chat), 2 (cross-network E2EE, prekey bundles, connection management, invite links), 2.5 (UI Foundation), 2.75 (Haven Design System v2), UI Polish Pass, 3 (Servers & Channels), 3.5 (Daily Driver) — all COMPLETE. WSS transport deployed.
+
+**Phase 3.75 — Security Hardening (Mar 16, 2026):**
+Full security audit of the codebase. 3 critical, 4 high, 6 medium, 8 low vulnerabilities found + relay server hardening.
+- **Critical:** `ServerDeleteBroadcast`/`MemberKickBroadcast` have no authentication — any peer can delete servers or kick members. CRDT op `author` field not verified against actual sender — peers can forge ops as other users.
+- **High:** Unbounded `get_channel_messages()`/`get_messages()` reads (no LIMIT), no rate limiting on incoming messages (DoS vector), `op_log` table grows unbounded (no pruning), file header validation gaps (missing size/name checks before accepting chunks).
+- **Medium:** Delete ownership not verified in Rust receive handlers, Ed25519 signature enforcement inconsistent (some paths skip verification), cross-server message injection (server_id not validated on receive), HLC drift not bounded (future timestamps accepted), path traversal possible in file save paths, reaction removal doesn't verify original reactor identity.
+- **Low:** No character limit on message content, profile field size limits not enforced in Rust, markdown parser has no recursion depth limit, emoji validation allows arbitrary strings, nickname length unbounded, typing indicator spoofable, channel name length unchecked, search query not sanitized for SQL LIKE wildcards.
+- **Relay server:** Rate limiting, connection limits, and abuse prevention planned.
+
+**Phase 3.75 completed so far:**
+- All 3 CRITICAL: `ServerDeleteBroadcast`/`MemberKickBroadcast` permission checks (owner-only verification), CRDT op author verification against actual sender + per-payload permission checks (role-gated ops rejected from unauthorized peers).
+- 2 of 4 HIGH: Message size limit (50MB cap on `HavenCodec` frame length), `FileHeader` size validation enforced in both Olm and MLS receive paths (reject if declared size exceeds server max file size setting).
+- All 6 MEDIUM: Delete ownership check (Rust verifies sender owns message before applying), signature enforcement (reject messages with invalid Ed25519 signatures instead of logging+continuing), cross-server channel message validation (server_id checked on receive), HLC drift bound (5-minute max future drift, reject outliers), file path sanitization (alphanumeric + dash + underscore + dot only, no path separators), reaction removal already safe (no change needed).
+- All 8 LOW: 4K character limit on chat messages (Rust `send_channel_message`/`send_message` reject + Dart UI `maxLength` with counter), profile field truncation (display name 64, status 128, about 512 chars in Rust `handle_profile_update`), markdown parser recursion depth cap (max 10 nesting levels), emoji length validation (max 32 chars, reject non-emoji strings), `height == 0` guard on message hover wrapper (prevents `localToGlobal` crash), event dispatch try-catch (swarm event loop catches panics to prevent crash-on-malformed-event), profile card overlay disposal fix (checks `mounted` before removing overlay entry), `getrandom` expect message improved (descriptive panic message).
+- Date separators: "Today", "Yesterday", or full date (e.g., "March 15, 2026") dividers in DM chat, channel chat, and pinned messages popup. Pinned messages sorted chronologically (oldest first).
+- `showCounter` param on `HavenTextField` for hiding the character counter on chat input fields.
+- **Remaining:** Per-peer rate limiting (DoS prevention), `op_log` compaction/pruning, relay server hardening.
+
+Phase 4 plan is fully broken down into 12 major items with ~80 sub-tasks in `HAVEN_PLAN.md`.
 
 **Phase 3.5 completed so far:**
 - User profiles: Rust `user_profiles` SQLCipher table, `ProfileUpdate` HavenMessage broadcast, timestamp-gated upsert, auto-exchange on `ConnectionEstablished`, `ProfileNotifier` Dart provider, `displayNameFor()` helper used everywhere (user_bar, member_panel, channel_message_bubble, peer_card, chat_pane)

@@ -54,7 +54,7 @@ class FileAttachmentWidget extends ConsumerWidget {
 
     double displayWidth = maxWidth;
     double displayHeight = maxHeight;
-    if (attachment.width != null && attachment.height != null) {
+    if (attachment.width != null && attachment.height != null && attachment.height! > 0) {
       final aspect = attachment.width! / attachment.height!;
       if (aspect > maxWidth / maxHeight) {
         displayWidth = maxWidth;

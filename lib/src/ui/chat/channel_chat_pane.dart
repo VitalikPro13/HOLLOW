@@ -160,7 +160,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     final pinnedMessages = pinnedIds
         .map((id) => messages.where((m) => m.messageId == id).firstOrNull)
         .where((m) => m != null)
-        .toList();
+        .toList()
+      ..sort((a, b) => b!.timestamp.compareTo(a!.timestamp));
 
     showDialog(
       context: context,
@@ -211,13 +212,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                   )
                 else
                   Flexible(
-                    child: ListView.separated(
+                    child: ListView.builder(
                       shrinkWrap: true,
                       itemCount: pinnedMessages.length,
-                      separatorBuilder: (_, _) => Divider(
-                        color: haven.border,
-                        height: HavenSpacing.md,
-                      ),
                       itemBuilder: (_, index) {
                         final msg = pinnedMessages[index]!;
                         final profiles = ref.read(profileProvider);
@@ -230,7 +227,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                         );
                         final time =
                             '${msg.timestamp.hour.toString().padLeft(2, '0')}:${msg.timestamp.minute.toString().padLeft(2, '0')}';
-                        return Padding(
+
+                        // Date separator between pinned messages on different days.
+                        final showDate = shouldShowDateSeparator(
+                          msg.timestamp,
+                          index > 0 ? pinnedMessages[index - 1]!.timestamp : null,
+                        );
+
+                        final msgWidget = Padding(
                           padding: const EdgeInsets.symmetric(
                               vertical: HavenSpacing.xs),
                           child: Column(
@@ -289,6 +293,26 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                             ],
                           ),
                         );
+
+                        if (showDate) {
+                          return Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              DateSeparator(date: msg.timestamp),
+                              msgWidget,
+                            ],
+                          );
+                        }
+                        if (index > 0) {
+                          return Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Divider(color: haven.border, height: HavenSpacing.sm),
+                              msgWidget,
+                            ],
+                          );
+                        }
+                        return msgWidget;
                       },
                     ),
                   ),
@@ -719,31 +743,33 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             child: Container(
             color: haven.background,
             child: messages.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          LucideIcons.hash,
-                          size: 64,
-                          color:
-                              haven.textSecondary.withValues(alpha: 0.3),
+                ? (_historyLoaded
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              LucideIcons.hash,
+                              size: 64,
+                              color:
+                                  haven.textSecondary.withValues(alpha: 0.3),
+                            ),
+                            const SizedBox(height: HavenSpacing.lg),
+                            Text(
+                              'Welcome to #${widget.channelName}',
+                              style: HavenTypography.heading
+                                  .copyWith(color: haven.textPrimary),
+                            ),
+                            const SizedBox(height: HavenSpacing.sm),
+                            Text(
+                              'This is the beginning of the channel.',
+                              style: HavenTypography.body
+                                  .copyWith(color: haven.textSecondary),
+                            ),
+                          ],
                         ),
-                        const SizedBox(height: HavenSpacing.lg),
-                        Text(
-                          'Welcome to #${widget.channelName}',
-                          style: HavenTypography.heading
-                              .copyWith(color: haven.textPrimary),
-                        ),
-                        const SizedBox(height: HavenSpacing.sm),
-                        Text(
-                          'This is the beginning of the channel.',
-                          style: HavenTypography.body
-                              .copyWith(color: haven.textSecondary),
-                        ),
-                      ],
-                    ),
-                  )
+                      )
+                    : const SizedBox.shrink())
                 : ScrollConfiguration(
                     behavior: ScrollConfiguration.of(context)
                         .copyWith(scrollbars: false),
@@ -913,13 +939,29 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                           );
                         }),
                       );
-                      if (showHeader) {
-                        return Padding(
-                          padding: const EdgeInsets.only(top: HavenSpacing.sm + 2),
-                          child: wrapper,
+                      // Date separator between messages on different days.
+                      final showDate = shouldShowDateSeparator(
+                        msg.timestamp,
+                        index > 0 ? messages[index - 1].timestamp : null,
+                      );
+
+                      final messageWidget = showHeader
+                          ? Padding(
+                              padding: const EdgeInsets.only(top: HavenSpacing.sm + 2),
+                              child: wrapper,
+                            )
+                          : wrapper;
+
+                      if (showDate) {
+                        return Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            DateSeparator(date: msg.timestamp),
+                            messageWidget,
+                          ],
                         );
                       }
-                      return wrapper;
+                      return messageWidget;
                     },
                   ),
                   ),
@@ -1061,6 +1103,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                     autofocus: true,
                     maxLines: 5,
                     minLines: 1,
+                    maxLength: 4000,
+                    showCounter: false,
                     style: HavenTypography.body
                         .copyWith(color: haven.textPrimary),
                     borderRadius: haven.radiusLg,

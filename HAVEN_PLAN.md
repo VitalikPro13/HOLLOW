@@ -1,6 +1,6 @@
 # Haven — A Fully Distributed, Encrypted Discord Alternative
 
-> **Status:** Active Development — Phases 1-3 Complete. Phase 3.5 (Daily Driver — Chat Features & Identity) In Progress.
+> **Status:** Active Development — Phases 1-3.5 Complete. Phase 4 (Shared Vault — Distributed Storage) Up Next.
 > **Author:** Designed through technical discussion, February 2026.
 > **Philosophy:** No central servers. No Electron. No Node.js hosting. The members ARE the server.
 
@@ -975,22 +975,160 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 **Deliverable:** Haven feels like a complete, polished chat app. Ready for daily use with friends.
 
+### Phase 3.75: Security Hardening
+
+**Goal:** Close all known security vulnerabilities before building the distributed storage layer. Every wire message from a peer is untrusted input — a malicious peer with basic programming knowledge can craft raw JSON messages to exploit any unvalidated handler. Fix all findings from the security audit (Mar 16, 2026).
+
+**CRITICAL — privilege escalation & server destruction:**
+- [X] **ServerDeleteBroadcast permission check** — currently ANY connected peer can send `ServerDeleteBroadcast { server_id }` and the receiver deletes the server immediately with zero verification. Fix: verify sender is the server Owner before processing. Reject and log all unauthorized attempts.
+- [X] **MemberKickBroadcast permission check** — same issue: any peer can force you to leave any server. Fix: verify sender has `KICK_MEMBERS` permission and outranks the local user in the role hierarchy before processing.
+- [X] **CRDT operation author verification** — `CrdtOpBroadcast` handler applies incoming ops with no permission checking. The `author` field in `CrdtOp` is self-reported and never verified against the actual sender's peer ID. A regular member can forge `RoleChanged { peer_id: self, role: Owner }` with the real owner's peer ID as author. Fix: (1) verify `op.author == actual_sender_peer_id`, (2) check that the author has permission for the specific operation type (e.g., only admins+ can `RoleChanged`, only owner can `MemberRemoved` for admins), (3) reject and log unauthorized ops.
+
+**HIGH — resource exhaustion & validation:**
+- [X] **Message size limit on HavenCodec** — `read_to_end` has no size cap. A peer can send a multi-GB message to cause OOM. Fix: use `io.take(MAX_MESSAGE_SIZE)` before `read_to_end` (e.g., 50MB max).
+- [ ] **Per-peer rate limiting** — no rate limits on any incoming message type. A peer can flood CRDT ops, messages, reactions, sync requests, file chunks. Fix: token-bucket rate limiter per peer (e.g., 100 messages/sec burst, 20/sec sustained). Excess messages dropped with log warning.
+- [ ] **Op log compaction** — `op_log: Vec<CrdtOp>` in ServerState grows without bound, serialized to JSON on every persist. Fix: implement periodic compaction — snapshot current state, prune ops older than the snapshot. Keep last N ops (e.g., 1000) for recent sync, discard the rest.
+- [X] **Incoming FileHeader size validation** — receiver trusts declared `size` and `chunks` without checking server's max file size setting. Fix: validate `FileHeader.size <= max_file_size_mb` from ServerState settings before accepting. Reject oversized headers.
+
+**MEDIUM — message integrity & access control:**
+- [X] **Message deletion ownership check** — `DeleteMessage` handler doesn't verify the sender owns the message (unlike `EditMessage` which does). Any peer can hide any message. Fix: add same ownership check as edit handler (`get_channel_message_sender` / `get_dm_message_is_mine`).
+- [X] **Enforce signature verification** — signature verification failures are logged but messages are still processed and stored. Fix: reject messages with invalid signatures. Accept unsigned messages for backward compatibility but mark them as `unverified` in the DB (new column). UI can optionally show unverified indicator.
+- [X] **Cross-server channel message validation** — channel messages via Olm are not checked for server membership. A peer with an Olm session can inject messages into any server/channel on the victim. Fix: before storing a channel message, verify (1) server `sid` exists, (2) sender is a member of that server, (3) channel `cid` exists in the server.
+- [X] **HLC drift bound** — `witness()` accepts any remote timestamp without bounding clock drift. A peer can send far-future timestamps to permanently win all LWW conflicts. Fix: reject timestamps more than 5 minutes ahead of local wall clock in `witness()`.
+- [X] **File path sanitization** — `file_id` and `ext` from remote peers used directly in path construction (`files_dir/{file_id}.{ext}`). Path separators in these fields could write outside intended directory. Fix: sanitize both to alphanumeric + dots only: `chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.').collect()`.
+- [X] **Reaction removal ownership check** — `RemoveReaction` handler doesn't verify the sender originally added the reaction. Fix: verify `peer_id` matches sender before removing.
+
+**LOW — defense in depth:**
+- [X] **Chat message character limit** — no character limit on message text. A custom client could send a 100MB text message. Fix: enforce 4,000 character limit in both Dart (UI input maxLength) AND Rust receive handlers (reject/truncate messages exceeding limit). Applies to DMs and channel messages. Edit messages same limit.
+- [X] **Profile update field size limits** — `ProfileUpdate` accepts unbounded strings for display_name/status/about_me. Fix: truncate on receive (100 chars name, 200 status, 500 about_me).
+- [X] **Markdown parser recursion depth** — `_parseInline` in `message_text_parser.dart` is recursive with no depth limit. Deeply nested formatting (5000+ levels) could stack overflow. Fix: add `depth` parameter, cap at 10 levels, treat remainder as plain text.
+- [X] **Reaction emoji validation** — modified clients can send arbitrary strings as emojis. Fix: reject emoji strings longer than 10 characters on receive.
+- [X] **FileHeader height=0 division guard** — aspect ratio calculation divides by height. Fix: guard `height > 0` before division in `FileAttachmentWidget`.
+- [X] **Event dispatch try-catch** — `_dispatch` in `event_provider.dart` not wrapped in try-catch. An exception in any handler could kill the event loop. Fix: wrap in `try { ... } catch (e) { debugPrint(...) }`.
+- [X] **Profile card OverlayEntry disposal** — `entry.dispose()` never called after `entry.remove()` in `profile_card_popup.dart`. Fix: add `entry.dispose()` after remove.
+- [X] **`getrandom::fill().unwrap()` panic** — extremely rare but would crash the app. Fix: handle error gracefully or use `expect` with descriptive message.
+
+**INFRASTRUCTURE — relay server hardening:**
+- [ ] **Disable password SSH** — switch to SSH key-only authentication. Password SSH is the #1 attack vector for VPS servers (automated bots try common passwords 24/7). Edit `/etc/ssh/sshd_config`: `PasswordAuthentication no`, `PubkeyAuthentication yes`. Add your public key to `~/.ssh/authorized_keys` first.
+- [ ] **Change default SSH user** — create a new non-root user with sudo, disable `ubuntu` default login. Attackers specifically target `root` and `ubuntu` usernames.
+- [ ] **Firewall rules (UFW)** — allow only: 22/tcp (SSH), 443/tcp (WSS/Nginx), 4001/tcp (libp2p relay), 9001/tcp (internal only, Nginx→relay). Deny all other inbound. Currently unknown what ports are open.
+- [ ] **Fail2ban** — auto-ban IPs after 5 failed SSH attempts. Blocks brute-force attacks.
+- [ ] **Relay connection rate limiting** — the relay binary itself should limit connections per IP (e.g., max 50 concurrent from same IP, max 100 new connections/min per IP). Prevents a single attacker from exhausting relay capacity and DoS-ing all users.
+- [ ] **Relay resource limits** — systemd `LimitNOFILE`, `MemoryMax`, `CPUQuota` on the haven-relay service. Prevents a misbehaving relay from taking down the entire VPS.
+
+**Deliverable:** All known security vulnerabilities patched. Wire protocol hardened against malicious peers. Relay server hardened against unauthorized access and DoS. Ready for distributed storage (Phase 4) where peers store shards on each other's devices — trust boundaries are enforced.
+
 ### Phase 4: Shared Vault — Distributed Storage
 
 **Goal:** The core innovation — distributed storage across members.
 
-- [ ] Storage pledge system (configurable minimum per server)
-- [ ] Reed-Solomon erasure coding implementation
-- [ ] Content-addressed storage (SHA-256 based)
-- [ ] DHT-based shard placement
-- [ ] Shard retrieval and content reconstruction
-- [ ] Rebalancing on member join/leave. 🎞️ Animate: rebalancing progress indicator, shard migration visualization
-- [ ] Storage dashboard UI (visualize pool, health, contributions). 🎞️ Animate: animated donut/bar charts, pool fill-up animation, health pulse indicators
-- [ ] File upload → encrypt → erasure-code → distribute pipeline. 🎞️ Animate: upload progress with encrypt→split→distribute step visualization
-- [ ] Image/file preview and download from distributed storage. 🎞️ Animate: image load shimmer placeholder → fade-in, download progress reconstruction
-- [ ] Storage tier configuration (retention policies per data type)
-- [ ] Connection subset management — limit persistent connections to 6-12 peers per server (not all members). Prefer peers with high uptime, low latency, good bandwidth. Rotate periodically for network diversity. Critical for 1,000+ member servers where full-mesh connections would overwhelm libp2p.
-- [ ] Channel-level CRDT sharding — split server CRDT state into per-channel documents instead of one monolithic ServerState. Reduces sync payload and memory footprint for servers with 5,000+ members and many channels. Each peer only needs full CRDT state for channels they participate in.
+- [ ] **Reed-Solomon erasure coding engine** — foundation for all distributed storage
+  - [ ] Add `reed-solomon-erasure` crate to Cargo.toml (pure Rust, no C deps, SIMD-accelerated)
+  - [ ] New module `vault/erasure.rs`: `encode(data, k, m) -> Vec<Vec<u8>>` (pad, split into k data shards, generate m parity shards), `decode(shards: &mut [Option<Vec<u8>>], k, m) -> Vec<u8>` (reconstruct from any k of n shards)
+  - [ ] `ShardMetadata` struct: shard_index, content_id, k, m, shard_size, total_data_size — self-describing header prepended to each stored shard
+  - [ ] Unit tests: encode+decode all shards, decode with exactly k shards (drop each combination of m), fewer than k fails, empty/single-byte/large (1MB+) inputs
+  - [ ] Benchmark: target >100MB/s encode/decode throughput for 1MB payload at k=10/m=5
+
+- [ ] **Content-addressed storage layer** — local shard storage on disk
+  - [ ] New module `vault/content_store.rs`
+  - [ ] `content_id(data) -> String`: SHA-256 hash of encrypted data, hex-encoded (reuses existing `sha2` crate)
+  - [ ] `shard_key(content_id, shard_index) -> String`: SHA-256(content_id || shard_index as big-endian u16), hex-encoded — used as DHT key and local filename
+  - [ ] Local shard directory: `~/.haven/vault/{server_id}/` with shards as `{shard_key}.shard` files
+  - [ ] CRUD operations: `store_shard()`, `read_shard()`, `delete_shard()`, `list_shards()`, `total_storage_used()`
+  - [ ] Integrity verification on read: recompute SHA-256 of shard data, compare to expected shard_key (detect corruption/tampering)
+  - [ ] New SQLCipher table `vault_shards`: shard_key (PK), server_id, content_id, shard_index, k, m, shard_size, total_data_size, stored_at, last_verified, storage_tier
+  - [ ] Indexes on (server_id, content_id) and (server_id, storage_tier)
+
+- [ ] **Storage pledge system** — CRDT-backed per-member storage commitment
+  - [ ] New `CrdtPayload::StoragePledgeChanged { peer_id, pledge_bytes }` variant
+  - [ ] New field `storage_pledges: HashMap<String, AdminLwwReg<u64>>` on ServerState with `#[serde(default)]` (backward-compatible)
+  - [ ] LWW merge: members can change own pledge, admins can change anyone's
+  - [ ] CRDT server settings: `min_pledge_mb` (admin-controlled, default 512MB), `vault_enabled` (admin-controlled, default "false" — master toggle gating all vault behavior)
+  - [ ] Auto-pledge on server join: when `vault_enabled` is true, new member automatically pledges `min_pledge_mb`
+  - [ ] FFI: `set_storage_pledge(server_id, pledge_bytes)`, `get_storage_stats(server_id) -> StorageStats { total_pledged, total_used, my_pledge, my_used, member_count, online_members, health_score }`
+  - [ ] `NodeCommand::SetStoragePledge` → creates CRDT op, broadcasts, applies locally
+
+- [ ] **DHT-based shard placement** — deterministic mapping of shards to peers
+  - [ ] New module `vault/placement.rs`
+  - [ ] `compute_shard_placements(content_id, n, server_members, pledges) -> Vec<(u16, PeerId)>`: for each shard 0..n, compute shard_key, XOR-distance to each member's peer ID, pick closest member with sufficient remaining pledge capacity
+  - [ ] Weighted placement: members with larger pledges hold proportionally more shards
+  - [ ] Self-placement: shards mapping closest to our own peer ID stored locally (no network transfer)
+  - [ ] Deterministic: any peer can independently compute canonical placement from same inputs
+  - [ ] New SQLCipher table `vault_placement`: content_id, shard_index, target_peer, server_id, stored_at, confirmed — PRIMARY KEY (content_id, shard_index)
+
+- [ ] **Store protocol** — distributing shards to target peers
+  - [ ] New wire messages: `HavenMessage::ShardStore { server_id, content_id, shard_index, shard_key, metadata_json, data (base64) }`, `ShardStoreAck { server_id, content_id, shard_index, success }`
+  - [ ] Receive handler: verify server membership, check pledge capacity, store via content_store, send ack
+  - [ ] Store coordinator: after encoding, send shards to targets in parallel (Olm-encrypted), track acks, retry 3x with 5s backoff
+  - [ ] Large shard chunking: shards >256KB split into 256KB pieces (reuse existing FileChunk mechanism), reassemble on receiver
+  - [ ] Rate limiting: max 10 concurrent outbound shard stores per server
+
+- [ ] **Retrieve protocol** — fetching shards from peers for reconstruction
+  - [ ] New wire messages: `ShardRequest { server_id, content_id, shard_indices }`, `ShardResponse { server_id, content_id, shard_index, data, not_found }`, `ShardProbe { server_id, content_ids }`, `ShardProbeResponse { server_id, available: Vec<(content_id, Vec<shard_index>)> }`
+  - [ ] Receive handler: look up shards in local store, send ShardResponse for each
+  - [ ] Retrieval coordinator: compute placement, request k shards in parallel, collect responses. If peer responds not_found, fallback to broadcast ShardProbe to all connected server members
+  - [ ] 10s timeout per peer — mark unavailable, try next closest peer
+  - [ ] `NodeCommand::RetrieveContent { server_id, content_id }` → `NetworkEvent::ContentRetrieved { server_id, content_id, data }` / `ContentRetrieveFailed { server_id, content_id, error }`
+
+- [ ] **File upload pipeline** — encrypt → erasure-code → distribute. 🎞️ Animate: upload progress with encrypt→split→distribute step visualization
+  - [ ] New module `vault/pipeline.rs` — orchestrates full upload flow
+  - [ ] Upload flow: (1) AES-256-GCM encrypt with random per-file key, (2) content_id = SHA-256(ciphertext), (3) erasure-encode into k+m shards, (4) compute placements, (5) store shards on targets, (6) create VaultManifest encrypted with MLS group key, erasure-code manifest itself at higher redundancy (k=3, m=3)
+  - [ ] `VaultManifest` struct: content_id, encryption_key, nonce, original_size, k, m, shard_count, file_name, mime_type, storage_tier, created_at, creator_peer_id
+  - [ ] New SQLCipher table `vault_manifests`: content_id (PK), server_id, channel_id, manifest_encrypted (BLOB), k, m, original_size, storage_tier, created_at, creator_peer_id
+  - [ ] Integration: when `vault_enabled` is true, channel file attachments go through vault pipeline instead of direct P2P. `file_id` on message becomes vault `content_id`. Direct P2P continues for DMs and servers with vault disabled (backward compatible)
+  - [ ] FFI: `vault_upload_file(server_id, channel_id, file_path, message_id) -> content_id`
+  - [ ] `NetworkEvent::VaultUploadProgress { server_id, content_id, phase ("encrypting"/"encoding"/"distributing"), progress (0.0-1.0) }`, `VaultUploadComplete`, `VaultUploadFailed`
+
+- [ ] **File download pipeline** — locate shards, retrieve k, reconstruct, decrypt. 🎞️ Animate: image load shimmer placeholder → fade-in, download progress reconstruction
+  - [ ] Download flow: (1) lookup VaultManifest by content_id (local DB or retrieve from vault), (2) decrypt manifest with MLS group key, (3) compute shard placements, (4) request k shards from placed peers, (5) erasure-decode, (6) AES-256-GCM decrypt with key from manifest, (7) write to disk, (8) cache locally
+  - [ ] Local cache: `~/.haven/vault_cache/{content_id}.{ext}` — LRU eviction when cache exceeds configurable size (default 1GB, outside pledge space)
+  - [ ] Cache-first retrieval: check local cache before network fetch (instant for recently viewed files)
+  - [ ] FFI: `vault_download_file(server_id, content_id) -> disk_path`
+  - [ ] `NetworkEvent::VaultDownloadProgress { phase ("locating"/"fetching"/"reconstructing"/"decrypting"), progress }`, `VaultDownloadComplete { disk_path }`, `VaultDownloadFailed`
+  - [ ] Dart: `VaultFileWidget` (shimmer placeholder during download, fade-in on completion), `VaultNotifier` provider (tracks active uploads/downloads, progress, completion)
+
+- [ ] **Rebalancing on member join/leave**. 🎞️ Animate: rebalancing progress indicator, shard migration visualization
+  - [ ] New module `vault/rebalancer.rs` — background task monitoring member status
+  - [ ] Departure detection: track `last_seen` per member in `vault_member_status` SQLCipher table. After 7 days offline (configurable via CRDT setting `offline_threshold_days`), mark departed — their shards are under-replicated
+  - [ ] Under-replication scan: every 30 minutes, check all content — if fewer than k+m shards confirmed stored, content is under-replicated
+  - [ ] Repair: surviving members with any shards reconstruct missing ones (fetch k, re-encode, distribute new parity shards to new targets). Repair distributed round-robin across online members (same pattern as SyncCoordinator fan-out)
+  - [ ] New member join: recompute placements, gradually migrate shards that now map closer to new member (max 10MB/min to avoid bandwidth spikes)
+  - [ ] Pledge change: over-capacity member's excess shards migrated to members with available space
+  - [ ] New wire message: `ShardMigrate { server_id, content_id, shard_index, data }` — proactive migration during rebalancing
+  - [ ] `NetworkEvent::RebalanceStarted { shards_to_move }`, `RebalanceProgress { moved, total }`, `RebalanceCompleted`
+
+- [ ] **Storage tier configuration** — retention policies per data type
+  - [ ] Tier k/m as CRDT server settings (admin-configurable): critical (default 10/10 — server config, roles), high (10/8 — channel metadata, pins), standard (10/5 — messages, files), low (10/3 — voice recordings), ephemeral (5/2 — temporary messages)
+  - [ ] Retention policies as CRDT settings: `retention_messages` (default "permanent"), `retention_files` (default "365d"), `retention_voice` (default "90d"). Values: "permanent", "365d", "180d", "90d", "30d"
+  - [ ] Automatic tier assignment: `determine_tier(context, mime_type) -> StorageTier` — text messages → standard, images/files → standard, server config → critical, channel metadata → high
+  - [ ] Background retention enforcement: check `created_at` on vault manifests, delete expired content and broadcast `ShardDelete` to peers
+  - [ ] New wire message: `ShardDelete { server_id, content_id, shard_indices }` — admin-only, permission-gated
+  - [ ] Server Settings UI: "Storage" tab with tier k/m sliders and retention policy dropdowns (MANAGE_SERVER permission)
+
+- [ ] **Storage dashboard UI**. 🎞️ Animate: animated donut/bar charts, pool fill-up animation, health pulse indicators
+  - [ ] New `lib/src/ui/settings/storage_tab.dart` in server settings panel
+  - [ ] Overview: animated donut chart (pledged vs used vs free), total capacity
+  - [ ] Member contributions: sorted bar chart (each member's pledge + usage)
+  - [ ] Health indicators: per-tier health score — green (all shards placed), yellow (some peers offline but k shards available), red (fewer than k available — data at risk)
+  - [ ] "My contribution" section: pledge amount + slider to adjust, personal usage bar
+  - [ ] FFI: `get_vault_health(server_id) -> VaultHealth` (per-tier stats), `get_member_storage_stats(server_id) -> Vec<MemberStorageStats>`
+  - [ ] Dart: `VaultStatsProvider` (Riverpod notifier, refreshes every 60s and on events)
+
+- [ ] **Connection subset management** — limit persistent connections for large servers
+  - [ ] Target: 6-12 peers per server (not full mesh). Total across all servers capped at 50 (configurable)
+  - [ ] Peer scoring: `PeerScore { uptime_ratio, avg_latency_ms, bandwidth_score, shard_overlap }` — computed from ping RTT history, connection duration, shared shard count
+  - [ ] Rotation: every 5 minutes, drop lowest-scoring peer, connect to highest-scoring unconnected peer. Max 1 rotation per cycle for stability
+  - [ ] Priority connections: always maintain connections to peers holding shards of recently accessed content (shard_overlap weighted heavily)
+  - [ ] Gossip peer exchange: `HavenMessage::PeerExchange { server_id, peers }` — connected peers share known peer lists for the server
+  - [ ] Fallback: <6 reachable peers → connect to all available. Shard access requires more → temporarily exceed limit
+
+- [ ] **Channel-level CRDT sharding** — split monolithic ServerState for scale
+  - [ ] Split into `ServerCoreState` (name, members, roles, settings, pledges, channel_layout — small, synced by all) + per-channel `ChannelState` (pinned_messages, channel-specific settings — synced only by members who access the channel)
+  - [ ] New SQLCipher table `channel_states`: server_id, channel_id, state_json, updated_at — PRIMARY KEY (server_id, channel_id)
+  - [ ] Migration: on first load after upgrade, extract channel-specific data from existing ServerState into ChannelState objects
+  - [ ] Scoped sync: SyncRequest/SyncResponse carry `scope` field ("core" or "channel:{id}") — peers only sync documents they need
+  - [ ] Lazy loading: channel state loaded from DB on demand (user navigates to channel), not all at once
+  - [ ] Memory budget: max 20 ChannelState objects in memory, LRU eviction to DB, active (open in UI) channels pinned
 
 **Deliverable:** Server data lives distributed across members. No single point of failure.
 

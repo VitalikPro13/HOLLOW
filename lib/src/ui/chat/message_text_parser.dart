@@ -112,7 +112,11 @@ Widget _buildWithCodeBlocks(
 }
 
 /// Parse inline formatting markers into a list of InlineSpans.
-List<InlineSpan> _parseInline(String text, TextStyle style, HavenTheme haven) {
+List<InlineSpan> _parseInline(String text, TextStyle style, HavenTheme haven, {int depth = 0}) {
+  // SECURITY: Cap recursion depth to prevent stack overflow from adversarial input.
+  if (depth > 10) {
+    return [TextSpan(text: text, style: style)];
+  }
   final spans = <InlineSpan>[];
   final buffer = StringBuffer();
 
@@ -128,6 +132,7 @@ List<InlineSpan> _parseInline(String text, TextStyle style, HavenTheme haven) {
           inner,
           style.copyWith(fontWeight: FontWeight.w700),
           haven,
+          depth: depth + 1,
         ));
         i = end + 2;
         continue;
@@ -144,6 +149,7 @@ List<InlineSpan> _parseInline(String text, TextStyle style, HavenTheme haven) {
           inner,
           style.copyWith(decoration: TextDecoration.lineThrough),
           haven,
+          depth: depth + 1,
         ));
         i = end + 2;
         continue;
@@ -207,6 +213,7 @@ List<InlineSpan> _parseInline(String text, TextStyle style, HavenTheme haven) {
           inner,
           style.copyWith(fontStyle: FontStyle.italic),
           haven,
+          depth: depth + 1,
         ));
         i = end + 1;
         continue;
@@ -224,6 +231,7 @@ List<InlineSpan> _parseInline(String text, TextStyle style, HavenTheme haven) {
           inner,
           style.copyWith(fontStyle: FontStyle.italic),
           haven,
+          depth: depth + 1,
         ));
         i = end + 1;
         continue;

@@ -907,8 +907,10 @@ impl request_response::Codec for HavenCodec {
         Self: 'async_trait,
     {
         Box::pin(async move {
+            // SECURITY: Cap message size to 50MB to prevent OOM from malicious peers.
             let mut buf = Vec::new();
-            libp2p::futures::AsyncReadExt::read_to_end(io, &mut buf).await?;
+            let mut limited = libp2p::futures::AsyncReadExt::take(io, 50 * 1024 * 1024);
+            libp2p::futures::AsyncReadExt::read_to_end(&mut limited, &mut buf).await?;
             serde_json::from_slice(&buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         })
@@ -927,8 +929,10 @@ impl request_response::Codec for HavenCodec {
         Self: 'async_trait,
     {
         Box::pin(async move {
+            // SECURITY: Cap message size to 50MB to prevent OOM from malicious peers.
             let mut buf = Vec::new();
-            libp2p::futures::AsyncReadExt::read_to_end(io, &mut buf).await?;
+            let mut limited = libp2p::futures::AsyncReadExt::take(io, 50 * 1024 * 1024);
+            libp2p::futures::AsyncReadExt::read_to_end(&mut limited, &mut buf).await?;
             serde_json::from_slice(&buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         })
@@ -1819,7 +1823,7 @@ async fn run_swarm(
                         let local_peer = swarm.local_peer_id().to_string();
                         let server_id = hex::encode(&{
                             let mut buf = [0u8; 16];
-                            getrandom::fill(&mut buf).unwrap();
+                            getrandom::fill(&mut buf).expect("system RNG unavailable — cannot generate secure random bytes");
                             buf
                         });
                         haven_log!("[HAVEN-CRDT] Creating server '{name}' id={server_id}");
@@ -1898,7 +1902,7 @@ async fn run_swarm(
                             }
                             let channel_id = format!("{}-{}", &server_id[..8.min(server_id.len())], hex::encode(&{
                                 let mut buf = [0u8; 4];
-                                getrandom::fill(&mut buf).unwrap();
+                                getrandom::fill(&mut buf).expect("system RNG unavailable — cannot generate secure random bytes");
                                 buf
                             }));
                             haven_log!("[HAVEN-CRDT] Creating channel '{name}' id={channel_id} in server {server_id}");
@@ -5428,15 +5432,30 @@ async fn handle_incoming_request(
             let text = String::from_utf8_lossy(&plaintext).to_string();
             match serde_json::from_str::<MessageEnvelope>(&text) {
                 Ok(MessageEnvelope::ChannelMessage { sid, cid, text: msg_text, ts, sig, pk, mid, reply_to, file_id }) => {
-                    // Verify Ed25519 signature if present.
+                    // SECURITY: Verify sender is a member of the claimed server.
+                    if let Some(state) = server_states.get(&sid) {
+                        if !state.members.contains_key(&peer_str) {
+                            haven_log!("[HAVEN-SECURITY] REJECTED ChannelMessage from {peer_str} — not a member of server {sid}");
+                            return;
+                        }
+                    } else {
+                        haven_log!("[HAVEN-SECURITY] REJECTED ChannelMessage for unknown server {sid}");
+                        return;
+                    }
+
+                    // SECURITY: Reject messages with invalid signatures.
                     if sig.is_some() {
                         let payload = message_signing_payload(
                             "ch", &format!("{sid}:{cid}"), &peer_str, ts, &msg_text,
                         );
                         if !verify_message_signature(&peer_str, sig.as_deref(), pk.as_deref(), &payload) {
-                            haven_log!("[HAVEN-CRYPTO] Signature verification FAILED for channel message from {peer_str}");
+                            haven_log!("[HAVEN-SECURITY] REJECTED ChannelMessage from {peer_str} — signature verification FAILED");
+                            return;
                         }
                     }
+
+                    // SECURITY: Enforce 4,000 character limit on message text.
+                    let msg_text = if msg_text.len() > 4000 { msg_text[..4000].to_string() } else { msg_text };
 
                     // Persist channel message using sender's timestamp.
                     // INSERT OR IGNORE deduplicates via UNIQUE(server_id, channel_id, sender_id, timestamp, text).
@@ -5562,6 +5581,9 @@ async fn handle_incoming_request(
                     }
                 }
                 Ok(MessageEnvelope::DirectMessage { text: msg_text, ts, sig, pk, mid, reply_to, file_id }) => {
+                    // SECURITY: Enforce 4,000 character limit on message text.
+                    let msg_text = if msg_text.len() > 4000 { msg_text[..4000].to_string() } else { msg_text };
+
                     // Verify DM signature if present.
                     if sig.is_some() {
                         let local_peer = swarm.local_peer_id().to_string();
@@ -5751,11 +5773,25 @@ async fn handle_incoming_request(
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
                             if sid.is_some() {
+                                // SECURITY: Verify sender owns the message before hiding.
+                                let sender = store.get_channel_message_sender(&mid);
+                                if sender.as_deref() != Some(&peer_str) {
+                                    haven_log!("[HAVEN-SECURITY] REJECTED DeleteMessage from {peer_str} — not the sender of message {mid}");
+                                    return;
+                                }
                                 let _ = store.hide_channel_message(
                                     &mid, ts,
                                     sig.as_deref(), pk.as_deref(),
                                 );
                             } else {
+                                // SECURITY: Verify sender owns the DM message.
+                                let is_mine = store.get_dm_message_is_mine(&mid);
+                                if is_mine != Some(false) {
+                                    // If is_mine is true, it's OUR message (not the peer's).
+                                    // If is_mine is None, message not found. Either way, reject.
+                                    haven_log!("[HAVEN-SECURITY] REJECTED DeleteMessage (DM) from {peer_str} — not the sender of message {mid}");
+                                    return;
+                                }
                                 let _ = store.hide_dm_message(
                                     &mid, ts,
                                     sig.as_deref(), pk.as_deref(),
@@ -5781,6 +5817,11 @@ async fn handle_incoming_request(
                     }
                 }
                 Ok(MessageEnvelope::AddReaction { mid, emoji, ts, sig, pk, sid, cid }) => {
+                    // SECURITY: Reject emoji strings longer than 10 characters.
+                    if emoji.len() > 10 {
+                        haven_log!("[HAVEN-SECURITY] REJECTED AddReaction from {peer_str} — emoji too long ({} chars)", emoji.len());
+                        return;
+                    }
                     haven_log!("[HAVEN-REACTION] Received reaction {emoji} on {mid} from {peer_str}");
 
                     let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
@@ -5852,6 +5893,25 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::FileHeader { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, .. }) => {
                     use crate::node::file_transfer;
                     haven_log!("[HAVEN-FILE] FileHeader received: {fid} ({name}, {size} bytes, {chunks} chunks)");
+
+                    // SECURITY: Validate file size against server limit (or default 34MB for DMs).
+                    let max_bytes: u64 = if let Some(ref s) = sid {
+                        if let Some(state) = server_states.get(s) {
+                            let max_mb_str = state.settings.get("max_file_size_mb")
+                                .map(|r| r.read().clone())
+                                .unwrap_or_else(|| "34".to_string());
+                            let max_mb = max_mb_str.parse::<u64>().unwrap_or(34);
+                            max_mb * 1024 * 1024
+                        } else {
+                            34 * 1024 * 1024
+                        }
+                    } else {
+                        34 * 1024 * 1024
+                    };
+                    if size > max_bytes {
+                        haven_log!("[HAVEN-SECURITY] REJECTED FileHeader from {peer_str} — size {size} exceeds max {max_bytes} bytes");
+                        return;
+                    }
 
                     let ctx_type = if sid.is_some() { "channel" } else { "dm" };
                     let ctx_id = match (&sid, &cid) {
@@ -6129,6 +6189,65 @@ async fn handle_incoming_request(
             }
 
             if let Ok(op) = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json) {
+                // SECURITY: Verify the claimed author matches the actual sender.
+                // Without this, a peer could forge ops as any other user (e.g., the owner).
+                if op.author != peer_str {
+                    haven_log!("[HAVEN-SECURITY] REJECTED CrdtOpBroadcast — author mismatch: claimed '{}' but sender is '{peer_str}'", op.author);
+                    return;
+                }
+
+                // SECURITY: Verify the sender has permission for this operation type.
+                {
+                    let state = server_states.get(&server_id).unwrap();
+                    let sender_role = state.get_role(&peer_str);
+                    let sender_perms = sender_role.default_permissions();
+                    use crate::crdt::operations::{CrdtPayload, Permission, MemberRole};
+
+                    let allowed = match &op.payload {
+                        // Only admins+ can manage channels
+                        CrdtPayload::ChannelAdded { .. }
+                        | CrdtPayload::ChannelRemoved { .. }
+                        | CrdtPayload::ChannelRenamed { .. }
+                        | CrdtPayload::ChannelLayoutUpdated { .. } => {
+                            (sender_perms & Permission::MANAGE_CHANNELS) != 0
+                        }
+                        // Only admins+ can change roles
+                        CrdtPayload::RoleChanged { peer_id, role, .. } => {
+                            state.can_change_role(&peer_str, peer_id, role)
+                        }
+                        // Only admins+ can change server settings/rename
+                        CrdtPayload::ServerRenamed { .. }
+                        | CrdtPayload::ServerSettingChanged { .. } => {
+                            sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
+                        }
+                        // Only moderators+ can kick members
+                        CrdtPayload::MemberRemoved { peer_id } => {
+                            let target_role = state.get_role(peer_id);
+                            (sender_perms & Permission::KICK_MEMBERS) != 0
+                                && sender_role.outranks(&target_role)
+                        }
+                        // Members can add other members (via invite), change own nickname,
+                        // pin/unpin messages (if they have MANAGE_CHANNELS), create servers
+                        CrdtPayload::MemberAdded { .. } => {
+                            state.members.contains_key(&peer_str)
+                        }
+                        CrdtPayload::NicknameChanged { peer_id, .. } => {
+                            // Members can only change their own nickname
+                            peer_id == &peer_str || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
+                        }
+                        CrdtPayload::MessagePinned { .. }
+                        | CrdtPayload::MessageUnpinned { .. } => {
+                            (sender_perms & Permission::MANAGE_CHANNELS) != 0
+                        }
+                        CrdtPayload::ServerCreated { .. } => true,
+                    };
+
+                    if !allowed {
+                        haven_log!("[HAVEN-SECURITY] REJECTED CrdtOpBroadcast from {peer_str} — insufficient permission for {:?} (role: {:?})", op.payload, sender_role);
+                        return;
+                    }
+                }
+
                 let state = server_states.get_mut(&server_id).unwrap();
 
                 let was_len = state.op_log.len();
@@ -6330,6 +6449,18 @@ async fn handle_incoming_request(
             haven_log!("[HAVEN-CRDT] ServerDeleteBroadcast from {peer_str} for server {server_id}");
             let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
 
+            // SECURITY: Verify sender is the server Owner before deleting.
+            if let Some(state) = server_states.get(&server_id) {
+                let sender_role = state.get_role(&peer_str);
+                if sender_role != crate::crdt::operations::MemberRole::Owner {
+                    haven_log!("[HAVEN-SECURITY] REJECTED ServerDeleteBroadcast from non-owner {peer_str} (role: {:?}) for server {server_id}", sender_role);
+                    return;
+                }
+            } else {
+                haven_log!("[HAVEN-SECURITY] REJECTED ServerDeleteBroadcast for unknown server {server_id}");
+                return;
+            }
+
             if server_states.remove(&server_id).is_some() {
                 // Remove from DB.
                 let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
@@ -6355,6 +6486,25 @@ async fn handle_incoming_request(
         HavenMessage::MemberKickBroadcast { server_id } => {
             haven_log!("[HAVEN-CRDT] MemberKickBroadcast from {peer_str} — kicked from server {server_id}");
             let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
+
+            // SECURITY: Verify sender has KICK_MEMBERS permission and outranks us.
+            if let Some(state) = server_states.get(&server_id) {
+                let sender_role = state.get_role(&peer_str);
+                let sender_perms = sender_role.default_permissions();
+                let local_peer = swarm.local_peer_id().to_string();
+                let our_role = state.get_role(&local_peer);
+                if (sender_perms & crate::crdt::operations::Permission::KICK_MEMBERS) == 0 {
+                    haven_log!("[HAVEN-SECURITY] REJECTED MemberKickBroadcast from {peer_str} — no KICK_MEMBERS permission (role: {:?})", sender_role);
+                    return;
+                }
+                if !sender_role.outranks(&our_role) {
+                    haven_log!("[HAVEN-SECURITY] REJECTED MemberKickBroadcast from {peer_str} — does not outrank us ({:?} vs {:?})", sender_role, our_role);
+                    return;
+                }
+            } else {
+                haven_log!("[HAVEN-SECURITY] REJECTED MemberKickBroadcast for unknown server {server_id}");
+                return;
+            }
 
             // Same cleanup as ServerDeleteBroadcast — remove ourselves from this server.
             if server_states.remove(&server_id).is_some() {
@@ -6766,6 +6916,12 @@ async fn handle_incoming_request(
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
                                 if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                    // SECURITY: Verify sender owns the message before hiding.
+                                    let sender = store.get_channel_message_sender(&mid);
+                                    if sender.as_deref() != Some(&sender_peer_id) {
+                                        haven_log!("[HAVEN-SECURITY] REJECTED MLS DeleteMessage from {sender_peer_id} — not the sender of {mid}");
+                                        return;
+                                    }
                                     let _ = store.hide_channel_message(
                                         &mid, ts,
                                         sig.as_deref(), pk.as_deref(),
@@ -6827,6 +6983,18 @@ async fn handle_incoming_request(
                                 // Handle FileHeader received via MLS.
                                 use crate::node::file_transfer;
                                 haven_log!("[HAVEN-FILE] MLS FileHeader: {fid} ({name}, {size} bytes, {chunks} chunks)");
+
+                                // SECURITY: Validate file size against server limit.
+                                let max_mb_str = if let Some(state) = server_states.get(&server_id) {
+                                    state.settings.get("max_file_size_mb")
+                                        .map(|r| r.read().clone())
+                                        .unwrap_or_else(|| "34".to_string())
+                                } else { "34".to_string() };
+                                let max_bytes = max_mb_str.parse::<u64>().unwrap_or(34) * 1024 * 1024;
+                                if size > max_bytes {
+                                    haven_log!("[HAVEN-SECURITY] REJECTED MLS FileHeader from {sender_peer_id} — size {size} exceeds max {max_bytes}");
+                                    return;
+                                }
 
                                 let ctx_type = "channel";
                                 let ctx_id = match (&sid, &cid) {
@@ -7207,6 +7375,12 @@ async fn handle_incoming_request(
 
         HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at } => {
             let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
+
+            // SECURITY: Truncate profile fields to prevent oversized strings from malicious peers.
+            // Slightly above UI limits (32/48/128) as a safety backstop.
+            let display_name = if display_name.len() > 64 { display_name[..64].to_string() } else { display_name };
+            let status = if status.len() > 96 { status[..96].to_string() } else { status };
+            let about_me = if about_me.len() > 256 { about_me[..256].to_string() } else { about_me };
 
             haven_log!("[HAVEN-SWARM] ProfileUpdate from {peer_str}: name={display_name}");
 

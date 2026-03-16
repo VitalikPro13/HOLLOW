@@ -24,6 +24,7 @@ class HavenTextField extends StatefulWidget {
   final FocusNode? focusNode;
   final double? borderRadius;
   final int? maxLength;
+  final bool showCounter;
 
   const HavenTextField({
     super.key,
@@ -42,6 +43,7 @@ class HavenTextField extends StatefulWidget {
     this.focusNode,
     this.borderRadius,
     this.maxLength,
+    this.showCounter = true,
   });
 
   @override
@@ -217,7 +219,7 @@ class _HavenTextFieldState extends State<HavenTextField>
     );
 
     // Counter / error row below field.
-    if (widget.maxLength != null || hasError) {
+    if ((widget.maxLength != null && widget.showCounter) || hasError) {
       final nearLimit = widget.maxLength != null &&
           _charCount >= widget.maxLength! * 0.8;
       return Column(

@@ -77,14 +77,23 @@ pub fn assemble_file(
     Ok(())
 }
 
+/// SECURITY: Sanitize file ID / extension to prevent path traversal.
+/// Only allows alphanumeric characters (strips path separators, dots, etc.).
+fn sanitize_path_component(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+}
+
 /// Path for a temporary chunk file.
 fn chunk_path(file_id: &str, chunk_index: u32) -> PathBuf {
-    files_dir().join(format!("{file_id}.chunk.{chunk_index}"))
+    let safe_id = sanitize_path_component(file_id);
+    files_dir().join(format!("{safe_id}.chunk.{chunk_index}"))
 }
 
 /// Build the final file path: files_dir/{file_id}.{ext}
 pub fn final_file_path(file_id: &str, ext: &str) -> PathBuf {
-    files_dir().join(format!("{file_id}.{ext}"))
+    let safe_id = sanitize_path_component(file_id);
+    let safe_ext = sanitize_path_component(ext);
+    files_dir().join(format!("{safe_id}.{safe_ext}"))
 }
 
 /// Detect MIME type from file extension.
