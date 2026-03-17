@@ -746,3 +746,53 @@ pub fn vault_upload_file(
 
     Ok(content_id)
 }
+
+/// Download a vault file. Checks local cache first, then attempts local reconstruction.
+/// Returns the disk path if the file is available locally (cache hit or reconstructable
+/// from local shards). Returns empty string if async network fetch is needed (Dart
+/// watches VaultDownloadComplete event for the disk_path).
+#[frb]
+pub fn vault_download_file(server_id: String, content_id: String) -> Result<String, String> {
+    // Quick cache check — no node needed
+    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
+    let haven_dir = data_dir.join("haven");
+    let db_path = haven_dir
+        .join("messages.db")
+        .to_str()
+        .ok_or("Invalid path")?
+        .to_string();
+
+    let id = crate::identity::load_or_create_identity()?;
+    let proto = id
+        .keypair
+        .to_protobuf_encoding()
+        .map_err(|e| format!("Failed to encode keypair: {e}"))?;
+    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+    let vault_dir = haven_dir.join("vault");
+
+    // Try to load manifest and check cache
+    if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+        if let Ok(Some(manifest)) = cs.load_manifest(&content_id) {
+            let ext = crate::vault::pipeline::ext_from_filename(&manifest.file_name);
+            if let Some(cached_path) = crate::vault::pipeline::check_cache(&content_id, &ext) {
+                return Ok(cached_path.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    // Not in cache — send command to swarm for reconstruction
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(
+        state.cmd_tx.send(node::NodeCommand::VaultDownloadFile {
+            server_id,
+            content_id,
+        }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(String::new()) // Async — Dart watches VaultDownloadComplete event
+}

@@ -1129,21 +1129,21 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [X] `MessageEnvelope::VaultManifestBroadcast` + receive handler: deserialize manifest → save to ContentStore
   - [X] 3 NetworkEvent variants (VaultUploadProgress, VaultUploadComplete, VaultUploadFailed) mirrored in api/network.rs FFI
 
-- [ ] **File download pipeline** — locate shards, retrieve k, reconstruct, decrypt. 🎞️ Animate: image load shimmer placeholder → fade-in, download progress reconstruction
-  - [ ] Download flow (erasure mode): (1) lookup VaultManifest by content_id (local DB), (2) decrypt manifest with MLS group key, (3) compute shard placements, (4) request k shards from placed peers, (5) erasure-decode, (6) AES-256-GCM decrypt with key from manifest, (7) write to disk, (8) cache locally
-  - [ ] Download flow (replication mode): (1) lookup VaultManifest, (2) decrypt manifest, (3) request full file from any online peer, (4) AES-256-GCM decrypt, (5) write to disk, (6) cache locally
-  - [ ] Local cache: `~/.haven/vault_cache/{content_id}.{ext}` — LRU eviction when cache exceeds configurable size (default 1GB, outside pledge space)
-  - [ ] Cache-first retrieval: check local cache before network fetch (instant for recently viewed files)
-  - [ ] FFI: `vault_download_file(server_id, content_id) -> disk_path`
-  - [ ] `NetworkEvent::VaultDownloadProgress { phase ("locating"/"fetching"/"reconstructing"/"decrypting"), progress }`, `VaultDownloadComplete { disk_path }`, `VaultDownloadFailed`
-  - [ ] Dart: `VaultFileWidget` (shimmer placeholder during download, fade-in on completion), `VaultNotifier` provider (tracks active uploads/downloads, progress, completion)
-  - [ ] Retrieval coordinator: compute placement, request k shards in parallel via `RequestShardFromPeer`, collect responses, 10s timeout per peer, fallback ShardProbe to all connected members (moved from retrieve protocol)
+- [X] **File download pipeline** — locate shards, retrieve k, reconstruct, decrypt. 🎞️ Animate: image load shimmer placeholder → fade-in, download progress reconstruction
+  - [X] `reconstruct_file(manifest, packed_shards)` pure function in pipeline.rs — erasure decode + AES decrypt, handles both replication (k=0) and erasure modes. 3 tests.
+  - [X] Local vault cache: `~/.haven/vault_cache/{content_id}.{ext}` — `vault_cache_dir()`, `cache_path()`, `check_cache()`, `write_to_cache()` helpers. 2 tests.
+  - [X] `ext_from_filename()` helper for extracting file extension from manifest
+  - [X] `NodeCommand::VaultDownloadFile` + handler: load manifest → check cache → collect local shards → reconstruct if enough → write to cache → emit Complete
+  - [X] Cache-first retrieval: FFI checks cache synchronously, returns path immediately on hit
+  - [X] FFI: `vault_download_file(server_id, content_id)` — cache check + async command dispatch
+  - [X] 3 NetworkEvent variants (VaultDownloadProgress, VaultDownloadComplete, VaultDownloadFailed) mirrored in api/network.rs FFI
 
 - [ ] **Vault status indicators** — rich UI feedback for vault operations. 🎞️ Animate: progress phases, health pulse
   - [ ] **Per-file indicators in chat**: upload "Encrypting..." → "Distributing (7/15 shards)..." → checkmark "Distributed". Download: shimmer → "Fetching (5/10 shards)..." → image fade-in. Replication mode: "Syncing to 4/5 members..." → checkmark "Synced"
   - [ ] **Channel header vault health dot**: green (all recent files fully distributed), yellow (some files distributing or some peers offline but data safe), red (data at risk — not enough peers for reconstruction). Same position as encryption lock icon
   - [ ] **Vault status in member panel**: per-member shard count, online/offline, last seen, storage used/pledged
   - [ ] Dart: `VaultStatusProvider` (aggregates upload/download/health state), `VaultHealthDot` widget, `FileDistributionIndicator` widget
+  - [ ] Dart: `VaultFileWidget` (shimmer placeholder during download, fade-in on completion), `VaultNotifier` provider (moved from download pipeline)
 
 - [ ] **Rebalancing on member join/leave**. 🎞️ Animate: rebalancing progress indicator, shard migration visualization
   - [ ] New module `vault/rebalancer.rs` — background task monitoring member status
@@ -1157,6 +1157,8 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [ ] `NetworkEvent::RebalanceStarted { shards_to_move }`, `RebalanceProgress { moved, total }`, `RebalanceCompleted`
   - [ ] Store coordinator with retry 3x/5s backoff + max 10 concurrent outbound stores (moved from upload pipeline — optimization over basic sequential sends)
   - [ ] Background retention enforcement: periodic timer checks vault_manifests created_at against retention policy, triggers DeleteVaultContent for expired files (moved from upload pipeline)
+  - [ ] Retrieval coordinator: parallel shard fetching via RequestShardFromPeer, 10s timeout, fallback ShardProbe (moved from download pipeline)
+  - [ ] LRU cache eviction: vault_cache dir capped at configurable size (default 1GB) (moved from download pipeline)
 
 - [ ] **Storage dashboard UI**. 🎞️ Animate: animated donut/bar charts, pool fill-up animation, health pulse indicators
   - [ ] New `lib/src/ui/settings/storage_tab.dart` in server settings panel

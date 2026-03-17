@@ -106,6 +106,10 @@ pub enum NetworkEvent {
     VaultUploadProgress { server_id: String, content_id: String, phase: String, progress: f32 },
     VaultUploadComplete { server_id: String, content_id: String, channel_id: String },
     VaultUploadFailed { server_id: String, content_id: String, error: String },
+    // -- Vault download pipeline events (Phase 4) --
+    VaultDownloadProgress { server_id: String, content_id: String, phase: String, progress: f32 },
+    VaultDownloadComplete { server_id: String, content_id: String, disk_path: String },
+    VaultDownloadFailed { server_id: String, content_id: String, error: String },
 }
 
 /// Holds all mutable state for the running node.
@@ -431,6 +435,16 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::VaultUploadFailed { server_id, content_id, error } => {
             NetworkEvent::VaultUploadFailed { server_id, content_id, error }
+        }
+        // -- Vault download pipeline events --
+        node::NetworkEvent::VaultDownloadProgress { server_id, content_id, phase, progress } => {
+            NetworkEvent::VaultDownloadProgress { server_id, content_id, phase, progress }
+        }
+        node::NetworkEvent::VaultDownloadComplete { server_id, content_id, disk_path } => {
+            NetworkEvent::VaultDownloadComplete { server_id, content_id, disk_path }
+        }
+        node::NetworkEvent::VaultDownloadFailed { server_id, content_id, error } => {
+            NetworkEvent::VaultDownloadFailed { server_id, content_id, error }
         }
     }
 }

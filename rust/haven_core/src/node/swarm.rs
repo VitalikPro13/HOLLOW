@@ -201,6 +201,10 @@ pub(crate) enum NetworkEvent {
     VaultUploadProgress { server_id: String, content_id: String, phase: String, progress: f32 },
     VaultUploadComplete { server_id: String, content_id: String, channel_id: String },
     VaultUploadFailed { server_id: String, content_id: String, error: String },
+    // -- Vault download pipeline events (Phase 4) --
+    VaultDownloadProgress { server_id: String, content_id: String, phase: String, progress: f32 },
+    VaultDownloadComplete { server_id: String, content_id: String, disk_path: String },
+    VaultDownloadFailed { server_id: String, content_id: String, error: String },
 }
 
 /// Commands the FFI layer can send into the swarm event loop.
@@ -264,6 +268,7 @@ pub(crate) enum NodeCommand {
         chunks: Vec<u32>,
     },
     // -- Vault shard distribution (Phase 4) --
+    VaultDownloadFile { server_id: String, content_id: String },
     VaultUploadFile {
         server_id: String,
         channel_id: String,
@@ -3852,6 +3857,85 @@ async fn run_swarm(
                     }
 
                     // -- Vault shard distribution (Phase 4) --
+                    NodeCommand::VaultDownloadFile { server_id, content_id } => {
+                        haven_log!("[HAVEN-VAULT] VaultDownloadFile: cid={content_id} in {server_id}");
+
+                        let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                        let vault_dir = data_dir.join("vault");
+                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+
+                        let result: Result<String, String> = (|| {
+                            let cs = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir)?;
+
+                            // Load manifest
+                            let manifest = cs.load_manifest(&content_id)?
+                                .ok_or_else(|| format!("Manifest not found for {content_id}"))?;
+
+                            let ext = crate::vault::pipeline::ext_from_filename(&manifest.file_name);
+
+                            // Check cache first
+                            if let Some(cached_path) = crate::vault::pipeline::check_cache(&content_id, &ext) {
+                                return Ok(cached_path.to_string_lossy().to_string());
+                            }
+
+                            // Collect local shards
+                            let local_shards = cs.list_content_shards(&server_id, &content_id)?;
+
+                            if manifest.k == 0 && manifest.m == 0 {
+                                // Replication mode — need just one shard (the full ciphertext)
+                                if let Some(record) = local_shards.first() {
+                                    let shard_data = cs.read_shard_unchecked(&server_id, &record.shard_key)?;
+                                    let packed: Vec<Option<Vec<u8>>> = vec![Some(shard_data)];
+                                    let plaintext = crate::vault::pipeline::reconstruct_file(&manifest, &packed)?;
+                                    let path = crate::vault::pipeline::write_to_cache(&content_id, &ext, &plaintext)?;
+                                    return Ok(path.to_string_lossy().to_string());
+                                }
+                                Err("No local shard available for replicated content".into())
+                            } else {
+                                // Erasure mode — need k of k+m shards
+                                let k = manifest.k as usize;
+                                let m = manifest.m as usize;
+                                let n = k + m;
+                                let mut packed: Vec<Option<Vec<u8>>> = vec![None; n];
+
+                                for record in &local_shards {
+                                    let idx = record.shard_index as usize;
+                                    if idx < n {
+                                        if let Ok(data) = cs.read_shard_unchecked(&server_id, &record.shard_key) {
+                                            packed[idx] = Some(data);
+                                        }
+                                    }
+                                }
+
+                                let available = packed.iter().filter(|s| s.is_some()).count();
+                                if available >= k {
+                                    let plaintext = crate::vault::pipeline::reconstruct_file(&manifest, &packed)?;
+                                    let path = crate::vault::pipeline::write_to_cache(&content_id, &ext, &plaintext)?;
+                                    Ok(path.to_string_lossy().to_string())
+                                } else {
+                                    Err(format!("Not enough local shards: have {available}, need {k}. Network fetch not yet implemented."))
+                                }
+                            }
+                        })();
+
+                        match result {
+                            Ok(disk_path) => {
+                                haven_log!("[HAVEN-VAULT] Download complete: {disk_path}");
+                                let _ = event_tx.send(NetworkEvent::VaultDownloadComplete {
+                                    server_id, content_id, disk_path,
+                                }).await;
+                            }
+                            Err(e) => {
+                                haven_log!("[HAVEN-VAULT] Download failed: {e}");
+                                let _ = event_tx.send(NetworkEvent::VaultDownloadFailed {
+                                    server_id, content_id, error: e,
+                                }).await;
+                            }
+                        }
+                    }
+
                     NodeCommand::VaultUploadFile {
                         server_id, channel_id, file_name, mime_type, message_id,
                         ciphertext, aes_key, aes_nonce, original_size, content_id,

@@ -187,6 +187,94 @@ pub fn mime_from_ext(ext: &str) -> String {
     .to_string()
 }
 
+/// Extract file extension from a filename.
+pub fn ext_from_filename(name: &str) -> String {
+    std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin")
+        .to_lowercase()
+}
+
+// ── Download / reconstruction ────────────────────────────────
+
+/// Reconstruct a file from its manifest and collected shards.
+///
+/// For replication mode (k=0, m=0): `packed_shards` should have one `Some` entry
+/// containing the full ciphertext.
+///
+/// For erasure mode: `packed_shards` must have k+m entries (Some/None pattern),
+/// with at least k available. These are packed shards (with ShardMetadata headers).
+pub fn reconstruct_file(
+    manifest: &VaultManifest,
+    packed_shards: &[Option<Vec<u8>>],
+) -> Result<Vec<u8>, String> {
+    // Decode AES key and nonce from manifest hex strings
+    let key_vec =
+        hex::decode(&manifest.encryption_key).map_err(|e| format!("Invalid AES key hex: {e}"))?;
+    let nonce_vec =
+        hex::decode(&manifest.nonce).map_err(|e| format!("Invalid nonce hex: {e}"))?;
+
+    let key: [u8; 32] = key_vec
+        .try_into()
+        .map_err(|_| "AES key must be 32 bytes".to_string())?;
+    let nonce: [u8; 12] = nonce_vec
+        .try_into()
+        .map_err(|_| "AES nonce must be 12 bytes".to_string())?;
+
+    let ciphertext = if manifest.k == 0 && manifest.m == 0 {
+        // Replication mode — the shard IS the ciphertext (no erasure headers)
+        packed_shards
+            .iter()
+            .flatten()
+            .next()
+            .cloned()
+            .ok_or_else(|| "No shard data available for replication mode".to_string())?
+    } else {
+        // Erasure mode — decode from packed shards
+        erasure::decode(packed_shards, manifest.k as usize, manifest.m as usize)?
+    };
+
+    aes_decrypt(&ciphertext, &key, &nonce)
+}
+
+// ── Vault cache ──────────────────────────────────────────────
+
+use std::path::PathBuf;
+
+/// Get the vault cache directory path.
+pub fn vault_cache_dir() -> PathBuf {
+    let dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("haven")
+        .join("vault_cache");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Get the cache file path for a content item.
+pub fn cache_path(content_id: &str, ext: &str) -> PathBuf {
+    let safe_ext = if ext.is_empty() { "bin" } else { ext };
+    vault_cache_dir().join(format!("{content_id}.{safe_ext}"))
+}
+
+/// Check if a file is in the local vault cache. Returns the path if found.
+pub fn check_cache(content_id: &str, ext: &str) -> Option<PathBuf> {
+    let path = cache_path(content_id, ext);
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// Write decrypted file data to the vault cache. Returns the disk path.
+pub fn write_to_cache(content_id: &str, ext: &str, data: &[u8]) -> Result<PathBuf, String> {
+    let path = cache_path(content_id, ext);
+    std::fs::write(&path, data).map_err(|e| format!("Failed to write cache file: {e}"))?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +476,115 @@ mod tests {
         assert_eq!(mime_from_ext("mp3"), "audio/mpeg");
         assert_eq!(mime_from_ext("pdf"), "application/pdf");
         assert_eq!(mime_from_ext("xyz"), "application/octet-stream");
+    }
+
+    // ── reconstruct_file ─────────────────────────────────────
+
+    #[test]
+    fn reconstruct_file_replication() {
+        let original = b"Hello, this is a replicated file!";
+        let encrypted = aes_encrypt(original).unwrap();
+        let cid = content_id(&encrypted.ciphertext);
+
+        let manifest = VaultManifest {
+            content_id: cid,
+            encryption_key: hex::encode(encrypted.key),
+            nonce: hex::encode(encrypted.nonce),
+            original_size: original.len() as u64,
+            k: 0, m: 0, shard_count: 0,
+            file_name: "test.txt".into(),
+            mime_type: "text/plain".into(),
+            storage_tier: "standard".into(),
+            created_at: 0,
+            creator_peer_id: "peer".into(),
+            channel_id: "ch".into(),
+        };
+
+        // Replication: single shard = full ciphertext
+        let shards: Vec<Option<Vec<u8>>> = vec![Some(encrypted.ciphertext)];
+        let result = reconstruct_file(&manifest, &shards).unwrap();
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn reconstruct_file_erasure() {
+        let original = b"File to be erasure-coded and reconstructed";
+        let encrypted = aes_encrypt(original).unwrap();
+        let cid = content_id(&encrypted.ciphertext);
+
+        let k = 3usize;
+        let m = 2usize;
+        let encoded = erasure::encode(&encrypted.ciphertext, k, m, &cid).unwrap();
+
+        let manifest = VaultManifest {
+            content_id: cid,
+            encryption_key: hex::encode(encrypted.key),
+            nonce: hex::encode(encrypted.nonce),
+            original_size: original.len() as u64,
+            k: k as u16, m: m as u16, shard_count: (k + m) as u16,
+            file_name: "test.dat".into(),
+            mime_type: "application/octet-stream".into(),
+            storage_tier: "standard".into(),
+            created_at: 0,
+            creator_peer_id: "peer".into(),
+            channel_id: "ch".into(),
+        };
+
+        // Drop m parity shards
+        let mut shards: Vec<Option<Vec<u8>>> = encoded.into_iter().map(Some).collect();
+        for i in k..k + m {
+            shards[i] = None;
+        }
+
+        let result = reconstruct_file(&manifest, &shards).unwrap();
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn reconstruct_file_wrong_key_fails() {
+        let original = b"secret data";
+        let encrypted = aes_encrypt(original).unwrap();
+        let cid = content_id(&encrypted.ciphertext);
+
+        let manifest = VaultManifest {
+            content_id: cid,
+            encryption_key: hex::encode([0xFFu8; 32]), // wrong key
+            nonce: hex::encode(encrypted.nonce),
+            original_size: original.len() as u64,
+            k: 0, m: 0, shard_count: 0,
+            file_name: "test.txt".into(),
+            mime_type: "text/plain".into(),
+            storage_tier: "standard".into(),
+            created_at: 0,
+            creator_peer_id: "peer".into(),
+            channel_id: "ch".into(),
+        };
+
+        let shards: Vec<Option<Vec<u8>>> = vec![Some(encrypted.ciphertext)];
+        let result = reconstruct_file(&manifest, &shards);
+        assert!(result.is_err());
+    }
+
+    // ── cache helpers ────────────────────────────────────────
+
+    #[test]
+    fn cache_write_and_check() {
+        let data = b"cached file data";
+        // Use a unique content_id to avoid test interference
+        let cid = content_id(data);
+        let path = write_to_cache(&cid, "txt", data).unwrap();
+        assert!(path.exists());
+
+        let found = check_cache(&cid, "txt");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap(), path);
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cache_check_nonexistent() {
+        assert!(check_cache("nonexistent_content_id_12345", "bin").is_none());
     }
 }
