@@ -176,6 +176,56 @@ Future<List<String>> getPinnedMessages({
 Future<void> deleteServer({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtDeleteServer(serverId: serverId);
 
+/// Set the local user's storage pledge for a server (in bytes).
+Future<void> setStoragePledge({
+  required String serverId,
+  required BigInt pledgeBytes,
+}) => RustLib.instance.api.crateApiCrdtSetStoragePledge(
+  serverId: serverId,
+  pledgeBytes: pledgeBytes,
+);
+
+/// Get storage stats for a server (pledges from CRDT state, usage from vault_shards table).
+Future<StorageStatsFfi> getStorageStats({required String serverId}) =>
+    RustLib.instance.api.crateApiCrdtGetStorageStats(serverId: serverId);
+
+/// Delete vault content from a server (admin-only, requires MANAGE_SERVER).
+/// Broadcasts ShardDelete to all connected members and removes local shards.
+Future<void> deleteVaultContent({
+  required String serverId,
+  required String contentId,
+}) => RustLib.instance.api.crateApiCrdtDeleteVaultContent(
+  serverId: serverId,
+  contentId: contentId,
+);
+
+/// Upload a file to the vault. Encrypts with AES-256-GCM, computes content_id,
+/// then sends to swarm for erasure coding + distribution + manifest broadcast.
+/// Returns the content_id immediately.
+Future<String> vaultUploadFile({
+  required String serverId,
+  required String channelId,
+  required String filePath,
+  required String messageId,
+}) => RustLib.instance.api.crateApiCrdtVaultUploadFile(
+  serverId: serverId,
+  channelId: channelId,
+  filePath: filePath,
+  messageId: messageId,
+);
+
+/// Download a vault file. Checks local cache first, then attempts local reconstruction.
+/// Returns the disk path if the file is available locally (cache hit or reconstructable
+/// from local shards). Returns empty string if async network fetch is needed (Dart
+/// watches VaultDownloadComplete event for the disk_path).
+Future<String> vaultDownloadFile({
+  required String serverId,
+  required String contentId,
+}) => RustLib.instance.api.crateApiCrdtVaultDownloadFile(
+  serverId: serverId,
+  contentId: contentId,
+);
+
 /// Channel info for FFI (Dart-visible).
 class ChannelFfi {
   final String channelId;
@@ -263,4 +313,44 @@ class ServerFfi {
           name == other.name &&
           memberCount == other.memberCount &&
           channelCount == other.channelCount;
+}
+
+/// Storage stats for a server, returned to Dart via FFI.
+class StorageStatsFfi {
+  final BigInt totalPledgedBytes;
+  final BigInt totalUsedBytes;
+  final BigInt myPledgeBytes;
+  final BigInt myUsedBytes;
+  final int memberCount;
+  final BigInt minPledgeMb;
+
+  const StorageStatsFfi({
+    required this.totalPledgedBytes,
+    required this.totalUsedBytes,
+    required this.myPledgeBytes,
+    required this.myUsedBytes,
+    required this.memberCount,
+    required this.minPledgeMb,
+  });
+
+  @override
+  int get hashCode =>
+      totalPledgedBytes.hashCode ^
+      totalUsedBytes.hashCode ^
+      myPledgeBytes.hashCode ^
+      myUsedBytes.hashCode ^
+      memberCount.hashCode ^
+      minPledgeMb.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is StorageStatsFfi &&
+          runtimeType == other.runtimeType &&
+          totalPledgedBytes == other.totalPledgedBytes &&
+          totalUsedBytes == other.totalUsedBytes &&
+          myPledgeBytes == other.myPledgeBytes &&
+          myUsedBytes == other.myUsedBytes &&
+          memberCount == other.memberCount &&
+          minPledgeMb == other.minPledgeMb;
 }

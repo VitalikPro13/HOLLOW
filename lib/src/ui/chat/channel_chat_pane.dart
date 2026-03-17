@@ -16,6 +16,7 @@ import 'package:haven/src/core/providers/server_provider.dart';
 import 'package:haven/src/core/providers/sync_progress_provider.dart';
 import 'package:haven/src/core/providers/typing_provider.dart';
 import 'package:haven/src/core/providers/pinned_provider.dart';
+import 'package:haven/src/core/providers/vault_status_provider.dart';
 import 'package:haven/src/rust/api/crdt.dart' as crdt_api;
 import 'package:haven/src/theme/haven_spacing.dart';
 import 'package:haven/src/theme/haven_theme.dart';
@@ -1182,6 +1183,7 @@ class _ChannelConnectionStatus extends ConsumerWidget {
             if (stage == ConnectionStage.encrypted) ...[
               const SizedBox(width: HavenSpacing.md),
               _SyncIndicator(serverId: serverId, channelId: channelId),
+              _VaultHealthIndicator(serverId: serverId),
             ],
           ],
         );
@@ -1334,6 +1336,43 @@ class _SpinningRefreshIconState extends State<_SpinningRefreshIcon>
       turns: _controller,
       child:
           Icon(LucideIcons.refreshCw, size: widget.size, color: widget.color),
+    );
+  }
+}
+
+/// Vault health indicator — green/yellow/red dot showing vault distribution status.
+class _VaultHealthIndicator extends ConsumerWidget {
+  final String serverId;
+  const _VaultHealthIndicator({required this.serverId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final haven = HavenTheme.of(context);
+
+    // Only show vault health dot when erasure coding is active (6+ members).
+    // <6 members use full replication — the existing "Synced" indicator covers it.
+    final memberCount = ref.watch(serverMembersProvider(serverId))
+        .valueOrNull?.length ?? 0;
+    if (memberCount < 6) return const SizedBox.shrink();
+
+    final status = ref.watch(
+      vaultStatusProvider.select((s) => s[serverId]),
+    );
+    if (status == null) return const SizedBox.shrink();
+
+    final health = status.computeHealth();
+    final color = switch (health) {
+      VaultHealth.healthy => haven.success,
+      VaultHealth.degraded => haven.warning,
+      VaultHealth.critical => haven.error,
+    };
+
+    return HavenTooltip(
+      message: status.healthMessage,
+      child: Padding(
+        padding: const EdgeInsets.only(left: HavenSpacing.sm),
+        child: StatusDot(color: color, size: 7, pulse: health != VaultHealth.healthy),
+      ),
     );
   }
 }

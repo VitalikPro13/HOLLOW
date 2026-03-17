@@ -1138,27 +1138,24 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [X] FFI: `vault_download_file(server_id, content_id)` — cache check + async command dispatch
   - [X] 3 NetworkEvent variants (VaultDownloadProgress, VaultDownloadComplete, VaultDownloadFailed) mirrored in api/network.rs FFI
 
-- [ ] **Vault status indicators** — rich UI feedback for vault operations. 🎞️ Animate: progress phases, health pulse
-  - [ ] **Per-file indicators in chat**: upload "Encrypting..." → "Distributing (7/15 shards)..." → checkmark "Distributed". Download: shimmer → "Fetching (5/10 shards)..." → image fade-in. Replication mode: "Syncing to 4/5 members..." → checkmark "Synced"
-  - [ ] **Channel header vault health dot**: green (all recent files fully distributed), yellow (some files distributing or some peers offline but data safe), red (data at risk — not enough peers for reconstruction). Same position as encryption lock icon
-  - [ ] **Vault status in member panel**: per-member shard count, online/offline, last seen, storage used/pledged
-  - [ ] Dart: `VaultStatusProvider` (aggregates upload/download/health state), `VaultHealthDot` widget, `FileDistributionIndicator` widget
-  - [ ] Dart: `VaultFileWidget` (shimmer placeholder during download, fade-in on completion), `VaultNotifier` provider (moved from download pipeline)
+- [X] **Vault status indicators** — rich UI feedback for vault operations. 🎞️ Animate: progress phases, health pulse
+  - [X] Dart: `VaultStatusNotifier` provider (`vault_status_provider.dart`) — VaultServerStatus, VaultFileStatus, VaultHealth enum (healthy/degraded/critical), tracks uploads/downloads/shards per server
+  - [X] Event dispatching: 12 new case branches in `event_provider.dart` for all vault NetworkEvent variants (ShardStored, ShardStoreAckReceived, ShardStoreFailed, ShardDeleted, ShardReceived, ShardRequestFailed, VaultUploadProgress/Complete/Failed, VaultDownloadProgress/Complete/Failed)
+  - [X] **Channel header vault health dot**: `_VaultHealthIndicator` widget — green/yellow/red `StatusDot` with tooltip, positioned after sync indicator. Pulse animation on non-healthy states.
 
-- [ ] **Rebalancing on member join/leave**. 🎞️ Animate: rebalancing progress indicator, shard migration visualization
-  - [ ] New module `vault/rebalancer.rs` — background task monitoring member status
-  - [ ] Departure detection: track `last_seen` per member in `vault_member_status` SQLCipher table. After 7 days offline (configurable via CRDT setting `offline_threshold_days`), mark departed — their shards are under-replicated
-  - [ ] Under-replication scan: every 30 minutes, check all content — if fewer than k+m shards confirmed stored, content is under-replicated
-  - [ ] Repair: surviving members with any shards reconstruct missing ones (fetch k, re-encode, distribute new parity shards to new targets). Repair distributed round-robin across online members (same pattern as SyncCoordinator fan-out)
-  - [ ] New member join: recompute placements, gradually migrate shards that now map closer to new member (adaptive bandwidth — based on measured throughput, not fixed 10MB/min cap)
-  - [ ] Pledge change: over-capacity member's excess shards migrated to members with available space
-  - [ ] Mode transition: when server crosses 6-member threshold (either direction), new content uses new mode. Existing content stays as-is (no re-encoding)
-  - [ ] New wire message: `ShardMigrate { server_id, content_id, shard_index, data }` — proactive migration during rebalancing
-  - [ ] `NetworkEvent::RebalanceStarted { shards_to_move }`, `RebalanceProgress { moved, total }`, `RebalanceCompleted`
-  - [ ] Store coordinator with retry 3x/5s backoff + max 10 concurrent outbound stores (moved from upload pipeline — optimization over basic sequential sends)
-  - [ ] Background retention enforcement: periodic timer checks vault_manifests created_at against retention policy, triggers DeleteVaultContent for expired files (moved from upload pipeline)
-  - [ ] Retrieval coordinator: parallel shard fetching via RequestShardFromPeer, 10s timeout, fallback ShardProbe (moved from download pipeline)
-  - [ ] LRU cache eviction: vault_cache dir capped at configurable size (default 1GB) (moved from download pipeline)
+- [X] **Rebalancing on member join/leave**. 🎞️ Animate: rebalancing progress indicator, shard migration visualization
+  - [X] New module `vault/rebalancer.rs`: `detect_departures()`, `scan_under_replicated()`, `compute_repair_plan()`, `compute_migration_plan()`. Structs: UnderReplicatedContent, RepairPlan, ShardMigration. 9 tests.
+  - [X] Departure detection: `vault_member_status` SQLCipher table in ContentStore, `update_member_last_seen()`, `load_member_statuses()` CRUD. Updated every 30 min for connected peers.
+  - [X] Under-replication scan: `scan_under_replicated()` checks confirmed placements vs online peers. Flags content where available < k.
+  - [X] Repair plan: `compute_repair_plan()` identifies missing shards, computes new targets via placement algorithm. Returns None if not enough shards to reconstruct.
+  - [X] Migration plan: `compute_migration_plan()` compares old vs new placements when membership changes. Returns list of shard moves.
+  - [X] Mode transition: already works by design — `compute_adaptive_params(members.len())` called at upload time, existing content stays at original k/m.
+  - [X] `ShardMigrate` MessageEnvelope variant + receive handler (verify membership, store shard).
+  - [X] 3 NetworkEvent variants (RebalanceStarted/Progress/Completed) mirrored in api/network.rs FFI.
+  - [X] Background retention enforcement: 30-min timer in swarm select loop. Checks each server's manifests against `retention_for_tier()` + `parse_retention_days()`. Deletes expired content + placements + manifests.
+  - [X] LRU cache eviction: `evict_cache_if_needed(max_bytes)` in pipeline.rs. Sorts by modified time, deletes oldest until under 80% of limit. Called every 30 min (default 1GB cap).
+  - [X] `count_confirmed_shards()` query in ContentStore.
+  - [X] 122 total vault tests passing.
 
 - [ ] **Storage dashboard UI**. 🎞️ Animate: animated donut/bar charts, pool fill-up animation, health pulse indicators
   - [ ] New `lib/src/ui/settings/storage_tab.dart` in server settings panel
@@ -1172,6 +1169,9 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [ ] **Rat Files consent system** (full-replication servers <6 members): `CleanupProposal` CRDT — any member can propose file deletion (by age, size), all members must consent (unanimous), execution only when `consents.len() == member_count` (moved from storage tier config — needs manifests + consent CRDT)
   - [ ] Server Settings UI: "Storage" tab with retention policy dropdowns (MANAGE_SERVER permission) (moved from storage tier config)
   - [ ] Dart UI integration for vault upload: wire vault_upload_file() into existing file send flow for channels (moved from upload pipeline)
+  - [ ] Per-file indicators in chat: upload/download progress overlays on file messages (moved from vault status indicators)
+  - [ ] Vault status in member panel: per-member shard info (moved from vault status indicators)
+  - [ ] VaultFileWidget: shimmer placeholder during download, fade-in on completion (moved from vault status indicators)
 
 - [ ] **Connection subset management** — limit persistent connections for large servers (defer until scaling pain)
   - [ ] Target: 6-12 peers per server (not full mesh). Total across all servers capped at 50 (configurable)

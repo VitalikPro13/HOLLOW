@@ -202,6 +202,17 @@ impl ContentStore {
         )
         .map_err(|e| format!("Failed to create manifests created index: {e}"))?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS vault_member_status (
+                peer_id     TEXT    NOT NULL,
+                server_id   TEXT    NOT NULL,
+                last_seen   INTEGER NOT NULL,
+                PRIMARY KEY (peer_id, server_id)
+            )",
+            [],
+        )
+        .map_err(|e| format!("Failed to create vault_member_status table: {e}"))?;
+
         std::fs::create_dir_all(base_dir)
             .map_err(|e| format!("Failed to create vault base dir: {e}"))?;
 
@@ -783,6 +794,66 @@ impl ContentStore {
             result.push(manifest);
         }
         Ok(result)
+    }
+
+    // ── Member status tracking ───────────────────────────────
+
+    /// Update last-seen timestamp for a member in a server.
+    pub fn update_member_last_seen(
+        &self,
+        server_id: &str,
+        peer_id: &str,
+        timestamp: i64,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO vault_member_status (peer_id, server_id, last_seen)
+                 VALUES (?1, ?2, ?3)",
+                params![peer_id, server_id, timestamp],
+            )
+            .map_err(|e| format!("Failed to update member last_seen: {e}"))?;
+        Ok(())
+    }
+
+    /// Load all member statuses for a server.
+    pub fn load_member_statuses(
+        &self,
+        server_id: &str,
+    ) -> Result<Vec<(String, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT peer_id, last_seen FROM vault_member_status WHERE server_id = ?1",
+            )
+            .map_err(|e| format!("Failed to prepare member status query: {e}"))?;
+
+        let rows = stmt
+            .query_map(params![server_id], |row| {
+                Ok((
+                    row.get::<_, String>(0).unwrap_or_default(),
+                    row.get::<_, i64>(1).unwrap_or(0),
+                ))
+            })
+            .map_err(|e| format!("Failed to query member statuses: {e}"))?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| format!("Failed to read member status: {e}"))?);
+        }
+        Ok(result)
+    }
+
+    /// Count confirmed shards for a content item.
+    pub fn count_confirmed_shards(&self, content_id: &str) -> Result<u32, String> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM vault_placement
+                 WHERE content_id = ?1 AND confirmed = 1",
+                params![content_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c as u32)
+            .map_err(|e| format!("Failed to count confirmed shards: {e}"))
     }
 }
 

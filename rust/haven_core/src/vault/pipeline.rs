@@ -275,6 +275,48 @@ pub fn write_to_cache(content_id: &str, ext: &str, data: &[u8]) -> Result<PathBu
     Ok(path)
 }
 
+/// Evict oldest cache files until total size is under max_bytes * 0.8.
+/// Returns bytes freed. Does nothing if already under limit.
+pub fn evict_cache_if_needed(max_bytes: u64) -> Result<u64, String> {
+    let dir = vault_cache_dir();
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("Failed to read cache dir: {e}"))?;
+
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total_size: u64 = 0;
+
+    for entry in entries.flatten() {
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_file() {
+                let size = meta.len();
+                let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                files.push((entry.path(), size, modified));
+                total_size += size;
+            }
+        }
+    }
+
+    if total_size <= max_bytes {
+        return Ok(0);
+    }
+
+    // Sort by modified time — oldest first (evict oldest)
+    files.sort_by(|a, b| a.2.cmp(&b.2));
+
+    let target = (max_bytes as f64 * 0.8) as u64;
+    let mut freed: u64 = 0;
+
+    for (path, size, _) in &files {
+        if total_size - freed <= target {
+            break;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            freed += size;
+        }
+    }
+
+    Ok(freed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

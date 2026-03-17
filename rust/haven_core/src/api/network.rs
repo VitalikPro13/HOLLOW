@@ -110,6 +110,10 @@ pub enum NetworkEvent {
     VaultDownloadProgress { server_id: String, content_id: String, phase: String, progress: f32 },
     VaultDownloadComplete { server_id: String, content_id: String, disk_path: String },
     VaultDownloadFailed { server_id: String, content_id: String, error: String },
+    // -- Vault rebalancing events (Phase 4) --
+    RebalanceStarted { server_id: String, shards_to_move: u32 },
+    RebalanceProgress { server_id: String, moved: u32, total: u32 },
+    RebalanceCompleted { server_id: String },
 }
 
 /// Holds all mutable state for the running node.
@@ -445,6 +449,16 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::VaultDownloadFailed { server_id, content_id, error } => {
             NetworkEvent::VaultDownloadFailed { server_id, content_id, error }
+        }
+        // -- Vault rebalancing events --
+        node::NetworkEvent::RebalanceStarted { server_id, shards_to_move } => {
+            NetworkEvent::RebalanceStarted { server_id, shards_to_move }
+        }
+        node::NetworkEvent::RebalanceProgress { server_id, moved, total } => {
+            NetworkEvent::RebalanceProgress { server_id, moved, total }
+        }
+        node::NetworkEvent::RebalanceCompleted { server_id } => {
+            NetworkEvent::RebalanceCompleted { server_id }
         }
     }
 }

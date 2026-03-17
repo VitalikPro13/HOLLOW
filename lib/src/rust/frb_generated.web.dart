@@ -63,6 +63,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DiscoveredPeer dco_decode_discovered_peer(dynamic raw);
 
   @protected
+  double dco_decode_f_32(dynamic raw);
+
+  @protected
   FriendFfi dco_decode_friend_ffi(dynamic raw);
 
   @protected
@@ -143,6 +146,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ServerFfi dco_decode_server_ffi(dynamic raw);
 
   @protected
+  StorageStatsFfi dco_decode_storage_stats_ffi(dynamic raw);
+
+  @protected
   StoredChannelMessage dco_decode_stored_channel_message(dynamic raw);
 
   @protected
@@ -153,6 +159,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   StoredReaction dco_decode_stored_reaction(dynamic raw);
+
+  @protected
+  int dco_decode_u_16(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -212,6 +221,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DiscoveredPeer sse_decode_discovered_peer(SseDeserializer deserializer);
+
+  @protected
+  double sse_decode_f_32(SseDeserializer deserializer);
 
   @protected
   FriendFfi sse_decode_friend_ffi(SseDeserializer deserializer);
@@ -306,6 +318,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ServerFfi sse_decode_server_ffi(SseDeserializer deserializer);
 
   @protected
+  StorageStatsFfi sse_decode_storage_stats_ffi(SseDeserializer deserializer);
+
+  @protected
   StoredChannelMessage sse_decode_stored_channel_message(
     SseDeserializer deserializer,
   );
@@ -318,6 +333,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   StoredReaction sse_decode_stored_reaction(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_u_16(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -393,6 +411,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     DiscoveredPeer self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_f_32(double self, SseSerializer serializer);
 
   @protected
   void sse_encode_friend_ffi(FriendFfi self, SseSerializer serializer);
@@ -521,6 +542,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_server_ffi(ServerFfi self, SseSerializer serializer);
 
   @protected
+  void sse_encode_storage_stats_ffi(
+    StorageStatsFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_stored_channel_message(
     StoredChannelMessage self,
     SseSerializer serializer,
@@ -540,6 +567,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     StoredReaction self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_u_16(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);

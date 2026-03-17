@@ -205,6 +205,10 @@ pub(crate) enum NetworkEvent {
     VaultDownloadProgress { server_id: String, content_id: String, phase: String, progress: f32 },
     VaultDownloadComplete { server_id: String, content_id: String, disk_path: String },
     VaultDownloadFailed { server_id: String, content_id: String, error: String },
+    // -- Vault rebalancing events (Phase 4) --
+    RebalanceStarted { server_id: String, shards_to_move: u32 },
+    RebalanceProgress { server_id: String, moved: u32, total: u32 },
+    RebalanceCompleted { server_id: String },
 }
 
 /// Commands the FFI layer can send into the swarm event loop.
@@ -811,6 +815,16 @@ enum MessageEnvelope {
         cid: String,
         chid: String,
         manifest: String, // manifest JSON
+    },
+
+    /// Vault shard migration — proactive move during rebalancing.
+    #[serde(rename = "shard_migrate")]
+    ShardMigrate {
+        sid: String,
+        cid: String,
+        si: u16,
+        sk: String,
+        data: String, // base64 shard data
     },
 }
 
@@ -1758,6 +1772,10 @@ async fn run_swarm(
     // Debounce timer for pending disconnects (500ms check interval).
     let mut disconnect_debounce_timer = tokio::time::interval(Duration::from_millis(500));
     disconnect_debounce_timer.tick().await; // consume immediate first tick
+
+    // Vault rebalance + retention enforcement timer (30 min).
+    let mut rebalance_timer = tokio::time::interval(Duration::from_secs(1800));
+    rebalance_timer.tick().await; // consume immediate first tick
 
     loop {
         tokio::select! {
@@ -5798,6 +5816,60 @@ async fn run_swarm(
                     }
                 }
             }
+
+            // -- Vault rebalance + retention enforcement (every 30 min) --
+            _ = rebalance_timer.tick() => {
+                haven_log!("[HAVEN-VAULT] Running rebalance + retention check");
+                let local_peer = swarm.local_peer_id().to_string();
+                let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                let vault_dir = data_dir.join("vault");
+                let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+
+                if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                    // 1. Update last_seen for all connected server members
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+
+                    for (server_id, state) in &server_states {
+                        for member_peer_str in state.members.keys() {
+                            if let Ok(pid) = member_peer_str.parse::<PeerId>() {
+                                if connected_peers.contains(&pid) {
+                                    let _ = cs.update_member_last_seen(server_id, member_peer_str, now_ts);
+                                }
+                            }
+                        }
+
+                        // 2. Retention enforcement: delete expired manifests
+                        for tier in [crate::vault::content_store::StorageTier::Standard, crate::vault::content_store::StorageTier::Low] {
+                            let policy = crate::vault::adaptive::retention_for_tier(tier, &state.settings);
+                            if let Some(days) = crate::vault::adaptive::parse_retention_days(&policy) {
+                                let cutoff = now_ts - (days as i64 * 86400);
+                                if let Ok(expired) = cs.find_expired_manifests(server_id, cutoff) {
+                                    for manifest in &expired {
+                                        if manifest.storage_tier == tier.as_str() {
+                                            haven_log!("[HAVEN-VAULT] Retention: deleting expired content {} (tier: {})", manifest.content_id, manifest.storage_tier);
+                                            let _ = cs.delete_content(server_id, &manifest.content_id);
+                                            let _ = cs.delete_placements(&manifest.content_id);
+                                            let _ = cs.delete_manifest(&manifest.content_id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. Cache eviction (1GB default limit)
+                    if let Ok(freed) = crate::vault::pipeline::evict_cache_if_needed(1024 * 1024 * 1024) {
+                        if freed > 0 {
+                            haven_log!("[HAVEN-VAULT] Cache eviction freed {} bytes", freed);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -7098,6 +7170,28 @@ async fn handle_incoming_request(
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
                         if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
                             let _ = cs.save_manifest(&sid, &chid, &manifest_obj);
+                        }
+                    }
+                }
+
+                Ok(MessageEnvelope::ShardMigrate { sid, cid, si, sk, data }) => {
+                    haven_log!("[HAVEN-VAULT] ShardMigrate received: cid={cid} si={si} from {peer_str}");
+                    // Same logic as ShardStore inline — verify membership, store shard
+                    let is_member = server_states.get(&sid)
+                        .map(|s| s.members.contains_key(&peer_str))
+                        .unwrap_or(false);
+                    if is_member {
+                        if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
+                            let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                            let vault_dir = data_dir.join("vault");
+                            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                            if let Ok(content_store) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                                let tier = crate::vault::content_store::StorageTier::Standard;
+                                let _ = content_store.store_shard(&sid, &cid, si, 0, 0, 0, tier, &shard_bytes);
+                                haven_log!("[HAVEN-VAULT] Migrated shard stored: cid={cid} si={si}");
+                            }
                         }
                     }
                 }

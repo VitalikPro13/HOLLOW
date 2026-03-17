@@ -18,6 +18,7 @@ import 'package:haven/src/core/providers/file_transfer_provider.dart';
 import 'package:haven/src/core/providers/friends_provider.dart';
 import 'package:haven/src/core/providers/member_panel_provider.dart';
 import 'package:haven/src/core/providers/unread_provider.dart';
+import 'package:haven/src/core/providers/vault_status_provider.dart';
 import 'package:haven/src/core/providers/notification_provider.dart';
 import 'package:haven/src/core/providers/system_notification_provider.dart';
 import 'package:haven/src/rust/api/crdt.dart' as crdt_api;
@@ -437,6 +438,50 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HAVEN] File failed: $fileId — $error');
         ref.read(fileTransferProvider.notifier).onFileFailed(
               fileId, error);
+
+      // -- Vault shard events (Phase 4) --
+      case NetworkEvent_ShardStored(:final serverId, :final contentId,
+            fromPeer: _):
+        ref.read(vaultStatusProvider.notifier).onShardStored(
+              serverId, contentId);
+      case NetworkEvent_ShardStoreAckReceived(:final serverId,
+            :final contentId, shardIndex: _, :final success, error: _):
+        ref.read(vaultStatusProvider.notifier).onShardAckReceived(
+              serverId, contentId, success);
+      case NetworkEvent_ShardStoreFailed():
+        break;
+      case NetworkEvent_ShardDeleted():
+        break;
+      case NetworkEvent_ShardReceived():
+        break;
+      case NetworkEvent_ShardRequestFailed():
+        break;
+
+      // -- Vault upload/download pipeline events (Phase 4) --
+      case NetworkEvent_VaultUploadProgress(:final serverId,
+            :final contentId, :final phase, :final progress):
+        ref.read(vaultStatusProvider.notifier).onUploadProgress(
+              serverId, contentId, phase, progress);
+      case NetworkEvent_VaultUploadComplete(:final serverId,
+            :final contentId, channelId: _):
+        ref.read(vaultStatusProvider.notifier).onUploadComplete(
+              serverId, contentId);
+      case NetworkEvent_VaultUploadFailed(:final serverId,
+            :final contentId, :final error):
+        ref.read(vaultStatusProvider.notifier).onUploadFailed(
+              serverId, contentId, error);
+      case NetworkEvent_VaultDownloadProgress(:final serverId,
+            :final contentId, :final phase, :final progress):
+        ref.read(vaultStatusProvider.notifier).onDownloadProgress(
+              serverId, contentId, phase, progress);
+      case NetworkEvent_VaultDownloadComplete(:final serverId,
+            :final contentId, diskPath: _):
+        ref.read(vaultStatusProvider.notifier).onDownloadComplete(
+              serverId, contentId);
+      case NetworkEvent_VaultDownloadFailed(:final serverId,
+            :final contentId, :final error):
+        ref.read(vaultStatusProvider.notifier).onDownloadFailed(
+              serverId, contentId, error);
     }
     } catch (e, st) {
       debugPrint('[HAVEN] Unhandled dispatch error: $e\n$st');
