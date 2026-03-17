@@ -1574,6 +1574,12 @@ async fn run_swarm(
             .await;
     }
 
+    // Decrypt failure cooldown: track last session-kill time per peer.
+    // Prevents rapid session thrashing when many in-flight chunks fail decrypt
+    // (e.g., 340MB file = 1360 chunks, all fail after session reset).
+    let mut decrypt_fail_cooldown: HashMap<String, std::time::Instant> = HashMap::new();
+    const REKEY_COOLDOWN: Duration = Duration::from_secs(5);
+
     // Track outbound request IDs → peer for delivery confirmation.
     let mut pending_requests = HashMap::<request_response::OutboundRequestId, String>::new();
 
@@ -4489,7 +4495,7 @@ async fn run_swarm(
                                     &target_peer, &peer_str, &header_json, &event_tx,
                                 ).await;
 
-                                // Send chunks.
+                                // Send chunks (yield every 50 to prevent connection backlog).
                                 for (idx, chunk_data) in chunks.iter().enumerate() {
                                     let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(chunk_data);
                                     let chunk_envelope = MessageEnvelope::FileChunk {
@@ -4503,6 +4509,11 @@ async fn run_swarm(
                                         &mut pending_requests, &mut outbound_message_text,
                                         &target_peer, &peer_str, &chunk_json, &event_tx,
                                     ).await;
+                                    // Yield frequently to prevent Olm ratchet desync from out-of-order delivery.
+                                    // Large files (50+ chunks) overwhelm the connection if sent too fast.
+                                    if idx % 10 == 9 {
+                                        tokio::time::sleep(Duration::from_millis(5)).await;
+                                    }
                                 }
                                 } // if connected_peers (file data only)
                             }
@@ -4596,7 +4607,7 @@ async fn run_swarm(
                                                 &pid, member_peer_str, &header_json, &event_tx,
                                             ).await;
 
-                                            // Send chunks via Olm.
+                                            // Send chunks via Olm (yield every 50 to prevent connection backlog).
                                             for (idx, chunk_data) in chunks.iter().enumerate() {
                                                 let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(chunk_data);
                                                 let chunk_envelope = MessageEnvelope::FileChunk {
@@ -4610,6 +4621,9 @@ async fn run_swarm(
                                                     &mut pending_requests, &mut outbound_message_text,
                                                     &pid, member_peer_str, &chunk_json, &event_tx,
                                                 ).await;
+                                                if idx % 50 == 49 {
+                                                    tokio::task::yield_now().await;
+                                                }
                                             }
                                         }
                                     }
@@ -4844,6 +4858,7 @@ async fn run_swarm(
                                             &sig_cmd_tx,
                                             &known_addresses,
                                             &mut pending_shard_assembly,
+                                            &mut decrypt_fail_cooldown,
                                             peer,
                                             request,
                                             channel,
@@ -5977,6 +5992,7 @@ async fn handle_incoming_request(
     sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     known_addresses: &[String],
     pending_shard_assembly: &mut HashMap<String, PendingShardAssembly>,
+    decrypt_fail_cooldown: &mut HashMap<String, std::time::Instant>,
     peer: PeerId,
     request: HavenMessage,
     channel: request_response::ResponseChannel<HavenMessage>,
@@ -6076,15 +6092,23 @@ async fn handle_incoming_request(
                                     pt
                                 }
                                 Err(e2) => {
-                                    haven_log!("[HAVEN-CRYPTO] PreKey session creation also failed for {peer_str}: {e2} — initiating re-key");
-                                    // Both paths failed. Initiate a clean re-key.
-                                    if !key_request_in_flight.contains(&peer_str) {
-                                        key_request_in_flight.insert(peer_str.clone());
-                                        let req_id = swarm.behaviour_mut().messaging.send_request(
-                                            &peer,
-                                            HavenMessage::KeyRequest,
-                                        );
-                                        pending_requests.insert(req_id, peer_str.clone());
+                                    // Both paths failed. Apply cooldown to prevent flood.
+                                    let now = std::time::Instant::now();
+                                    let should_rekey = match decrypt_fail_cooldown.get(&peer_str) {
+                                        Some(last) => now.duration_since(*last) >= Duration::from_secs(5),
+                                        None => true,
+                                    };
+                                    if should_rekey {
+                                        haven_log!("[HAVEN-CRYPTO] PreKey session creation also failed for {peer_str}: {e2} — initiating re-key");
+                                        decrypt_fail_cooldown.insert(peer_str.clone(), now);
+                                        if !key_request_in_flight.contains(&peer_str) {
+                                            key_request_in_flight.insert(peer_str.clone());
+                                            let req_id = swarm.behaviour_mut().messaging.send_request(
+                                                &peer,
+                                                HavenMessage::KeyRequest,
+                                            );
+                                            pending_requests.insert(req_id, peer_str.clone());
+                                        }
                                     }
                                     persist_crypto_state(olm, crypto_store, &peer_str);
                                     let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
@@ -6120,14 +6144,23 @@ async fn handle_incoming_request(
                             pt
                         }
                         Err(e) => {
-                            haven_log!("[HAVEN-CRYPTO] PreKey session creation failed for {peer_str}: {e} — initiating re-key");
-                            if !key_request_in_flight.contains(&peer_str) {
-                                key_request_in_flight.insert(peer_str.clone());
-                                let req_id = swarm.behaviour_mut().messaging.send_request(
-                                    &peer,
-                                    HavenMessage::KeyRequest,
-                                );
-                                pending_requests.insert(req_id, peer_str.clone());
+                            // Apply cooldown to prevent flood from stale PreKey messages.
+                            let now = std::time::Instant::now();
+                            let should_rekey = match decrypt_fail_cooldown.get(&peer_str) {
+                                Some(last) => now.duration_since(*last) >= Duration::from_secs(5),
+                                None => true,
+                            };
+                            if should_rekey {
+                                haven_log!("[HAVEN-CRYPTO] PreKey session creation failed for {peer_str}: {e} — initiating re-key");
+                                decrypt_fail_cooldown.insert(peer_str.clone(), now);
+                                if !key_request_in_flight.contains(&peer_str) {
+                                    key_request_in_flight.insert(peer_str.clone());
+                                    let req_id = swarm.behaviour_mut().messaging.send_request(
+                                        &peer,
+                                        HavenMessage::KeyRequest,
+                                    );
+                                    pending_requests.insert(req_id, peer_str.clone());
+                                }
                             }
                             persist_crypto_state(olm, crypto_store, &peer_str);
                             let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
@@ -6140,37 +6173,49 @@ async fn handle_incoming_request(
                 match olm.decrypt(&peer_str, message_type, &ciphertext) {
                     Ok(pt) => pt,
                     Err(e) => {
-                        // Stale session — remove it and initiate fresh key exchange.
-                        haven_log!("[HAVEN-SWARM] Decrypt failed for {peer_str}: {e} — removing stale session");
-                        olm.remove_session(&peer_str);
-                        persist_crypto_state(olm, crypto_store, &peer_str);
+                        // Decrypt failure — check cooldown before killing session.
+                        // This prevents rapid session thrashing when many in-flight
+                        // chunks fail (e.g., large file transfer with 1000+ chunks).
+                        let now = std::time::Instant::now();
+                        let should_rekey = match decrypt_fail_cooldown.get(&peer_str) {
+                            Some(last_kill) => now.duration_since(*last_kill) >= Duration::from_secs(5),
+                            None => true, // First failure — allow rekey
+                        };
 
-                        let _ = event_tx
-                            .send(NetworkEvent::Error {
-                                message: format!("Stale session with {peer_str}, re-keying..."),
-                            })
-                            .await;
+                        if should_rekey {
+                            haven_log!("[HAVEN-SWARM] Decrypt failed for {peer_str}: {e} — removing stale session");
+                            olm.remove_session(&peer_str);
+                            persist_crypto_state(olm, crypto_store, &peer_str);
+                            decrypt_fail_cooldown.insert(peer_str.clone(), now);
 
-                        // Emit MessageSyncFailed for any servers where this peer is a member
-                        // so the UI doesn't stay stuck on "Syncing...".
-                        for (sid, state) in server_states.iter() {
-                            if state.members.contains_key(&peer_str) {
-                                let _ = event_tx.send(NetworkEvent::MessageSyncFailed {
-                                    server_id: sid.clone(),
-                                    error: format!("Decrypt failed with {peer_str}, re-keying"),
-                                }).await;
+                            let _ = event_tx
+                                .send(NetworkEvent::Error {
+                                    message: format!("Stale session with {peer_str}, re-keying..."),
+                                })
+                                .await;
+
+                            // Emit MessageSyncFailed for any servers where this peer is a member
+                            // so the UI doesn't stay stuck on "Syncing...".
+                            for (sid, state) in server_states.iter() {
+                                if state.members.contains_key(&peer_str) {
+                                    let _ = event_tx.send(NetworkEvent::MessageSyncFailed {
+                                        server_id: sid.clone(),
+                                        error: format!("Decrypt failed with {peer_str}, re-keying"),
+                                    }).await;
+                                }
+                            }
+
+                            // Send a KeyRequest to re-establish the session.
+                            if !key_request_in_flight.contains(&peer_str) {
+                                key_request_in_flight.insert(peer_str.clone());
+                                let req_id = swarm.behaviour_mut().messaging.send_request(
+                                    &peer,
+                                    HavenMessage::KeyRequest,
+                                );
+                                pending_requests.insert(req_id, peer_str.clone());
                             }
                         }
-
-                        // Send a KeyRequest to re-establish the session.
-                        if !key_request_in_flight.contains(&peer_str) {
-                            key_request_in_flight.insert(peer_str.clone());
-                            let req_id = swarm.behaviour_mut().messaging.send_request(
-                                &peer,
-                                HavenMessage::KeyRequest,
-                            );
-                            pending_requests.insert(req_id, peer_str.clone());
-                        }
+                        // else: within cooldown — silently skip this stale message
 
                         let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
                         return;

@@ -3596,6 +3596,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           contentId: dco_decode_String(raw[2]),
           error: dco_decode_String(raw[3]),
         );
+      case 59:
+        return NetworkEvent_RebalanceStarted(
+          serverId: dco_decode_String(raw[1]),
+          shardsToMove: dco_decode_u_32(raw[2]),
+        );
+      case 60:
+        return NetworkEvent_RebalanceProgress(
+          serverId: dco_decode_String(raw[1]),
+          moved: dco_decode_u_32(raw[2]),
+          total: dco_decode_u_32(raw[3]),
+        );
+      case 61:
+        return NetworkEvent_RebalanceCompleted(
+          serverId: dco_decode_String(raw[1]),
+        );
       default:
         throw Exception("unreachable");
     }
@@ -4589,6 +4604,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           contentId: var_contentId,
           error: var_error,
         );
+      case 59:
+        var var_serverId = sse_decode_String(deserializer);
+        var var_shardsToMove = sse_decode_u_32(deserializer);
+        return NetworkEvent_RebalanceStarted(
+          serverId: var_serverId,
+          shardsToMove: var_shardsToMove,
+        );
+      case 60:
+        var var_serverId = sse_decode_String(deserializer);
+        var var_moved = sse_decode_u_32(deserializer);
+        var var_total = sse_decode_u_32(deserializer);
+        return NetworkEvent_RebalanceProgress(
+          serverId: var_serverId,
+          moved: var_moved,
+          total: var_total,
+        );
+      case 61:
+        var var_serverId = sse_decode_String(deserializer);
+        return NetworkEvent_RebalanceCompleted(serverId: var_serverId);
       default:
         throw UnimplementedError('');
     }
@@ -5659,6 +5693,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_String(serverId, serializer);
         sse_encode_String(contentId, serializer);
         sse_encode_String(error, serializer);
+      case NetworkEvent_RebalanceStarted(
+        serverId: final serverId,
+        shardsToMove: final shardsToMove,
+      ):
+        sse_encode_i_32(59, serializer);
+        sse_encode_String(serverId, serializer);
+        sse_encode_u_32(shardsToMove, serializer);
+      case NetworkEvent_RebalanceProgress(
+        serverId: final serverId,
+        moved: final moved,
+        total: final total,
+      ):
+        sse_encode_i_32(60, serializer);
+        sse_encode_String(serverId, serializer);
+        sse_encode_u_32(moved, serializer);
+        sse_encode_u_32(total, serializer);
+      case NetworkEvent_RebalanceCompleted(serverId: final serverId):
+        sse_encode_i_32(61, serializer);
+        sse_encode_String(serverId, serializer);
     }
   }
 

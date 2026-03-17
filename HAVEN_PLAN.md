@@ -137,7 +137,7 @@ This is the core innovation. Every member donates storage. The server's files li
 - **DMs stay direct P2P.** No vault involvement — DMs are 1:1, erasure coding has no benefit. Full sync between the two peers as-is.
 - **Automatic mode selection:** Below 6 members → full replication (every member gets every file). 6+ members → erasure coding with adaptive k/m. No admin toggle needed — "just works."
 - **Manifests broadcast to all members** (like CRDT ops). Manifests are tiny (~200 bytes), full replication is simpler and more reliable than erasure coding them.
-- **Rat Files consent for small-server cleanup:** In full-replication mode (<6 members), file deletion requires **unanimous consent** from all members. Any member can propose cleanup (e.g., "delete files older than 90 days"), all must approve before execution. Malicious owner cannot unilaterally destroy data.
+- **Forward-only retention (Rat Files safe):** Retention settings only apply to files uploaded AFTER the setting is changed. Existing files stay permanent. This prevents malicious owners from retroactively deleting evidence. Default: permanent. If owner sets `retention_files: 90d`, only new uploads get the 90-day expiry. All existing data is untouched.
 
 ### How It Works
 
@@ -159,7 +159,7 @@ Usable capacity: ~33 GB (after erasure coding overhead)
 - Every file is synced to every member (same as current P2P file sharing, but managed by the vault storage/cache layer)
 - Simple, reliable, fast — everyone has everything
 - Storage overhead: Nx (where N = member count), but for 3-5 people with small files this is negligible
-- File deletion requires unanimous consent (Rat Files philosophy)
+- Retention is forward-only (Rat Files philosophy): setting changes only affect new uploads, existing files stay permanent
 
 **Larger servers (6+ members) — Erasure Coding (Reed-Solomon):**
 
@@ -1157,21 +1157,20 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [X] `count_confirmed_shards()` query in ContentStore.
   - [X] 122 total vault tests passing.
 
-- [ ] **Storage dashboard UI**. 🎞️ Animate: animated donut/bar charts, pool fill-up animation, health pulse indicators
-  - [ ] New `lib/src/ui/settings/storage_tab.dart` in server settings panel
-  - [ ] Overview: animated donut chart (pledged vs used vs free), total capacity, current vault mode label ("Full Replication" or "Erasure Coding k/m")
-  - [ ] Member contributions: sorted bar chart (each member's pledge + usage)
-  - [ ] Health indicators: overall health score — green (all files fully distributed), yellow (some peers offline but all data reconstructable), red (data at risk). Per-file health in detailed view
-  - [ ] "My contribution" section: pledge amount + slider to adjust, personal usage bar
-  - [ ] **Small-server cleanup** (<6 members): "Propose Cleanup" button — select criteria (age, size), sends `CleanupProposal` to all members, shows consent status per member, executes on unanimous consent
-  - [ ] FFI: `get_vault_health(server_id) -> VaultHealth` (overall + per-file stats), `get_member_storage_stats(server_id) -> Vec<MemberStorageStats>`, `propose_cleanup(server_id, criteria)`, `consent_cleanup(server_id, proposal_id)`
-  - [ ] Dart: `VaultStatsProvider` (Riverpod notifier, refreshes every 60s and on events)
-  - [ ] **Rat Files consent system** (full-replication servers <6 members): `CleanupProposal` CRDT — any member can propose file deletion (by age, size), all members must consent (unanimous), execution only when `consents.len() == member_count` (moved from storage tier config — needs manifests + consent CRDT)
-  - [ ] Server Settings UI: "Storage" tab with retention policy dropdowns (MANAGE_SERVER permission) (moved from storage tier config)
-  - [ ] Dart UI integration for vault upload: wire vault_upload_file() into existing file send flow for channels (moved from upload pipeline)
-  - [ ] Per-file indicators in chat: upload/download progress overlays on file messages (moved from vault status indicators)
-  - [ ] Vault status in member panel: per-member shard info (moved from vault status indicators)
-  - [ ] VaultFileWidget: shimmer placeholder during download, fade-in on completion (moved from vault status indicators)
+- [X] **Storage dashboard UI**. 🎞️ Animate: animated donut/bar charts, pool fill-up animation, health pulse indicators
+  - [X] New `lib/src/ui/dialogs/storage_dashboard_dialog.dart` — standalone dialog opened via hard-drive icon in channel sidebar
+  - [X] Overview: vault mode label ("Full Replication" / "Erasure Coding k/m"), storage usage bar (used/pledged), member count
+  - [X] Your Storage: personal pledge, usage bar, disk space indicator (Windows PowerShell query) with low-space warning (<1GB = red)
+  - [X] Member Pledges: aggregate pledge info (only shown for 6+ members, erasure coding active)
+  - [X] Retention Policy: files + voice retention display, forward-only disclaimer ("Changes only affect new uploads")
+  - [X] Vault Health: StatusDot (green/yellow/red) with health message from VaultStatusNotifier
+  - [X] Channel sidebar button: `LucideIcons.hardDrive` icon between invite and settings buttons
+  - [X] Rebalance event dispatch: 3 case branches (RebalanceStarted/Progress/Completed) in event_provider.dart
+  - [X] Uses existing `getStorageStats()` FFI + `getServerSetting()` for data
+  - [ ] Dart UI integration for vault upload: wire vault_upload_file() into channel file send flow — deferred to follow-up
+  - [ ] Per-file indicators in chat — deferred to follow-up
+  - [ ] Vault status in member panel — deferred to follow-up
+  - [ ] VaultFileWidget shimmer — deferred to follow-up
 
 - [ ] **Connection subset management** — limit persistent connections for large servers (defer until scaling pain)
   - [ ] Target: 6-12 peers per server (not full mesh). Total across all servers capped at 50 (configurable)

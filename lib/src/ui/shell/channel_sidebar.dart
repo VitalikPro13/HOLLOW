@@ -13,6 +13,7 @@ import 'package:haven/src/theme/haven_typography.dart';
 import 'package:haven/src/ui/animations/haven_curves.dart';
 import 'package:haven/src/ui/animations/reveal_widgets.dart';
 import 'package:haven/src/ui/animations/selection_shimmer.dart';
+import 'package:haven/src/ui/dialogs/storage_dashboard_dialog.dart';
 import 'package:haven/src/ui/animations/startup_reveal.dart';
 import 'package:haven/src/core/providers/friends_provider.dart';
 import 'package:haven/src/core/providers/notification_provider.dart';
@@ -205,6 +206,20 @@ class ChannelSidebar extends StatelessWidget {
                 padding: const EdgeInsets.all(HavenSpacing.xs),
                 child: Icon(
                   LucideIcons.userPlus,
+                  size: 16,
+                  color: haven.textSecondary,
+                ),
+              ),
+            ),
+            HavenTooltip(
+              message: 'Storage',
+              child: HavenPressable(
+                onTap: () => showStorageDashboardDialog(
+                    context, selectedServer!.serverId),
+                borderRadius: BorderRadius.circular(haven.radiusSm),
+                padding: const EdgeInsets.all(HavenSpacing.xs),
+                child: Icon(
+                  LucideIcons.hardDrive,
                   size: 16,
                   color: haven.textSecondary,
                 ),

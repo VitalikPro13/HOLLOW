@@ -482,6 +482,14 @@ class EventStreamNotifier extends Notifier<bool> {
             :final contentId, :final error):
         ref.read(vaultStatusProvider.notifier).onDownloadFailed(
               serverId, contentId, error);
+
+      // -- Vault rebalancing events (Phase 4) --
+      case NetworkEvent_RebalanceStarted():
+        break; // Logged in Rust, UI tracks via vault status provider
+      case NetworkEvent_RebalanceProgress():
+        break;
+      case NetworkEvent_RebalanceCompleted():
+        break;
     }
     } catch (e, st) {
       debugPrint('[HAVEN] Unhandled dispatch error: $e\n$st');

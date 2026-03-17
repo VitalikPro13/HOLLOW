@@ -3668,6 +3668,30 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     error: var_error,
                 };
             }
+            59 => {
+                let mut var_serverId = <String>::sse_decode(deserializer);
+                let mut var_shardsToMove = <u32>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::RebalanceStarted {
+                    server_id: var_serverId,
+                    shards_to_move: var_shardsToMove,
+                };
+            }
+            60 => {
+                let mut var_serverId = <String>::sse_decode(deserializer);
+                let mut var_moved = <u32>::sse_decode(deserializer);
+                let mut var_total = <u32>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::RebalanceProgress {
+                    server_id: var_serverId,
+                    moved: var_moved,
+                    total: var_total,
+                };
+            }
+            61 => {
+                let mut var_serverId = <String>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::RebalanceCompleted {
+                    server_id: var_serverId,
+                };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -4787,6 +4811,29 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 error.into_into_dart().into_dart(),
             ]
             .into_dart(),
+            crate::api::network::NetworkEvent::RebalanceStarted {
+                server_id,
+                shards_to_move,
+            } => [
+                59.into_dart(),
+                server_id.into_into_dart().into_dart(),
+                shards_to_move.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::network::NetworkEvent::RebalanceProgress {
+                server_id,
+                moved,
+                total,
+            } => [
+                60.into_dart(),
+                server_id.into_into_dart().into_dart(),
+                moved.into_into_dart().into_dart(),
+                total.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::network::NetworkEvent::RebalanceCompleted { server_id } => {
+                [61.into_dart(), server_id.into_into_dart().into_dart()].into_dart()
+            }
             _ => {
                 unimplemented!("");
             }
@@ -5736,6 +5783,28 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(content_id, serializer);
                 <String>::sse_encode(error, serializer);
+            }
+            crate::api::network::NetworkEvent::RebalanceStarted {
+                server_id,
+                shards_to_move,
+            } => {
+                <i32>::sse_encode(59, serializer);
+                <String>::sse_encode(server_id, serializer);
+                <u32>::sse_encode(shards_to_move, serializer);
+            }
+            crate::api::network::NetworkEvent::RebalanceProgress {
+                server_id,
+                moved,
+                total,
+            } => {
+                <i32>::sse_encode(60, serializer);
+                <String>::sse_encode(server_id, serializer);
+                <u32>::sse_encode(moved, serializer);
+                <u32>::sse_encode(total, serializer);
+            }
+            crate::api::network::NetworkEvent::RebalanceCompleted { server_id } => {
+                <i32>::sse_encode(61, serializer);
+                <String>::sse_encode(server_id, serializer);
             }
             _ => {
                 unimplemented!("");

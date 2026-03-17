@@ -557,4 +557,15 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String contentId,
     required String error,
   }) = NetworkEvent_VaultDownloadFailed;
+  const factory NetworkEvent.rebalanceStarted({
+    required String serverId,
+    required int shardsToMove,
+  }) = NetworkEvent_RebalanceStarted;
+  const factory NetworkEvent.rebalanceProgress({
+    required String serverId,
+    required int moved,
+    required int total,
+  }) = NetworkEvent_RebalanceProgress;
+  const factory NetworkEvent.rebalanceCompleted({required String serverId}) =
+      NetworkEvent_RebalanceCompleted;
 }
