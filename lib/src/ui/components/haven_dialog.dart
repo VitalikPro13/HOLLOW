@@ -81,7 +81,7 @@ class HavenDialog extends StatelessWidget {
         padding: const EdgeInsets.all(HavenSpacing.xl),
         child: ConstrainedBox(
           constraints: const BoxConstraints(
-            maxWidth: 420,
+            maxWidth: 600,
             minWidth: 300,
           ),
           child: Material(
@@ -105,12 +105,14 @@ class HavenDialog extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    title,
-                    style: HavenTypography.heading
-                        .copyWith(color: haven.textPrimary),
-                  ),
-                  const SizedBox(height: HavenSpacing.lg),
+                  if (title.isNotEmpty) ...[
+                    Text(
+                      title,
+                      style: HavenTypography.heading
+                          .copyWith(color: haven.textPrimary),
+                    ),
+                    const SizedBox(height: HavenSpacing.lg),
+                  ],
                   content,
                   if (actions.isNotEmpty) ...[
                     const SizedBox(height: HavenSpacing.xl),

@@ -10,6 +10,8 @@ class FileTransferState {
   final int chunksReceived;
   final bool isComplete;
   final bool isSending;
+  /// True while a streamed transfer is in flight (no chunk-based progress).
+  final bool isDownloading;
   final String? error;
   final String? diskPath;
   final bool isImage;
@@ -24,6 +26,7 @@ class FileTransferState {
     this.chunksReceived = 0,
     this.isComplete = false,
     this.isSending = false,
+    this.isDownloading = false,
     this.error,
     this.diskPath,
     this.isImage = false,
@@ -37,6 +40,7 @@ class FileTransferState {
   FileTransferState copyWith({
     int? chunksReceived,
     bool? isComplete,
+    bool? isDownloading,
     String? error,
     String? diskPath,
   }) {
@@ -48,6 +52,7 @@ class FileTransferState {
       chunksReceived: chunksReceived ?? this.chunksReceived,
       isComplete: isComplete ?? this.isComplete,
       isSending: isSending,
+      isDownloading: isDownloading ?? this.isDownloading,
       error: error ?? this.error,
       diskPath: diskPath ?? this.diskPath,
       isImage: isImage,
@@ -125,10 +130,11 @@ class FileTransferNotifier
       fileId: fileId,
       fileName: fileName,
       sizeBytes: sizeBytes,
-      totalChunks: 0, // Will be updated by progress events.
+      totalChunks: 0,
       isImage: isImage,
       width: width,
       height: height,
+      isDownloading: true, // Stream transfer in flight.
     );
     state = updated;
   }
@@ -138,8 +144,7 @@ class FileTransferNotifier
     final current = state[fileId];
     if (current == null) return;
     final updated = Map<String, FileTransferState>.from(state);
-    updated[fileId] = current.copyWith(chunksReceived: chunksReceived);
-    // Update totalChunks if we have it now.
+    // For streamed transfers, chunks represent MB received / MB total.
     if (current.totalChunks == 0 && totalChunks > 0) {
       updated[fileId] = FileTransferState(
         fileId: current.fileId,
@@ -148,10 +153,13 @@ class FileTransferNotifier
         totalChunks: totalChunks,
         chunksReceived: chunksReceived,
         isSending: current.isSending,
+        isDownloading: current.isDownloading,
         isImage: current.isImage,
         width: current.width,
         height: current.height,
       );
+    } else {
+      updated[fileId] = current.copyWith(chunksReceived: chunksReceived);
     }
     state = updated;
   }
@@ -163,8 +171,9 @@ class FileTransferNotifier
     final updated = Map<String, FileTransferState>.from(state);
     updated[fileId] = current.copyWith(
       isComplete: true,
+      isDownloading: false,
       diskPath: diskPath,
-      chunksReceived: current.totalChunks,
+      chunksReceived: current.totalChunks > 0 ? current.totalChunks : 1,
     );
     state = updated;
   }

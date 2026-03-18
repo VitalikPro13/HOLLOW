@@ -36,18 +36,23 @@ class FileAttachmentWidget extends ConsumerWidget {
     // Only override from transfer provider if it provides better info.
     final isComplete = attachment.isComplete || (transfer?.isComplete ?? false);
     final diskPath = attachment.diskPath ?? transfer?.diskPath;
+    final isDownloading = transfer?.isDownloading ?? false;
     final progress = (transfer != null && transfer.progress > 0)
         ? transfer.progress
         : attachment.progress;
+    // Bytes received for streamed transfers (chunks = MB).
+    final bytesReceived = (transfer != null && transfer.totalChunks > 0)
+        ? transfer.chunksReceived * 1024 * 1024
+        : 0;
 
     if (attachment.isImage) {
-      return _buildImagePreview(context, haven, isComplete, diskPath, progress);
+      return _buildImagePreview(context, haven, isComplete, diskPath, isDownloading, progress, bytesReceived);
     }
-    return _buildFileCard(haven, isComplete, progress);
+    return _buildFileCard(haven, isComplete, isDownloading, progress, bytesReceived);
   }
 
   Widget _buildImagePreview(
-      BuildContext context, HavenTheme haven, bool isComplete, String? diskPath, double progress) {
+      BuildContext context, HavenTheme haven, bool isComplete, String? diskPath, bool isDownloading, double progress, int bytesReceived) {
     // Calculate display size maintaining aspect ratio.
     const maxWidth = 300.0;
     const maxHeight = 250.0;
@@ -82,7 +87,7 @@ class FileAttachmentWidget extends ConsumerWidget {
                 File(diskPath),
                 fit: BoxFit.contain,
                 errorBuilder: (_, e, st) => _buildPlaceholder(
-                    haven, displayWidth, displayHeight, 1.0),
+                    haven, displayWidth, displayHeight, false, 1.0, 0),
               ),
             ),
           ),
@@ -90,12 +95,12 @@ class FileAttachmentWidget extends ConsumerWidget {
       );
     }
 
-    // Show placeholder with progress.
-    return _buildPlaceholder(haven, displayWidth, displayHeight, progress);
+    // Show placeholder with progress or downloading indicator.
+    return _buildPlaceholder(haven, displayWidth, displayHeight, isDownloading, progress, bytesReceived);
   }
 
   Widget _buildPlaceholder(
-      HavenTheme haven, double width, double height, double progress) {
+      HavenTheme haven, double width, double height, bool isDownloading, double progress, int bytesReceived) {
     return Container(
       width: width,
       height: height,
@@ -107,9 +112,28 @@ class FileAttachmentWidget extends ConsumerWidget {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(LucideIcons.image, size: 32, color: haven.textSecondary),
-          const SizedBox(height: HavenSpacing.sm),
-          if (progress > 0 && progress < 1) ...[
+          if (isDownloading) ...[
+            SizedBox(
+              width: 40,
+              height: 40,
+              child: CircularProgressIndicator(
+                value: progress > 0 ? progress.clamp(0.0, 1.0) : null,
+                strokeWidth: 3,
+                valueColor: AlwaysStoppedAnimation(haven.accent),
+                backgroundColor: haven.border,
+              ),
+            ),
+            const SizedBox(height: HavenSpacing.sm),
+            Text(
+              progress > 0
+                  ? '${_formatSize(bytesReceived)} / ${attachment.formattedSize}'
+                  : 'Downloading...',
+              style: HavenTypography.caption.copyWith(
+                color: haven.textSecondary,
+                fontSize: 10,
+              ),
+            ),
+          ] else if (progress > 0 && progress < 1) ...[
             SizedBox(
               width: 80,
               child: LinearProgressIndicator(
@@ -126,7 +150,9 @@ class FileAttachmentWidget extends ConsumerWidget {
                 fontSize: 10,
               ),
             ),
-          ] else
+          ] else ...[
+            Icon(LucideIcons.image, size: 32, color: haven.textSecondary),
+            const SizedBox(height: HavenSpacing.sm),
             Text(
               attachment.formattedSize,
               style: HavenTypography.caption.copyWith(
@@ -134,66 +160,86 @@ class FileAttachmentWidget extends ConsumerWidget {
                 fontSize: 10,
               ),
             ),
+          ],
         ],
       ),
     );
   }
 
-  Widget _buildFileCard(HavenTheme haven, bool isComplete, double progress) {
+  String _formatSize(int bytes) {
+    final b = bytes.toDouble();
+    if (b < 1024) return '${b.toInt()} B';
+    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} KB';
+    if (b < 1024 * 1024 * 1024) return '${(b / (1024 * 1024)).toStringAsFixed(1)} MB';
+    return '${(b / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  }
+
+  Widget _buildFileCard(HavenTheme haven, bool isComplete, bool isDownloading, double progress, int bytesReceived) {
     return Container(
       constraints: const BoxConstraints(maxWidth: 280),
-      padding: const EdgeInsets.all(HavenSpacing.md),
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: haven.surface,
         borderRadius: BorderRadius.circular(haven.radiusSm),
         border: Border.all(color: haven.border),
       ),
-      child: Row(
+      child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            _fileIcon(),
-            size: 28,
-            color: haven.accent,
-          ),
-          const SizedBox(width: HavenSpacing.md),
-          Flexible(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+          Padding(
+            padding: const EdgeInsets.all(HavenSpacing.md),
+            child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  attachment.fileName,
-                  style: HavenTypography.body.copyWith(
-                    color: haven.textPrimary,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                Icon(
+                  _fileIcon(),
+                  size: 28,
+                  color: haven.accent,
                 ),
-                const SizedBox(height: HavenSpacing.xxs),
-                if (!isComplete && progress > 0) ...[
-                  SizedBox(
-                    height: 4,
-                    child: LinearProgressIndicator(
-                      value: progress,
-                      backgroundColor: haven.elevated,
-                      valueColor: AlwaysStoppedAnimation(haven.accent),
-                    ),
-                  ),
-                  const SizedBox(height: HavenSpacing.xxs),
-                ],
-                Text(
-                  attachment.formattedSize,
-                  style: HavenTypography.caption.copyWith(
-                    color: haven.textSecondary,
-                    fontSize: 11,
+                const SizedBox(width: HavenSpacing.md),
+                Flexible(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        attachment.fileName,
+                        style: HavenTypography.body.copyWith(
+                          color: haven.textPrimary,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: HavenSpacing.xxs),
+                      Text(
+                        isDownloading && progress > 0
+                            ? '${_formatSize(bytesReceived)} / ${attachment.formattedSize}'
+                            : isDownloading
+                                ? 'Downloading... ${attachment.formattedSize}'
+                                : attachment.formattedSize,
+                        style: HavenTypography.caption.copyWith(
+                          color: haven.textSecondary,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ],
             ),
           ),
+          // Thin progress bar at the bottom of the card.
+          if (isDownloading || (!isComplete && progress > 0))
+            SizedBox(
+              height: 3,
+              child: LinearProgressIndicator(
+                value: progress > 0 ? progress.clamp(0.0, 1.0) : null,
+                backgroundColor: haven.border,
+                valueColor: AlwaysStoppedAnimation(haven.accent),
+              ),
+            ),
         ],
       ),
     );

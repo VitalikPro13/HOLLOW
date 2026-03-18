@@ -8,8 +8,11 @@
 //!   Request:  [1-byte type] [32-byte id (hex)] [8-byte size LE] [2-byte shard_index LE (type=1 only)] [...data bytes...]
 //!   Response: [1-byte status (0=ok, 1=error)]
 
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use libp2p::futures::{AsyncReadExt, AsyncWriteExt};
 use libp2p::request_response;
@@ -18,6 +21,22 @@ use crate::haven_log;
 
 /// 64 KB streaming buffer — only this much in memory at a time.
 const STREAM_BUF_SIZE: usize = 64 * 1024;
+
+// ── Global progress tracker ──────────────────────────────────
+
+/// Tracks bytes received per file_id. Updated by the codec during stream receive,
+/// polled by the swarm event loop to emit FileProgress events to Dart.
+#[derive(Debug, Clone)]
+pub struct StreamProgress {
+    pub bytes_received: Arc<AtomicU64>,
+    pub total_bytes: u64,
+}
+
+/// Global progress map. Initialized on first access.
+pub fn stream_progress() -> &'static Mutex<HashMap<String, StreamProgress>> {
+    static INSTANCE: std::sync::OnceLock<Mutex<HashMap<String, StreamProgress>>> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 // ── Wire types ───────────────────────────────────────────────
 
@@ -107,6 +126,20 @@ impl request_response::Codec for FileStreamCodec {
                 }
             };
 
+            // Register progress tracker (for files only — shards don't need UI progress).
+            let progress_counter = if matches!(kind, StreamKind::File) {
+                let counter = Arc::new(AtomicU64::new(0));
+                if let Ok(mut map) = stream_progress().lock() {
+                    map.insert(id.clone(), StreamProgress {
+                        bytes_received: counter.clone(),
+                        total_bytes: size,
+                    });
+                }
+                Some(counter)
+            } else {
+                None
+            };
+
             // Stream data bytes to a temp file using std::fs (no tokio::fs needed).
             let temp_dir = super::file_transfer::files_dir();
             let temp_name = format!(".stream_recv_{}.tmp", &id);
@@ -131,10 +164,22 @@ impl request_response::Codec for FileStreamCodec {
                     std::io::Write::write_all(&mut file, &buf[..n])
                         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Write temp file: {e}")))?;
                     remaining -= n as u64;
+
+                    // Update progress counter for UI.
+                    if let Some(ref counter) = progress_counter {
+                        counter.store(size - remaining, Ordering::Relaxed);
+                    }
                 }
 
                 std::io::Write::flush(&mut file)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Flush temp file: {e}")))?;
+            }
+
+            // Clean up progress tracker.
+            if matches!(kind, StreamKind::File) {
+                if let Ok(mut map) = stream_progress().lock() {
+                    map.remove(&id);
+                }
             }
 
             haven_log!("[HAVEN-STREAM] Received {size} bytes for {id} ({})",

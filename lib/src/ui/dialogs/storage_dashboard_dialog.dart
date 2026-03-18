@@ -34,53 +34,71 @@ class _StorageDashboardContent extends ConsumerStatefulWidget {
 
 class _StorageDashboardContentState
     extends ConsumerState<_StorageDashboardContent> {
+  // Static cache — persists across dialog open/close so it shows instantly on reopen.
+  static final Map<String, crdt_api.StorageStatsFfi> _statsCache = {};
+  static final Map<String, String> _retentionFilesCache = {};
+  static final Map<String, String> _retentionVoiceCache = {};
+  static int _diskFreeBytesCache = 0;
+
   crdt_api.StorageStatsFfi? _stats;
   String _retentionFiles = 'permanent';
   String _retentionVoice = '90d';
   int _diskFreeBytes = 0;
-  bool _loading = true;
 
   @override
   void initState() {
     super.initState();
+    // Load cached values immediately so UI appears instantly.
+    _stats = _statsCache[widget.serverId];
+    _retentionFiles = _retentionFilesCache[widget.serverId] ?? 'permanent';
+    _retentionVoice = _retentionVoiceCache[widget.serverId] ?? '90d';
+    _diskFreeBytes = _diskFreeBytesCache;
+    // Refresh in background — setState triggers smooth animation.
     _loadData();
   }
 
   Future<void> _loadData() async {
     try {
-      final stats =
-          await crdt_api.getStorageStats(serverId: widget.serverId);
-      final retFiles = await crdt_api.getServerSetting(
-          serverId: widget.serverId, key: 'retention_files');
-      final retVoice = await crdt_api.getServerSetting(
-          serverId: widget.serverId, key: 'retention_voice');
+      final results = await Future.wait([
+        crdt_api.getStorageStats(serverId: widget.serverId),
+        crdt_api.getServerSetting(serverId: widget.serverId, key: 'retention_files'),
+        crdt_api.getServerSetting(serverId: widget.serverId, key: 'retention_voice'),
+        _getDiskFreeBytes(),
+      ]);
 
-      int diskFree = 0;
-      try {
-        if (Platform.isWindows) {
-          final result = await Process.run('powershell', [
-            '-Command',
-            r"(Get-PSDrive C).Free",
-          ]);
-          final output = result.stdout.toString().trim();
-          diskFree = int.tryParse(output) ?? 0;
-        }
-      } catch (_) {}
+      final stats = results[0] as crdt_api.StorageStatsFfi;
+      final retFiles = results[1] as String;
+      final retVoice = results[2] as String;
+      final diskFree = results[3] as int;
+
+      // Update static cache for next open.
+      _statsCache[widget.serverId] = stats;
+      _retentionFilesCache[widget.serverId] = retFiles.isNotEmpty ? retFiles : 'permanent';
+      _retentionVoiceCache[widget.serverId] = retVoice.isNotEmpty ? retVoice : '90d';
+      _diskFreeBytesCache = diskFree;
 
       if (mounted) {
         setState(() {
           _stats = stats;
-          _retentionFiles = retFiles.isNotEmpty ? retFiles : 'permanent';
-          _retentionVoice = retVoice.isNotEmpty ? retVoice : '90d';
+          _retentionFiles = _retentionFilesCache[widget.serverId]!;
+          _retentionVoice = _retentionVoiceCache[widget.serverId]!;
           _diskFreeBytes = diskFree;
-          _loading = false;
         });
       }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _loading = false);
+    } catch (_) {}
+  }
+
+  Future<int> _getDiskFreeBytes() async {
+    try {
+      if (Platform.isWindows) {
+        final result = await Process.run('powershell', [
+          '-Command',
+          r"(Get-PSDrive C).Free",
+        ]);
+        return int.tryParse(result.stdout.toString().trim()) ?? 0;
       }
-    }
+    } catch (_) {}
+    return 0;
   }
 
   String _formatBytes(BigInt bytes) {
@@ -154,59 +172,66 @@ class _StorageDashboardContentState
             ),
             const SizedBox(height: HavenSpacing.lg),
 
-            if (_loading)
-              const SizedBox(
-                height: 150,
-                child: Center(child: CircularProgressIndicator()),
-              )
-            else ...[
-              // Top row: Server Storage | Your Storage
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: _buildSection(
-                      haven,
-                      'Server Storage',
-                      LucideIcons.server,
-                      _buildServerOverview(haven, memberCount),
-                    ),
+            ...[
+              // Server Storage — full width when <6 members, side-by-side when 6+
+              if (memberCount < 6)
+                _buildSection(
+                  haven,
+                  'Server Storage',
+                  LucideIcons.server,
+                  _buildServerOverview(haven, memberCount),
+                )
+              else
+                IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(
+                        child: _buildSection(
+                          haven,
+                          'Server Storage',
+                          LucideIcons.server,
+                          _buildServerOverview(haven, memberCount),
+                        ),
+                      ),
+                      const SizedBox(width: HavenSpacing.md),
+                      Expanded(
+                        child: _buildSection(
+                          haven,
+                          'Your Storage',
+                          LucideIcons.user,
+                          _buildYourStorage(haven),
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: HavenSpacing.md),
-                  Expanded(
-                    child: _buildSection(
-                      haven,
-                      'Your Storage',
-                      LucideIcons.user,
-                      _buildYourStorage(haven),
-                    ),
-                  ),
-                ],
-              ),
+                ),
               const SizedBox(height: HavenSpacing.md),
 
-              // Bottom row: Retention Policy | Vault Health
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: _buildSection(
-                      haven,
-                      'Retention Policy',
-                      LucideIcons.clock,
-                      _buildRetentionPolicy(haven),
+              // Bottom row: Retention Policy | Vault Health — equal height
+              IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      child: _buildSection(
+                        haven,
+                        'Retention Policy',
+                        LucideIcons.clock,
+                        _buildRetentionPolicy(haven),
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: HavenSpacing.md),
-                  Expanded(
-                    child: _buildSection(
-                      haven,
-                      'Vault Health',
-                      LucideIcons.shield,
-                      _buildVaultHealth(haven, vaultStatus, memberCount),
+                    const SizedBox(width: HavenSpacing.md),
+                    Expanded(
+                      child: _buildSection(
+                        haven,
+                        'Vault Health',
+                        LucideIcons.shield,
+                        _buildVaultHealth(haven, vaultStatus, memberCount),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
 
               // Member Pledges (6+ only) — full width below
@@ -259,10 +284,64 @@ class _StorageDashboardContentState
 
   Widget _buildServerOverview(HavenTheme haven, int memberCount) {
     final stats = _stats;
-    if (stats == null) return const SizedBox.shrink();
+    final totalUsed = stats?.totalUsedBytes.toDouble() ?? 0;
 
-    final totalPledged = stats.totalPledgedBytes.toDouble();
-    final totalUsed = stats.totalUsedBytes.toDouble();
+    if (memberCount < 6) {
+      // Full replication — bar shows server data vs disk capacity.
+      // Total disk = used + free. Bar fill = server data / total disk.
+      final diskTotal = totalUsed + _diskFreeBytes.toDouble();
+      final fraction = diskTotal > 0 ? totalUsed / diskTotal : 0.0;
+      final diskFreeColor = _diskFreeBytes < 1024 * 1024 * 1024
+          ? haven.error
+          : haven.textSecondary;
+
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            _vaultModeLabel(memberCount),
+            style: HavenTypography.body.copyWith(
+              color: haven.textPrimary,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: HavenSpacing.sm),
+          _storageBar(fraction, haven.accent, haven),
+          const SizedBox(height: HavenSpacing.xs),
+          Row(
+            children: [
+              Text(
+                _formatBytes(stats?.totalUsedBytes ?? BigInt.zero),
+                style: HavenTypography.caption.copyWith(color: haven.textSecondary),
+              ),
+              const Spacer(),
+              if (_diskFreeBytes > 0) ...[
+                Icon(
+                  _diskFreeBytes < 1024 * 1024 * 1024
+                      ? LucideIcons.alertTriangle
+                      : LucideIcons.hardDrive,
+                  size: 11,
+                  color: diskFreeColor,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  '${_formatBytesInt(_diskFreeBytes)} free',
+                  style: HavenTypography.caption.copyWith(color: diskFreeColor),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text(
+            '$memberCount members',
+            style: HavenTypography.caption.copyWith(color: haven.textSecondary),
+          ),
+        ],
+      );
+    }
+
+    // Erasure coding (6+) — bar shows server data vs total pledged.
+    final totalPledged = stats?.totalPledgedBytes.toDouble() ?? 0;
     final fraction = totalPledged > 0 ? totalUsed / totalPledged : 0.0;
 
     return Column(
@@ -279,7 +358,7 @@ class _StorageDashboardContentState
         _storageBar(fraction, haven.accent, haven),
         const SizedBox(height: HavenSpacing.xs),
         Text(
-          '${_formatBytes(stats.totalUsedBytes)} / ${_formatBytes(stats.totalPledgedBytes)}',
+          '${_formatBytes(stats?.totalUsedBytes ?? BigInt.zero)} / ${_formatBytes(stats?.totalPledgedBytes ?? BigInt.zero)}',
           style: HavenTypography.caption.copyWith(color: haven.textSecondary),
         ),
         const SizedBox(height: 2),
@@ -459,6 +538,7 @@ class _StorageDashboardContentState
   }
 
   Widget _storageBar(double fraction, Color color, HavenTheme haven) {
+    final clamped = fraction.clamp(0.0, 1.0);
     final barColor = fraction > 0.9
         ? haven.error
         : fraction > 0.7
@@ -472,12 +552,17 @@ class _StorageDashboardContentState
         child: Stack(
           children: [
             Container(color: haven.border),
-            FractionallySizedBox(
-              widthFactor: fraction.clamp(0.0, 1.0),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: barColor,
-                  borderRadius: BorderRadius.circular(4),
+            TweenAnimationBuilder<double>(
+              tween: Tween(end: clamped),
+              duration: const Duration(milliseconds: 500),
+              curve: Curves.easeOutCubic,
+              builder: (context, value, _) => FractionallySizedBox(
+                widthFactor: value,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: barColor,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
                 ),
               ),
             ),

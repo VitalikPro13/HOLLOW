@@ -1221,7 +1221,11 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 **Goal:** Final features, platform testing, and polish pass before distribution.
 
-- [ ] Proper roles on the server and ediiting of permissions
+- [ ] **Scaling (deferred from Phase 4):**
+  - [ ] Connection subset management (6-12 peers per server, peer scoring, rotation) — defer until scaling pain
+  - [ ] Channel-level CRDT sharding (split ServerState for scale) — defer until ServerState is too large
+- [ ] **File deduplication** — content-addressable dedup via SHA-256 hash. If the same file is sent multiple times, store once on disk, point all file_ids to the same path. Reference counting for cleanup.
+- [ ] Proper roles on the server and editing of permissions
 - [ ] Video preview in chats
 - [ ] Link previews (URL metadata fetch + embed card rendering)
 - [ ] Discord import system (full implementation — parse GDPR export ZIP, map servers/channels/roles/messages, placeholder identities, member claiming)

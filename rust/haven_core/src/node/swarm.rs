@@ -1836,6 +1836,11 @@ async fn run_swarm(
     let mut rebalance_timer = tokio::time::interval(Duration::from_secs(1800));
     rebalance_timer.tick().await; // consume immediate first tick
 
+    // Stream transfer progress poll timer (500ms) — emits FileProgress events
+    // to Dart based on bytes received by the FileStreamCodec.
+    let mut stream_progress_timer = tokio::time::interval(Duration::from_millis(500));
+    stream_progress_timer.tick().await; // consume immediate first tick
+
     loop {
         tokio::select! {
             // Handle commands from the FFI layer.
@@ -5962,6 +5967,26 @@ async fn run_swarm(
                 }
             }
 
+            // -- Stream transfer progress poll (every 500ms) --
+            _ = stream_progress_timer.tick() => {
+                // Snapshot progress under lock, then emit events outside lock.
+                let snapshot: Vec<(String, u64, u64)> = {
+                    let Ok(map) = super::stream_transfer::stream_progress().lock() else { continue };
+                    map.iter().map(|(id, p)| {
+                        (id.clone(), p.bytes_received.load(std::sync::atomic::Ordering::Relaxed), p.total_bytes)
+                    }).collect()
+                };
+                for (file_id, received, total) in snapshot {
+                    if received > 0 {
+                        let _ = event_tx.send(NetworkEvent::FileProgress {
+                            file_id,
+                            chunks_received: (received / (1024 * 1024)).max(1) as u32,
+                            total_chunks: (total / (1024 * 1024)).max(1) as u32,
+                        }).await;
+                    }
+                }
+            }
+
             // -- Vault rebalance + retention enforcement (every 30 min) --
             _ = rebalance_timer.tick() => {
                 haven_log!("[HAVEN-VAULT] Running rebalance + retention check");
@@ -8869,6 +8894,17 @@ async fn handle_incoming_request(
                                 if let Ok(enc) = crate::vault::pipeline::aes_encrypt(&file_data) {
                                     let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}.tmp"));
                                     if let Ok(()) = std::fs::write(&temp_path, &enc.ciphertext) {
+                                        // Extract server/channel IDs from context.
+                                        let (resp_sid, resp_cid) = if file_meta.context_type == "channel" {
+                                            let parts: Vec<&str> = file_meta.context_id.splitn(2, ':').collect();
+                                            if parts.len() == 2 {
+                                                (Some(parts[0].to_string()), Some(parts[1].to_string()))
+                                            } else {
+                                                (None, None)
+                                            }
+                                        } else {
+                                            (None, None)
+                                        };
                                         let header = MessageEnvelope::FileHeader {
                                             fid: file_id.clone(),
                                             name: file_meta.file_name.clone(),
@@ -8880,8 +8916,8 @@ async fn handle_incoming_request(
                                             w: file_meta.width,
                                             h: file_meta.height,
                                             mid: file_meta.message_id.clone(),
-                                            sid: None,
-                                            cid: None,
+                                            sid: resp_sid,
+                                            cid: resp_cid,
                                             ts: file_meta.created_at,
                                             sig: None,
                                             pk: None,

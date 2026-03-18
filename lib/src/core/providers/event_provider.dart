@@ -421,6 +421,9 @@ class EventStreamNotifier extends Notifier<bool> {
               width: width?.toInt(),
               height: height?.toInt(),
             );
+        // Reload chat so the message gets its fileAttachment from DB
+        // (replacing the raw [file:xxx] text with the file card).
+        _reloadChatForFile(fileId);
 
       case NetworkEvent_FileProgress(
             :final fileId, :final chunksReceived, :final totalChunks):
@@ -504,10 +507,17 @@ class EventStreamNotifier extends Notifier<bool> {
     try {
       final missingIds = await storage_api.getMissingFileIds();
       if (missingIds.isEmpty) return;
-      debugPrint('[HAVEN] ${missingIds.length} missing files found, requesting...');
+      // Skip files that already have an active stream transfer in flight.
+      final activeTransfers = ref.read(fileTransferProvider);
+      final toRequest = missingIds.where((id) {
+        final t = activeTransfers[id];
+        return t == null || (!t.isDownloading && !t.isComplete);
+      }).toList();
+      if (toRequest.isEmpty) return;
+      debugPrint('[HAVEN] ${toRequest.length} missing files found, requesting...');
       final peers = ref.read(peersProvider);
       if (peers.isEmpty) return;
-      for (final fileId in missingIds) {
+      for (final fileId in toRequest) {
         for (final peerId in peers.keys) {
           try {
             await requestFileFromPeer(
@@ -531,8 +541,14 @@ class EventStreamNotifier extends Notifier<bool> {
     try {
       final missingIds = await storage_api.getMissingFileIds();
       if (missingIds.isEmpty) return;
-      debugPrint('[HAVEN] ${missingIds.length} missing DM files, requesting from $peerId');
-      for (final fileId in missingIds) {
+      final activeTransfers = ref.read(fileTransferProvider);
+      final toRequest = missingIds.where((id) {
+        final t = activeTransfers[id];
+        return t == null || (!t.isDownloading && !t.isComplete);
+      }).toList();
+      if (toRequest.isEmpty) return;
+      debugPrint('[HAVEN] ${toRequest.length} missing DM files, requesting from $peerId');
+      for (final fileId in toRequest) {
         try {
           await requestFileFromPeer(
             fileId: fileId,
