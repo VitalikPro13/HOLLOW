@@ -678,7 +678,7 @@ enum MessageEnvelope {
         mime: String,
         /// Total size in bytes.
         size: u64,
-        /// Number of chunks.
+        /// Number of chunks (0 for streamed transfers).
         chunks: u32,
         /// Is this an image?
         #[serde(default)]
@@ -703,6 +703,12 @@ enum MessageEnvelope {
         sig: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pk: Option<String>,
+        /// AES-256-GCM key (hex). Present → file bytes arrive via /haven/stream/1.0.0.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        aes_key: Option<String>,
+        /// AES-256-GCM nonce (hex). Present with aes_key for streamed transfers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        aes_nonce: Option<String>,
     },
 
     /// A single file chunk (base64-encoded data).
@@ -849,6 +855,33 @@ struct PendingShardAssembly {
     chunk_data: Vec<(u32, Vec<u8>)>,
     sender_peer: String,
     received_at: std::time::Instant,
+}
+
+/// Pending streamed file transfer — AES key stored here until stream bytes arrive.
+struct PendingFileStream {
+    aes_key: String,
+    aes_nonce: String,
+    file_name: String,
+    ext: String,
+    sender: String,
+    server_id: String,
+    channel_id: String,
+    message_id: String,
+    is_image: bool,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+/// Pending streamed shard transfer — metadata stored here until stream bytes arrive.
+struct PendingShardStream {
+    server_id: String,
+    content_id: String,
+    shard_index: u16,
+    shard_key: String,
+    k: u16,
+    m: u16,
+    total_size: u64,
+    tier: String,
 }
 
 /// A single message in a sync batch.
@@ -1381,6 +1414,7 @@ struct HavenBehaviour {
     dcutr: dcutr::Behaviour,
     mdns: mdns::tokio::Behaviour,
     messaging: request_response::Behaviour<HavenCodec>,
+    file_streaming: request_response::Behaviour<super::stream_transfer::FileStreamCodec>,
 }
 
 /// Build and spawn the libp2p swarm. Returns the local peer ID and a join handle.
@@ -1438,6 +1472,14 @@ pub(crate) async fn spawn_node(
                 request_response::Config::default(),
             );
 
+            // Streaming binary protocol for large file/shard transfers.
+            // Separate from `messaging` — uses ordered substreams, no Olm ratchet.
+            let file_streaming = request_response::Behaviour::<super::stream_transfer::FileStreamCodec>::new(
+                [("/haven/stream/1.0.0", ProtocolSupport::Full)],
+                request_response::Config::default()
+                    .with_request_timeout(Duration::from_secs(300)), // 5 min for large files
+            );
+
             // Kademlia DHT (MemoryStore — records lost on restart, fine for Phase 2)
             let mut kademlia = kad::Behaviour::new(
                 local_peer_id,
@@ -1475,6 +1517,7 @@ pub(crate) async fn spawn_node(
                 dcutr,
                 mdns,
                 messaging,
+                file_streaming,
             })
         })
         .map_err(|e| format!("Behaviour setup failed: {e}"))?
@@ -1647,6 +1690,10 @@ async fn run_swarm(
     // -- Vault shard assembly state (Phase 4) --
     // Tracks chunked shard reassembly. Key = "content_id:shard_index:sender_peer".
     let mut pending_shard_assembly: HashMap<String, PendingShardAssembly> = HashMap::new();
+
+    // -- Pending stream transfer state --
+    let mut pending_file_streams: HashMap<String, PendingFileStream> = HashMap::new();
+    let mut pending_shard_streams: HashMap<String, PendingShardStream> = HashMap::new();
 
     // -- CRDT state (Phase 3) --
     // Server states keyed by server_id. Reload from DB so servers survive restarts.
@@ -4048,59 +4095,37 @@ async fn run_swarm(
                                         &file_name, &mime_type, &channel_id,
                                         original_size, &local_peer, &members, &pledges,
                                     ) {
-                                        // Send remote shards
+                                        // Send remote shards via streaming
                                         for placement in &plan.placements {
                                             if placement.target_peer != local_peer {
                                                 if let Some((_, shard_data)) = plan.shards.iter().find(|(idx, _)| *idx == placement.shard_index) {
                                                     if let Ok(pid) = placement.target_peer.parse::<PeerId>() {
                                                         if connected_peers.contains(&pid) && olm.has_session(&placement.target_peer) {
-                                                            use crate::node::file_transfer::CHUNK_SIZE;
+                                                            // Send ShardStore metadata via Olm (no data, just metadata).
+                                                            let envelope = MessageEnvelope::ShardStore {
+                                                                sid: server_id.clone(), cid: content_id.clone(),
+                                                                si: placement.shard_index, sk: placement.shard_key.clone(),
+                                                                k: plan.manifest.k, m: plan.manifest.m,
+                                                                total_size: plan.manifest.original_size,
+                                                                tier: plan.manifest.storage_tier.clone(),
+                                                                data: String::new(), // empty — data comes via stream
+                                                                chunks: 0,
+                                                            };
+                                                            let json = serde_json::to_string(&envelope).unwrap_or_default();
+                                                            send_encrypted_message(
+                                                                &mut swarm, &mut olm, &crypto_store,
+                                                                &mut pending_requests, &mut outbound_message_text,
+                                                                &pid, &placement.target_peer, &json, &event_tx,
+                                                            ).await;
 
-                                                            if shard_data.len() <= CHUNK_SIZE {
-                                                                let envelope = MessageEnvelope::ShardStore {
-                                                                    sid: server_id.clone(), cid: content_id.clone(),
-                                                                    si: placement.shard_index, sk: placement.shard_key.clone(),
-                                                                    k: plan.manifest.k, m: plan.manifest.m,
-                                                                    total_size: plan.manifest.original_size,
-                                                                    tier: plan.manifest.storage_tier.clone(),
-                                                                    data: base64::engine::general_purpose::STANDARD.encode(shard_data),
-                                                                    chunks: 0,
-                                                                };
-                                                                let json = serde_json::to_string(&envelope).unwrap_or_default();
-                                                                send_encrypted_message(
-                                                                    &mut swarm, &mut olm, &crypto_store,
-                                                                    &mut pending_requests, &mut outbound_message_text,
-                                                                    &pid, &placement.target_peer, &json, &event_tx,
-                                                                ).await;
-                                                            } else {
-                                                                let chunk_count = ((shard_data.len() + CHUNK_SIZE - 1) / CHUNK_SIZE) as u32;
-                                                                let header = MessageEnvelope::ShardStore {
-                                                                    sid: server_id.clone(), cid: content_id.clone(),
-                                                                    si: placement.shard_index, sk: placement.shard_key.clone(),
-                                                                    k: plan.manifest.k, m: plan.manifest.m,
-                                                                    total_size: plan.manifest.original_size,
-                                                                    tier: plan.manifest.storage_tier.clone(),
-                                                                    data: String::new(), chunks: chunk_count,
-                                                                };
-                                                                let hdr_json = serde_json::to_string(&header).unwrap_or_default();
-                                                                send_encrypted_message(
-                                                                    &mut swarm, &mut olm, &crypto_store,
-                                                                    &mut pending_requests, &mut outbound_message_text,
-                                                                    &pid, &placement.target_peer, &hdr_json, &event_tx,
-                                                                ).await;
-                                                                for (ci, chunk) in shard_data.chunks(CHUNK_SIZE).enumerate() {
-                                                                    let chunk_env = MessageEnvelope::ShardChunk {
-                                                                        sid: server_id.clone(), cid: content_id.clone(),
-                                                                        si: placement.shard_index, ci: ci as u32,
-                                                                        data: base64::engine::general_purpose::STANDARD.encode(chunk),
-                                                                    };
-                                                                    let cj = serde_json::to_string(&chunk_env).unwrap_or_default();
-                                                                    send_encrypted_message(
-                                                                        &mut swarm, &mut olm, &crypto_store,
-                                                                        &mut pending_requests, &mut outbound_message_text,
-                                                                        &pid, &placement.target_peer, &cj, &event_tx,
-                                                                    ).await;
-                                                                }
+                                                            // Stream shard bytes via /haven/stream/1.0.0.
+                                                            if let Ok(stream_req) = super::stream_transfer::shard_stream_request(
+                                                                &content_id, placement.shard_index, shard_data,
+                                                            ) {
+                                                                swarm.behaviour_mut().file_streaming.send_request(
+                                                                    &pid, stream_req,
+                                                                );
+                                                                haven_log!("[HAVEN-VAULT] Streaming shard si={} ({} bytes) to {}", placement.shard_index, shard_data.len(), placement.target_peer);
                                                             }
                                                         }
                                                     }
@@ -4231,68 +4256,35 @@ async fn run_swarm(
                                     error: "Peer not connected or no Olm session".into(),
                                 }).await;
                             } else {
-                                use crate::node::file_transfer::CHUNK_SIZE;
+                                // Send ShardStore metadata via Olm (no data — stream follows).
+                                let envelope = MessageEnvelope::ShardStore {
+                                    sid: server_id.clone(),
+                                    cid: content_id.clone(),
+                                    si: shard_index,
+                                    sk: shard_key.clone(),
+                                    k,
+                                    m,
+                                    total_size: total_data_size,
+                                    tier: storage_tier.clone(),
+                                    data: String::new(),
+                                    chunks: 0,
+                                };
+                                let json = serde_json::to_string(&envelope).unwrap_or_default();
+                                send_encrypted_message(
+                                    &mut swarm, &mut olm, &crypto_store,
+                                    &mut pending_requests, &mut outbound_message_text,
+                                    &pid, &target_peer, &json, &event_tx,
+                                ).await;
 
-                                if data.len() <= CHUNK_SIZE {
-                                    // Small shard — send inline
-                                    let envelope = MessageEnvelope::ShardStore {
-                                        sid: server_id.clone(),
-                                        cid: content_id.clone(),
-                                        si: shard_index,
-                                        sk: shard_key.clone(),
-                                        k,
-                                        m,
-                                        total_size: total_data_size,
-                                        tier: storage_tier.clone(),
-                                        data: base64::engine::general_purpose::STANDARD.encode(&data),
-                                        chunks: 0,
-                                    };
-                                    let json = serde_json::to_string(&envelope).unwrap_or_default();
-                                    send_encrypted_message(
-                                        &mut swarm, &mut olm, &crypto_store,
-                                        &mut pending_requests, &mut outbound_message_text,
-                                        &pid, &target_peer, &json, &event_tx,
-                                    ).await;
-                                } else {
-                                    // Large shard — send header + chunks
-                                    let chunk_count = ((data.len() + CHUNK_SIZE - 1) / CHUNK_SIZE) as u32;
-                                    let header = MessageEnvelope::ShardStore {
-                                        sid: server_id.clone(),
-                                        cid: content_id.clone(),
-                                        si: shard_index,
-                                        sk: shard_key.clone(),
-                                        k,
-                                        m,
-                                        total_size: total_data_size,
-                                        tier: storage_tier.clone(),
-                                        data: String::new(),
-                                        chunks: chunk_count,
-                                    };
-                                    let header_json = serde_json::to_string(&header).unwrap_or_default();
-                                    send_encrypted_message(
-                                        &mut swarm, &mut olm, &crypto_store,
-                                        &mut pending_requests, &mut outbound_message_text,
-                                        &pid, &target_peer, &header_json, &event_tx,
-                                    ).await;
-
-                                    // Send each chunk
-                                    for (ci, chunk_data) in data.chunks(CHUNK_SIZE).enumerate() {
-                                        let chunk_envelope = MessageEnvelope::ShardChunk {
-                                            sid: server_id.clone(),
-                                            cid: content_id.clone(),
-                                            si: shard_index,
-                                            ci: ci as u32,
-                                            data: base64::engine::general_purpose::STANDARD.encode(chunk_data),
-                                        };
-                                        let chunk_json = serde_json::to_string(&chunk_envelope).unwrap_or_default();
-                                        send_encrypted_message(
-                                            &mut swarm, &mut olm, &crypto_store,
-                                            &mut pending_requests, &mut outbound_message_text,
-                                            &pid, &target_peer, &chunk_json, &event_tx,
-                                        ).await;
-                                    }
+                                // Stream shard bytes via /haven/stream/1.0.0.
+                                if let Ok(stream_req) = super::stream_transfer::shard_stream_request(
+                                    &content_id, shard_index, &data,
+                                ) {
+                                    swarm.behaviour_mut().file_streaming.send_request(
+                                        &pid, stream_req,
+                                    );
+                                    haven_log!("[HAVEN-VAULT] Streaming shard si={shard_index} ({} bytes) to {target_peer}", data.len());
                                 }
-                                haven_log!("[HAVEN-VAULT] Shard {shard_index} of {content_id} sent to {target_peer}");
                             }
                         } else {
                             haven_log!("[HAVEN-VAULT] Invalid target_peer: {target_peer}");
@@ -4372,14 +4364,13 @@ async fn run_swarm(
                             (file_data.clone(), original_ext.clone(), None, None)
                         };
 
-                        // 5. Generate file ID and chunk.
+                        // 5. Generate file ID.
                         let file_id = file_transfer::generate_file_id();
-                        let chunks = file_transfer::chunk_file(&final_data);
-                        let total_chunks = chunks.len() as u32;
                         let file_size = final_data.len() as u64;
+                        let total_chunks = 0u32; // 0 = streamed transfer
                         let final_mime = file_transfer::mime_from_ext(&final_ext);
 
-                        haven_log!("[HAVEN-FILE] File {file_id}: {original_name} -> {total_chunks} chunks, {file_size} bytes");
+                        haven_log!("[HAVEN-FILE] File {file_id}: {original_name} -> {file_size} bytes (streamed)");
 
                         // 6. Store file locally.
                         let final_path = file_transfer::final_file_path(&file_id, &final_ext);
@@ -4476,49 +4467,50 @@ async fn run_swarm(
                                 // If offline, the file_id is in the message — sync will request it later.
                                 if connected_peers.contains(&target_peer) {
 
-                                // Send FileHeader.
-                                let header = MessageEnvelope::FileHeader {
-                                    fid: file_id.clone(),
-                                    name: original_name.clone(),
-                                    ext: final_ext.clone(),
-                                    mime: final_mime.clone(),
-                                    size: file_size,
-                                    chunks: total_chunks,
-                                    img: is_image,
-                                    w: width,
-                                    h: height,
-                                    mid: Some(message_id.clone()),
-                                    sid: None,
-                                    cid: None,
-                                    ts: timestamp,
-                                    sig: None,
-                                    pk: None,
-                                };
-                                let header_json = serde_json::to_string(&header).unwrap_or_default();
-                                send_encrypted_message(
-                                    &mut swarm, &mut olm, &crypto_store,
-                                    &mut pending_requests, &mut outbound_message_text,
-                                    &target_peer, &peer_str, &header_json, &event_tx,
-                                ).await;
+                                // AES-encrypt the file, write ciphertext to temp file.
+                                let encrypted = crate::vault::pipeline::aes_encrypt(&final_data);
+                                if let Ok(enc) = encrypted {
+                                    let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}.tmp"));
+                                    if let Ok(()) = std::fs::write(&temp_path, &enc.ciphertext) {
+                                        let aes_key_hex = hex::encode(enc.key);
+                                        let aes_nonce_hex = hex::encode(enc.nonce);
 
-                                // Send chunks (yield every 50 to prevent connection backlog).
-                                for (idx, chunk_data) in chunks.iter().enumerate() {
-                                    let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(chunk_data);
-                                    let chunk_envelope = MessageEnvelope::FileChunk {
-                                        fid: file_id.clone(),
-                                        idx: idx as u32,
-                                        data: chunk_b64,
-                                    };
-                                    let chunk_json = serde_json::to_string(&chunk_envelope).unwrap_or_default();
-                                    send_encrypted_message(
-                                        &mut swarm, &mut olm, &crypto_store,
-                                        &mut pending_requests, &mut outbound_message_text,
-                                        &target_peer, &peer_str, &chunk_json, &event_tx,
-                                    ).await;
-                                    // Yield after every chunk to prevent Olm ratchet desync from
-                                    // out-of-order delivery. Without pacing, rapid-fire chunks arrive
-                                    // interleaved with other messages, causing ratchet chain mismatches.
-                                    tokio::time::sleep(Duration::from_millis(10)).await;
+                                        // Send FileHeader via Olm (carries AES key — tiny, secure).
+                                        let header = MessageEnvelope::FileHeader {
+                                            fid: file_id.clone(),
+                                            name: original_name.clone(),
+                                            ext: final_ext.clone(),
+                                            mime: final_mime.clone(),
+                                            size: file_size,
+                                            chunks: 0, // 0 = streamed transfer
+                                            img: is_image,
+                                            w: width,
+                                            h: height,
+                                            mid: Some(message_id.clone()),
+                                            sid: None,
+                                            cid: None,
+                                            ts: timestamp,
+                                            sig: None,
+                                            pk: None,
+                                            aes_key: Some(aes_key_hex),
+                                            aes_nonce: Some(aes_nonce_hex),
+                                        };
+                                        let header_json = serde_json::to_string(&header).unwrap_or_default();
+                                        send_encrypted_message(
+                                            &mut swarm, &mut olm, &crypto_store,
+                                            &mut pending_requests, &mut outbound_message_text,
+                                            &target_peer, &peer_str, &header_json, &event_tx,
+                                        ).await;
+
+                                        // Stream encrypted file bytes via /haven/stream/1.0.0.
+                                        let stream_req = super::stream_transfer::file_stream_request(
+                                            &file_id, temp_path, enc.ciphertext.len() as u64,
+                                        );
+                                        swarm.behaviour_mut().file_streaming.send_request(
+                                            &target_peer, stream_req,
+                                        );
+                                        haven_log!("[HAVEN-FILE] Streaming {file_id} ({} bytes) to DM {peer_str}", enc.ciphertext.len());
+                                    }
                                 }
                                 } // if connected_peers (file data only)
                             }
@@ -4579,62 +4571,65 @@ async fn run_swarm(
                                 }
                             }
 
-                            // Send FileHeader + chunks via Olm ONLY to connected peers.
+                            // Send FileHeader + file bytes via stream to connected peers.
                             // File data is NOT queued for offline peers — they get it via sync.
-                            let header = MessageEnvelope::FileHeader {
-                                fid: file_id.clone(),
-                                name: original_name.clone(),
-                                ext: final_ext.clone(),
-                                mime: final_mime.clone(),
-                                size: file_size,
-                                chunks: total_chunks,
-                                img: is_image,
-                                w: width,
-                                h: height,
-                                mid: Some(message_id.clone()),
-                                sid: Some(sid.clone()),
-                                cid: Some(cid.clone()),
-                                ts: timestamp,
-                                sig: None,
-                                pk: None,
-                            };
-                            let header_json = serde_json::to_string(&header).unwrap_or_default();
+                            let encrypted = crate::vault::pipeline::aes_encrypt(&final_data);
+                            if let Ok(enc) = encrypted {
+                                let aes_key_hex = hex::encode(&enc.key);
+                                let aes_nonce_hex = hex::encode(&enc.nonce);
 
-                            if let Some(state) = server_states.get(&sid) {
-                                for member_peer_str in state.members.keys() {
-                                    if member_peer_str == &local_peer { continue; }
-                                    if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                        if connected_peers.contains(&pid) && olm.has_session(member_peer_str) {
-                                            // Send FileHeader via Olm.
-                                            send_encrypted_message(
-                                                &mut swarm, &mut olm, &crypto_store,
-                                                &mut pending_requests, &mut outbound_message_text,
-                                                &pid, member_peer_str, &header_json, &event_tx,
-                                            ).await;
+                                let header = MessageEnvelope::FileHeader {
+                                    fid: file_id.clone(),
+                                    name: original_name.clone(),
+                                    ext: final_ext.clone(),
+                                    mime: final_mime.clone(),
+                                    size: file_size,
+                                    chunks: 0,
+                                    img: is_image,
+                                    w: width,
+                                    h: height,
+                                    mid: Some(message_id.clone()),
+                                    sid: Some(sid.clone()),
+                                    cid: Some(cid.clone()),
+                                    ts: timestamp,
+                                    sig: None,
+                                    pk: None,
+                                    aes_key: Some(aes_key_hex),
+                                    aes_nonce: Some(aes_nonce_hex),
+                                };
+                                let header_json = serde_json::to_string(&header).unwrap_or_default();
 
-                                            // Send chunks via Olm with pacing to prevent ratchet desync.
-                                            for (idx, chunk_data) in chunks.iter().enumerate() {
-                                                let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(chunk_data);
-                                                let chunk_envelope = MessageEnvelope::FileChunk {
-                                                    fid: file_id.clone(),
-                                                    idx: idx as u32,
-                                                    data: chunk_b64,
-                                                };
-                                                let chunk_json = serde_json::to_string(&chunk_envelope).unwrap_or_default();
+                                // Write ciphertext to temp file (shared across all members).
+                                let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}.tmp"));
+                                let _ = std::fs::write(&temp_path, &enc.ciphertext);
+                                let ct_size = enc.ciphertext.len() as u64;
+
+                                if let Some(state) = server_states.get(&sid) {
+                                    for member_peer_str in state.members.keys() {
+                                        if member_peer_str == &local_peer { continue; }
+                                        if let Ok(pid) = member_peer_str.parse::<PeerId>() {
+                                            if connected_peers.contains(&pid) && olm.has_session(member_peer_str) {
+                                                // Send FileHeader via Olm (carries AES key).
                                                 send_encrypted_message(
                                                     &mut swarm, &mut olm, &crypto_store,
                                                     &mut pending_requests, &mut outbound_message_text,
-                                                    &pid, member_peer_str, &chunk_json, &event_tx,
+                                                    &pid, member_peer_str, &header_json, &event_tx,
                                                 ).await;
-                                                // Pace to prevent Olm ratchet desync from out-of-order delivery.
-                                                tokio::time::sleep(Duration::from_millis(10)).await;
+
+                                                // Stream encrypted file bytes via /haven/stream/1.0.0.
+                                                let stream_req = super::stream_transfer::file_stream_request(
+                                                    &file_id, temp_path.clone(), ct_size,
+                                                );
+                                                swarm.behaviour_mut().file_streaming.send_request(
+                                                    &pid, stream_req,
+                                                );
                                             }
                                         }
                                     }
                                 }
                             }
 
-                            haven_log!("[HAVEN-FILE] Sent {total_chunks} chunks for {file_id} to channel {cid}");
+                            haven_log!("[HAVEN-FILE] Streamed {file_id} to channel {cid}");
                         }
                     }
 
@@ -4862,6 +4857,8 @@ async fn run_swarm(
                                             &sig_cmd_tx,
                                             &known_addresses,
                                             &mut pending_shard_assembly,
+                                            &mut pending_file_streams,
+                                            &mut pending_shard_streams,
                                             &mut decrypt_fail_cooldown,
                                             peer,
                                             request,
@@ -4913,6 +4910,127 @@ async fn run_swarm(
                                             .await;
                                     }
                                 }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // -- File streaming events (/haven/stream/1.0.0) --
+                    SwarmEvent::Behaviour(HavenBehaviourEvent::FileStreaming(event)) => {
+                        match event {
+                            request_response::Event::Message { peer, message, .. } => {
+                                match message {
+                                    request_response::Message::Request { request, channel, .. } => {
+                                        // Inbound stream transfer completed — codec wrote data to temp file.
+                                        use crate::node::file_transfer;
+                                        use super::stream_transfer::StreamKind;
+
+                                        let peer_str = peer.to_string();
+
+                                        match request.kind {
+                                            StreamKind::File => {
+                                                let file_id = request.id.clone();
+                                                haven_log!("[HAVEN-STREAM] Inbound file stream: {file_id} ({} bytes)", request.size);
+
+                                                // Look up the pending file stream (registered by FileHeader).
+                                                if let Some(pfs) = pending_file_streams.remove(&file_id) {
+                                                    // Decrypt the temp file with AES key from FileHeader.
+                                                    if let Ok(ciphertext) = std::fs::read(&request.temp_path) {
+                                                        let key_bytes = hex::decode(&pfs.aes_key).unwrap_or_default();
+                                                        let nonce_bytes = hex::decode(&pfs.aes_nonce).unwrap_or_default();
+                                                        if key_bytes.len() == 32 && nonce_bytes.len() == 12 {
+                                                            let key: [u8; 32] = key_bytes.try_into().unwrap();
+                                                            let nonce: [u8; 12] = nonce_bytes.try_into().unwrap();
+                                                            match crate::vault::pipeline::aes_decrypt(&ciphertext, &key, &nonce) {
+                                                                Ok(plaintext) => {
+                                                                    let final_path = file_transfer::final_file_path(&file_id, &pfs.ext);
+                                                                    if let Ok(()) = std::fs::write(&final_path, &plaintext) {
+                                                                        // Update DB.
+                                                                        let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                                                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                                                        if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
+                                                                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                                                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                                                                let disk_path = final_path.to_string_lossy().to_string();
+                                                                                let _ = store.mark_file_complete(&file_id, &disk_path);
+                                                                            }
+                                                                        }
+                                                                        let disk_path = final_path.to_string_lossy().to_string();
+                                                                        haven_log!("[HAVEN-STREAM] File {file_id} complete: {disk_path}");
+                                                                        let _ = event_tx.send(NetworkEvent::FileCompleted {
+                                                                            file_id,
+                                                                            disk_path,
+                                                                        }).await;
+                                                                    } else {
+                                                                        haven_log!("[HAVEN-STREAM] Failed to write decrypted file {file_id}");
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    haven_log!("[HAVEN-STREAM] AES decrypt failed for {file_id}: {e}");
+                                                                    let _ = event_tx.send(NetworkEvent::FileFailed {
+                                                                        file_id,
+                                                                        error: format!("Decrypt failed: {e}"),
+                                                                    }).await;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    // Clean up temp file.
+                                                    let _ = std::fs::remove_file(&request.temp_path);
+                                                } else {
+                                                    haven_log!("[HAVEN-STREAM] No pending FileHeader for stream {file_id} — ignoring");
+                                                    let _ = std::fs::remove_file(&request.temp_path);
+                                                }
+                                            }
+                                            StreamKind::Shard { shard_index } => {
+                                                let content_id = request.id.clone();
+                                                let key = format!("{content_id}:{shard_index}");
+                                                haven_log!("[HAVEN-STREAM] Inbound shard stream: cid={content_id} si={shard_index} ({} bytes)", request.size);
+
+                                                if let Some(pss) = pending_shard_streams.remove(&key) {
+                                                    if let Ok(shard_bytes) = std::fs::read(&request.temp_path) {
+                                                        let data_dir = dirs::data_dir().unwrap_or_default().join("haven");
+                                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                                        let vault_dir = data_dir.join("vault");
+                                                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                                        if let Ok(content_store) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                                                            let tier = crate::vault::content_store::StorageTier::from_str(&pss.tier);
+                                                            let _ = content_store.store_shard(
+                                                                &pss.server_id, &pss.content_id, pss.shard_index,
+                                                                pss.k, pss.m, pss.total_size, tier, &shard_bytes,
+                                                            );
+                                                            haven_log!("[HAVEN-STREAM] Shard stored: cid={content_id} si={shard_index}");
+                                                            let _ = event_tx.send(NetworkEvent::ShardStored {
+                                                                server_id: pss.server_id,
+                                                                content_id,
+                                                                shard_index,
+                                                                from_peer: peer_str.clone(),
+                                                            }).await;
+                                                        }
+                                                    }
+                                                    let _ = std::fs::remove_file(&request.temp_path);
+                                                } else {
+                                                    haven_log!("[HAVEN-STREAM] No pending ShardStore for stream {key} — ignoring");
+                                                    let _ = std::fs::remove_file(&request.temp_path);
+                                                }
+                                            }
+                                        }
+
+                                        // Send ack response.
+                                        let _ = swarm.behaviour_mut().file_streaming.send_response(
+                                            channel,
+                                            super::stream_transfer::StreamResponse { ok: true },
+                                        );
+                                    }
+                                    request_response::Message::Response { .. } => {
+                                        // Outbound stream completed — clean up temp files.
+                                        haven_log!("[HAVEN-STREAM] Outbound stream transfer completed");
+                                    }
+                                }
+                            }
+                            request_response::Event::OutboundFailure { request_id, error, .. } => {
+                                haven_log!("[HAVEN-STREAM] Stream transfer failed: {error:?}");
                             }
                             _ => {}
                         }
@@ -6008,6 +6126,8 @@ async fn handle_incoming_request(
     sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     known_addresses: &[String],
     pending_shard_assembly: &mut HashMap<String, PendingShardAssembly>,
+    pending_file_streams: &mut HashMap<String, PendingFileStream>,
+    pending_shard_streams: &mut HashMap<String, PendingShardStream>,
     decrypt_fail_cooldown: &mut HashMap<String, std::time::Instant>,
     peer: PeerId,
     request: HavenMessage,
@@ -6715,7 +6835,7 @@ async fn handle_incoming_request(
                     }
                 }
                 // -- File transfer receive handlers --
-                Ok(MessageEnvelope::FileHeader { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, .. }) => {
+                Ok(MessageEnvelope::FileHeader { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, .. }) => {
                     use crate::node::file_transfer;
                     haven_log!("[HAVEN-FILE] FileHeader received: {fid} ({name}, {size} bytes, {chunks} chunks)");
 
@@ -6760,6 +6880,28 @@ async fn handle_incoming_request(
                         }
                     }
 
+                    let mid_str = mid.unwrap_or_default();
+                    let sid_str = sid.unwrap_or_default();
+                    let cid_str = cid.unwrap_or_else(|| peer_str.clone());
+
+                    // If aes_key is present, this is a streamed transfer — register for stream receive.
+                    if let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
+                        pending_file_streams.insert(fid.clone(), PendingFileStream {
+                            aes_key: ak,
+                            aes_nonce: an,
+                            file_name: name.clone(),
+                            ext: ext.clone(),
+                            sender: peer_str.clone(),
+                            server_id: sid_str.clone(),
+                            channel_id: cid_str.clone(),
+                            message_id: mid_str.clone(),
+                            is_image: img,
+                            width: w,
+                            height: h,
+                        });
+                        haven_log!("[HAVEN-FILE] Registered pending stream for {fid} (streamed transfer)");
+                    }
+
                     let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
                         file_id: fid,
                         file_name: name,
@@ -6767,10 +6909,10 @@ async fn handle_incoming_request(
                         is_image: img,
                         width: w,
                         height: h,
-                        message_id: mid.unwrap_or_default(),
+                        message_id: mid_str,
                         sender_id: peer_str.clone(),
-                        server_id: sid.unwrap_or_default(),
-                        channel_id: cid.unwrap_or_else(|| peer_str.clone()),
+                        server_id: sid_str,
+                        channel_id: cid_str,
                     }).await;
                 }
                 Ok(MessageEnvelope::FileChunk { fid, idx, data }) => {
@@ -6842,8 +6984,16 @@ async fn handle_incoming_request(
                         .unwrap_or(false);
                     if !is_member {
                         haven_log!("[HAVEN-SECURITY] REJECTED ShardStore from {peer_str} — not a member of {sid}");
+                    } else if chunks == 0 && data.is_empty() {
+                        // Streamed shard — data arrives via /haven/stream/1.0.0.
+                        let key = format!("{cid}:{si}");
+                        pending_shard_streams.insert(key.clone(), PendingShardStream {
+                            server_id: sid, content_id: cid, shard_index: si,
+                            shard_key: sk, k, m, total_size, tier,
+                        });
+                        haven_log!("[HAVEN-VAULT] Registered pending shard stream: {key}");
                     } else if chunks == 0 {
-                        // Inline shard — decode and store immediately
+                        // Inline shard (legacy) — decode and store immediately
                         if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
                             // Check pledge capacity
                             let local_peer = swarm.local_peer_id().to_string();
@@ -7082,47 +7232,27 @@ async fn handle_incoming_request(
                         if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
                             match cs.read_shard_unchecked(&sid, &sk) {
                                 Ok(shard_data) => {
-                                    use crate::node::file_transfer::CHUNK_SIZE;
-                                    if shard_data.len() <= CHUNK_SIZE {
-                                        let resp = MessageEnvelope::ShardResponse {
-                                            sid: sid.clone(), cid: cid.clone(), si,
-                                            data: base64::engine::general_purpose::STANDARD.encode(&shard_data),
-                                            chunks: 0, found: true,
-                                        };
-                                        let json = serde_json::to_string(&resp).unwrap_or_default();
-                                        if let Ok(pid) = peer_str.parse::<PeerId>() {
-                                            send_encrypted_message(
-                                                swarm, olm, crypto_store,
-                                                pending_requests, outbound_message_text,
-                                                &pid, &peer_str, &json, event_tx,
-                                            ).await;
-                                        }
-                                    } else {
-                                        let chunk_count = ((shard_data.len() + CHUNK_SIZE - 1) / CHUNK_SIZE) as u32;
-                                        let header = MessageEnvelope::ShardResponse {
-                                            sid: sid.clone(), cid: cid.clone(), si,
-                                            data: String::new(), chunks: chunk_count, found: true,
-                                        };
-                                        let header_json = serde_json::to_string(&header).unwrap_or_default();
-                                        if let Ok(pid) = peer_str.parse::<PeerId>() {
-                                            send_encrypted_message(
-                                                swarm, olm, crypto_store,
-                                                pending_requests, outbound_message_text,
-                                                &pid, &peer_str, &header_json, event_tx,
-                                            ).await;
-                                            for (ci, chunk) in shard_data.chunks(CHUNK_SIZE).enumerate() {
-                                                let chunk_env = MessageEnvelope::ShardResponseChunk {
-                                                    sid: sid.clone(), cid: cid.clone(), si,
-                                                    ci: ci as u32,
-                                                    data: base64::engine::general_purpose::STANDARD.encode(chunk),
-                                                };
-                                                let chunk_json = serde_json::to_string(&chunk_env).unwrap_or_default();
-                                                send_encrypted_message(
-                                                    swarm, olm, crypto_store,
-                                                    pending_requests, outbound_message_text,
-                                                    &pid, &peer_str, &chunk_json, event_tx,
-                                                ).await;
-                                            }
+                                    // Send metadata via Olm, stream shard bytes.
+                                    let resp = MessageEnvelope::ShardResponse {
+                                        sid: sid.clone(), cid: cid.clone(), si,
+                                        data: String::new(), chunks: 0, found: true,
+                                    };
+                                    let json = serde_json::to_string(&resp).unwrap_or_default();
+                                    if let Ok(pid) = peer_str.parse::<PeerId>() {
+                                        send_encrypted_message(
+                                            swarm, olm, crypto_store,
+                                            pending_requests, outbound_message_text,
+                                            &pid, &peer_str, &json, event_tx,
+                                        ).await;
+
+                                        // Stream shard bytes via /haven/stream/1.0.0.
+                                        if let Ok(stream_req) = super::stream_transfer::shard_stream_request(
+                                            &cid, si, &shard_data,
+                                        ) {
+                                            swarm.behaviour_mut().file_streaming.send_request(
+                                                &pid, stream_req,
+                                            );
+                                            haven_log!("[HAVEN-VAULT] Streaming shard response si={si} ({} bytes) to {peer_str}", shard_data.len());
                                         }
                                     }
                                 }
@@ -8735,57 +8865,47 @@ async fn handle_incoming_request(
                     if let Ok(Some(file_meta)) = store.get_file_metadata(&file_id) {
                         if let Some(ref disk_path) = file_meta.disk_path {
                             if let Ok(file_data) = std::fs::read(disk_path) {
-                                // Send FileHeader first.
-                                let header = MessageEnvelope::FileHeader {
-                                    fid: file_id.clone(),
-                                    name: file_meta.file_name.clone(),
-                                    ext: file_meta.file_ext.clone(),
-                                    mime: file_meta.mime_type.clone(),
-                                    size: file_meta.size_bytes,
-                                    chunks: file_meta.chunk_count,
-                                    img: file_meta.is_image,
-                                    w: file_meta.width,
-                                    h: file_meta.height,
-                                    mid: file_meta.message_id.clone(),
-                                    sid: None,
-                                    cid: None,
-                                    ts: file_meta.created_at,
-                                    sig: None,
-                                    pk: None,
-                                };
-                                let header_json = serde_json::to_string(&header).unwrap_or_default();
-                                if let Ok(pid) = peer_str.parse::<PeerId>() {
-                                    if olm.has_session(&peer_str) {
-                                        send_encrypted_message(
-                                            swarm, olm, crypto_store,
-                                            pending_requests, outbound_message_text,
-                                            &pid, &peer_str, &header_json, event_tx,
-                                        ).await;
-
-                                        // Send requested chunks (or all if empty).
-                                        let all_chunks = file_transfer::chunk_file(&file_data);
-                                        let indices: Vec<u32> = if chunks.is_empty() {
-                                            (0..all_chunks.len() as u32).collect()
-                                        } else {
-                                            chunks
+                                // AES-encrypt and stream the file.
+                                if let Ok(enc) = crate::vault::pipeline::aes_encrypt(&file_data) {
+                                    let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}.tmp"));
+                                    if let Ok(()) = std::fs::write(&temp_path, &enc.ciphertext) {
+                                        let header = MessageEnvelope::FileHeader {
+                                            fid: file_id.clone(),
+                                            name: file_meta.file_name.clone(),
+                                            ext: file_meta.file_ext.clone(),
+                                            mime: file_meta.mime_type.clone(),
+                                            size: file_meta.size_bytes,
+                                            chunks: 0,
+                                            img: file_meta.is_image,
+                                            w: file_meta.width,
+                                            h: file_meta.height,
+                                            mid: file_meta.message_id.clone(),
+                                            sid: None,
+                                            cid: None,
+                                            ts: file_meta.created_at,
+                                            sig: None,
+                                            pk: None,
+                                            aes_key: Some(hex::encode(enc.key)),
+                                            aes_nonce: Some(hex::encode(enc.nonce)),
                                         };
-                                        for idx in indices {
-                                            if let Some(chunk_data) = all_chunks.get(idx as usize) {
-                                                let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(chunk_data);
-                                                let chunk_envelope = MessageEnvelope::FileChunk {
-                                                    fid: file_id.clone(),
-                                                    idx,
-                                                    data: chunk_b64,
-                                                };
-                                                let chunk_json = serde_json::to_string(&chunk_envelope).unwrap_or_default();
+                                        let header_json = serde_json::to_string(&header).unwrap_or_default();
+                                        if let Ok(pid) = peer_str.parse::<PeerId>() {
+                                            if olm.has_session(&peer_str) {
                                                 send_encrypted_message(
                                                     swarm, olm, crypto_store,
                                                     pending_requests, outbound_message_text,
-                                                    &pid, &peer_str, &chunk_json, event_tx,
+                                                    &pid, &peer_str, &header_json, event_tx,
                                                 ).await;
+
+                                                let stream_req = super::stream_transfer::file_stream_request(
+                                                    &file_id, temp_path, enc.ciphertext.len() as u64,
+                                                );
+                                                swarm.behaviour_mut().file_streaming.send_request(
+                                                    &pid, stream_req,
+                                                );
+                                                haven_log!("[HAVEN-FILE] Streamed file {} to {peer_str}", file_id);
                                             }
                                         }
-                                        haven_log!("[HAVEN-FILE] Sent file {} to {peer_str}", file_id);
                                     }
                                 }
                             }
