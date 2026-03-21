@@ -3692,6 +3692,44 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     server_id: var_serverId,
                 };
             }
+            62 => {
+                let mut var_peerId = <String>::sse_decode(deserializer);
+                let mut var_method = <String>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::ConnectionAttemptStarted {
+                    peer_id: var_peerId,
+                    method: var_method,
+                };
+            }
+            63 => {
+                let mut var_peerId = <String>::sse_decode(deserializer);
+                let mut var_method = <String>::sse_decode(deserializer);
+                let mut var_reason = <String>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::ConnectionAttemptFailed {
+                    peer_id: var_peerId,
+                    method: var_method,
+                    reason: var_reason,
+                };
+            }
+            64 => {
+                let mut var_peerId = <String>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::KeyExchangeStarted {
+                    peer_id: var_peerId,
+                };
+            }
+            65 => {
+                let mut var_peerId = <String>::sse_decode(deserializer);
+                let mut var_stage = <String>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::KeyExchangeProgress {
+                    peer_id: var_peerId,
+                    stage: var_stage,
+                };
+            }
+            66 => {
+                let mut var_status = <String>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::RelayStatusChanged {
+                    status: var_status,
+                };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -4834,6 +4872,35 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
             crate::api::network::NetworkEvent::RebalanceCompleted { server_id } => {
                 [61.into_dart(), server_id.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::network::NetworkEvent::ConnectionAttemptStarted { peer_id, method } => [
+                62.into_dart(),
+                peer_id.into_into_dart().into_dart(),
+                method.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::network::NetworkEvent::ConnectionAttemptFailed {
+                peer_id,
+                method,
+                reason,
+            } => [
+                63.into_dart(),
+                peer_id.into_into_dart().into_dart(),
+                method.into_into_dart().into_dart(),
+                reason.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::network::NetworkEvent::KeyExchangeStarted { peer_id } => {
+                [64.into_dart(), peer_id.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::network::NetworkEvent::KeyExchangeProgress { peer_id, stage } => [
+                65.into_dart(),
+                peer_id.into_into_dart().into_dart(),
+                stage.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::network::NetworkEvent::RelayStatusChanged { status } => {
+                [66.into_dart(), status.into_into_dart().into_dart()].into_dart()
+            }
             _ => {
                 unimplemented!("");
             }
@@ -5805,6 +5872,34 @@ impl SseEncode for crate::api::network::NetworkEvent {
             crate::api::network::NetworkEvent::RebalanceCompleted { server_id } => {
                 <i32>::sse_encode(61, serializer);
                 <String>::sse_encode(server_id, serializer);
+            }
+            crate::api::network::NetworkEvent::ConnectionAttemptStarted { peer_id, method } => {
+                <i32>::sse_encode(62, serializer);
+                <String>::sse_encode(peer_id, serializer);
+                <String>::sse_encode(method, serializer);
+            }
+            crate::api::network::NetworkEvent::ConnectionAttemptFailed {
+                peer_id,
+                method,
+                reason,
+            } => {
+                <i32>::sse_encode(63, serializer);
+                <String>::sse_encode(peer_id, serializer);
+                <String>::sse_encode(method, serializer);
+                <String>::sse_encode(reason, serializer);
+            }
+            crate::api::network::NetworkEvent::KeyExchangeStarted { peer_id } => {
+                <i32>::sse_encode(64, serializer);
+                <String>::sse_encode(peer_id, serializer);
+            }
+            crate::api::network::NetworkEvent::KeyExchangeProgress { peer_id, stage } => {
+                <i32>::sse_encode(65, serializer);
+                <String>::sse_encode(peer_id, serializer);
+                <String>::sse_encode(stage, serializer);
+            }
+            crate::api::network::NetworkEvent::RelayStatusChanged { status } => {
+                <i32>::sse_encode(66, serializer);
+                <String>::sse_encode(status, serializer);
             }
             _ => {
                 unimplemented!("");

@@ -7,6 +7,7 @@ import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
@@ -1204,8 +1205,23 @@ class _ChannelConnectionStatus extends ConsumerWidget {
 
         // Determine connection stage.
         final ConnectionStage stage;
+        String? detail;
         if (onlineMembers.isEmpty) {
           stage = ConnectionStage.connecting;
+          // Check if we're trying to connect to members.
+          final connStatus = ref.watch(connectionStatusProvider);
+          final memberIds = otherMembers.map((m) => m.peerId).toList();
+          final connectingCount = memberIds
+              .where((id) {
+                final cs = connStatus.peers[id];
+                return cs != null &&
+                    (cs.stage == PeerConnectionStage.connected ||
+                     cs.stage == PeerConnectionStage.keyExchange);
+              })
+              .length;
+          detail = connectingCount > 0
+              ? 'Connecting to $connectingCount member${connectingCount == 1 ? '' : 's'}...'
+              : 'No members online';
         } else if (encryptedMembers.isEmpty) {
           stage = ConnectionStage.encrypting;
         } else {
@@ -1218,6 +1234,7 @@ class _ChannelConnectionStatus extends ConsumerWidget {
             ConnectionProgress(
               key: ValueKey('conn-$serverId'),
               stage: stage,
+              detail: detail,
             ),
             if (stage == ConnectionStage.encrypted) ...[
               const SizedBox(width: HollowSpacing.md),

@@ -2,7 +2,9 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
+import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
@@ -30,6 +32,7 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 /// to the appropriate providers.
 class EventStreamNotifier extends Notifier<bool> {
   StreamSubscription<NetworkEvent>? _subscription;
+  final Map<String, Timer> _syncTimeouts = {};
 
   @override
   bool build() => false; // streaming?
@@ -66,6 +69,7 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint(
             '[HOLLOW] Peer discovered: ${peer.peerId} at ${peer.addresses}');
         ref.read(peersProvider.notifier).addPeer(peer.peerId, peer.addresses);
+        ref.read(connectionStatusProvider.notifier).onPeerConnected(peer.peerId);
 
       case NetworkEvent_PeerExpired(:final peerId):
         ref.read(peersProvider.notifier).removePeer(peerId);
@@ -74,6 +78,7 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_PeerDisconnected(:final peerId):
         debugPrint('[HOLLOW] Peer disconnected: $peerId');
         ref.read(peersProvider.notifier).removePeer(peerId);
+        ref.read(connectionStatusProvider.notifier).onPeerDisconnected(peerId);
         // Don't deselect — friends stay visible when offline.
 
       case NetworkEvent_RoomCleared():
@@ -138,6 +143,7 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_SessionEstablished(:final peerId):
         ref.read(peersProvider.notifier).markEncrypted(peerId);
+        ref.read(connectionStatusProvider.notifier).onSessionEstablished(peerId);
         // After re-key, clear any "Sync failed" status for servers where this
         // peer is a member, so the UI recovers automatically.
         _clearFailedSyncForPeer(peerId);
@@ -205,13 +211,29 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_MemberLeft(:final serverId, :final peerId):
         debugPrint('[HOLLOW] Member left: $peerId in $serverId');
-        ref.read(serverListProvider.notifier).onServerUpdated(serverId);
-        ref.invalidate(serverMembersProvider(serverId));
+        final localId = ref.read(identityProvider).peerId;
+        if (peerId == localId) {
+          // Local user was kicked — remove server from UI.
+          ref.read(serverListProvider.notifier).onServerDeleted(serverId);
+          if (ref.read(selectedServerProvider) == serverId) {
+            ref.read(selectedServerProvider.notifier).state = null;
+            ref.read(selectedChannelProvider.notifier).state = null;
+            ref.read(serverSettingsOpenProvider.notifier).state = false;
+          }
+        } else {
+          ref.read(serverListProvider.notifier).onServerUpdated(serverId);
+          ref.invalidate(serverMembersProvider(serverId));
+        }
 
       case NetworkEvent_SyncCompleted(:final serverId, :final opsApplied):
         debugPrint('[HOLLOW] Sync completed: $serverId ($opsApplied ops)');
         ref.read(serverListProvider.notifier).onServerUpdated(serverId);
         ref.invalidate(serverMembersProvider(serverId));
+        // Reload channels in case they changed while offline.
+        if (ref.read(selectedServerProvider) == serverId) {
+          ref.read(channelListProvider.notifier).loadForServer(serverId);
+          ref.read(channelLayoutProvider.notifier).loadForServer(serverId);
+        }
 
       case NetworkEvent_ServerJoined(:final serverId, :final name):
         debugPrint('[HOLLOW] Server joined: $name ($serverId)');
@@ -234,11 +256,25 @@ class EventStreamNotifier extends Notifier<bool> {
               ? ServerSyncStatus.retrying
               : ServerSyncStatus.syncing,
         );
+        // Timeout: if no progress/completion within 10s, clear syncing status.
+        _syncTimeouts[serverId]?.cancel();
+        _syncTimeouts[serverId] = Timer(const Duration(seconds: 10), () {
+          final status = ref.read(serverSyncStatusProvider(serverId));
+          if (status == ServerSyncStatus.syncing ||
+              status == ServerSyncStatus.retrying) {
+            ref.read(syncStatusProvider.notifier).setStatus(
+                  serverId, ServerSyncStatus.idle);
+            ref.read(syncingPeersProvider.notifier).clearServer(serverId);
+          }
+          _syncTimeouts.remove(serverId);
+        });
 
       case NetworkEvent_MessageSyncCompleted(
             :final serverId, :final newMessageCount):
         debugPrint(
             '[HOLLOW] Message sync: $newMessageCount new messages for $serverId');
+        _syncTimeouts[serverId]?.cancel();
+        _syncTimeouts.remove(serverId);
         ref.read(syncingPeersProvider.notifier).clearServer(serverId);
         ref.read(syncProgressProvider.notifier).clearServer(serverId);
         ref.read(syncStatusProvider.notifier).setStatus(
@@ -277,6 +313,8 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_MessageSyncFailed(:final serverId, :final error):
         debugPrint('[HOLLOW] Message sync failed for $serverId: $error');
+        _syncTimeouts[serverId]?.cancel();
+        _syncTimeouts.remove(serverId);
         ref.read(syncingPeersProvider.notifier).clearServer(serverId);
         ref.read(syncProgressProvider.notifier).clearServer(serverId);
         // Transient decrypt failures during re-key → show "Retrying"
@@ -293,6 +331,18 @@ class EventStreamNotifier extends Notifier<bool> {
             :final serverId, :final channelId, :final receivedCount, :final totalCount):
         debugPrint(
             '[HOLLOW] Sync progress: $receivedCount/$totalCount for $channelId in $serverId');
+        // Reset sync timeout — progress is happening.
+        _syncTimeouts[serverId]?.cancel();
+        _syncTimeouts[serverId] = Timer(const Duration(seconds: 10), () {
+          final status = ref.read(serverSyncStatusProvider(serverId));
+          if (status == ServerSyncStatus.syncing ||
+              status == ServerSyncStatus.retrying) {
+            ref.read(syncStatusProvider.notifier).setStatus(
+                  serverId, ServerSyncStatus.idle);
+            ref.read(syncingPeersProvider.notifier).clearServer(serverId);
+          }
+          _syncTimeouts.remove(serverId);
+        });
         ref.read(syncProgressProvider.notifier).updateProgress(
             serverId, receivedCount, totalCount);
 
@@ -508,6 +558,35 @@ class EventStreamNotifier extends Notifier<bool> {
         break;
       case NetworkEvent_RebalanceCompleted():
         break;
+
+      // -- Connection status events (granular UI) --
+      case NetworkEvent_ConnectionAttemptStarted(
+            :final peerId, :final method):
+        ref
+            .read(connectionStatusProvider.notifier)
+            .onConnectionAttemptStarted(peerId, method);
+
+      case NetworkEvent_ConnectionAttemptFailed(
+            :final peerId, :final method, :final reason):
+        ref
+            .read(connectionStatusProvider.notifier)
+            .onConnectionAttemptFailed(peerId, method, reason);
+
+      case NetworkEvent_KeyExchangeStarted(:final peerId):
+        ref
+            .read(connectionStatusProvider.notifier)
+            .onKeyExchangeStarted(peerId);
+
+      case NetworkEvent_KeyExchangeProgress(
+            :final peerId, :final stage):
+        ref
+            .read(connectionStatusProvider.notifier)
+            .onKeyExchangeProgress(peerId, stage);
+
+      case NetworkEvent_RelayStatusChanged(:final status):
+        ref
+            .read(connectionStatusProvider.notifier)
+            .onRelayStatusChanged(status);
     }
     } catch (e, st) {
       debugPrint('[HOLLOW] Unhandled dispatch error: $e\n$st');

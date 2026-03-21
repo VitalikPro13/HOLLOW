@@ -46,16 +46,19 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
       // Reload all servers to get fresh name + counts
       final servers = await crdt_api.getJoinedServers();
       final match = servers.where((s) => s.serverId == serverId).firstOrNull;
+      final updated = Map.of(state);
       if (match != null) {
-        final updated = Map.of(state);
         updated[serverId] = ServerInfo(
           serverId: match.serverId,
           name: match.name,
           memberCount: match.memberCount,
           channelCount: match.channelCount,
         );
-        state = updated;
+      } else {
+        // Server no longer exists (user was kicked or server deleted while offline).
+        updated.remove(serverId);
       }
+      state = updated;
     } catch (e) {
       debugPrint('[HOLLOW] Failed to refresh server $serverId: $e');
     }

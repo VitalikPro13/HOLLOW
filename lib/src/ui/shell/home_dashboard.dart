@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -615,21 +616,31 @@ class _NetworkColumn extends ConsumerWidget {
 
     final isOnline = nodeState.status == NodeStatus.connected;
 
-    // Friends connection status.
+    // Friends connection status (granular via connectionStatusProvider).
+    final connStatus = ref.watch(connectionStatusProvider);
     final accepted = friends.values
         .where((f) => f.status == 'accepted')
         .toList();
-    final onlineFriends = <String>[];
-    final encryptingFriends = <String>[];
+    final encryptedFriends = <String>[];
+    final activeFriends = <PeerConnectionStatus>[];
     final offlineFriends = <String>[];
     for (final f in accepted) {
       final peer = peers[f.peerId];
-      if (peer == null) {
-        offlineFriends.add(f.peerId);
-      } else if (!peer.isEncrypted) {
-        encryptingFriends.add(f.peerId);
+      final cs = connStatus.peers[f.peerId];
+      if (peer != null && peer.isEncrypted) {
+        encryptedFriends.add(f.peerId);
+      } else if (cs != null &&
+          (cs.stage == PeerConnectionStage.connected ||
+           cs.stage == PeerConnectionStage.keyExchange)) {
+        activeFriends.add(cs);
+      } else if (peer != null && !peer.isEncrypted) {
+        activeFriends.add(PeerConnectionStatus(
+          peerId: f.peerId,
+          stage: PeerConnectionStage.keyExchange,
+          lastUpdated: DateTime.now(),
+        ));
       } else {
-        onlineFriends.add(f.peerId);
+        offlineFriends.add(f.peerId);
       }
     }
 
@@ -704,30 +715,38 @@ class _NetworkColumn extends ConsumerWidget {
           ),
         ),
 
+        const SizedBox(height: HollowSpacing.sm),
+
+        // Relay status
+        _RelayStatusCard(hollow: hollow),
+
         const SizedBox(height: HollowSpacing.lg),
 
         // ── Friends Connections ──
         _SectionLabel(hollow: hollow, label: 'FRIENDS'),
         const SizedBox(height: HollowSpacing.sm),
 
-        // In-progress connections (encrypting) — shown as active items
-        for (final peerId in encryptingFriends)
+        // Active connections — per-peer detail rows
+        for (final cs in activeFriends)
           _ConnectionRow(
             hollow: hollow,
-            peerId: peerId,
-            name: displayNameFor(profiles, peerId),
-            status: 'Encrypting...',
-            statusColor: hollow.accent,
-            showSpinner: true,
+            peerId: cs.peerId,
+            name: displayNameFor(profiles, cs.peerId),
+            status: cs.label,
+            statusColor: cs.stage == PeerConnectionStage.failed
+                ? hollow.error
+                : hollow.accent,
+            showSpinner: cs.stage != PeerConnectionStage.failed &&
+                cs.stage != PeerConnectionStage.encrypted,
           ),
 
         // Summary counters
-        if (onlineFriends.isNotEmpty)
+        if (encryptedFriends.isNotEmpty)
           _CounterRow(
             hollow: hollow,
             icon: LucideIcons.shieldCheck,
             label: 'Encrypted',
-            count: onlineFriends.length,
+            count: encryptedFriends.length,
             color: hollow.success,
           ),
         if (offlineFriends.isNotEmpty)
@@ -810,6 +829,76 @@ class _SectionLabel extends StatelessWidget {
         fontWeight: FontWeight.w600,
         letterSpacing: 0.8,
         fontSize: 10,
+      ),
+    );
+  }
+}
+
+/// Relay connection status card.
+class _RelayStatusCard extends ConsumerWidget {
+  final HollowTheme hollow;
+  const _RelayStatusCard({required this.hollow});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final connStatus = ref.watch(connectionStatusProvider);
+    final relayStatus = connStatus.relayStatus;
+
+    final Color dotColor;
+    final bool pulse;
+    switch (relayStatus) {
+      case RelayConnectionStatus.circuitReady:
+        dotColor = hollow.success;
+        pulse = false;
+      case RelayConnectionStatus.connected:
+      case RelayConnectionStatus.circuitRequested:
+        dotColor = hollow.accent;
+        pulse = true;
+      case RelayConnectionStatus.connecting:
+      case RelayConnectionStatus.reconnecting:
+        dotColor = hollow.warning;
+        pulse = true;
+      case RelayConnectionStatus.disconnected:
+        dotColor = hollow.textSecondary;
+        pulse = false;
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(HollowSpacing.sm + 2),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        border: Border.all(color: hollow.border),
+      ),
+      child: Row(
+        children: [
+          Icon(LucideIcons.radio, size: 14, color: hollow.textSecondary),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Relay',
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary,
+                    fontWeight: FontWeight.w500,
+                    fontSize: 12,
+                  ),
+                ),
+                Text(
+                  connStatus.relayLabel,
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary,
+                    fontSize: 10,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          StatusDot(color: dotColor, size: 8, pulse: pulse),
+        ],
       ),
     );
   }
@@ -975,8 +1064,27 @@ class _ServerSyncRow extends ConsumerWidget {
     switch (effectiveStatus) {
       case ServerSyncStatus.connecting:
         statusColor = hollow.textSecondary;
-        statusLabel = 'Connecting...';
-        showSpinner = true;
+        // Check if we're actually trying to connect to members.
+        final connStatus = ref.watch(connectionStatusProvider);
+        final memberIds = membersAsync.whenOrNull(
+              data: (members) => members
+                  .where((m) => m.peerId != localPeerId)
+                  .map((m) => m.peerId)
+                  .toList(),
+            ) ??
+            [];
+        final connectingCount = memberIds
+            .where((id) {
+              final cs = connStatus.peers[id];
+              return cs != null &&
+                  (cs.stage == PeerConnectionStage.connected ||
+                   cs.stage == PeerConnectionStage.keyExchange);
+            })
+            .length;
+        statusLabel = connectingCount > 0
+            ? 'Connecting to $connectingCount member${connectingCount == 1 ? '' : 's'}...'
+            : 'No members online';
+        showSpinner = connectingCount > 0;
       case ServerSyncStatus.syncing:
         statusColor = hollow.accent;
         statusLabel = 'Syncing...';

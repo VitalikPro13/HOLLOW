@@ -8,6 +8,7 @@ import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
@@ -433,17 +434,31 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               ),
               Builder(builder: (_) {
                 final peer = ref.watch(peersProvider)[widget.peerId];
+                final connStatus = ref.watch(connectionStatusProvider);
+                final cs = connStatus.peers[widget.peerId];
                 final ConnectionStage stage;
+                String? detail;
                 if (peer == null) {
                   stage = ConnectionStage.connecting;
+                  // Only show detail for meaningful stages (not routine dial failures).
+                  if (cs != null &&
+                      (cs.stage == PeerConnectionStage.connected ||
+                       cs.stage == PeerConnectionStage.keyExchange)) {
+                    detail = cs.label;
+                  }
                 } else if (peer.isEncrypted) {
                   stage = ConnectionStage.encrypted;
                 } else {
                   stage = ConnectionStage.encrypting;
+                  if (cs != null &&
+                      cs.stage == PeerConnectionStage.keyExchange) {
+                    detail = cs.label;
+                  }
                 }
                 return ConnectionProgress(
                   key: ValueKey('dm-conn-${widget.peerId}-${stage.index}'),
                   stage: stage,
+                  detail: detail,
                 );
               }),
               const SizedBox(width: HollowSpacing.sm),

@@ -568,4 +568,21 @@ sealed class NetworkEvent with _$NetworkEvent {
   }) = NetworkEvent_RebalanceProgress;
   const factory NetworkEvent.rebalanceCompleted({required String serverId}) =
       NetworkEvent_RebalanceCompleted;
+  const factory NetworkEvent.connectionAttemptStarted({
+    required String peerId,
+    required String method,
+  }) = NetworkEvent_ConnectionAttemptStarted;
+  const factory NetworkEvent.connectionAttemptFailed({
+    required String peerId,
+    required String method,
+    required String reason,
+  }) = NetworkEvent_ConnectionAttemptFailed;
+  const factory NetworkEvent.keyExchangeStarted({required String peerId}) =
+      NetworkEvent_KeyExchangeStarted;
+  const factory NetworkEvent.keyExchangeProgress({
+    required String peerId,
+    required String stage,
+  }) = NetworkEvent_KeyExchangeProgress;
+  const factory NetworkEvent.relayStatusChanged({required String status}) =
+      NetworkEvent_RelayStatusChanged;
 }

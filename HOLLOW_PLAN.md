@@ -1171,7 +1171,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [ ] Per-file indicators in chat — deferred to follow-up
   - [ ] Vault status in member panel — deferred to follow-up
   - [ ] VaultFileWidget shimmer — deferred to follow-up
-  - [ ] Sync UI fixes: "Syncing..." indicator timeout (clear after 10s if no progress), CRDT server state changes (rename/delete) refresh Dart UI on SyncCompleted
+  - [X] Sync UI fixes: "Syncing..." indicator timeout (clear after 10s if no progress), CRDT server state changes (rename/delete) refresh Dart UI on SyncCompleted
 
 - [ ] **Connection subset management** — limit persistent connections for large servers (defer until scaling pain)
   - [ ] Target: 6-12 peers per server (not full mesh). Total across all servers capped at 50 (configurable)

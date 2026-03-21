@@ -114,6 +114,12 @@ pub enum NetworkEvent {
     RebalanceStarted { server_id: String, shards_to_move: u32 },
     RebalanceProgress { server_id: String, moved: u32, total: u32 },
     RebalanceCompleted { server_id: String },
+    // -- Connection status events (granular UI) --
+    ConnectionAttemptStarted { peer_id: String, method: String },
+    ConnectionAttemptFailed { peer_id: String, method: String, reason: String },
+    KeyExchangeStarted { peer_id: String },
+    KeyExchangeProgress { peer_id: String, stage: String },
+    RelayStatusChanged { status: String },
 }
 
 /// Holds all mutable state for the running node.
@@ -272,6 +278,21 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::MessageUnpinned { server_id, channel_id, message_id } => {
             hollow_log!("[HOLLOW] Message {message_id} unpinned in {server_id}/{channel_id}");
+        }
+        node::NetworkEvent::ConnectionAttemptStarted { peer_id, method } => {
+            hollow_log!("[HOLLOW] Connection attempt: {peer_id} via {method}");
+        }
+        node::NetworkEvent::ConnectionAttemptFailed { peer_id, method, reason } => {
+            hollow_log!("[HOLLOW] Connection failed: {peer_id} via {method}: {reason}");
+        }
+        node::NetworkEvent::KeyExchangeStarted { peer_id } => {
+            hollow_log!("[HOLLOW] Key exchange started: {peer_id}");
+        }
+        node::NetworkEvent::KeyExchangeProgress { peer_id, stage } => {
+            hollow_log!("[HOLLOW] Key exchange: {peer_id} stage={stage}");
+        }
+        node::NetworkEvent::RelayStatusChanged { status } => {
+            hollow_log!("[HOLLOW] Relay: {status}");
         }
         _ => {}
     }
@@ -459,6 +480,21 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::RebalanceCompleted { server_id } => {
             NetworkEvent::RebalanceCompleted { server_id }
+        }
+        node::NetworkEvent::ConnectionAttemptStarted { peer_id, method } => {
+            NetworkEvent::ConnectionAttemptStarted { peer_id, method }
+        }
+        node::NetworkEvent::ConnectionAttemptFailed { peer_id, method, reason } => {
+            NetworkEvent::ConnectionAttemptFailed { peer_id, method, reason }
+        }
+        node::NetworkEvent::KeyExchangeStarted { peer_id } => {
+            NetworkEvent::KeyExchangeStarted { peer_id }
+        }
+        node::NetworkEvent::KeyExchangeProgress { peer_id, stage } => {
+            NetworkEvent::KeyExchangeProgress { peer_id, stage }
+        }
+        node::NetworkEvent::RelayStatusChanged { status } => {
+            NetworkEvent::RelayStatusChanged { status }
         }
     }
 }

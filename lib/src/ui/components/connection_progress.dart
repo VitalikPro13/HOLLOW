@@ -22,8 +22,10 @@ enum ConnectionStage {
 /// Progress: connecting = 33%, encrypting = 66%, encrypted = 100% then fade.
 class ConnectionProgress extends StatefulWidget {
   final ConnectionStage stage;
+  /// Optional detail text override (e.g., "Connecting via relay...").
+  final String? detail;
 
-  const ConnectionProgress({super.key, required this.stage});
+  const ConnectionProgress({super.key, required this.stage, this.detail});
 
   @override
   State<ConnectionProgress> createState() => _ConnectionProgressState();
@@ -142,13 +144,13 @@ class _ConnectionProgressState extends State<ConnectionProgress>
     final Color labelColor;
     switch (widget.stage) {
       case ConnectionStage.connecting:
-        label = 'Offline';
+        label = widget.detail ?? 'Offline';
         labelColor = hollow.textSecondary;
       case ConnectionStage.encrypting:
-        label = 'Encrypting...';
+        label = widget.detail ?? 'Encrypting...';
         labelColor = hollow.accent;
       case ConnectionStage.encrypted:
-        label = 'Encrypted';
+        label = widget.detail ?? 'Encrypted';
         labelColor = hollow.success;
     }
 

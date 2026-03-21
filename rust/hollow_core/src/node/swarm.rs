@@ -105,6 +105,21 @@ fn dm_room_code(peer_a: &str, peer_b: &str) -> String {
     hex::encode(&hash[..16]) // 128-bit / 32 hex chars
 }
 
+/// Extract transport method from a multiaddr string for UI display.
+fn transport_method_from_addr(addr: &str) -> &'static str {
+    if addr.contains("p2p-circuit") {
+        "relay"
+    } else if addr.contains("/quic") {
+        "quic"
+    } else if addr.contains("/ws/") || addr.contains("/wss/") {
+        "wss"
+    } else if addr.contains("/tcp/") {
+        "tcp"
+    } else {
+        "unknown"
+    }
+}
+
 /// A discovered peer on the local network.
 pub(crate) struct DiscoveredPeer {
     pub peer_id: String,
@@ -209,6 +224,12 @@ pub(crate) enum NetworkEvent {
     RebalanceStarted { server_id: String, shards_to_move: u32 },
     RebalanceProgress { server_id: String, moved: u32, total: u32 },
     RebalanceCompleted { server_id: String },
+    // -- Connection status events (granular UI) --
+    ConnectionAttemptStarted { peer_id: String, method: String },
+    ConnectionAttemptFailed { peer_id: String, method: String, reason: String },
+    KeyExchangeStarted { peer_id: String },
+    KeyExchangeProgress { peer_id: String, stage: String },
+    RelayStatusChanged { status: String },
 }
 
 /// Commands the FFI layer can send into the swarm event loop.
@@ -1605,6 +1626,9 @@ async fn run_swarm(
             swarm.add_peer_address(relay_pid, addr.clone());
             swarm.behaviour_mut().kademlia.add_address(&relay_pid, addr);
         }
+        let _ = event_tx.send(NetworkEvent::RelayStatusChanged {
+            status: "connecting".to_string(),
+        }).await;
         if let Err(e) = swarm.dial(relay_pid) {
             let _ = event_tx
                 .send(NetworkEvent::Error {
@@ -4787,6 +4811,10 @@ async fn run_swarm(
                             // Seed Kademlia DHT from LAN peers discovered via mDNS.
                             swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
                             expected_peers.insert(peer_id);
+                            let _ = event_tx.send(NetworkEvent::ConnectionAttemptStarted {
+                                peer_id: peer_id.to_string(),
+                                method: "mdns".to_string(),
+                            }).await;
                             // Dedup: only emit PeerDiscovered once per session.
                             if discovered_peers.insert(peer_id) {
                                 let peer_id_str = peer_id.to_string();
@@ -5080,6 +5108,10 @@ async fn run_swarm(
                                         if let Some(target_peer) = pending_prekey_fetches.remove(&id) {
                                             hollow_log!("[HOLLOW-SWARM] Found prekey record for {target_peer}");
                                             dht_fetch_in_flight.remove(&target_peer);
+                                            let _ = event_tx.send(NetworkEvent::KeyExchangeProgress {
+                                                peer_id: target_peer.clone(),
+                                                stage: "prekey_found".to_string(),
+                                            }).await;
 
                                             let mut used = false;
                                             if let Ok(bundle) = serde_json::from_slice::<PrekeyBundle>(&record.value)
@@ -5102,6 +5134,10 @@ async fn run_swarm(
                                                             hollow_log!("[HOLLOW-SWARM] Session already exists for {target_peer}, skipping DHT prekey session creation");
                                                             used = true;
                                                         } else {
+                                                        let _ = event_tx.send(NetworkEvent::KeyExchangeProgress {
+                                                            peer_id: target_peer.clone(),
+                                                            stage: "establishing_session".to_string(),
+                                                        }).await;
                                                         match olm.create_outbound_session(
                                                             &target_peer,
                                                             &bundle.identity_key,
@@ -5109,6 +5145,10 @@ async fn run_swarm(
                                                         ) {
                                                             Ok(()) => {
                                                                 persist_crypto_state(&olm, &crypto_store, &target_peer);
+                                                                let _ = event_tx.send(NetworkEvent::KeyExchangeProgress {
+                                                                    peer_id: target_peer.clone(),
+                                                                    stage: "session_created".to_string(),
+                                                                }).await;
                                                                 let _ = event_tx.send(NetworkEvent::SessionEstablished {
                                                                     peer_id: target_peer.clone(),
                                                                 }).await;
@@ -5274,6 +5314,9 @@ async fn run_swarm(
                     SwarmEvent::Behaviour(HavenBehaviourEvent::RelayClient(event)) => {
                         match event {
                             relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
+                                let _ = event_tx.send(NetworkEvent::RelayStatusChanged {
+                                    status: "circuit_ready".to_string(),
+                                }).await;
                                 if !renewal {
                                     let _ = event_tx
                                         .send(NetworkEvent::Listening {
@@ -5411,6 +5454,13 @@ async fn run_swarm(
                                     // No Olm session — proactively start key exchange
                                     // so encryption is ready before the first message.
                                     hollow_log!("[HOLLOW-SWARM] Proactive key exchange for {peer_id_str}");
+                                    let _ = event_tx.send(NetworkEvent::KeyExchangeStarted {
+                                        peer_id: peer_id_str.clone(),
+                                    }).await;
+                                    let _ = event_tx.send(NetworkEvent::KeyExchangeProgress {
+                                        peer_id: peer_id_str.clone(),
+                                        stage: "fetching_prekey".to_string(),
+                                    }).await;
                                     let record_key = kad::RecordKey::new(
                                         &format!("/hollow/prekeys/{}", peer_id_str),
                                     );
@@ -5587,6 +5637,12 @@ async fn run_swarm(
                                     message: format!("[DEBUG] Connected to relay! Requesting circuit via: {relay_circuit}"),
                                 })
                                 .await;
+                            let _ = event_tx.send(NetworkEvent::RelayStatusChanged {
+                                status: "connected".to_string(),
+                            }).await;
+                            let _ = event_tx.send(NetworkEvent::RelayStatusChanged {
+                                status: "circuit_requested".to_string(),
+                            }).await;
                             if let Err(e) = swarm.listen_on(relay_circuit) {
                                 let _ = event_tx
                                     .send(NetworkEvent::Error {
@@ -5634,6 +5690,20 @@ async fn run_swarm(
                                 message: format!("[DEBUG] Dial failed to {peer_id:?}: {error}"),
                             })
                             .await;
+                        if let Some(pid) = peer_id {
+                            let err_str = format!("{error}");
+                            let method = if err_str.contains("p2p-circuit") { "relay" }
+                                else if err_str.contains("quic") { "quic" }
+                                else if err_str.contains("ws") || err_str.contains("443") { "wss" }
+                                else if err_str.contains("tcp") { "tcp" }
+                                else { "unknown" };
+                            let reason: String = err_str.chars().take(200).collect();
+                            let _ = event_tx.send(NetworkEvent::ConnectionAttemptFailed {
+                                peer_id: pid.to_string(),
+                                method: method.to_string(),
+                                reason,
+                            }).await;
+                        }
                     }
                     SwarmEvent::ListenerError { listener_id, error } => {
                         let _ = event_tx
@@ -5677,6 +5747,9 @@ async fn run_swarm(
                         if num_established == 0 && relay_peer_id() == Some(peer_id) {
                             let _ = event_tx.send(NetworkEvent::Error {
                                 message: "[RELAY] Relay connection lost! Re-dialing in 5s...".to_string(),
+                            }).await;
+                            let _ = event_tx.send(NetworkEvent::RelayStatusChanged {
+                                status: "reconnecting".to_string(),
                             }).await;
                             // Remove stale relay circuit addresses.
                             known_addresses.retain(|a| !a.contains("p2p-circuit"));
@@ -5783,6 +5856,10 @@ async fn run_swarm(
                             }
 
                             // Dial relay circuit first for fast connection.
+                            let _ = event_tx.send(NetworkEvent::ConnectionAttemptStarted {
+                                peer_id: bp.peer_id.clone(),
+                                method: "relay".to_string(),
+                            }).await;
                             let _ = swarm.dial(peer_id);
 
                             // NOW add direct addresses from signaling (for potential
