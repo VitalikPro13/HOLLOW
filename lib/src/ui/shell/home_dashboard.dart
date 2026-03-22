@@ -18,6 +18,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
@@ -33,6 +34,72 @@ class HomeDashboard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
 
+    // Staggered reveal animations for each column.
+    final leftReveal =
+        StartupRevealScope.interval(context, 0.30, 0.55);
+    final centerReveal =
+        StartupRevealScope.interval(context, 0.35, 0.60);
+    final rightReveal =
+        StartupRevealScope.interval(context, 0.40, 0.65);
+
+    Widget leftCol = SizedBox(
+      width: 240,
+      child: _ProfileColumn(hollow: hollow),
+    );
+    Widget centerCol = Expanded(
+      child: _RecentConversationsColumn(hollow: hollow),
+    );
+    Widget rightCol = SizedBox(
+      width: 260,
+      child: _NetworkColumn(hollow: hollow),
+    );
+
+    // Apply fade + slide-up reveal to each column.
+    if (leftReveal != null) {
+      leftCol = SizedBox(
+        width: 240,
+        child: FadeTransition(
+          opacity: leftReveal,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0, 0.08),
+              end: Offset.zero,
+            ).animate(leftReveal),
+            child: _ProfileColumn(hollow: hollow),
+          ),
+        ),
+      );
+    }
+    if (centerReveal != null) {
+      centerCol = Expanded(
+        child: FadeTransition(
+          opacity: centerReveal,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0, 0.08),
+              end: Offset.zero,
+            ).animate(centerReveal),
+            child: _RecentConversationsColumn(hollow: hollow),
+          ),
+        ),
+      );
+    }
+    if (rightReveal != null) {
+      rightCol = SizedBox(
+        width: 260,
+        child: FadeTransition(
+          opacity: rightReveal,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0, 0.08),
+              end: Offset.zero,
+            ).animate(rightReveal),
+            child: _NetworkColumn(hollow: hollow),
+          ),
+        ),
+      );
+    }
+
     return Container(
       color: hollow.background,
       child: Padding(
@@ -40,11 +107,7 @@ class HomeDashboard extends ConsumerWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Left: Profile Card ──
-            SizedBox(
-              width: 240,
-              child: _ProfileColumn(hollow: hollow),
-            ),
+            leftCol,
 
             // Divider
             Padding(
@@ -58,10 +121,7 @@ class HomeDashboard extends ConsumerWidget {
               ),
             ),
 
-            // ── Center: Recent Conversations ──
-            Expanded(
-              child: _RecentConversationsColumn(hollow: hollow),
-            ),
+            centerCol,
 
             // Divider
             Padding(
@@ -75,11 +135,7 @@ class HomeDashboard extends ConsumerWidget {
               ),
             ),
 
-            // ── Right: Network & Status ──
-            SizedBox(
-              width: 260,
-              child: _NetworkColumn(hollow: hollow),
-            ),
+            rightCol,
           ],
         ),
       ),

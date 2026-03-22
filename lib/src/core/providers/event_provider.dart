@@ -97,7 +97,8 @@ class EventStreamNotifier extends Notifier<bool> {
         final windowVisible = ref.read(windowVisibleProvider);
         final isViewingDm = windowVisible &&
             ref.read(selectedPeerProvider) == fromPeer &&
-            ref.read(selectedServerProvider) == null;
+            ref.read(selectedServerProvider) == null &&
+            ref.read(chatAtBottomProvider);
         final isDmMuted = !ref
             .read(notificationSettingsProvider.notifier)
             .isDmEnabled(fromPeer);
@@ -121,10 +122,11 @@ class EventStreamNotifier extends Notifier<bool> {
             .receiveMessage(serverId, channelId, fromPeer, text, timestamp, messageId, replyToMid);
         ref.read(typingProvider.notifier).clearTyping('$serverId:$channelId', fromPeer);
         // Track unread channel message — only if not muted.
-        // Window must be visible AND viewing this channel to count as "viewing".
+        // Must be visible, viewing this channel, AND scrolled to bottom.
         final isViewingChannel = ref.read(windowVisibleProvider) &&
             ref.read(selectedServerProvider) == serverId &&
-            ref.read(selectedChannelProvider) == channelId;
+            ref.read(selectedChannelProvider) == channelId &&
+            ref.read(chatAtBottomProvider);
         final channelNotifLevel = ref
             .read(notificationSettingsProvider.notifier)
             .effectiveChannelLevel(serverId, channelId);

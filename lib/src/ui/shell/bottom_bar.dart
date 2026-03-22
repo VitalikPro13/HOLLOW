@@ -382,16 +382,18 @@ class _BottomBarState extends ConsumerState<BottomBar> {
       return;
     }
 
-    // Standard left-pane navigation (same as vertical ServerStrip).
-    ref.read(selectedServerProvider.notifier).state = serverId;
+    // Load channels BEFORE setting server — avoids empty sidebar flash.
     ref.read(selectedPeerProvider.notifier).state = null;
     ref.read(serverSettingsOpenProvider.notifier).state = false;
 
-    final lastChannels = ref.read(lastChannelPerServerProvider);
-    final lastChannel = lastChannels[serverId];
-
     await ref.read(channelListProvider.notifier).loadForServer(serverId);
     ref.read(channelLayoutProvider.notifier).loadForServer(serverId);
+
+    // Now set the server — sidebar appears with channels already loaded.
+    ref.read(selectedServerProvider.notifier).state = serverId;
+
+    final lastChannels = ref.read(lastChannelPerServerProvider);
+    final lastChannel = lastChannels[serverId];
 
     final channels = ref.read(channelListProvider);
     String? channelToSelect;

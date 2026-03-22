@@ -469,6 +469,9 @@ enum HavenMessage {
         channel_id: String,
         /// Our latest timestamp for this channel (so the peer can quickly compare).
         our_latest: i64,
+        /// Total message count for health check (catches mid-session drops).
+        #[serde(default)]
+        msg_count: u32,
     },
 
     // -- Friends (Phase 3.5) --
@@ -5948,14 +5951,28 @@ async fn run_swarm(
                         "[HOLLOW-SYNC] Fan-out dispatch for server {server_id}: {total_channels} channel probes across {total_peers} peers"
                     );
 
+                    // Open DB for message count queries.
+                    let sync_data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                    let sync_db_path = sync_data_dir.join("messages.db").to_string_lossy().to_string();
+                    let sync_store = if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
+                        let pass = hex::encode(&proto[..32.min(proto.len())]);
+                        crate::storage::MessageStore::open(&sync_db_path, &pass).ok()
+                    } else {
+                        None
+                    };
+
                     for (peer, channels) in assignments {
                         for (channel_id, our_latest) in channels {
+                            let msg_count = sync_store.as_ref()
+                                .map(|s| s.count_channel_messages(server_id, channel_id))
+                                .unwrap_or(0);
                             swarm.behaviour_mut().messaging.send_request(
                                 peer,
                                 HavenMessage::ChannelSyncProbe {
                                     server_id: server_id.clone(),
                                     channel_id: channel_id.clone(),
                                     our_latest: *our_latest,
+                                    msg_count,
                                 },
                             );
                         }
@@ -8173,7 +8190,7 @@ async fn handle_incoming_request(
 
         // -- Multi-peer fan-out sync probe handlers --
 
-        HavenMessage::ChannelSyncProbe { server_id, channel_id, our_latest } => {
+        HavenMessage::ChannelSyncProbe { server_id, channel_id, our_latest, msg_count: _probe_count } => {
             let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
 
             // Room gating: only respond for servers we're a member of.
@@ -8191,8 +8208,7 @@ async fn handle_incoming_request(
                         .unwrap_or(None)
                         .unwrap_or(0);
                     let msg_count = store
-                        .count_channel_messages_since(&server_id, &channel_id, 0)
-                        .unwrap_or(0);
+                        .count_channel_messages(&server_id, &channel_id);
 
                     hollow_log!(
                         "[HOLLOW-SYNC] Probe from {peer_str} for {channel_id}: ours={their_latest} theirs={our_latest} (count={msg_count})"
@@ -8224,14 +8240,16 @@ async fn handle_incoming_request(
                         .get_latest_channel_timestamp(&server_id, &channel_id)
                         .unwrap_or(None)
                         .unwrap_or(0);
+                    let our_msg_count = store.count_channel_messages(&server_id, &channel_id);
 
-                    if their_latest > our_latest || (msg_count > 0 && our_latest == 0) {
-                        // Peer has newer messages — fire full sync request.
+                    // Sync if: peer has newer timestamp, OR counts differ (catches mid-session drops).
+                    if their_latest > our_latest || msg_count != our_msg_count {
+                        // Peer has newer messages or count mismatch — fire full sync request.
                         let sender_ts = store
                             .get_per_sender_timestamps(&server_id, &channel_id)
                             .unwrap_or_default();
                         hollow_log!(
-                            "[HOLLOW-SYNC] Probe response: {channel_id} needs sync (ours={our_latest} peer={their_latest}, peer_count={msg_count}). Requesting from {peer_str}"
+                            "[HOLLOW-SYNC] Probe response: {channel_id} needs sync (ts: ours={our_latest} peer={their_latest}, count: ours={our_msg_count} peer={msg_count}). Requesting from {peer_str}"
                         );
                         swarm.behaviour_mut().messaging.send_request(
                             &peer,
@@ -8244,7 +8262,7 @@ async fn handle_incoming_request(
                         );
                     } else {
                         hollow_log!(
-                            "[HOLLOW-SYNC] Probe response: {channel_id} is up to date (ours={our_latest} peer={their_latest}). Skipping."
+                            "[HOLLOW-SYNC] Probe response: {channel_id} is up to date (ts: ours={our_latest} peer={their_latest}, count: {our_msg_count}). Skipping."
                         );
                         // Emit completion for this channel so UI knows sync is done.
                         let _ = event_tx.send(NetworkEvent::MessageSyncCompleted {

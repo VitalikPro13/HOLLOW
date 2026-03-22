@@ -115,6 +115,13 @@ Phase 4 plan is fully broken down into 12 major items with ~80 sub-tasks in `HOL
 **Dock Layout Redesign — COMPLETE (Mar 21, 2026):**
 New "Dock" layout as default. Bottom bar (macOS dock-style server strip), top friends bar, split view (50/50 draggable, ProviderScope overrides for right pane, pending migration pattern), Friends Manager dialog (4 tabs with remove friend), Home Dashboard (profile + recent conversations + network monitor). Classic layout preserved as option in Settings > System. See MEMORY.md for full details.
 
+**Connection Status + Sync Fixes — COMPLETE (Mar 22, 2026):**
+- Granular connection status: 5 new Rust NetworkEvent variants, `connection_status_provider.dart` with auto-cleanup, relay status card, enhanced ConnectionProgress with detail param
+- Unread pill: floating "N new messages" pill above chat input, `chatAtBottomProvider` scroll-aware read tracking
+- Channel count health check: `msg_count` field on ChannelSyncProbe catches mid-session message drops via count comparison
+- Sync UI: 10s timeout, SyncCompleted reloads channels, kicked member detection, server removal on DB miss
+- Startup reveal: dock bars slide in, dashboard columns stagger, no blob jitter on reveal complete
+
 **Phase 3.5 completed so far:**
 - User profiles: Rust `user_profiles` SQLCipher table, `ProfileUpdate` HollowMessage broadcast, timestamp-gated upsert, auto-exchange on `ConnectionEstablished`, `ProfileNotifier` Dart provider, `displayNameFor()` helper used everywhere (user_bar, member_panel, channel_message_bubble, peer_card, chat_pane)
 - User settings dialog: two-column layout (live profile preview card with centered banner/avatar/name/about-me on left, edit fields + dark mode toggle on right), `showHollowDialog` glassmorphism entrance, settings gear icon replaces theme toggle in user bar

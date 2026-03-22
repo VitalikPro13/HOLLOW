@@ -76,6 +76,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
   // Chat pane reveal sub-animation.
   late final Animation<double> _chatReveal;
 
+  // Dock layout reveal sub-animations.
+  late final Animation<double> _friendsBarReveal;
+  late final Animation<double> _bottomBarReveal;
+  late final Animation<double> _dockChatReveal;
+
   @override
   void initState() {
     super.initState();
@@ -88,6 +93,19 @@ class _HollowShellState extends ConsumerState<HollowShell>
     _chatReveal = CurvedAnimation(
       parent: _revealController,
       curve: const Interval(0.30, 0.70, curve: Curves.easeOutCubic),
+    );
+
+    _friendsBarReveal = CurvedAnimation(
+      parent: _revealController,
+      curve: const Interval(0.0, 0.25, curve: Curves.easeOutCubic),
+    );
+    _bottomBarReveal = CurvedAnimation(
+      parent: _revealController,
+      curve: const Interval(0.05, 0.30, curve: Curves.easeOutCubic),
+    );
+    _dockChatReveal = CurvedAnimation(
+      parent: _revealController,
+      curve: const Interval(0.20, 0.60, curve: Curves.easeOutCubic),
     );
 
     _revealController.addStatusListener((status) {
@@ -464,7 +482,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
   /// the reveal completes — avoids resetting the ambient blob positions.
   Widget _chatRevealWrap(Widget child) {
     return FadeTransition(
-      opacity: _revealComplete ? kAlwaysCompleteAnimation : _chatReveal,
+      opacity: _chatReveal,
       child: child,
     );
   }
@@ -727,8 +745,21 @@ class _HollowShellState extends ConsumerState<HollowShell>
         children: [
           if (isDesktopPlatform) const WindowTitleBar(),
 
-          // Friends bar (top)
-          const RepaintBoundary(child: FriendsBar()),
+          // Friends bar (top) — slides down from top
+          ClipRect(
+            child: AnimatedBuilder(
+              animation: _friendsBarReveal,
+              builder: (context, child) => Align(
+                alignment: Alignment.bottomCenter,
+                heightFactor: _friendsBarReveal.value.clamp(0.0, 1.0),
+                child: child,
+              ),
+              child: FadeTransition(
+                opacity: _friendsBarReveal,
+                child: const RepaintBoundary(child: FriendsBar()),
+              ),
+            ),
+          ),
 
           // Main content area
           Expanded(
@@ -752,8 +783,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
                 // Chat area (single pane or split, animated transition)
                 Expanded(
-                  child: _chatRevealWrap(
-                    AnimatedSwitcher(
+                  child: FadeTransition(
+                    opacity: _dockChatReveal,
+                    child: AnimatedSwitcher(
                       duration: HollowDurations.normal,
                       switchInCurve: HollowCurves.enter,
                       switchOutCurve: HollowCurves.exit,
@@ -837,8 +869,21 @@ class _HollowShellState extends ConsumerState<HollowShell>
             ),
           ),
 
-          // Bottom bar (dock)
-          const RepaintBoundary(child: BottomBar()),
+          // Bottom bar (dock) — slides up from bottom
+          ClipRect(
+            child: AnimatedBuilder(
+              animation: _bottomBarReveal,
+              builder: (context, child) => Align(
+                alignment: Alignment.topCenter,
+                heightFactor: _bottomBarReveal.value.clamp(0.0, 1.0),
+                child: child,
+              ),
+              child: FadeTransition(
+                opacity: _bottomBarReveal,
+                child: const RepaintBoundary(child: BottomBar()),
+              ),
+            ),
+          ),
         ],
       ),
     );

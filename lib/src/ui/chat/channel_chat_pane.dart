@@ -88,6 +88,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   final _searchController = TextEditingController();
   List<dynamic> _searchResults = [];
   final _searchFocusNode = FocusNode();
+  bool _showScrollPill = false;
 
   String get _stateKey => '${widget.serverId}:${widget.channelId}';
 
@@ -96,6 +97,23 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   void initState() {
     super.initState();
     _loadHistory();
+    _itemPositionsListener.itemPositions.addListener(_onScrollPositionChanged);
+  }
+
+  void _onScrollPositionChanged() {
+    final nearBottom = _isNearBottom;
+    if (_showScrollPill == nearBottom) {
+      setState(() => _showScrollPill = !nearBottom);
+    }
+    ref.read(chatAtBottomProvider.notifier).state = nearBottom;
+    // Auto-mark as read when user scrolls back to bottom.
+    if (nearBottom) {
+      final msgs = ref.read(channelChatProvider)[_stateKey];
+      if (msgs != null && msgs.isNotEmpty) {
+        ref.read(unreadProvider.notifier).markChannelSeen(
+              widget.serverId, widget.channelId, msgs.last.messageId);
+      }
+    }
   }
 
   Future<void> _loadHistory() async {
@@ -117,6 +135,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
   @override
   void dispose() {
+    _itemPositionsListener.itemPositions.removeListener(_onScrollPositionChanged);
     _controller.dispose();
     _focusNode.dispose();
     _searchController.dispose();
@@ -770,9 +789,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             ),
           ),
 
-        // Messages list
+        // Messages list + unread pill overlay
         Expanded(
-          child: MessageActionBarScope(
+          child: Stack(
+            children: [
+          MessageActionBarScope(
           child: Builder(builder: (scopeContext) =>
           NotificationListener<ScrollNotification>(
             onNotification: (notification) {
@@ -1009,6 +1030,35 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           ),
           ),
           ),
+          ),
+              // Unread pill — only when new messages arrived while scrolled up
+              Builder(builder: (context) {
+                final unreadState = ref.watch(unreadProvider);
+                final unreadCount = unreadState
+                    .channelUnreadCounts['${widget.serverId}:${widget.channelId}'] ?? 0;
+                if (unreadCount > 0 && _showScrollPill) {
+                  return Positioned(
+                    bottom: HollowSpacing.md,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: _UnreadPill(
+                        count: unreadCount,
+                        onTap: () {
+                          _scrollToBottom();
+                          ref.read(unreadProvider.notifier).markChannelSeen(
+                                widget.serverId,
+                                widget.channelId,
+                                messages.last.messageId,
+                              );
+                        },
+                      ),
+                    ),
+                  );
+                }
+                return const SizedBox.shrink();
+              }),
+            ],
           ),
         ),
 
@@ -1428,6 +1478,44 @@ class _VaultHealthIndicator extends ConsumerWidget {
       child: Padding(
         padding: const EdgeInsets.only(left: HollowSpacing.sm),
         child: StatusDot(color: color, size: 7, pulse: health != VaultHealth.healthy),
+      ),
+    );
+  }
+}
+
+/// Floating pill that appears when scrolled away from the bottom.
+/// Tap to jump to newest messages.
+class _UnreadPill extends StatelessWidget {
+  final int count;
+  final VoidCallback onTap;
+  const _UnreadPill({required this.count, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final label = count == 1 ? '1 new message' : '$count new messages';
+    return HollowPressable(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(20),
+      backgroundColor: hollow.accent,
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.md,
+        vertical: HollowSpacing.xs + 2,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(LucideIcons.arrowDown, size: 14, color: hollow.textOnAccent),
+          const SizedBox(width: HollowSpacing.xs),
+          Text(
+            label,
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textOnAccent,
+              fontWeight: FontWeight.w600,
+              fontSize: 12,
+            ),
+          ),
+        ],
       ),
     );
   }

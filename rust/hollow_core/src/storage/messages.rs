@@ -949,6 +949,21 @@ impl MessageStore {
         Ok(messages)
     }
 
+    /// Total message count for a channel (for health check comparison).
+    pub fn count_channel_messages(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+    ) -> u32 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM channel_messages WHERE server_id = ?1 AND channel_id = ?2",
+                params![server_id, channel_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as u32
+    }
+
     /// Count channel messages newer than a given timestamp (for sync progress indication).
     pub fn count_channel_messages_since(
         &self,
