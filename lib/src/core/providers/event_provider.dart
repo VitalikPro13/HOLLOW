@@ -13,6 +13,7 @@ import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
@@ -166,6 +167,7 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_ServerCreated(:final serverId, :final name):
         debugPrint('[HOLLOW] Server created: $name ($serverId)');
         ref.read(serverListProvider.notifier).onServerCreated(serverId, name);
+        ref.read(serverStripLayoutProvider.notifier).onServerCreated(serverId);
 
       case NetworkEvent_ServerUpdated(:final serverId):
         debugPrint('[HOLLOW] Server updated: $serverId');
@@ -201,6 +203,7 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_ServerDeleted(:final serverId):
         debugPrint('[HOLLOW] Server deleted: $serverId');
         ref.read(serverListProvider.notifier).onServerDeleted(serverId);
+        ref.read(serverStripLayoutProvider.notifier).onServerDeleted(serverId);
         // Deselect if this was the active server.
         if (ref.read(selectedServerProvider) == serverId) {
           ref.read(selectedServerProvider.notifier).state = null;
@@ -219,6 +222,7 @@ class EventStreamNotifier extends Notifier<bool> {
         if (peerId == localId) {
           // Local user was kicked — remove server from UI.
           ref.read(serverListProvider.notifier).onServerDeleted(serverId);
+          ref.read(serverStripLayoutProvider.notifier).onServerDeleted(serverId);
           if (ref.read(selectedServerProvider) == serverId) {
             ref.read(selectedServerProvider.notifier).state = null;
             ref.read(selectedChannelProvider.notifier).state = null;
@@ -242,6 +246,7 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_ServerJoined(:final serverId, :final name):
         debugPrint('[HOLLOW] Server joined: $name ($serverId)');
         ref.read(serverListProvider.notifier).onServerCreated(serverId, name);
+        ref.read(serverStripLayoutProvider.notifier).onServerCreated(serverId);
         // Auto-select the newly joined server and load its channels
         ref.read(selectedServerProvider.notifier).state = serverId;
         ref

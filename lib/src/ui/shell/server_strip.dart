@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
+import 'package:hollow/src/core/models/strip_item.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
+import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -32,13 +35,11 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final servers = ref.watch(serverListProvider);
     final selectedServerId = ref.watch(selectedServerProvider);
 
-    // Capture initial server IDs on first build.
-    _initialServerIds ??= servers.keys.toSet();
+    _initialServerIds ??= ref.read(serverStripLayoutProvider.notifier).allServerIds();
 
-    final serverEntries = servers.values.toList();
+    final stripLayout = ref.watch(serverStripLayoutProvider);
 
     final unreadState = ref.watch(unreadProvider);
 
@@ -124,95 +125,59 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
           // Server icon list
           Expanded(
             child: ListView.builder(
-              itemCount: serverEntries.length,
+              // Items interleaved with reorder gaps: gap0, item0, gap1, item1, ..., gapN
+              itemCount: stripLayout.length * 2 + 1,
               padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
-              itemBuilder: (context, index) {
-                final server = serverEntries[index];
-                final isSelected = server.serverId == selectedServerId;
-                final isNew =
-                    !_initialServerIds!.contains(server.serverId);
-
-                final isServerMuted = ref.watch(notificationSettingsProvider.notifier)
-                    .isServerMuted(server.serverId);
-                final serverUnreads = isServerMuted
-                    ? 0
-                    : ref.watch(unreadProvider.notifier)
-                        .serverUnreadCount(server.serverId);
-                Widget icon = _ServerIconWithIndicator(
-                  isSelected: isSelected,
-                  unreadCount: isSelected ? 0 : serverUnreads,
-                  child: _ServerIcon(
-                    isSelected: isSelected,
-                    backgroundColor: _colorFromId(server.serverId),
-                    tooltip: server.name,
-                    onTap: () async {
-                      ref.read(selectedServerProvider.notifier).state =
-                          server.serverId;
-                      ref.read(selectedPeerProvider.notifier).state = null;
-                      ref.read(serverSettingsOpenProvider.notifier).state =
-                          false;
-
-                      // Restore last viewed channel, or auto-select first.
-                      final lastChannels =
-                          ref.read(lastChannelPerServerProvider);
-                      final lastChannel = lastChannels[server.serverId];
-
-                      await ref
-                          .read(channelListProvider.notifier)
-                          .loadForServer(server.serverId);
-                      ref
-                          .read(channelLayoutProvider.notifier)
-                          .loadForServer(server.serverId);
-
-                      final channels = ref.read(channelListProvider);
-                      String? channelToSelect;
-                      if (lastChannel != null &&
-                          channels.containsKey(lastChannel)) {
-                        channelToSelect = lastChannel;
-                      } else if (channels.isNotEmpty) {
-                        channelToSelect = channels.keys.first;
-                      }
-                      ref.read(selectedChannelProvider.notifier).state =
-                          channelToSelect;
-                      // Save auto-selected channel as last viewed.
-                      if (channelToSelect != null) {
-                        final map = Map<String, String>.from(
-                            ref.read(lastChannelPerServerProvider));
-                        map[server.serverId] = channelToSelect;
-                        ref.read(lastChannelPerServerProvider.notifier)
-                            .state = map;
-                      }
+              itemBuilder: (context, rawIndex) {
+                // Even indices = gap, odd indices = item
+                if (rawIndex.isEven) {
+                  final gapIndex = rawIndex ~/ 2;
+                  return _VerticalReorderGap(
+                    index: gapIndex,
+                    hollow: hollow,
+                    onAccept: (data) {
+                      ref.read(serverStripLayoutProvider.notifier)
+                          .reorder(data.sourceIndex, gapIndex);
                     },
-                    child: Builder(builder: (_) {
-                      final serverAvatar = ref.watch(serverAvatarProvider)[server.serverId];
-                      if (serverAvatar != null) {
-                        return ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: Image.memory(serverAvatar, width: 44, height: 44, fit: BoxFit.cover),
-                        );
-                      }
-                      return Text(
-                        _initialsFromName(server.name),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      );
-                    }),
-                  ),
-                );
+                  );
+                }
 
-                // Animate newly created servers (after app startup).
+                final index = rawIndex ~/ 2;
+                final item = stripLayout[index];
+
+                Widget icon = switch (item) {
+                  ServerStripItem(:final serverId) => _buildServerIcon(
+                      index: index,
+                      serverId: serverId,
+                      selectedServerId: selectedServerId,
+                      hollow: hollow,
+                    ),
+                  FolderStripItem() => _buildFolderIcon(
+                      index: index,
+                      folder: item,
+                      selectedServerId: selectedServerId,
+                      hollow: hollow,
+                    ),
+                };
+
+                // Animate newly created servers
+                final isNew = switch (item) {
+                  ServerStripItem(:final serverId) =>
+                    !_initialServerIds!.contains(serverId),
+                  FolderStripItem() => false,
+                };
                 if (isNew) {
                   icon = _ScaleBounceEntry(
-                    key: ValueKey('bounce-${server.serverId}'),
+                    key: ValueKey('bounce-${switch (item) {
+                      ServerStripItem(:final serverId) => serverId,
+                      FolderStripItem(:final id) => id,
+                    }}'),
                     child: icon,
                   );
                 }
 
                 return Padding(
-                  padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+                  padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
                   child: icon,
                 );
               },
@@ -224,6 +189,279 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       ),
     );
   }
+
+  Widget _buildServerIcon({
+    required int index,
+    required String serverId,
+    required String? selectedServerId,
+    required HollowTheme hollow,
+  }) {
+    final server = ref.watch(serverListProvider)[serverId];
+    final isSelected = serverId == selectedServerId;
+    final isServerMuted =
+        ref.watch(notificationSettingsProvider.notifier).isServerMuted(serverId);
+    final serverUnreads = isServerMuted
+        ? 0
+        : ref.watch(unreadProvider.notifier).serverUnreadCount(serverId);
+    final name = server?.name ?? '';
+
+    Widget serverIconChild = Builder(builder: (_) {
+      final serverAvatar = ref.watch(serverAvatarProvider)[serverId];
+      if (serverAvatar != null) {
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.memory(serverAvatar,
+              width: 44, height: 44, fit: BoxFit.cover),
+        );
+      }
+      return Text(
+        _initialsFromName(name.isNotEmpty ? name : serverId),
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 18,
+          fontWeight: FontWeight.w600,
+        ),
+      );
+    });
+
+    return DragTarget<_StripDragData>(
+      onWillAcceptWithDetails: (details) {
+        return details.data.serverId != null && details.data.serverId != serverId;
+      },
+      onAcceptWithDetails: (details) {
+        if (details.data.serverId != null) {
+          ref.read(serverStripLayoutProvider.notifier)
+              .createFolder(details.data.serverId!, serverId);
+        }
+      },
+      builder: (context, candidateData, rejectedData) {
+        final isMergeTarget = candidateData.isNotEmpty;
+        return LongPressDraggable<_StripDragData>(
+          data: _StripDragData(serverId: serverId, sourceIndex: index),
+          delay: const Duration(milliseconds: 150),
+          feedback: Material(
+            color: Colors.transparent,
+            child: AnimatedOpacity(
+              opacity: 0.8,
+              duration: Duration.zero,
+              child: _ServerIcon(
+                backgroundColor: _colorFromId(serverId),
+                child: serverIconChild,
+              ),
+            ),
+          ),
+          childWhenDragging: AnimatedOpacity(
+            opacity: 0.3,
+            duration: const Duration(milliseconds: 150),
+            child: _ServerIconWithIndicator(
+              isSelected: false,
+              child: _ServerIcon(
+                backgroundColor: _colorFromId(serverId),
+                child: serverIconChild,
+              ),
+            ),
+          ),
+          child: AnimatedScale(
+            scale: isMergeTarget ? 1.08 : 1.0,
+            duration: const Duration(milliseconds: 150),
+            child: _ServerIconWithIndicator(
+              isSelected: isSelected,
+              unreadCount: isSelected ? 0 : serverUnreads,
+              child: _ServerIcon(
+                isSelected: isSelected,
+                backgroundColor: _colorFromId(serverId),
+                tooltip: name,
+                onTap: () => _selectServer(serverId),
+                child: serverIconChild,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildFolderIcon({
+    required int index,
+    required FolderStripItem folder,
+    required String? selectedServerId,
+    required HollowTheme hollow,
+  }) {
+    final isSelected = folder.serverIds.contains(selectedServerId);
+    int folderUnreads = 0;
+    final notifS = ref.watch(notificationSettingsProvider.notifier);
+    for (final sid in folder.serverIds) {
+      if (!notifS.isServerMuted(sid)) {
+        folderUnreads +=
+            ref.watch(unreadProvider.notifier).serverUnreadCount(sid);
+      }
+    }
+
+    return DragTarget<_StripDragData>(
+      onWillAcceptWithDetails: (details) {
+        return details.data.serverId != null &&
+            !folder.serverIds.contains(details.data.serverId);
+      },
+      onAcceptWithDetails: (details) {
+        if (details.data.serverId != null) {
+          ref.read(serverStripLayoutProvider.notifier)
+              .addToFolder(folder.id, details.data.serverId!);
+        }
+      },
+      builder: (context, candidateData, rejectedData) {
+        final isDropTarget = candidateData.isNotEmpty;
+        return LongPressDraggable<_StripDragData>(
+          data: _StripDragData(folderId: folder.id, sourceIndex: index),
+          delay: const Duration(milliseconds: 150),
+          feedback: Material(
+            color: Colors.transparent,
+            child: AnimatedOpacity(
+              opacity: 0.8,
+              duration: Duration.zero,
+              child: _ServerIcon(
+                backgroundColor: hollow.elevated,
+                child: ServerFolderIcon(folder: folder, size: 48),
+              ),
+            ),
+          ),
+          childWhenDragging: AnimatedOpacity(
+            opacity: 0.3,
+            duration: const Duration(milliseconds: 150),
+            child: _ServerIconWithIndicator(
+              isSelected: false,
+              child: _ServerIcon(
+                backgroundColor: hollow.elevated,
+                child: ServerFolderIcon(folder: folder, size: 48),
+              ),
+            ),
+          ),
+          child: AnimatedScale(
+            scale: isDropTarget ? 1.08 : 1.0,
+            duration: const Duration(milliseconds: 150),
+            child: _ServerIconWithIndicator(
+              isSelected: isSelected,
+              unreadCount: isSelected ? 0 : folderUnreads,
+              child: GestureDetector(
+                onSecondaryTapUp: (_) {
+                  showFolderRenameDialog(
+                    context: context,
+                    ref: ref,
+                    folder: folder,
+                  );
+                },
+                child: _ServerIcon(
+                  isSelected: isSelected,
+                  showBorder: false,
+                  backgroundColor: hollow.elevated,
+                  tooltip: folder.name,
+                  onTap: () {
+                    final box = context.findRenderObject() as RenderBox?;
+                    if (box == null) return;
+                    final pos = box.localToGlobal(Offset.zero);
+                    showServerFolderPopup(
+                      context: context,
+                      ref: ref,
+                      folder: folder,
+                      anchor: Offset(pos.dx + 72, pos.dy + box.size.height / 2),
+                      isDock: false,
+                      onServerSelected: (serverId) => _selectServer(serverId),
+                      onRenameRequested: () {
+                        showFolderRenameDialog(
+                          context: context,
+                          ref: ref,
+                          folder: folder,
+                        );
+                      },
+                    );
+                  },
+                  child: ServerFolderIcon(folder: folder, size: 48),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _selectServer(String serverId) async {
+    ref.read(selectedServerProvider.notifier).state = serverId;
+    ref.read(selectedPeerProvider.notifier).state = null;
+    ref.read(serverSettingsOpenProvider.notifier).state = false;
+
+    final lastChannels = ref.read(lastChannelPerServerProvider);
+    final lastChannel = lastChannels[serverId];
+
+    await ref.read(channelListProvider.notifier).loadForServer(serverId);
+    ref.read(channelLayoutProvider.notifier).loadForServer(serverId);
+
+    final channels = ref.read(channelListProvider);
+    String? channelToSelect;
+    if (lastChannel != null && channels.containsKey(lastChannel)) {
+      channelToSelect = lastChannel;
+    } else if (channels.isNotEmpty) {
+      channelToSelect = channels.keys.first;
+    }
+    ref.read(selectedChannelProvider.notifier).state = channelToSelect;
+    if (channelToSelect != null) {
+      final map = Map<String, String>.from(
+          ref.read(lastChannelPerServerProvider));
+      map[serverId] = channelToSelect;
+      ref.read(lastChannelPerServerProvider.notifier).state = map;
+    }
+  }
+}
+
+/// Thin vertical drop zone between items for reordering.
+class _VerticalReorderGap extends StatelessWidget {
+  final int index;
+  final HollowTheme hollow;
+  final void Function(_StripDragData data) onAccept;
+
+  const _VerticalReorderGap({
+    required this.index,
+    required this.hollow,
+    required this.onAccept,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return DragTarget<_StripDragData>(
+      onWillAcceptWithDetails: (details) {
+        final src = details.data.sourceIndex;
+        return src != index && src != index - 1;
+      },
+      onAcceptWithDetails: (details) => onAccept(details.data),
+      builder: (context, candidateData, rejectedData) {
+        final isActive = candidateData.isNotEmpty;
+        return Center(
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 100),
+            width: 36,
+            height: isActive ? 4 : HollowSpacing.xs,
+            margin: EdgeInsets.symmetric(vertical: isActive ? 2 : 0),
+            decoration: BoxDecoration(
+              color: isActive ? hollow.accent : Colors.transparent,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Drag data for server strip items.
+class _StripDragData {
+  final String? serverId;
+  final String? folderId;
+  final int sourceIndex;
+
+  const _StripDragData({
+    this.serverId,
+    this.folderId,
+    required this.sourceIndex,
+  });
 }
 
 /// Deterministic color from an ID string (same logic as HollowAvatar).
@@ -348,6 +586,7 @@ class _ServerIcon extends StatefulWidget {
   final VoidCallback? onTap;
   final String? tooltip;
   final bool isSelected;
+  final bool showBorder;
 
   const _ServerIcon({
     required this.child,
@@ -355,6 +594,7 @@ class _ServerIcon extends StatefulWidget {
     this.onTap,
     this.tooltip,
     this.isSelected = false,
+    this.showBorder = true,
   });
 
   @override
@@ -390,10 +630,11 @@ class _ServerIconState extends State<_ServerIcon> {
           curve: Curves.easeOutCubic,
           width: 48,
           height: 48,
+          clipBehavior: Clip.antiAlias,
           decoration: BoxDecoration(
             color: effectiveBg,
             borderRadius: BorderRadius.circular(radius),
-            border: widget.isSelected
+            border: (widget.isSelected && widget.showBorder)
                 ? Border.all(
                     color: hollow.accent.withValues(alpha: 0.6),
                     width: 2,
