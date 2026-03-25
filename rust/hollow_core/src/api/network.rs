@@ -527,8 +527,7 @@ pub fn start_node() -> Result<String, String> {
     let passphrase = hex::encode(key_bytes);
 
     // Get DB path.
-    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
-    let hollow_dir = data_dir.join("hollow");
+    let hollow_dir = crate::identity::data_dir()?;
     std::fs::create_dir_all(&hollow_dir)
         .map_err(|e| format!("Failed to create data dir: {e}"))?;
     let db_path = hollow_dir

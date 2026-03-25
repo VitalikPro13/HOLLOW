@@ -100,8 +100,7 @@ pub fn remove_channel(server_id: String, channel_id: String) -> Result<(), Strin
 /// Get all servers the user has joined. Reads from the local DB.
 #[frb]
 pub fn get_joined_servers() -> Result<Vec<ServerFfi>, String> {
-    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
-    let hollow_dir = data_dir.join("hollow");
+    let hollow_dir = crate::identity::data_dir()?;
     let db_path = hollow_dir
         .join("messages.db")
         .to_str()
@@ -138,8 +137,7 @@ pub fn get_joined_servers() -> Result<Vec<ServerFfi>, String> {
 /// Get channels for a specific server. Reads from the local DB.
 #[frb]
 pub fn get_server_channels(server_id: String) -> Result<Vec<ChannelFfi>, String> {
-    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
-    let hollow_dir = data_dir.join("hollow");
+    let hollow_dir = crate::identity::data_dir()?;
     let db_path = hollow_dir
         .join("messages.db")
         .to_str()
@@ -178,8 +176,7 @@ pub fn get_server_channels(server_id: String) -> Result<Vec<ChannelFfi>, String>
 /// Get members for a specific server. Reads from the local DB.
 #[frb]
 pub fn get_server_members(server_id: String) -> Result<Vec<MemberFfi>, String> {
-    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
-    let hollow_dir = data_dir.join("hollow");
+    let hollow_dir = crate::identity::data_dir()?;
     let db_path = hollow_dir
         .join("messages.db")
         .to_str()
@@ -219,8 +216,7 @@ pub fn get_server_members(server_id: String) -> Result<Vec<MemberFfi>, String> {
 /// Get a server setting value by key. Returns empty string if not set.
 #[frb]
 pub fn get_server_setting(server_id: String, key: String) -> Result<String, String> {
-    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
-    let hollow_dir = data_dir.join("hollow");
+    let hollow_dir = crate::identity::data_dir()?;
     let db_path = hollow_dir
         .join("messages.db")
         .to_str()
@@ -361,8 +357,7 @@ pub fn join_server(server_id: String) -> Result<(), String> {
 /// Returns "owner", "admin", "moderator", or "member".
 #[frb]
 pub fn get_my_role(server_id: String) -> Result<String, String> {
-    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
-    let hollow_dir = data_dir.join("hollow");
+    let hollow_dir = crate::identity::data_dir()?;
     let db_path = hollow_dir
         .join("messages.db")
         .to_str()
@@ -392,8 +387,7 @@ pub fn get_my_role(server_id: String) -> Result<String, String> {
 /// Get the local user's permissions bitmask in a server.
 #[frb]
 pub fn get_my_permissions(server_id: String) -> Result<u32, String> {
-    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
-    let hollow_dir = data_dir.join("hollow");
+    let hollow_dir = crate::identity::data_dir()?;
     let db_path = hollow_dir
         .join("messages.db")
         .to_str()
@@ -504,8 +498,7 @@ pub fn update_channel_layout(server_id: String, layout_json: String) -> Result<(
 /// Get the channel layout for a server. Returns a JSON array of ChannelLayoutItem.
 #[frb]
 pub fn get_channel_layout(server_id: String) -> Result<String, String> {
-    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
-    let hollow_dir = data_dir.join("hollow");
+    let hollow_dir = crate::identity::data_dir()?;
     let db_path = hollow_dir
         .join("messages.db")
         .to_str()
@@ -575,8 +568,7 @@ pub fn unpin_message(server_id: String, channel_id: String, message_id: String) 
 /// Get pinned message IDs for a channel.
 #[frb]
 pub fn get_pinned_messages(server_id: String, channel_id: String) -> Result<Vec<String>, String> {
-    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
-    let hollow_dir = data_dir.join("hollow");
+    let hollow_dir = crate::identity::data_dir()?;
     let db_path = hollow_dir
         .join("messages.db")
         .to_str()
@@ -642,8 +634,7 @@ pub fn set_storage_pledge(server_id: String, pledge_bytes: u64) -> Result<(), St
 /// Get storage stats for a server (pledges from CRDT state, usage from vault_shards table).
 #[frb]
 pub fn get_storage_stats(server_id: String) -> Result<StorageStatsFfi, String> {
-    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
-    let hollow_dir = data_dir.join("hollow");
+    let hollow_dir = crate::identity::data_dir()?;
     let db_path = hollow_dir
         .join("messages.db")
         .to_str()
@@ -673,25 +664,32 @@ pub fn get_storage_stats(server_id: String) -> Result<StorageStatsFfi, String> {
     let member_count = state.members.len() as u32;
     let min_pledge_mb = state.min_pledge_mb();
 
-    // Load storage usage: vault shards + local files for this server.
+    // Load storage usage.
     let vault_dir = hollow_dir.join("vault");
-    let vault_used = if let Ok(content_store) =
+    let (server_total, my_local) = if let Ok(content_store) =
         crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir)
     {
-        content_store.total_storage_used(&server_id).unwrap_or(0)
+        // Server total: sum of original file sizes from all manifests (what the server "has").
+        let manifest_total = content_store.total_manifest_size(&server_id).unwrap_or(0);
+        // Local: vault shards stored on this machine.
+        let local_shards = content_store.total_storage_used(&server_id).unwrap_or(0);
+        (manifest_total, local_shards)
     } else {
-        0
+        (0, 0)
     };
 
     // Also count completed files stored locally for this server (P2P file sharing).
     let file_used = store.total_file_storage_for_server(&server_id).unwrap_or(0);
-    let total_used_bytes = vault_used + file_used;
+
+    // Server Storage: use manifest total if vault has data, otherwise P2P file total.
+    // Don't double-count (manifests already represent the file sizes).
+    let total_server = if server_total > 0 { server_total } else { file_used };
 
     Ok(StorageStatsFfi {
         total_pledged_bytes,
-        total_used_bytes,
+        total_used_bytes: total_server,
         my_pledge_bytes,
-        my_used_bytes: total_used_bytes,
+        my_used_bytes: my_local + file_used,
         member_count,
         min_pledge_mb,
     })
@@ -787,8 +785,7 @@ pub fn vault_upload_file(
 #[frb]
 pub fn vault_download_file(server_id: String, content_id: String) -> Result<String, String> {
     // Quick cache check — no node needed
-    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
-    let hollow_dir = data_dir.join("hollow");
+    let hollow_dir = crate::identity::data_dir()?;
     let db_path = hollow_dir
         .join("messages.db")
         .to_str()

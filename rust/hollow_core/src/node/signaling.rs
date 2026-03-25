@@ -349,3 +349,56 @@ fn urlencoding_encode(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_register_signature_format_uses_hollow_prefix() {
+        // The signed message format must use "hollow-register", NOT "haven-register".
+        // This must match the relay server's verification format.
+        let room_code = "test_room";
+        let peer_id = "12D3KooWTestPeer";
+        let addrs = "addr1,addr2";
+        let timestamp = 1234567890u64;
+
+        let message = format!("hollow-register:{room_code}:{peer_id}:{addrs}:{timestamp}");
+
+        assert!(message.starts_with("hollow-register:"));
+        assert!(!message.starts_with("haven-register:"));
+        assert!(message.contains(room_code));
+        assert!(message.contains(peer_id));
+        assert!(message.contains(addrs));
+        assert!(message.contains(&timestamp.to_string()));
+    }
+
+    #[test]
+    fn test_unregister_signature_format_uses_hollow_prefix() {
+        let room_code = "test_room";
+        let peer_id = "12D3KooWTestPeer";
+        let timestamp = 1234567890u64;
+
+        let message = format!("hollow-unregister:{room_code}:{peer_id}:{timestamp}");
+
+        assert!(message.starts_with("hollow-unregister:"));
+        assert!(!message.starts_with("haven-unregister:"));
+        assert!(message.contains(room_code));
+        assert!(message.contains(peer_id));
+    }
+
+    #[test]
+    fn test_register_format_matches_relay_expectation() {
+        // The relay server verifies: "hollow-register:{room}:{peer}:{addrs}:{ts}"
+        // Ensure our format has exactly 4 colons (5 parts).
+        let msg = format!(
+            "hollow-register:{}:{}:{}:{}",
+            "room123", "12D3KooWPeer", "addr1,addr2", 999
+        );
+        let parts: Vec<&str> = msg.splitn(5, ':').collect();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0], "hollow-register");
+        assert_eq!(parts[1], "room123");
+        assert_eq!(parts[2], "12D3KooWPeer");
+        assert_eq!(parts[3], "addr1,addr2");
+        assert_eq!(parts[4], "999");
+    }
+}

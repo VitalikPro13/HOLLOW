@@ -155,6 +155,8 @@ class FileTransferNotifier
   }
 
   /// Handle FileHeaderReceived event.
+  /// [isVaultMode] — if true (6+ member server), file data arrives via vault shards,
+  /// not P2P streaming, so we don't mark it as "downloading".
   void onFileHeaderReceived({
     required String fileId,
     required String fileName,
@@ -162,6 +164,7 @@ class FileTransferNotifier
     required bool isImage,
     int? width,
     int? height,
+    bool isVaultMode = false,
   }) {
     final updated = Map<String, FileTransferState>.from(state);
     updated[fileId] = FileTransferState(
@@ -172,7 +175,7 @@ class FileTransferNotifier
       isImage: isImage,
       width: width,
       height: height,
-      isDownloading: true, // Stream transfer in flight.
+      isDownloading: !isVaultMode, // Only downloading if P2P stream expected.
     );
     state = updated;
   }

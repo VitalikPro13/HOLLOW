@@ -1167,7 +1167,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [X] Channel sidebar button: `LucideIcons.hardDrive` icon between invite and settings buttons
   - [X] Rebalance event dispatch: 3 case branches (RebalanceStarted/Progress/Completed) in event_provider.dart
   - [X] Uses existing `getStorageStats()` FFI + `getServerSetting()` for data
-  - [ ] Dart UI integration for vault upload: wire vault_upload_file() into channel file send flow — deferred to follow-up
+  - [X] Dart UI integration for vault upload: wire vault_upload_file() into channel file send flow — deferred to follow-up
   - [ ] Per-file indicators in chat — deferred to follow-up
   - [ ] Vault status in member panel — deferred to follow-up
   - [ ] VaultFileWidget shimmer — deferred to follow-up
@@ -1227,6 +1227,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 - [X] Change locally someone else's nickname (only for you to see)
 - [X] Custom background for the app / Custom color picker chooser
 - [X] GIF support for chats and as animated avatars/banners for Profiles
+- [ ] Different fonts/elements like hearts or sparkles on Profile and maybe nicknames
 - [ ] **Scaling (deferred from Phase 4):**
   - [ ] Connection subset management (6-12 peers per server, peer scoring, rotation) — defer until scaling pain
   - [ ] Channel-level CRDT sharding (split ServerState for scale) — defer until ServerState is too large

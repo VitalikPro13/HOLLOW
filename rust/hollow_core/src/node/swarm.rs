@@ -1726,11 +1726,15 @@ async fn run_swarm(
     let mut pending_file_streams: HashMap<String, PendingFileStream> = HashMap::new();
     let mut pending_shard_streams: HashMap<String, PendingShardStream> = HashMap::new();
 
+    // Pending vault downloads waiting for remote shards.
+    // Key: content_id, Value: (server_id, shards_needed: k, shards_requested: count)
+    let mut pending_vault_downloads: HashMap<String, (String, usize, usize)> = HashMap::new();
+
     // -- CRDT state (Phase 3) --
     // Server states keyed by server_id. Reload from DB so servers survive restarts.
     let mut server_states: HashMap<String, ServerState> = HashMap::new();
     {
-        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+        let data_dir = crate::identity::data_dir().unwrap_or_default();
         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -1762,7 +1766,7 @@ async fn run_swarm(
     // -- MLS state --
     let local_peer_str = swarm.local_peer_id().to_string();
     let mut mls: Option<MlsManager> = {
-        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+        let data_dir = crate::identity::data_dir().unwrap_or_default();
         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -1805,7 +1809,7 @@ async fn run_swarm(
                 if let Ok(signer) = mgr.signer_bytes() {
                     if let Ok(cred) = mgr.credential_bytes() {
                         if let Ok(storage) = mgr.serialize_storage() {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -1833,6 +1837,14 @@ async fn run_swarm(
     // Track server_ids for which we've already requested MLS bootstrap (KeyPackage sent to owner).
     // Prevents spamming the owner on every MlsChannelMessage for an unknown group.
     let mut mls_bootstrap_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // MLS batch addition queue: collect KeyPackages and process them in a single commit.
+    let mut pending_mls_key_packages: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
+    let mut mls_batch_timer = tokio::time::interval(Duration::from_secs(2));
+    mls_batch_timer.tick().await; // consume immediate first tick
+
+    // MLS decrypt failure counter per server — triggers recovery after 3 consecutive failures.
+    let mut mls_decrypt_failures: HashMap<String, u32> = HashMap::new();
 
     // Multi-peer fan-out sync coordinator.
     // Collects connected peers for 500ms, then assigns channels evenly across peers.
@@ -1944,7 +1956,7 @@ async fn run_swarm(
                         // Persist sent DM locally with the same Rust-generated timestamp.
                         // This ensures DM sync timestamps are consistent (no Dart DateTime.now() mismatch).
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2096,7 +2108,7 @@ async fn run_swarm(
                         }
 
                         // Persist locally with same timestamp as sent.
-                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2140,7 +2152,7 @@ async fn run_swarm(
                                 message: format!("[CRDT] Server state saved: {server_id}"),
                             }).await;
                             // We'll persist through the storage API
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2164,7 +2176,7 @@ async fn run_swarm(
 
                             // Re-persist with pledge included
                             if let Ok(json) = serde_json::to_string(&state) {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2231,7 +2243,7 @@ async fn run_swarm(
 
                             // Persist
                             if let Ok(json) = serde_json::to_string(&state) {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2291,7 +2303,7 @@ async fn run_swarm(
 
                             // Persist
                             if let Ok(json) = serde_json::to_string(&state) {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2346,7 +2358,7 @@ async fn run_swarm(
 
                             // Persist
                             if let Ok(json) = serde_json::to_string(&state) {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2401,7 +2413,7 @@ async fn run_swarm(
 
                             // Persist
                             if let Ok(json) = serde_json::to_string(&state) {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2450,7 +2462,7 @@ async fn run_swarm(
 
                             // Persist
                             if let Ok(json) = serde_json::to_string(&state) {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2532,7 +2544,7 @@ async fn run_swarm(
                         }).await;
 
                         // Remove from DB
-                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2624,7 +2636,7 @@ async fn run_swarm(
 
                             // Persist
                             if let Ok(json) = serde_json::to_string(&state) {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2688,7 +2700,7 @@ async fn run_swarm(
 
                             // Persist
                             if let Ok(json) = serde_json::to_string(&state) {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2789,7 +2801,7 @@ async fn run_swarm(
 
                             // Persist
                             if let Ok(json) = serde_json::to_string(&state) {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2828,7 +2840,7 @@ async fn run_swarm(
                     NodeCommand::RequestChannelSync { server_id, channel_id } => {
                         // On-demand sync when user opens a channel.
                         if let Some(state) = server_states.get(&server_id) {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2882,7 +2894,7 @@ async fn run_swarm(
 
                         // Save our own profile to DB.
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -2942,7 +2954,7 @@ async fn run_swarm(
 
                         // Update local DB (preserves old text in message_edits table).
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3047,7 +3059,7 @@ async fn run_swarm(
 
                         // Update local DB.
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3114,7 +3126,7 @@ async fn run_swarm(
 
                         // Hide in local DB (preserves text in message_deletions table).
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3217,7 +3229,7 @@ async fn run_swarm(
 
                         // Hide in local DB.
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3281,7 +3293,7 @@ async fn run_swarm(
 
                         // Save to local DB.
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3385,7 +3397,7 @@ async fn run_swarm(
 
                         // Save to local DB.
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3451,7 +3463,7 @@ async fn run_swarm(
 
                         // Remove from local DB.
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3555,7 +3567,7 @@ async fn run_swarm(
 
                         // Remove from local DB.
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3608,7 +3620,7 @@ async fn run_swarm(
 
                         // Save as pending outgoing.
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3657,7 +3669,7 @@ async fn run_swarm(
 
                         // Update to accepted.
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3709,7 +3721,7 @@ async fn run_swarm(
 
                         // Remove from friends table.
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3735,7 +3747,7 @@ async fn run_swarm(
                         hollow_log!("[HOLLOW-FRIENDS] Removing friend {peer_id_str}");
 
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3804,7 +3816,7 @@ async fn run_swarm(
                             let _ = state.apply_op(&op);
 
                             if let Ok(json) = serde_json::to_string(&state) {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3854,7 +3866,7 @@ async fn run_swarm(
                             let _ = state.apply_op(&op);
 
                             if let Ok(json) = serde_json::to_string(&state) {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3906,7 +3918,7 @@ async fn run_swarm(
                             let _ = state.apply_op(&op);
 
                             if let Ok(json) = serde_json::to_string(&state) {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3954,7 +3966,7 @@ async fn run_swarm(
                             let _ = state.apply_op(&op);
 
                             if let Ok(json) = serde_json::to_string(&state) {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -3991,7 +4003,7 @@ async fn run_swarm(
                     NodeCommand::VaultDownloadFile { server_id, content_id } => {
                         hollow_log!("[HOLLOW-VAULT] VaultDownloadFile: cid={content_id} in {server_id}");
 
-                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                         let vault_dir = data_dir.join("vault");
                         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -4046,7 +4058,41 @@ async fn run_swarm(
                                     let path = crate::vault::pipeline::write_to_cache(&content_id, &ext, &plaintext)?;
                                     Ok(path.to_string_lossy().to_string())
                                 } else {
-                                    Err(format!("Not enough local shards: have {available}, need {k}. Network fetch not yet implemented."))
+                                    // Not enough local shards — collect placement info for network fetch.
+                                    // Try saved placements first; if empty (non-uploader), recompute deterministically.
+                                    let mut placements = cs.load_placements(&content_id).unwrap_or_default();
+                                    if placements.is_empty() {
+                                        // Recompute from server state using the same deterministic algorithm
+                                        if let Some(state) = server_states.get(&server_id) {
+                                            let members: Vec<String> = state.members_list().iter().map(|m| m.peer_id.clone()).collect();
+                                            let pledges: std::collections::HashMap<String, u64> = members.iter()
+                                                .map(|pid| (pid.clone(), state.get_storage_pledge(pid)))
+                                                .collect();
+                                            let mode = crate::vault::adaptive::compute_adaptive_params(members.len());
+                                            let computed = crate::vault::placement::place(&content_id, &mode, &members, &pledges);
+                                            placements = computed.iter().map(|sp| crate::vault::content_store::PlacementRecord {
+                                                content_id: content_id.clone(),
+                                                shard_index: sp.shard_index,
+                                                target_peer: sp.target_peer.clone(),
+                                                server_id: server_id.clone(),
+                                                shard_key: sp.shard_key.clone(),
+                                                stored_at: 0,
+                                                confirmed: false,
+                                            }).collect();
+                                        }
+                                    }
+                                    let missing_indices: Vec<usize> = (0..n)
+                                        .filter(|i| packed[*i].is_none())
+                                        .collect();
+                                    // Encode placement info into error string for post-closure processing
+                                    let placement_info: Vec<String> = missing_indices.iter()
+                                        .filter_map(|idx| {
+                                            placements.iter()
+                                                .find(|p| p.shard_index as usize == *idx)
+                                                .map(|p| format!("{}:{}:{}", idx, p.target_peer, p.shard_key))
+                                        })
+                                        .collect();
+                                    Err(format!("__NEED_SHARDS__:{}:{}:{}", available, k, placement_info.join("|")))
                                 }
                             }
                         })();
@@ -4057,6 +4103,63 @@ async fn run_swarm(
                                 let _ = event_tx.send(NetworkEvent::VaultDownloadComplete {
                                     server_id, content_id, disk_path,
                                 }).await;
+                            }
+                            Err(e) if e.starts_with("__NEED_SHARDS__:") => {
+                                // Parse placement info and request shards from connected peers
+                                let parts: Vec<&str> = e.splitn(4, ':').collect();
+                                if parts.len() >= 4 {
+                                    let available: usize = parts[1].parse().unwrap_or(0);
+                                    let k: usize = parts[2].parse().unwrap_or(3);
+                                    let needed = k - available;
+                                    let placement_entries: Vec<&str> = parts[3].split('|').filter(|s| !s.is_empty()).collect();
+
+                                    let mut requested = 0usize;
+                                    for entry in &placement_entries {
+                                        if requested >= needed { break; }
+                                        let ep: Vec<&str> = entry.splitn(3, ':').collect();
+                                        if ep.len() == 3 {
+                                            let si: u16 = ep[0].parse().unwrap_or(0);
+                                            let target_peer = ep[1];
+                                            let shard_key = ep[2];
+                                            if let Ok(pid) = target_peer.parse::<PeerId>() {
+                                                if connected_peers.contains(&pid) && olm.has_session(target_peer) {
+                                                    let envelope = MessageEnvelope::ShardRequest {
+                                                        sid: server_id.clone(),
+                                                        cid: content_id.clone(),
+                                                        si,
+                                                        sk: shard_key.to_string(),
+                                                    };
+                                                    let json = serde_json::to_string(&envelope).unwrap_or_default();
+                                                    send_encrypted_message(
+                                                        &mut swarm, &mut olm, &crypto_store,
+                                                        &mut pending_requests, &mut outbound_message_text,
+                                                        &pid, target_peer, &json, &event_tx,
+                                                    ).await;
+                                                    hollow_log!("[HOLLOW-VAULT] Requested shard si={si} from {target_peer}");
+                                                    requested += 1;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if requested > 0 {
+                                        pending_vault_downloads.insert(
+                                            content_id.clone(),
+                                            (server_id.clone(), k, requested),
+                                        );
+                                        hollow_log!("[HOLLOW-VAULT] Requested {requested} shards for {content_id} (have {available}, need {k})");
+                                        let _ = event_tx.send(NetworkEvent::VaultDownloadProgress {
+                                            server_id, content_id,
+                                            phase: "Fetching shards from peers...".into(),
+                                            progress: 0.1,
+                                        }).await;
+                                    } else {
+                                        let _ = event_tx.send(NetworkEvent::VaultDownloadFailed {
+                                            server_id, content_id,
+                                            error: format!("Not enough shards: have {available}, need {k}. No connected peers have the missing shards."),
+                                        }).await;
+                                    }
+                                }
                             }
                             Err(e) => {
                                 hollow_log!("[HOLLOW-VAULT] Download failed: {e}");
@@ -4099,7 +4202,7 @@ async fn run_swarm(
                             )?;
 
                             // Open ContentStore for local operations
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let vault_dir = data_dir.join("vault");
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -4230,7 +4333,7 @@ async fn run_swarm(
                             hollow_log!("[HOLLOW-VAULT] Deleting vault content {content_id} in {server_id}");
 
                             // Delete local shards and placements
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let vault_dir = data_dir.join("vault");
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -4450,7 +4553,7 @@ async fn run_swarm(
                         }
 
                         {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -4495,7 +4598,7 @@ async fn run_swarm(
 
                             // Store the text message.
                             {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -4589,7 +4692,7 @@ async fn run_swarm(
 
                             // Store the text message.
                             {
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -4626,7 +4729,13 @@ async fn run_swarm(
                             }
 
                             // Send FileHeader + file bytes via stream to connected peers.
-                            // File data is NOT queued for offline peers — they get it via sync.
+                            // Skip full-file streaming in erasure coding mode (6+ members) —
+                            // vault shards are distributed separately via VaultUploadFile.
+                            let member_count = server_states.get(&sid)
+                                .map(|s| s.members.len())
+                                .unwrap_or(0);
+                            let use_vault_only = member_count >= 6;
+
                             let encrypted = crate::vault::pipeline::aes_encrypt(&final_data);
                             if let Ok(enc) = encrypted {
                                 let aes_key_hex = hex::encode(&enc.key);
@@ -4659,6 +4768,25 @@ async fn run_swarm(
                                 let ct_size = enc.ciphertext.len() as u64;
 
                                 if let Some(state) = server_states.get(&sid) {
+                                    if use_vault_only {
+                                        // Erasure coding mode: send only the message metadata (FileHeader)
+                                        // via Olm so peers know a file exists, but do NOT stream full bytes.
+                                        // Vault shards handle actual data distribution.
+                                        for member_peer_str in state.members.keys() {
+                                            if member_peer_str == &local_peer { continue; }
+                                            if let Ok(pid) = member_peer_str.parse::<PeerId>() {
+                                                if connected_peers.contains(&pid) && olm.has_session(member_peer_str) {
+                                                    send_encrypted_message(
+                                                        &mut swarm, &mut olm, &crypto_store,
+                                                        &mut pending_requests, &mut outbound_message_text,
+                                                        &pid, member_peer_str, &header_json, &event_tx,
+                                                    ).await;
+                                                }
+                                            }
+                                        }
+                                        hollow_log!("[HOLLOW-FILE] Erasure coding active ({member_count} members) — skipping full-file streaming, vault handles shard distribution");
+                                    } else {
+                                    // Full replication: stream entire encrypted file to each member.
                                     for member_peer_str in state.members.keys() {
                                         if member_peer_str == &local_peer { continue; }
                                         if let Ok(pid) = member_peer_str.parse::<PeerId>() {
@@ -4679,6 +4807,7 @@ async fn run_swarm(
                                                 );
                                             }
                                         }
+                                    }
                                     }
                                 }
                             }
@@ -4778,7 +4907,7 @@ async fn run_swarm(
 
                                 // Register + bootstrap DM room codes for all accepted friends.
                                 {
-                                    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
                                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                     if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -4918,6 +5047,8 @@ async fn run_swarm(
                                             &mut pending_file_streams,
                                             &mut pending_shard_streams,
                                             &mut decrypt_fail_cooldown,
+                                            &mut pending_mls_key_packages,
+                                            &mut mls_decrypt_failures,
                                             peer,
                                             request,
                                             channel,
@@ -5004,7 +5135,7 @@ async fn run_swarm(
                                                                     let final_path = file_transfer::final_file_path(&file_id, &pfs.ext);
                                                                     if let Ok(()) = std::fs::write(&final_path, &plaintext) {
                                                                         // Update DB.
-                                                                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                                                                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                                                         if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                                                                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -5047,7 +5178,7 @@ async fn run_swarm(
 
                                                 if let Some(pss) = pending_shard_streams.remove(&key) {
                                                     if let Ok(shard_bytes) = std::fs::read(&request.temp_path) {
-                                                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                                                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                                         let vault_dir = data_dir.join("vault");
                                                         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -5060,11 +5191,57 @@ async fn run_swarm(
                                                             );
                                                             hollow_log!("[HOLLOW-STREAM] Shard stored: cid={content_id} si={shard_index}");
                                                             let _ = event_tx.send(NetworkEvent::ShardStored {
-                                                                server_id: pss.server_id,
-                                                                content_id,
+                                                                server_id: pss.server_id.clone(),
+                                                                content_id: content_id.clone(),
                                                                 shard_index,
                                                                 from_peer: peer_str.clone(),
                                                             }).await;
+
+                                                            // Check if a pending download can now be completed
+                                                            if let Some((dl_server_id, dl_k, _)) = pending_vault_downloads.remove(&content_id) {
+                                                                hollow_log!("[HOLLOW-VAULT] Shard arrived for pending download — attempting reconstruction: {content_id}");
+                                                                // Re-check local shards and attempt reconstruction
+                                                                if let Ok(manifest) = content_store.load_manifest(&content_id) {
+                                                                    if let Some(manifest) = manifest {
+                                                                        let n = dl_k + manifest.m as usize;
+                                                                        let local_shards = content_store.list_content_shards(&dl_server_id, &content_id).unwrap_or_default();
+                                                                        let mut packed: Vec<Option<Vec<u8>>> = vec![None; n];
+                                                                        for record in &local_shards {
+                                                                            let idx = record.shard_index as usize;
+                                                                            if idx < n {
+                                                                                if let Ok(data) = content_store.read_shard_unchecked(&dl_server_id, &record.shard_key) {
+                                                                                    packed[idx] = Some(data);
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                        let avail = packed.iter().filter(|s| s.is_some()).count();
+                                                                        if avail >= dl_k {
+                                                                            let ext = crate::vault::pipeline::ext_from_filename(&manifest.file_name);
+                                                                            match crate::vault::pipeline::reconstruct_file(&manifest, &packed) {
+                                                                                Ok(plaintext) => {
+                                                                                    if let Ok(path) = crate::vault::pipeline::write_to_cache(&content_id, &ext, &plaintext) {
+                                                                                        let disk_path = path.to_string_lossy().to_string();
+                                                                                        hollow_log!("[HOLLOW-VAULT] Download reconstructed: {disk_path}");
+                                                                                        let _ = event_tx.send(NetworkEvent::VaultDownloadComplete {
+                                                                                            server_id: dl_server_id, content_id: content_id.clone(), disk_path,
+                                                                                        }).await;
+                                                                                    }
+                                                                                }
+                                                                                Err(e) => {
+                                                                                    hollow_log!("[HOLLOW-VAULT] Reconstruction failed: {e}");
+                                                                                    let _ = event_tx.send(NetworkEvent::VaultDownloadFailed {
+                                                                                        server_id: dl_server_id, content_id: content_id.clone(), error: e,
+                                                                                    }).await;
+                                                                                }
+                                                                            }
+                                                                        } else {
+                                                                            // Still not enough — put back in pending
+                                                                            pending_vault_downloads.insert(content_id.clone(), (dl_server_id, dl_k, 0));
+                                                                            hollow_log!("[HOLLOW-VAULT] Still need more shards: have {avail}, need {dl_k}");
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                     let _ = std::fs::remove_file(&request.temp_path);
@@ -5521,7 +5698,7 @@ async fn run_swarm(
                                         // the coordinator collects peers for 500ms, then assigns
                                         // channels evenly across all available peers.
                                         {
-                                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                             if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -5568,7 +5745,7 @@ async fn run_swarm(
                                 // DM sync — request missed DMs from this peer.
                                 {
                                     let dm_peer_str = peer_id.to_string();
-                                    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
                                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                     if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -5589,7 +5766,7 @@ async fn run_swarm(
 
                                 // Send our profile to the newly connected peer.
                                 {
-                                    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
                                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                     if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -5937,6 +6114,71 @@ async fn run_swarm(
                 }
             }
 
+            // MLS batch addition timer — process queued KeyPackages as a single commit.
+            _ = mls_batch_timer.tick() => {
+                if let Some(ref mut mls_mgr) = mls {
+                    let server_ids: Vec<String> = pending_mls_key_packages.keys().cloned().collect();
+                    for server_id in server_ids {
+                        if let Some(queued) = pending_mls_key_packages.remove(&server_id) {
+                            if queued.is_empty() { continue; }
+
+                            hollow_log!("[HOLLOW-MLS] Processing batch of {} KeyPackages for {server_id}", queued.len());
+
+                            match mls_mgr.add_members_batch(&server_id, &queued) {
+                                Ok((commit_bytes, welcome_bytes, added_peers)) => {
+                                    if let Err(e) = mls_mgr.merge_pending_commit(&server_id) {
+                                        hollow_log!("[HOLLOW-MLS] Failed to merge batch commit: {e}");
+                                        continue;
+                                    }
+                                    persist_mls_state(mls_mgr, &bundle_keypair);
+
+                                    let welcome_b64 = base64::engine::general_purpose::STANDARD.encode(&welcome_bytes);
+                                    let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
+
+                                    // Send Welcome to all new joiners.
+                                    for peer_id_str in &added_peers {
+                                        if let Ok(pid) = peer_id_str.parse::<PeerId>() {
+                                            if connected_peers.contains(&pid) {
+                                                swarm.behaviour_mut().messaging.send_request(
+                                                    &pid,
+                                                    HavenMessage::MlsWelcome {
+                                                        server_id: server_id.clone(),
+                                                        welcome: welcome_b64.clone(),
+                                                    },
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    // Broadcast single Commit to all existing members.
+                                    if let Some(state) = server_states.get(&server_id) {
+                                        let local_peer = swarm.local_peer_id().to_string();
+                                        for member_peer_str in state.members.keys() {
+                                            if member_peer_str == &local_peer { continue; }
+                                            if added_peers.contains(member_peer_str) { continue; }
+                                            if let Ok(pid) = member_peer_str.parse::<PeerId>() {
+                                                if connected_peers.contains(&pid) {
+                                                    swarm.behaviour_mut().messaging.send_request(
+                                                        &pid,
+                                                        HavenMessage::MlsCommit {
+                                                            server_id: server_id.clone(),
+                                                            commit: commit_b64.clone(),
+                                                        },
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    hollow_log!("[HOLLOW-MLS] Batch-added {} members to server {server_id}: {:?}", added_peers.len(), added_peers);
+                                }
+                                Err(e) => hollow_log!("[HOLLOW-MLS] Batch add failed for {server_id}: {e}"),
+                            }
+                        }
+                    }
+                }
+            }
+
             // Periodic re-bootstrap for mutual peer discovery.
             _ = rebootstrap_timer.tick() => {
                 // Clear disconnected peers that have cooled down past the stale threshold.
@@ -5953,13 +6195,31 @@ async fn run_swarm(
                         hollow_log!("[HOLLOW-SWARM] Cleared {cleared} cooled-down disconnected peers ({} still cooling)", disconnected_peers.len());
                     }
                 }
+                // Re-register with signaling to prevent stale cleanup (3-min threshold).
+                let reg_addrs: Vec<String> = known_addresses.iter()
+                    .filter(|a| is_registerable_address(a))
+                    .cloned()
+                    .collect();
+
                 if let Some(room) = &active_room {
+                    if !reg_addrs.is_empty() {
+                        let _ = sig_cmd_tx.send(SignalingCmd::Register {
+                            room_code: room.clone(),
+                            addresses: reg_addrs.clone(),
+                        }).await;
+                    }
                     let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
                         room_code: room.clone(),
                     }).await;
                 }
-                // Also re-bootstrap all server signaling rooms.
+                // Also re-register + re-bootstrap all server signaling rooms.
                 for sid in server_states.keys() {
+                    if !reg_addrs.is_empty() {
+                        let _ = sig_cmd_tx.send(SignalingCmd::Register {
+                            room_code: sid.clone(),
+                            addresses: reg_addrs.clone(),
+                        }).await;
+                    }
                     let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
                         room_code: sid.clone(),
                     }).await;
@@ -5979,7 +6239,7 @@ async fn run_swarm(
                     );
 
                     // Open DB for message count queries.
-                    let sync_data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                    let sync_data_dir = crate::identity::data_dir().unwrap_or_default();
                     let sync_db_path = sync_data_dir.join("messages.db").to_string_lossy().to_string();
                     let sync_store = if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                         let pass = hex::encode(&proto[..32.min(proto.len())]);
@@ -6112,7 +6372,7 @@ async fn run_swarm(
             _ = rebalance_timer.tick() => {
                 hollow_log!("[HOLLOW-VAULT] Running rebalance + retention check");
                 let local_peer = swarm.local_peer_id().to_string();
-                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                let data_dir = crate::identity::data_dir().unwrap_or_default();
                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                 let vault_dir = data_dir.join("vault");
                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -6187,7 +6447,7 @@ fn persist_mls_state(mls: &MlsManager, keypair: &identity::Keypair) {
         Ok(s) => s,
         Err(e) => { hollow_log!("[HOLLOW-MLS] Failed to serialize storage: {e}"); return; }
     };
-    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+    let data_dir = crate::identity::data_dir().unwrap_or_default();
     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
     let proto = keypair.to_protobuf_encoding().unwrap_or_default();
     let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -6275,6 +6535,8 @@ async fn handle_incoming_request(
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
     decrypt_fail_cooldown: &mut HashMap<String, std::time::Instant>,
+    pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
+    mls_decrypt_failures: &mut HashMap<String, u32>,
     peer: PeerId,
     request: HavenMessage,
     channel: request_response::ResponseChannel<HavenMessage>,
@@ -6551,7 +6813,7 @@ async fn handle_incoming_request(
                     // Persist channel message using sender's timestamp.
                     // INSERT OR IGNORE deduplicates via UNIQUE(server_id, channel_id, sender_id, timestamp, text).
                     let mut is_new = true;
-                    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                    let data_dir = crate::identity::data_dir().unwrap_or_default();
                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                     if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -6589,7 +6851,7 @@ async fn handle_incoming_request(
                     let mut new_count = 0u32;
                     let received_count = messages.len() as u32;
 
-                    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                    let data_dir = crate::identity::data_dir().unwrap_or_default();
                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                     if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -6690,7 +6952,7 @@ async fn handle_incoming_request(
                     // This ensures DM sync timestamps are consistent for deduplication.
                     let mut is_new = true;
                     {
-                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                         if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -6726,7 +6988,7 @@ async fn handle_incoming_request(
                     let local_peer = swarm.local_peer_id().to_string();
                     let mut new_count = 0u32;
 
-                    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                    let data_dir = crate::identity::data_dir().unwrap_or_default();
                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                     if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -6800,7 +7062,7 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-EDIT] Received edit for message {mid} from {peer_str}");
 
                     // Persist the edit to local DB (preserves old text).
-                    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                    let data_dir = crate::identity::data_dir().unwrap_or_default();
                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                     let mut edit_applied = false;
                     if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
@@ -6858,7 +7120,7 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-DELETE] Received delete for message {mid} from {peer_str}");
 
                     // Hide the message in local DB (preserves text in message_deletions).
-                    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                    let data_dir = crate::identity::data_dir().unwrap_or_default();
                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                     if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -6915,7 +7177,7 @@ async fn handle_incoming_request(
                     }
                     hollow_log!("[HOLLOW-REACTION] Received reaction {emoji} on {mid} from {peer_str}");
 
-                    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                    let data_dir = crate::identity::data_dir().unwrap_or_default();
                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                     if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -6949,7 +7211,7 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::RemoveReaction { mid, emoji, ts, sig, pk, sid, cid }) => {
                     hollow_log!("[HOLLOW-REACTION] Received remove reaction {emoji} on {mid} from {peer_str}");
 
-                    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                    let data_dir = crate::identity::data_dir().unwrap_or_default();
                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                     if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -7011,7 +7273,7 @@ async fn handle_incoming_request(
                     };
 
                     // Save file metadata to DB.
-                    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                    let data_dir = crate::identity::data_dir().unwrap_or_default();
                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                     if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -7076,7 +7338,7 @@ async fn handle_incoming_request(
                     } else {
 
                     // Update DB.
-                    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                    let data_dir = crate::identity::data_dir().unwrap_or_default();
                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                     if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -7146,7 +7408,7 @@ async fn handle_incoming_request(
                             let pledge = server_states.get(&sid)
                                 .map(|s| s.get_storage_pledge(&local_peer))
                                 .unwrap_or(0);
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let vault_dir = data_dir.join("vault");
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -7253,7 +7515,7 @@ async fn handle_incoming_request(
                                 }
 
                                 // Store via ContentStore
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let vault_dir = data_dir.join("vault");
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -7317,7 +7579,7 @@ async fn handle_incoming_request(
 
                     // Mark placement as confirmed in DB
                     if ok {
-                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                         let vault_dir = data_dir.join("vault");
                         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -7342,7 +7604,7 @@ async fn handle_incoming_request(
                     if !allowed {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED ShardDelete from {peer_str} — not authorized for {sid}");
                     } else {
-                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                         let vault_dir = data_dir.join("vault");
                         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -7369,7 +7631,7 @@ async fn handle_incoming_request(
                     if !is_member {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED ShardRequest from {peer_str} — not a member of {sid}");
                     } else {
-                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                         let vault_dir = data_dir.join("vault");
                         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -7427,25 +7689,33 @@ async fn handle_incoming_request(
                             server_id: sid, content_id: cid, shard_index: si,
                             error: "Shard not found on peer".into(),
                         }).await;
-                    } else if chunks == 0 {
+                    } else if data.is_empty() {
+                        // Streamed shard response — data arrives via /hollow/stream/1.0.0.
+                        // Register pending_shard_streams so the stream handler stores it.
+                        let key = format!("{cid}:{si}");
+                        pending_shard_streams.insert(key.clone(), PendingShardStream {
+                            server_id: sid.clone(), content_id: cid.clone(), shard_index: si,
+                            shard_key: String::new(), k: 0, m: 0, total_size: 0,
+                            tier: "standard".to_string(),
+                        });
+                        hollow_log!("[HOLLOW-VAULT] Registered pending shard stream for response: {key}");
+                    } else {
+                        // Inline shard data (small shards) — decode and store immediately
                         if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
+                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                            let vault_dir = data_dir.join("vault");
+                            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                            if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                                let tier = crate::vault::content_store::StorageTier::Standard;
+                                let _ = cs.store_shard(&sid, &cid, si, 0, 0, 0, tier, &shard_bytes);
+                            }
                             let _ = event_tx.send(NetworkEvent::ShardReceived {
                                 server_id: sid, content_id: cid, shard_index: si,
                                 from_peer: peer_str.clone(),
                             }).await;
                         }
-                    } else {
-                        // Chunked response — create assembly entry
-                        let key = format!("resp:{cid}:{si}:{peer_str}");
-                        pending_shard_assembly.insert(key, PendingShardAssembly {
-                            server_id: sid, content_id: cid, shard_index: si,
-                            shard_key: String::new(), k: 0, m: 0, total_size: 0,
-                            tier: String::new(), expected_chunks: chunks,
-                            received: std::collections::HashSet::new(),
-                            chunk_data: Vec::new(),
-                            sender_peer: peer_str.clone(),
-                            received_at: std::time::Instant::now(),
-                        });
                     }
                 }
 
@@ -7477,7 +7747,7 @@ async fn handle_incoming_request(
                         .map(|s| s.members.contains_key(&peer_str))
                         .unwrap_or(false);
                     if is_member {
-                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                         let vault_dir = data_dir.join("vault");
                         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -7511,7 +7781,7 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::VaultManifestBroadcast { sid, cid, chid, manifest }) => {
                     hollow_log!("[HOLLOW-VAULT] VaultManifest received: cid={cid} in {sid}/{chid} from {peer_str}");
                     if let Ok(manifest_obj) = serde_json::from_str::<crate::vault::pipeline::VaultManifest>(&manifest) {
-                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                         let vault_dir = data_dir.join("vault");
                         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -7530,7 +7800,7 @@ async fn handle_incoming_request(
                         .unwrap_or(false);
                     if is_member {
                         if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let vault_dir = data_dir.join("vault");
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -7629,7 +7899,7 @@ async fn handle_incoming_request(
 
                         // Persist
                         if let Ok(json) = serde_json::to_string(&state) {
-                            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
                             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                             let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                             let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -7660,7 +7930,7 @@ async fn handle_incoming_request(
                                     let _ = state.apply_op(&pledge_op);
 
                                     if let Ok(json) = serde_json::to_string(&state) {
-                                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -7778,17 +8048,19 @@ async fn handle_incoming_request(
             }
 
             if let Ok(op) = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json) {
-                // SECURITY: Verify the claimed author matches the actual sender.
-                // Without this, a peer could forge ops as any other user (e.g., the owner).
+                // SECURITY: Log author mismatch but don't reject — the op may be
+                // legitimately relayed by another peer during join/sync fan-out.
+                // The per-payload permission check below validates the author's role.
                 if op.author != peer_str {
-                    hollow_log!("[HOLLOW-SECURITY] REJECTED CrdtOpBroadcast — author mismatch: claimed '{}' but sender is '{peer_str}'", op.author);
-                    return;
+                    hollow_log!("[HOLLOW-CRDT] Note: CrdtOpBroadcast author '{}' differs from sender '{peer_str}' (relay)", op.author);
                 }
 
-                // SECURITY: Verify the sender has permission for this operation type.
+                // SECURITY: Verify the AUTHOR has permission for this operation type.
+                // Use op.author (the original creator) for role lookup, not the sender
+                // (who may be relaying the op).
                 {
                     let state = server_states.get(&server_id).unwrap();
-                    let sender_role = state.get_role(&peer_str);
+                    let sender_role = state.get_role(&op.author);
                     let sender_perms = sender_role.default_permissions();
                     use crate::crdt::operations::{CrdtPayload, Permission, MemberRole};
 
@@ -7849,7 +8121,7 @@ async fn handle_incoming_request(
                 if state.op_log.len() > was_len {
                     // New op — persist and forward to other connected peers
                     if let Ok(json) = serde_json::to_string(&state) {
-                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -7968,7 +8240,7 @@ async fn handle_incoming_request(
 
                     // Persist
                     if let Ok(json) = serde_json::to_string(&state) {
-                        let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                        let data_dir = crate::identity::data_dir().unwrap_or_default();
                         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                         let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8056,7 +8328,7 @@ async fn handle_incoming_request(
 
             if server_states.remove(&server_id).is_some() {
                 // Remove from DB.
-                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                let data_dir = crate::identity::data_dir().unwrap_or_default();
                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8101,7 +8373,7 @@ async fn handle_incoming_request(
 
             // Same cleanup as ServerDeleteBroadcast — remove ourselves from this server.
             if server_states.remove(&server_id).is_some() {
-                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                let data_dir = crate::identity::data_dir().unwrap_or_default();
                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8130,7 +8402,7 @@ async fn handle_incoming_request(
                 return;
             }
 
-            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+            let data_dir = crate::identity::data_dir().unwrap_or_default();
             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
             if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8225,7 +8497,7 @@ async fn handle_incoming_request(
                 return;
             }
 
-            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+            let data_dir = crate::identity::data_dir().unwrap_or_default();
             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
             if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8258,7 +8530,7 @@ async fn handle_incoming_request(
             let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
 
             // Compare: if the peer has newer messages than us, fire a full sync request.
-            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+            let data_dir = crate::identity::data_dir().unwrap_or_default();
             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
             if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8305,7 +8577,7 @@ async fn handle_incoming_request(
             hollow_log!("[HOLLOW-SYNC] DmSyncRequest from {peer_str} since {since_timestamp}");
             let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
 
-            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+            let data_dir = crate::identity::data_dir().unwrap_or_default();
             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
             if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8428,6 +8700,7 @@ async fn handle_incoming_request(
                 match mls_mgr.decrypt(&server_id, &ciphertext) {
                     Ok((plaintext, sender_peer_id)) => {
                         persist_mls_state(mls_mgr, bundle_keypair);
+                        mls_decrypt_failures.remove(&server_id); // Reset failure counter on success.
 
                         // Parse the plaintext as a MessageEnvelope.
                         let envelope_str = String::from_utf8_lossy(&plaintext);
@@ -8449,7 +8722,7 @@ async fn handle_incoming_request(
                                 let is_mine = sender_peer_id == local_peer;
 
                                 // Persist to DB.
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8474,7 +8747,7 @@ async fn handle_incoming_request(
                                 }
                             } else if let MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, sid, cid } = envelope {
                                 // Handle edit received via MLS.
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8505,7 +8778,7 @@ async fn handle_incoming_request(
                                 }
                             } else if let MessageEnvelope::DeleteMessage { mid, ts, sig, pk, sid, cid } = envelope {
                                 // Handle delete received via MLS.
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8531,7 +8804,7 @@ async fn handle_incoming_request(
                                 }
                             } else if let MessageEnvelope::AddReaction { mid, emoji, ts, sig, pk, sid, cid } = envelope {
                                 // Handle reaction received via MLS.
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8553,7 +8826,7 @@ async fn handle_incoming_request(
                                 }
                             } else if let MessageEnvelope::RemoveReaction { mid, emoji, ts, sig, pk, sid, cid } = envelope {
                                 // Handle remove reaction received via MLS.
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8596,7 +8869,7 @@ async fn handle_incoming_request(
                                     _ => server_id.clone(),
                                 };
 
-                                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
                                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                 let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8638,7 +8911,7 @@ async fn handle_incoming_request(
                                 if let Err(e) = file_transfer::write_chunk(&fid, idx, &chunk_bytes) {
                                     hollow_log!("[HOLLOW-FILE] {e}");
                                 } else {
-                                    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
                                     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                                     let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
                                     let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8681,7 +8954,51 @@ async fn handle_incoming_request(
                             hollow_log!("[HOLLOW-MLS] Failed to parse decrypted envelope");
                         }
                     }
-                    Err(e) => hollow_log!("[HOLLOW-MLS] Decrypt failed: {e}"),
+                    Err(e) => {
+                        hollow_log!("[HOLLOW-MLS] Decrypt failed for {server_id}: {e}");
+
+                        // Track consecutive failures — trigger recovery after 3.
+                        let count = mls_decrypt_failures.entry(server_id.clone()).or_insert(0);
+                        *count += 1;
+
+                        if *count >= 3 && !mls_bootstrap_requested.contains(&server_id) {
+                            hollow_log!("[HOLLOW-MLS] {} consecutive decrypt failures — initiating MLS recovery for {server_id}", count);
+                            *count = 0;
+
+                            // Drop broken group and request re-bootstrap from owner.
+                            mls_mgr.remove_group(&server_id);
+                            persist_mls_state(mls_mgr, bundle_keypair);
+
+                            if let Some(state) = server_states.get(&server_id) {
+                                let local_peer = swarm.local_peer_id().to_string();
+                                for member in state.members_list() {
+                                    if member.peer_id == local_peer { continue; }
+                                    let is_owner = state.roles.get(&member.peer_id)
+                                        .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+                                        .unwrap_or(false);
+                                    if is_owner {
+                                        if let Ok(owner_pid) = member.peer_id.parse::<PeerId>() {
+                                            if connected_peers.contains(&owner_pid) {
+                                                if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                                    let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                                    swarm.behaviour_mut().messaging.send_request(
+                                                        &owner_pid,
+                                                        HavenMessage::MlsKeyPackage {
+                                                            server_id: server_id.clone(),
+                                                            key_package: kp_b64,
+                                                        },
+                                                    );
+                                                    mls_bootstrap_requested.insert(server_id.clone());
+                                                    hollow_log!("[HOLLOW-MLS] Sent recovery KeyPackage to owner for {server_id}");
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -8715,53 +9032,24 @@ async fn handle_incoming_request(
                     }
                 }
 
+                // Duplicate check: skip if peer is already in the MLS group.
+                let already_member = mls_mgr.group_members(&server_id).contains(&peer_str);
+                if already_member {
+                    hollow_log!("[HOLLOW-MLS] Peer {peer_str} already in MLS group for {server_id}, skipping");
+                    return;
+                }
+
                 let kp_bytes = match base64::engine::general_purpose::STANDARD.decode(&key_package) {
                     Ok(b) => b,
                     Err(e) => { hollow_log!("[HOLLOW-MLS] Base64 decode KeyPackage failed: {e}"); return; }
                 };
 
-                match mls_mgr.add_member(&server_id, &kp_bytes) {
-                    Ok((commit_bytes, welcome_bytes)) => {
-                        if let Err(e) = mls_mgr.merge_pending_commit(&server_id) {
-                            hollow_log!("[HOLLOW-MLS] Failed to merge add commit: {e}");
-                            return;
-                        }
-                        persist_mls_state(mls_mgr, bundle_keypair);
-
-                        // Send Welcome to the joiner.
-                        let welcome_b64 = base64::engine::general_purpose::STANDARD.encode(&welcome_bytes);
-                        swarm.behaviour_mut().messaging.send_request(
-                            &peer,
-                            HavenMessage::MlsWelcome {
-                                server_id: server_id.clone(),
-                                welcome: welcome_b64,
-                            },
-                        );
-
-                        // Broadcast Commit to all other MLS group members.
-                        let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
-                        if let Some(state) = server_states.get(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
-                            for member_peer_str in state.members.keys() {
-                                if member_peer_str == &local_peer || member_peer_str == &peer_str { continue; }
-                                if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                    if connected_peers.contains(&pid) {
-                                        swarm.behaviour_mut().messaging.send_request(
-                                            &pid,
-                                            HavenMessage::MlsCommit {
-                                                server_id: server_id.clone(),
-                                                commit: commit_b64.clone(),
-                                            },
-                                        );
-                                    }
-                                }
-                            }
-                        }
-
-                        hollow_log!("[HOLLOW-MLS] Added {peer_str} to MLS group for server {server_id}");
-                    }
-                    Err(e) => hollow_log!("[HOLLOW-MLS] Failed to add member: {e}"),
-                }
+                // Queue KeyPackage for batch processing (single epoch advance per batch).
+                pending_mls_key_packages
+                    .entry(server_id.clone())
+                    .or_default()
+                    .push((peer_str.clone(), kp_bytes));
+                hollow_log!("[HOLLOW-MLS] Queued KeyPackage from {peer_str} for batch add to {server_id}");
             }
         }
 
@@ -8781,7 +9069,11 @@ async fn handle_incoming_request(
                         mls_bootstrap_requested.remove(&server_id);
                         hollow_log!("[HOLLOW-MLS] Joined MLS group for server {server_id}");
                     }
-                    Err(e) => hollow_log!("[HOLLOW-MLS] Failed to join from Welcome: {e}"),
+                    Err(e) => {
+                        hollow_log!("[HOLLOW-MLS] Failed to join from Welcome for {server_id}: {e}");
+                        // Clear bootstrap flag so next MlsChannelMessage can trigger retry.
+                        mls_bootstrap_requested.remove(&server_id);
+                    }
                 }
             }
         }
@@ -8801,7 +9093,45 @@ async fn handle_incoming_request(
                         persist_mls_state(mls_mgr, bundle_keypair);
                         hollow_log!("[HOLLOW-MLS] Processed commit for server {server_id}");
                     }
-                    Err(e) => hollow_log!("[HOLLOW-MLS] Failed to process commit: {e}"),
+                    Err(e) => {
+                        hollow_log!("[HOLLOW-MLS] Failed to process commit for {server_id}: {e}");
+
+                        // Commit processing failed — MLS group state is stale.
+                        // Drop group and request re-bootstrap from owner.
+                        if !mls_bootstrap_requested.contains(&server_id) {
+                            hollow_log!("[HOLLOW-MLS] Dropping stale MLS group and requesting re-bootstrap for {server_id}");
+                            mls_mgr.remove_group(&server_id);
+                            persist_mls_state(mls_mgr, bundle_keypair);
+
+                            if let Some(state) = server_states.get(&server_id) {
+                                let local_peer = swarm.local_peer_id().to_string();
+                                for member in state.members_list() {
+                                    if member.peer_id == local_peer { continue; }
+                                    let is_owner = state.roles.get(&member.peer_id)
+                                        .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+                                        .unwrap_or(false);
+                                    if is_owner {
+                                        if let Ok(owner_pid) = member.peer_id.parse::<PeerId>() {
+                                            if connected_peers.contains(&owner_pid) {
+                                                if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                                    let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                                    swarm.behaviour_mut().messaging.send_request(
+                                                        &owner_pid,
+                                                        HavenMessage::MlsKeyPackage {
+                                                            server_id: server_id.clone(),
+                                                            key_package: kp_b64,
+                                                        },
+                                                    );
+                                                    mls_bootstrap_requested.insert(server_id.clone());
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -8811,7 +9141,12 @@ async fn handle_incoming_request(
             let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
 
             // Respond with our KeyPackage if we have an MLS identity.
+            // Skip if we already have the MLS group (reconnecting peer, not a new joiner).
             if let Some(mls_mgr) = mls {
+                if mls_mgr.has_group(&server_id) {
+                    hollow_log!("[HOLLOW-MLS] Already in MLS group for {server_id}, ignoring KeyPackageRequest");
+                    return;
+                }
                 match mls_mgr.generate_key_package() {
                     Ok(kp_bytes) => {
                         let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
@@ -8836,7 +9171,7 @@ async fn handle_incoming_request(
 
             // Save as pending incoming.
             {
-                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                let data_dir = crate::identity::data_dir().unwrap_or_default();
                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                 if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                     let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8877,7 +9212,7 @@ async fn handle_incoming_request(
 
             // Update our outgoing request to accepted.
             {
-                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                let data_dir = crate::identity::data_dir().unwrap_or_default();
                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                 if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                     let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8922,7 +9257,7 @@ async fn handle_incoming_request(
 
             // Remove our outgoing request.
             {
-                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                let data_dir = crate::identity::data_dir().unwrap_or_default();
                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                 if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                     let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -8942,7 +9277,7 @@ async fn handle_incoming_request(
             hollow_log!("[HOLLOW-FRIENDS] Friend removed by {peer_str}");
 
             {
-                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                let data_dir = crate::identity::data_dir().unwrap_or_default();
                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                 if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                     let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -9006,7 +9341,7 @@ async fn handle_incoming_request(
 
             // Save to local DB (upsert with timestamp check — only update if newer).
             {
-                let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+                let data_dir = crate::identity::data_dir().unwrap_or_default();
                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                 if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                     let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -9033,7 +9368,7 @@ async fn handle_incoming_request(
             use crate::node::file_transfer;
             hollow_log!("[HOLLOW-FILE] FileRequest from {peer_str} for {file_id}");
 
-            let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+            let data_dir = crate::identity::data_dir().unwrap_or_default();
             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
             if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
@@ -9218,7 +9553,7 @@ async fn flush_pending_sync_requests(
 
     hollow_log!("[HOLLOW-SYNC] Flushing {} pending sync requests for {peer_str}", entries.len());
 
-    let data_dir = dirs::data_dir().unwrap_or_default().join("hollow");
+    let data_dir = crate::identity::data_dir().unwrap_or_default();
     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
     let Ok(proto) = bundle_keypair.to_protobuf_encoding() else { return };
     let passphrase = hex::encode(&proto[..32.min(proto.len())]);

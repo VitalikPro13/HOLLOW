@@ -212,6 +212,61 @@ impl MlsManager {
         Ok((commit_bytes, welcome_bytes))
     }
 
+    /// Add multiple members to the MLS group in a single commit (single epoch advance).
+    /// Returns (commit_bytes, welcome_bytes, list of added peer_ids).
+    pub fn add_members_batch(
+        &mut self,
+        server_id: &str,
+        key_packages: &[(String, Vec<u8>)],
+    ) -> Result<(Vec<u8>, Vec<u8>, Vec<String>), String> {
+        let existing_members = self.group_members(server_id);
+        let group = self.groups.get_mut(server_id)
+            .ok_or_else(|| format!("No MLS group for server {server_id}"))?;
+
+        let mut validated_kps = Vec::new();
+        let mut added_peers = Vec::new();
+
+        for (peer_id, kp_bytes) in key_packages {
+            if existing_members.contains(peer_id) {
+                hollow_log!("[HOLLOW-MLS] Skipping {peer_id} — already in MLS group");
+                continue;
+            }
+            match TlsDeserialize::tls_deserialize_exact(kp_bytes) {
+                Ok(kp_in) => {
+                    let kp_in: KeyPackageIn = kp_in;
+                    match kp_in.validate(self.provider.crypto(), ProtocolVersion::Mls10) {
+                        Ok(kp) => {
+                            validated_kps.push(kp);
+                            added_peers.push(peer_id.clone());
+                        }
+                        Err(e) => {
+                            hollow_log!("[HOLLOW-MLS] KeyPackage validation failed for {peer_id}: {e:?}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    hollow_log!("[HOLLOW-MLS] Failed to deserialize KeyPackage from {peer_id}: {e:?}");
+                }
+            }
+        }
+
+        if validated_kps.is_empty() {
+            return Err("No valid new members to add".to_string());
+        }
+
+        let (commit_out, welcome, _group_info) = group
+            .add_members(&self.provider, &self.signer, &validated_kps)
+            .map_err(|e| format!("Failed to batch add members: {e:?}"))?;
+
+        let commit_bytes = TlsSerialize::tls_serialize_detached(&commit_out)
+            .map_err(|e| format!("Failed to serialize commit: {e:?}"))?;
+        let welcome_bytes = TlsSerialize::tls_serialize_detached(&welcome)
+            .map_err(|e| format!("Failed to serialize welcome: {e:?}"))?;
+
+        hollow_log!("[HOLLOW-MLS] Batch-added {} members to server {server_id}", added_peers.len());
+        Ok((commit_bytes, welcome_bytes, added_peers))
+    }
+
     /// Merge the pending commit after add/remove.
     /// Must be called by the committer after broadcasting the commit.
     pub fn merge_pending_commit(&mut self, server_id: &str) -> Result<(), String> {
@@ -580,5 +635,161 @@ mod tests {
         // Verify it can be deserialized back.
         let kp_in: KeyPackageIn = TlsDeserialize::tls_deserialize_exact(&kp).unwrap();
         assert!(kp_in.validate(mgr.provider.crypto(), ProtocolVersion::Mls10).is_ok());
+    }
+
+    #[test]
+    fn test_batch_add_six_members() {
+        // Owner creates group, 6 peers generate KeyPackages.
+        let mut owner = MlsManager::new("12D3KooWOwner").unwrap();
+        owner.create_group("server1").unwrap();
+
+        let peer_ids: Vec<String> = (1..=6).map(|i| format!("12D3KooWPeer{i}")).collect();
+        let peers: Vec<MlsManager> = peer_ids.iter()
+            .map(|id| MlsManager::new(id).unwrap())
+            .collect();
+        let key_packages: Vec<(String, Vec<u8>)> = peers.iter().zip(&peer_ids)
+            .map(|(p, id)| (id.clone(), p.generate_key_package().unwrap()))
+            .collect();
+
+        // Batch add all 6 at once — single epoch advance.
+        let (commit_bytes, welcome_bytes, added) = owner
+            .add_members_batch("server1", &key_packages)
+            .unwrap();
+        owner.merge_pending_commit("server1").unwrap();
+
+        assert_eq!(added.len(), 6);
+        assert_eq!(owner.member_count("server1"), 7); // owner + 6
+
+        // All peers join from the same Welcome.
+        let mut joined_peers: Vec<MlsManager> = peers.into_iter().map(|mut p| {
+            p.join_from_welcome("server1", &welcome_bytes).unwrap();
+            p
+        }).collect();
+
+        // Verify all peers see 7 members.
+        for p in &joined_peers {
+            assert_eq!(p.member_count("server1"), 7);
+        }
+
+        // Owner encrypts, all peers can decrypt.
+        let msg = b"Hello from owner to all 6 peers!";
+        let ct = owner.encrypt("server1", msg).unwrap();
+        for p in &mut joined_peers {
+            let (decrypted, sender) = p.decrypt("server1", &ct).unwrap();
+            assert_eq!(decrypted, msg.to_vec());
+            assert_eq!(sender, "12D3KooWOwner");
+        }
+    }
+
+    #[test]
+    fn test_batch_add_skips_duplicates() {
+        let mut owner = MlsManager::new("12D3KooWOwner").unwrap();
+        owner.create_group("server1").unwrap();
+
+        // Add Bob normally first.
+        let bob = MlsManager::new("12D3KooWBob").unwrap();
+        let bob_kp = bob.generate_key_package().unwrap();
+        let (_, _) = owner.add_member("server1", &bob_kp).unwrap();
+        owner.merge_pending_commit("server1").unwrap();
+        assert_eq!(owner.member_count("server1"), 2);
+
+        // Try batch-adding Bob again + a new peer Charlie.
+        let charlie = MlsManager::new("12D3KooWCharlie").unwrap();
+        let charlie_kp = charlie.generate_key_package().unwrap();
+        let bob2 = MlsManager::new("12D3KooWBob").unwrap();
+        let bob2_kp = bob2.generate_key_package().unwrap();
+
+        let batch = vec![
+            ("12D3KooWBob".to_string(), bob2_kp),       // duplicate — should be skipped
+            ("12D3KooWCharlie".to_string(), charlie_kp), // new — should be added
+        ];
+
+        let (_, _, added) = owner.add_members_batch("server1", &batch).unwrap();
+        owner.merge_pending_commit("server1").unwrap();
+
+        // Only Charlie should be added, Bob skipped.
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0], "12D3KooWCharlie");
+        assert_eq!(owner.member_count("server1"), 3); // owner + bob + charlie
+    }
+
+    #[test]
+    fn test_batch_add_empty_returns_error() {
+        let mut owner = MlsManager::new("12D3KooWOwner").unwrap();
+        owner.create_group("server1").unwrap();
+
+        let result = owner.add_members_batch("server1", &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_batch_add_single_member() {
+        let mut owner = MlsManager::new("12D3KooWOwner").unwrap();
+        owner.create_group("server1").unwrap();
+
+        let bob = MlsManager::new("12D3KooWBob").unwrap();
+        let bob_kp = bob.generate_key_package().unwrap();
+
+        let batch = vec![("12D3KooWBob".to_string(), bob_kp)];
+        let (_, welcome_bytes, added) = owner.add_members_batch("server1", &batch).unwrap();
+        owner.merge_pending_commit("server1").unwrap();
+
+        assert_eq!(added.len(), 1);
+        assert_eq!(owner.member_count("server1"), 2);
+
+        let mut bob = bob;
+        bob.join_from_welcome("server1", &welcome_bytes).unwrap();
+        assert_eq!(bob.member_count("server1"), 2);
+    }
+
+    #[test]
+    fn test_six_members_all_communicate() {
+        // Setup: owner + 6 peers, batch-added.
+        let mut owner = MlsManager::new("12D3KooWOwner").unwrap();
+        owner.create_group("server1").unwrap();
+
+        let peer_ids: Vec<String> = (1..=6).map(|i| format!("12D3KooWPeer{i}")).collect();
+        let peers: Vec<MlsManager> = peer_ids.iter()
+            .map(|id| MlsManager::new(id).unwrap())
+            .collect();
+        let key_packages: Vec<(String, Vec<u8>)> = peers.iter().zip(&peer_ids)
+            .map(|(p, id)| (id.clone(), p.generate_key_package().unwrap()))
+            .collect();
+
+        let (_, welcome_bytes, _) = owner.add_members_batch("server1", &key_packages).unwrap();
+        owner.merge_pending_commit("server1").unwrap();
+
+        let mut all_peers: Vec<MlsManager> = peers.into_iter().map(|mut p| {
+            p.join_from_welcome("server1", &welcome_bytes).unwrap();
+            p
+        }).collect();
+
+        // Each peer sends a message, all others (including owner) decrypt it.
+        for sender_idx in 0..all_peers.len() {
+            let msg = format!("Message from peer {}", sender_idx + 1);
+            let ct = all_peers[sender_idx].encrypt("server1", msg.as_bytes()).unwrap();
+
+            // Owner decrypts.
+            let (dec, sender) = owner.decrypt("server1", &ct).unwrap();
+            assert_eq!(dec, msg.as_bytes());
+            assert_eq!(sender, peer_ids[sender_idx]);
+
+            // All other peers decrypt.
+            for recv_idx in 0..all_peers.len() {
+                if recv_idx == sender_idx { continue; }
+                let (dec, sender) = all_peers[recv_idx].decrypt("server1", &ct).unwrap();
+                assert_eq!(dec, msg.as_bytes());
+                assert_eq!(sender, peer_ids[sender_idx]);
+            }
+        }
+
+        // Owner sends, all peers decrypt.
+        let owner_msg = b"Owner broadcast";
+        let owner_ct = owner.encrypt("server1", owner_msg).unwrap();
+        for p in &mut all_peers {
+            let (dec, sender) = p.decrypt("server1", &owner_ct).unwrap();
+            assert_eq!(dec, owner_msg.to_vec());
+            assert_eq!(sender, "12D3KooWOwner");
+        }
     }
 }

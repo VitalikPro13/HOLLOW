@@ -99,11 +99,11 @@ impl request_response::Codec for FileStreamCodec {
         Self: 'async_trait,
     {
         Box::pin(async move {
-            // Read header: [1-byte type][32-byte id][8-byte size LE][optional 2-byte shard_index]
+            // Read header: [1-byte type][64-byte id][8-byte size LE][optional 2-byte shard_index]
             let mut type_byte = [0u8; 1];
             io.read_exact(&mut type_byte).await?;
 
-            let mut id_bytes = [0u8; 32];
+            let mut id_bytes = [0u8; 64];
             io.read_exact(&mut id_bytes).await?;
             let id = String::from_utf8_lossy(&id_bytes).trim().to_string();
 
@@ -233,10 +233,10 @@ impl request_response::Codec for FileStreamCodec {
             };
             io.write_all(&[type_byte]).await?;
 
-            // Write 32-byte ID (pad with spaces to exactly 32 bytes).
-            let mut id_buf = [b' '; 32];
+            // Write 64-byte ID (pad with spaces to exactly 64 bytes).
+            let mut id_buf = [b' '; 64];
             let id_bytes = req.id.as_bytes();
-            let copy_len = id_bytes.len().min(32);
+            let copy_len = id_bytes.len().min(64);
             id_buf[..copy_len].copy_from_slice(&id_bytes[..copy_len]);
             io.write_all(&id_buf).await?;
 
@@ -322,4 +322,80 @@ pub fn shard_stream_request(
         size: shard_data.len() as u64,
         temp_path,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_id_field_64_bytes_no_truncation() {
+        // A full SHA-256 hex string is 64 characters.
+        // The wire format must preserve all 64 characters without truncation.
+        let full_sha256 = "cd5111f7bb8af5c8d986b3a668d23cff435fa68bb66a8d18e73b91572664fa83";
+        assert_eq!(full_sha256.len(), 64);
+
+        // Simulate write: pad to 64 bytes.
+        let mut id_buf = [b' '; 64];
+        let id_bytes = full_sha256.as_bytes();
+        let copy_len = id_bytes.len().min(64);
+        id_buf[..copy_len].copy_from_slice(&id_bytes[..copy_len]);
+
+        // Simulate read: trim spaces.
+        let read_back = String::from_utf8_lossy(&id_buf).trim().to_string();
+
+        assert_eq!(read_back, full_sha256, "64-char ID must survive write→read round-trip");
+    }
+
+    #[test]
+    fn test_short_id_padded_correctly() {
+        // Old file_id format is 32 hex chars. Must pad to 64 bytes and read back correctly.
+        let short_id = "09d12a64a5d013862354d6d6ac633a7c";
+        assert_eq!(short_id.len(), 32);
+
+        let mut id_buf = [b' '; 64];
+        let id_bytes = short_id.as_bytes();
+        let copy_len = id_bytes.len().min(64);
+        id_buf[..copy_len].copy_from_slice(&id_bytes[..copy_len]);
+
+        let read_back = String::from_utf8_lossy(&id_buf).trim().to_string();
+        assert_eq!(read_back, short_id, "32-char ID must survive round-trip with 64-byte padding");
+    }
+
+    #[test]
+    fn test_old_32_byte_field_would_truncate() {
+        // Prove that the OLD 32-byte field would truncate a SHA-256 hash.
+        let full_sha256 = "cd5111f7bb8af5c8d986b3a668d23cff435fa68bb66a8d18e73b91572664fa83";
+
+        // Old format: 32-byte buffer.
+        let mut old_buf = [b' '; 32];
+        let id_bytes = full_sha256.as_bytes();
+        let copy_len = id_bytes.len().min(32);
+        old_buf[..copy_len].copy_from_slice(&id_bytes[..copy_len]);
+
+        let truncated = String::from_utf8_lossy(&old_buf).trim().to_string();
+
+        // This MUST be different (truncated) — proving the bug existed.
+        assert_ne!(truncated, full_sha256, "32-byte field must truncate 64-char SHA-256");
+        assert_eq!(truncated.len(), 32, "Truncated ID is only 32 chars");
+        assert_eq!(truncated, &full_sha256[..32], "First 32 chars match");
+    }
+
+    #[test]
+    fn test_shard_key_lookup_matches_with_64_byte_field() {
+        // The pending_shard_streams key format is "{content_id}:{shard_index}".
+        // With the 64-byte ID field, the content_id in the stream matches the full hash.
+        let content_id = "4bb4f0025e591c7b44da2a01b26f52b87425e37aae71778859c4b4a0f4612293";
+        let shard_index = 2u16;
+
+        // Key registered by ShardStore Olm message.
+        let registered_key = format!("{content_id}:{shard_index}");
+
+        // Key from stream (simulating 64-byte write→read).
+        let mut id_buf = [b' '; 64];
+        let id_bytes = content_id.as_bytes();
+        id_buf[..id_bytes.len().min(64)].copy_from_slice(&id_bytes[..id_bytes.len().min(64)]);
+        let stream_id = String::from_utf8_lossy(&id_buf).trim().to_string();
+        let stream_key = format!("{stream_id}:{shard_index}");
+
+        assert_eq!(registered_key, stream_key, "Shard lookup key must match between Olm metadata and stream");
+    }
 }

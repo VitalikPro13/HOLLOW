@@ -244,9 +244,8 @@ use std::path::PathBuf;
 
 /// Get the vault cache directory path.
 pub fn vault_cache_dir() -> PathBuf {
-    let dir = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("hollow")
+    let dir = crate::identity::data_dir()
+        .unwrap_or_else(|_| PathBuf::from("hollow"))
         .join("vault_cache");
     let _ = std::fs::create_dir_all(&dir);
     dir

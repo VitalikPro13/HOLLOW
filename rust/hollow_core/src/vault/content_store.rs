@@ -437,6 +437,19 @@ impl ContentStore {
             .map_err(|e| format!("Failed to query storage used: {e}"))
     }
 
+    /// Total original file sizes from all manifests for a server (bytes).
+    /// This represents the total data the server "has" — not the local shard size.
+    pub fn total_manifest_size(&self, server_id: &str) -> Result<u64, String> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(original_size), 0) FROM vault_manifests WHERE server_id = ?1",
+                params![server_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|v| v as u64)
+            .map_err(|e| format!("Failed to query manifest sizes: {e}"))
+    }
+
     /// Total storage used across all servers (bytes).
     pub fn total_storage_used_all(&self) -> Result<u64, String> {
         self.conn

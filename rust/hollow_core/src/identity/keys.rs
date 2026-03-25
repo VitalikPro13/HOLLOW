@@ -11,10 +11,16 @@ pub(crate) struct IdentityData {
     pub mnemonic: Option<String>,
 }
 
-/// Get the Haven data directory (e.g., %APPDATA%/haven on Windows).
-fn data_dir() -> Result<PathBuf, String> {
-    let base = dirs::data_dir().ok_or("Could not find app data directory")?;
-    let dir = base.join("hollow");
+/// Get the Hollow data directory.
+/// Checks HOLLOW_DATA_DIR env var first (for multi-instance testing),
+/// then falls back to %APPDATA%/hollow on Windows.
+pub fn data_dir() -> Result<PathBuf, String> {
+    let dir = if let Ok(custom) = std::env::var("HOLLOW_DATA_DIR") {
+        PathBuf::from(custom)
+    } else {
+        let base = dirs::data_dir().ok_or("Could not find app data directory")?;
+        base.join("hollow")
+    };
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create data dir: {e}"))?;
     Ok(dir)
 }

@@ -19,9 +19,8 @@ pub fn generate_file_id() -> String {
 /// Get the directory for storing files.
 /// Creates it if it doesn't exist.
 pub fn files_dir() -> PathBuf {
-    let dir = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("hollow")
+    let dir = crate::identity::data_dir()
+        .unwrap_or_else(|_| PathBuf::from("hollow"))
         .join("files");
     let _ = std::fs::create_dir_all(&dir);
     dir

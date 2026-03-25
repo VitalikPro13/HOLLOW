@@ -1,3 +1,7 @@
+# Multi-instance test data (local only)
+test_instances/instance_*/
+test_instances/data_*/
+
 # Miscellaneous
 *.class
 *.log

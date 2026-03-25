@@ -249,11 +249,17 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(serverStripLayoutProvider.notifier).onServerCreated(serverId);
         // Auto-select the newly joined server and load its channels
         ref.read(selectedServerProvider.notifier).state = serverId;
-        ref
-            .read(channelListProvider.notifier)
-            .loadForServer(serverId);
-        ref.read(selectedChannelProvider.notifier).state = null;
+        ref.read(selectedPeerProvider.notifier).state = null;
         ref.read(serverSettingsOpenProvider.notifier).state = false;
+        ref.read(channelListProvider.notifier).loadForServer(serverId).then((_) {
+          ref.read(channelLayoutProvider.notifier).loadForServer(serverId);
+          // Auto-select first channel after load completes
+          final joinedChannels = ref.read(channelListProvider);
+          if (joinedChannels.isNotEmpty) {
+            ref.read(selectedChannelProvider.notifier).state =
+                joinedChannels.keys.first;
+          }
+        });
 
       case NetworkEvent_MessageSyncStarted(:final serverId, :final peerId):
         debugPrint('[HOLLOW] Message sync started for $serverId with $peerId');
@@ -480,8 +486,12 @@ class EventStreamNotifier extends Notifier<bool> {
             :final fileId, :final fileName, :final sizeBytes,
             :final isImage, :final width, :final height,
             messageId: _, senderId: _,
-            serverId: _, channelId: _):
+            :final serverId, channelId: _):
         debugPrint('[HOLLOW] File header: $fileId ($fileName, $sizeBytes bytes)');
+        // In erasure coding mode (6+ members), file data comes via vault shards,
+        // not P2P streaming — so don't mark as "downloading".
+        final isVaultMode = serverId != null &&
+            (ref.read(serverMembersProvider(serverId)).valueOrNull?.length ?? 0) >= 6;
         ref.read(fileTransferProvider.notifier).onFileHeaderReceived(
               fileId: fileId,
               fileName: fileName,
@@ -489,6 +499,7 @@ class EventStreamNotifier extends Notifier<bool> {
               isImage: isImage,
               width: width?.toInt(),
               height: height?.toInt(),
+              isVaultMode: isVaultMode,
             );
         // Reload chat so the message gets its fileAttachment from DB
         // (replacing the raw [file:xxx] text with the file card).
@@ -605,7 +616,13 @@ class EventStreamNotifier extends Notifier<bool> {
   /// Request missing files after message sync completes.
   /// Queries messages with file_id that have no completed file on disk.
   /// Delayed by 2 seconds to let sync pipeline settle.
+  /// Skipped for 6+ member servers (erasure coding handles file data via shards).
   Future<void> _requestMissingFiles(String serverId) async {
+    // In erasure coding mode (6+ members), file data is in vault shards —
+    // don't auto-request full files via P2P streaming.
+    final memberCount = ref.read(serverMembersProvider(serverId)).valueOrNull?.length ?? 0;
+    if (memberCount >= 6) return;
+
     await Future.delayed(const Duration(seconds: 2));
     try {
       final missingIds = await storage_api.getMissingFileIds();

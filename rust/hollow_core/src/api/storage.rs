@@ -52,8 +52,7 @@ pub fn open_message_store() -> Result<(), String> {
         return Ok(()); // Already open.
     }
 
-    let data_dir = dirs::data_dir().ok_or("Could not find app data directory")?;
-    let hollow_dir = data_dir.join("hollow");
+    let hollow_dir = crate::identity::data_dir()?;
     std::fs::create_dir_all(&hollow_dir)
         .map_err(|e| format!("Failed to create data dir: {e}"))?;
     let db_path = hollow_dir.join("messages.db");
