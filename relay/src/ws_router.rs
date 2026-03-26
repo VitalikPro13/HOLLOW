@@ -124,10 +124,21 @@ async fn handle_ws(mut socket: WebSocket, state: SharedWsState) {
                         }
                     }
                     Some(Ok(Message::Binary(data))) => {
-                        // Binary broadcast to room peers — forward as-is.
-                        if data.len() > 33 {
-                            let room_hex = hex::encode(&data[1..33]);
-                            broadcast_binary(&state_clone, &room_hex, &peer_id_clone, &data).await;
+                        if data.len() > 1 {
+                            match data[0] {
+                                0x01 => {
+                                    // Binary broadcast to room peers (legacy: 32-byte room hash).
+                                    if data.len() > 33 {
+                                        let room_hex = hex::encode(&data[1..33]);
+                                        broadcast_binary(&state_clone, &room_hex, &peer_id_clone, &data).await;
+                                    }
+                                }
+                                0x02 => {
+                                    // Binary direct: [0x02][room\0][target\0][payload]
+                                    direct_binary(&state_clone, &peer_id_clone, &data).await;
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -344,6 +355,55 @@ async fn broadcast_binary(state: &SharedWsState, room_hex: &str, sender_id: &str
             if pid != sender_id {
                 let _ = sender.send(msg.clone());
             }
+        }
+    }
+}
+
+/// Forward a binary frame to a specific target peer.
+/// Sender format: [0x02][room_code\0][target_peer\0][payload...]
+/// Forwarded:     [0x02][room_code\0][sender_peer\0][payload...]
+async fn direct_binary(state: &SharedWsState, sender_id: &str, data: &[u8]) {
+    // Parse room code from bytes 1+ until first \0.
+    let room_start = 1;
+    let room_nul = match data[room_start..].iter().position(|&b| b == 0) {
+        Some(p) => room_start + p,
+        None => return,
+    };
+    let room_code = match std::str::from_utf8(&data[room_start..room_nul]) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    // Parse target peer from next \0-terminated string.
+    let peer_start = room_nul + 1;
+    if peer_start >= data.len() { return; }
+    let peer_nul = match data[peer_start..].iter().position(|&b| b == 0) {
+        Some(p) => peer_start + p,
+        None => return,
+    };
+    let target_peer = match std::str::from_utf8(&data[peer_start..peer_nul]) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let payload_start = peer_nul + 1;
+    if payload_start >= data.len() { return; }
+
+    // Build forwarded frame: replace target_peer with sender_id.
+    let sender_bytes = sender_id.as_bytes();
+    let room_bytes = room_code.as_bytes();
+    let payload = &data[payload_start..];
+    let mut forwarded = Vec::with_capacity(1 + room_bytes.len() + 1 + sender_bytes.len() + 1 + payload.len());
+    forwarded.push(0x02);
+    forwarded.extend_from_slice(room_bytes);
+    forwarded.push(0x00);
+    forwarded.extend_from_slice(sender_bytes);
+    forwarded.push(0x00);
+    forwarded.extend_from_slice(payload);
+
+    let rooms = state.rooms.read().await;
+    if let Some(room_entry) = rooms.get(room_code) {
+        if let Some(sender) = room_entry.peers.get(target_peer) {
+            let _ = sender.send(Message::Binary(forwarded.into()));
         }
     }
 }

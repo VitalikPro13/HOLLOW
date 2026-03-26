@@ -28,6 +28,8 @@ pub enum WsCommand {
     SendToRoom { room_code: String, data: Vec<u8> },
     /// Send directly to a specific peer in a room (for shard transfers).
     SendDirect { room_code: String, target_peer: String, data: Vec<u8> },
+    /// Send binary data directly to a specific peer (for file/shard streaming).
+    SendBinaryDirect { room_code: String, target_peer: String, data: Vec<u8> },
 }
 
 /// Events received from the WebSocket relay, forwarded to the swarm.
@@ -42,6 +44,8 @@ pub enum WsEvent {
     Message { room: String, from: String, data: Vec<u8> },
     /// Direct message from a specific peer (shard transfers, etc.)
     DirectMessage { room: String, from: String, data: Vec<u8> },
+    /// Binary data from a specific peer (file/shard streaming chunks).
+    BinaryDirect { room: String, from: String, data: Vec<u8> },
 }
 
 // -- Wire protocol (matches relay/src/ws_router.rs) --
@@ -153,10 +157,30 @@ async fn ws_client_loop(
                                     }
                                 }
                                 Some(Ok(Message::Binary(data))) => {
-                                    // Binary messages forwarded as-is.
-                                    // Parse room from first 33 bytes (1 type + 32 room hash).
-                                    // For now, we don't use binary frames on the client side.
-                                    hollow_log!("[HOLLOW-WS] Binary frame received ({} bytes)", data.len());
+                                    if data.len() > 3 && data[0] == 0x02 {
+                                        // BinaryDirect: [0x02][room_code\0][sender\0][payload]
+                                        let room_start = 1;
+                                        if let Some(room_nul_off) = data[room_start..].iter().position(|&b| b == 0) {
+                                            let room_nul = room_start + room_nul_off;
+                                            if let Ok(room_code) = std::str::from_utf8(&data[room_start..room_nul]) {
+                                                let peer_start = room_nul + 1;
+                                                if peer_start < data.len() {
+                                                    if let Some(peer_nul_off) = data[peer_start..].iter().position(|&b| b == 0) {
+                                                        let peer_nul = peer_start + peer_nul_off;
+                                                        if let Ok(from_peer) = std::str::from_utf8(&data[peer_start..peer_nul]) {
+                                                            let payload_start = peer_nul + 1;
+                                                            let payload = data[payload_start..].to_vec();
+                                                            let _ = event_tx.send(WsEvent::BinaryDirect {
+                                                                room: room_code.to_string(),
+                                                                from: from_peer.to_string(),
+                                                                data: payload,
+                                                            });
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 Some(Ok(Message::Ping(data))) => {
                                     let _ = ws_write.send(Message::Pong(data)).await;
@@ -271,6 +295,23 @@ async fn connect_and_auth(
 type WsSink = futures_util::stream::SplitSink<WsStream, Message>;
 
 async fn send_command(write: &mut WsSink, cmd: &WsCommand) {
+    // Binary commands send raw binary frames, not JSON.
+    if let WsCommand::SendBinaryDirect { room_code, target_peer, data } = cmd {
+        let room_bytes = room_code.as_bytes();
+        let target_bytes = target_peer.as_bytes();
+        let mut frame = Vec::with_capacity(1 + room_bytes.len() + 1 + target_bytes.len() + 1 + data.len());
+        frame.push(0x02); // BinaryDirect type
+        frame.extend_from_slice(room_bytes); // room code
+        frame.push(0x00); // \0 terminator
+        frame.extend_from_slice(target_bytes); // target peer ID
+        frame.push(0x00); // \0 terminator
+        frame.extend_from_slice(data); // payload
+        if let Err(e) = write.send(Message::Binary(frame.into())).await {
+            hollow_log!("[HOLLOW-WS] Binary send failed: {e}");
+        }
+        return;
+    }
+
     let json = match cmd {
         WsCommand::JoinRoom { room_code } => {
             serde_json::to_string(&ClientMsg::Join { room: room_code.clone() })
@@ -290,6 +331,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) {
                 data: data_b64,
             })
         }
+        WsCommand::SendBinaryDirect { .. } => unreachable!(), // handled above
     };
 
     if let Ok(json) = json {

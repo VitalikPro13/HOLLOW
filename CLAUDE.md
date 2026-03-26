@@ -63,10 +63,21 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 ```
 
 ## Current Phase
-**Phase 5: WebSocket Relay Migration — IN PROGRESS.** Phases 1-4 COMPLETE.
+**Phase 5: WebSocket Relay Migration — COMPLETE.** All messages + file streaming now route through WS.
 
-**Phase 5 — WebSocket Relay (started Mar 25, 2026):**
-Replacing libp2p pairwise connections with a WebSocket room router. Phases 1-3 done (relay server deployed, client connected, presence working). Phases 4-5 remaining: route all messages + file transfers through WS. Requires refactoring swarm.rs. See `ws-migration-handoff.md` in memory.
+**Phase 6: Pure MLS for Servers + Prekey over WS — NEXT.**
+
+**Phase 5 — WebSocket Relay (Mar 25-26, 2026) — DONE:**
+All messages and file/shard streaming now route through WS relay first with libp2p fallback. Sub-phases: (1) relay deployed, (2) client connected, (3) presence working, (4) all messages WS-first, (5) file/shard binary streaming via WS.
+- `send_message_to_peer()` / `send_encrypted_message()` — WS-first routing
+- `stream_to_peer()` — WS binary first, libp2p fallback for file/shard streaming
+- `ws_stream_transfer.rs` — 256KB chunked binary transfers over WS
+- Relay `0x02` BinaryDirect frame type for target-specific binary forwarding
+- `synced_peers` prevents duplicate sync race between WS and libp2p
+- 183 tests pass. Relay needs redeployment for BinaryDirect.
+
+**Phase 6 — Pure MLS for Servers + Prekey over WS (PLANNED):**
+Route ALL server messages through MLS (zero Olm for servers). Move prekey from DHT to WS KeyRequest. Plan: `plans/mellow-tinkering-shamir.md` in memory. 9 steps: new envelope variants, MLS broadcast helpers, dispatcher expansion, migrate ~30 send sites, remove DHT prekey.
 
 **Phase 4: Shared Vault — COMPLETE.** Phases 1-3.75 all COMPLETE.
 
