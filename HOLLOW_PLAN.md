@@ -1220,13 +1220,12 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [ ] VaultFileWidget shimmer — deferred to follow-up
   - [X] Sync UI fixes: "Syncing..." indicator timeout (clear after 10s if no progress), CRDT server state changes (rename/delete) refresh Dart UI on SyncCompleted
 
-- [ ] **Connection subset management** — limit persistent connections for large servers (defer until scaling pain)
-  - [ ] Target: 6-12 peers per server (not full mesh). Total across all servers capped at 50 (configurable)
-  - [ ] Peer scoring: `PeerScore { uptime_ratio, avg_latency_ms, bandwidth_score, shard_overlap }` — computed from ping RTT history, connection duration, shared shard count
-  - [ ] Rotation: every 5 minutes, drop lowest-scoring peer, connect to highest-scoring unconnected peer. Max 1 rotation per cycle for stability
-  - [ ] Priority connections: always maintain connections to peers holding shards of recently accessed content (shard_overlap weighted heavily)
-  - [ ] Gossip peer exchange: `HollowMessage::PeerExchange { server_id, peers }` — connected peers share known peer lists for the server
-  - [ ] Fallback: <6 reachable peers → connect to all available. Shard access requires more → temporarily exceed limit
+- [ ] **Multi-relay server support** — distribute load across multiple WSS relay servers for scale and redundancy
+  - [ ] Relay discovery: list of relay URLs stored in app config (default: relay.anonlisten.com). Users/admins can add backup relays.
+  - [ ] Load balancing: client measures latency to each relay, picks lowest. Fallback to next relay on disconnect.
+  - [ ] Room federation: relay servers share room membership so a message sent to Relay A reaches peers on Relay B. (OR: all peers connect to the same relay for a given server — simpler, scales to ~10K concurrent users per relay.)
+  - [ ] Self-hosted relay: document how to deploy your own relay (Docker image or binary). Server owners can point their server to a custom relay URL via CRDT setting.
+  - [ ] Bandwidth monitoring: relay reports current load. Client picks least-loaded relay for file/shard streaming.
 
 - [ ] **Channel-level CRDT sharding** — split monolithic ServerState for scale (defer until ServerState is too large)
   - [ ] Split into `ServerCoreState` (name, members, roles, settings, pledges, channel_layout — small, synced by all) + per-channel `ChannelState` (pinned_messages, channel-specific settings — synced only by members who access the channel)
@@ -1238,7 +1237,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 **Deliverable:** Server files live distributed across members. No single point of failure. Automatic mode selection — small groups get full sync, larger servers get space-efficient erasure coding. Rich status indicators keep users informed.
 
-### Phase 4.5: Account Recovery & Backup
+### Phase 4.75: Account Recovery & Backup
 
 **Goal:** Identity recovery mechanisms that leverage the Shared Vault infrastructure.
 
@@ -1307,7 +1306,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 - [ ] Landing page / website
 - [ ] Documentation (user guide, FAQ)
 - [ ] Beta testing program
-- [ ] Security audit (third-party review of E2EE implementation)
+- [ ] Security audit (third-party review of E2EE implementation - OTF Security Lab funding)
 
 **Deliverable:** Public release across all platforms.
 
