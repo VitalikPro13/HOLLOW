@@ -4238,7 +4238,7 @@ async fn run_swarm(
                                             let target_peer = ep[1];
                                             let shard_key = ep[2];
                                             if let Ok(pid) = target_peer.parse::<PeerId>() {
-                                                if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, target_peer) && olm.has_session(target_peer) {
+                                                if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, target_peer) {
                                                     let envelope = MessageEnvelope::ShardRequest {
                                                         sid: server_id.clone(),
                                                         cid: content_id.clone(),
@@ -4246,13 +4246,23 @@ async fn run_swarm(
                                                         sk: shard_key.to_string(),
                                                         target: None,
                                                     };
-                                                    let json = serde_json::to_string(&envelope).unwrap_or_default();
-                                                    send_encrypted_message(
-                                                        &mut swarm, &mut olm, &crypto_store,
-                                                        &mut pending_requests, &mut outbound_message_text,
-                                                        &pid, target_peer, &json, &event_tx,
-                                                                                                        &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                    ).await;
+                                                    // Send via MLS (targeted) if in group, Olm fallback.
+                                                    let mls_ok = mls.as_ref().is_some_and(|m| {
+                                                        m.has_group(&server_id) && m.group_members(&server_id).contains(&target_peer.to_string())
+                                                    });
+                                                    if mls_ok {
+                                                        if let Err(e) = send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, target_peer, &envelope, &bundle_keypair) {
+                                                            hollow_log!("[HOLLOW-VAULT] MLS ShardRequest failed: {e}");
+                                                        }
+                                                    } else {
+                                                        let json = serde_json::to_string(&envelope).unwrap_or_default();
+                                                        send_encrypted_message(
+                                                            &mut swarm, &mut olm, &crypto_store,
+                                                            &mut pending_requests, &mut outbound_message_text,
+                                                            &pid, target_peer, &json, &event_tx,
+                                                            &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                        ).await;
+                                                    }
                                                     hollow_log!("[HOLLOW-VAULT] Requested shard si={si} from {target_peer}");
                                                     requested += 1;
                                                 }
@@ -4375,8 +4385,8 @@ async fn run_swarm(
                                             if placement.target_peer != local_peer {
                                                 if let Some((_, shard_data)) = plan.shards.iter().find(|(idx, _)| *idx == placement.shard_index) {
                                                     if let Ok(pid) = placement.target_peer.parse::<PeerId>() {
-                                                        if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, &placement.target_peer) && olm.has_session(&placement.target_peer) {
-                                                            // Send ShardStore metadata via Olm (no data, just metadata).
+                                                        if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, &placement.target_peer) {
+                                                            // Send ShardStore metadata via MLS or Olm.
                                                             let envelope = MessageEnvelope::ShardStore {
                                                                 sid: server_id.clone(), cid: content_id.clone(),
                                                                 si: placement.shard_index, sk: placement.shard_key.clone(),
@@ -4500,17 +4510,25 @@ async fn run_swarm(
                                 sid: server_id.clone(),
                                 cid: content_id.clone(),
                             };
-                            let delete_json = serde_json::to_string(&delete_envelope).unwrap_or_default();
-                            for member_peer_str in state.members.keys() {
-                                if member_peer_str == &local_peer { continue; }
-                                if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                    if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) && olm.has_session(member_peer_str) {
-                                        send_encrypted_message(
-                                            &mut swarm, &mut olm, &crypto_store,
-                                            &mut pending_requests, &mut outbound_message_text,
-                                            &pid, member_peer_str, &delete_json, &event_tx,
-                                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                        ).await;
+                            // Broadcast ShardDelete via MLS or Olm fallback.
+                            let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+                            if mls_ok {
+                                if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &delete_envelope, &bundle_keypair) {
+                                    hollow_log!("[HOLLOW-MLS] ShardDelete broadcast failed: {e}");
+                                }
+                            } else {
+                                let delete_json = serde_json::to_string(&delete_envelope).unwrap_or_default();
+                                for member_peer_str in state.members.keys() {
+                                    if member_peer_str == &local_peer { continue; }
+                                    if let Ok(pid) = member_peer_str.parse::<PeerId>() {
+                                        if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) && olm.has_session(member_peer_str) {
+                                            send_encrypted_message(
+                                                &mut swarm, &mut olm, &crypto_store,
+                                                &mut pending_requests, &mut outbound_message_text,
+                                                &pid, member_peer_str, &delete_json, &event_tx,
+                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                            ).await;
+                                        }
                                     }
                                 }
                             }
@@ -4525,27 +4543,36 @@ async fn run_swarm(
                     NodeCommand::RequestShardFromPeer { server_id, content_id, shard_index, shard_key, target_peer } => {
                         hollow_log!("[HOLLOW-VAULT] RequestShardFromPeer: cid={content_id} si={shard_index} from {target_peer}");
                         if let Ok(pid) = target_peer.parse::<PeerId>() {
-                            if !peer_is_reachable(&ws_room_peers, &connected_peers, &pid, &target_peer) || !olm.has_session(&target_peer) {
-                                hollow_log!("[HOLLOW-VAULT] Cannot request shard: peer {target_peer} not reachable or no Olm session");
+                            if !peer_is_reachable(&ws_room_peers, &connected_peers, &pid, &target_peer) {
+                                hollow_log!("[HOLLOW-VAULT] Cannot request shard: peer {target_peer} not reachable");
                                 let _ = event_tx.send(NetworkEvent::ShardRequestFailed {
                                     server_id, content_id, shard_index,
-                                    error: "Peer not reachable or no Olm session".into(),
+                                    error: "Peer not reachable".into(),
                                 }).await;
                             } else {
                                 let envelope = MessageEnvelope::ShardRequest {
-                                    sid: server_id,
+                                    sid: server_id.clone(),
                                     cid: content_id,
                                     si: shard_index,
                                     sk: shard_key,
                                     target: None,
                                 };
-                                let json = serde_json::to_string(&envelope).unwrap_or_default();
-                                send_encrypted_message(
-                                    &mut swarm, &mut olm, &crypto_store,
-                                    &mut pending_requests, &mut outbound_message_text,
-                                    &pid, &target_peer, &json, &event_tx,
-                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                ).await;
+                                let mls_ok = mls.as_ref().is_some_and(|m| {
+                                    m.has_group(&server_id) && m.group_members(&server_id).contains(&target_peer)
+                                });
+                                if mls_ok {
+                                    if let Err(e) = send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &target_peer, &envelope, &bundle_keypair) {
+                                        hollow_log!("[HOLLOW-VAULT] MLS ShardRequest failed: {e}");
+                                    }
+                                } else {
+                                    let json = serde_json::to_string(&envelope).unwrap_or_default();
+                                    send_encrypted_message(
+                                        &mut swarm, &mut olm, &crypto_store,
+                                        &mut pending_requests, &mut outbound_message_text,
+                                        &pid, &target_peer, &json, &event_tx,
+                                        &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                    ).await;
+                                }
                             }
                         }
                     }
@@ -4558,17 +4585,17 @@ async fn run_swarm(
                         hollow_log!("[HOLLOW-VAULT] StoreShardOnPeer: cid={content_id} si={shard_index} -> {target_peer}");
 
                         if let Ok(pid) = target_peer.parse::<PeerId>() {
-                            if !peer_is_reachable(&ws_room_peers, &connected_peers, &pid, &target_peer) || !olm.has_session(&target_peer) {
-                                hollow_log!("[HOLLOW-VAULT] Cannot store shard: peer {target_peer} not reachable or no Olm session");
+                            if !peer_is_reachable(&ws_room_peers, &connected_peers, &pid, &target_peer) {
+                                hollow_log!("[HOLLOW-VAULT] Cannot store shard: peer {target_peer} not reachable");
                                 let _ = event_tx.send(NetworkEvent::ShardStoreFailed {
                                     server_id: server_id.clone(),
                                     content_id: content_id.clone(),
                                     shard_index,
                                     target_peer: target_peer.clone(),
-                                    error: "Peer not reachable or no Olm session".into(),
+                                    error: "Peer not reachable".into(),
                                 }).await;
                             } else {
-                                // Send ShardStore metadata via Olm (no data — stream follows).
+                                // Send ShardStore metadata via MLS or Olm fallback.
                                 let envelope = MessageEnvelope::ShardStore {
                                     sid: server_id.clone(),
                                     cid: content_id.clone(),
@@ -4582,13 +4609,22 @@ async fn run_swarm(
                                     chunks: 0,
                                     target: None,
                                 };
-                                let json = serde_json::to_string(&envelope).unwrap_or_default();
-                                send_encrypted_message(
-                                    &mut swarm, &mut olm, &crypto_store,
-                                    &mut pending_requests, &mut outbound_message_text,
-                                    &pid, &target_peer, &json, &event_tx,
-                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                ).await;
+                                let mls_ok = mls.as_ref().is_some_and(|m| {
+                                    m.has_group(&server_id) && m.group_members(&server_id).contains(&target_peer)
+                                });
+                                if mls_ok {
+                                    if let Err(e) = send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &target_peer, &envelope, &bundle_keypair) {
+                                        hollow_log!("[HOLLOW-MLS] ShardStore targeted send failed: {e}");
+                                    }
+                                } else {
+                                    let json = serde_json::to_string(&envelope).unwrap_or_default();
+                                    send_encrypted_message(
+                                        &mut swarm, &mut olm, &crypto_store,
+                                        &mut pending_requests, &mut outbound_message_text,
+                                        &pid, &target_peer, &json, &event_tx,
+                                        &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                    ).await;
+                                }
 
                                 // Stream shard bytes via stream_to_peer (WS or libp2p).
                                 let shard_temp_dir = crate::node::file_transfer::files_dir();
@@ -10114,21 +10150,220 @@ async fn handle_incoming_request(
                                 }
                             }
 
-                            // Vault/shard envelopes via MLS — same as Olm handlers but arrive via MLS broadcast.
-                            MessageEnvelope::ShardStore { .. }
-                            | MessageEnvelope::ShardChunk { .. }
-                            | MessageEnvelope::ShardStoreAck { .. }
-                            | MessageEnvelope::ShardDelete { .. }
-                            | MessageEnvelope::ShardRequest { .. }
-                            | MessageEnvelope::ShardResponse { .. }
-                            | MessageEnvelope::ShardResponseChunk { .. }
-                            | MessageEnvelope::ShardProbe { .. }
-                            | MessageEnvelope::ShardProbeResponse { .. }
-                            | MessageEnvelope::VaultManifestBroadcast { .. }
-                            | MessageEnvelope::ShardMigrate { .. } => {
-                                // These will be dispatched via MLS in Step 6.
-                                // For now, log receipt. The Olm handlers still work as fallback.
-                                hollow_log!("[HOLLOW-MLS] Received vault/shard envelope via MLS from {sender_peer_id} — dispatch pending");
+                            // -- Vault/shard envelopes via MLS (same logic as Olm handlers) --
+
+                            MessageEnvelope::ShardStore { sid, cid, si, sk, k, m, total_size, tier, data, chunks, .. } => {
+                                hollow_log!("[HOLLOW-MLS-VAULT] ShardStore: cid={cid} si={si} from {sender_peer_id}");
+                                let is_member = server_states.get(&sid).map(|s| s.members.contains_key(&sender_peer_id)).unwrap_or(false);
+                                if !is_member { return; }
+                                if chunks == 0 && data.is_empty() {
+                                    // Streamed shard — data arrives via binary WS stream.
+                                    let key = format!("{cid}:{si}");
+                                    pending_shard_streams.insert(key, PendingShardStream {
+                                        server_id: sid, content_id: cid, shard_index: si,
+                                        shard_key: sk, k, m, total_size, tier,
+                                    });
+                                } else if chunks == 0 {
+                                    // Inline shard — store directly.
+                                    if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
+                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
+                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                        let vault_dir = data_dir.join("vault");
+                                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                                            let tier_enum = crate::vault::content_store::StorageTier::from_str(&tier);
+                                            let _ = cs.store_shard(&sid, &cid, si, k, m, total_size, tier_enum, &shard_bytes);
+                                        }
+                                        let _ = event_tx.send(NetworkEvent::ShardStored {
+                                            server_id: sid.clone(), content_id: cid.clone(),
+                                            shard_index: si, from_peer: sender_peer_id.clone(),
+                                        }).await;
+                                        // Send ack via MLS.
+                                        let ack = MessageEnvelope::ShardStoreAck {
+                                            sid, cid, si, ok: true, err: None, target: None,
+                                        };
+                                        if let Some(mls_mgr_ref) = mls {
+                                            let _ = send_mls_to_peer(mls_mgr_ref, ws_cmd_tx, &server_id, &sender_peer_id, &ack, bundle_keypair);
+                                        }
+                                    }
+                                }
+                            }
+
+                            MessageEnvelope::ShardChunk { .. } => {
+                                // Chunked shards are legacy — inline/streamed modes handle everything.
+                                hollow_log!("[HOLLOW-MLS-VAULT] ShardChunk via MLS from {sender_peer_id} — legacy, ignoring");
+                            }
+
+                            MessageEnvelope::ShardStoreAck { sid, cid, si, ok, err, .. } => {
+                                if ok {
+                                    hollow_log!("[HOLLOW-MLS-VAULT] ShardStoreAck OK: cid={cid} si={si}");
+                                    let _ = event_tx.send(NetworkEvent::ShardStoreAckReceived {
+                                        server_id: sid, content_id: cid, shard_index: si, success: true, error: String::new(),
+                                    }).await;
+                                } else {
+                                    hollow_log!("[HOLLOW-MLS-VAULT] ShardStoreAck FAILED: cid={cid} si={si} err={err:?}");
+                                    let _ = event_tx.send(NetworkEvent::ShardStoreAckReceived {
+                                        server_id: sid, content_id: cid, shard_index: si, success: false,
+                                        error: err.unwrap_or_default(),
+                                    }).await;
+                                }
+                            }
+
+                            MessageEnvelope::ShardDelete { sid, cid } => {
+                                // SECURITY: Verify sender has MANAGE_SERVER permission.
+                                let has_perm = server_states.get(&sid).map(|s| {
+                                    let role = s.get_role(&sender_peer_id);
+                                    let perms = role.default_permissions();
+                                    (perms & crate::crdt::operations::Permission::MANAGE_SERVER) != 0
+                                }).unwrap_or(false);
+                                if !has_perm { return; }
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
+                                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                let vault_dir = data_dir.join("vault");
+                                let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                                    let _ = cs.delete_content(&sid, &cid);
+                                }
+                                let _ = event_tx.send(NetworkEvent::ShardDeleted {
+                                    server_id: sid, content_id: cid,
+                                }).await;
+                            }
+
+                            MessageEnvelope::ShardRequest { sid, cid, si, sk, .. } => {
+                                hollow_log!("[HOLLOW-MLS-VAULT] ShardRequest: cid={cid} si={si} from {sender_peer_id}");
+                                let is_member = server_states.get(&sid).map(|s| s.members.contains_key(&sender_peer_id)).unwrap_or(false);
+                                if !is_member { return; }
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
+                                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                let vault_dir = data_dir.join("vault");
+                                let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                                    match cs.read_shard_unchecked(&sid, &sk) {
+                                        Ok(shard_data) => {
+                                            // Send metadata via MLS, stream bytes via binary WS.
+                                            let resp = MessageEnvelope::ShardResponse {
+                                                sid: sid.clone(), cid: cid.clone(), si,
+                                                data: String::new(), chunks: 0, found: true, target: None,
+                                            };
+                                            if let Some(mls_mgr_ref) = mls {
+                                                let _ = send_mls_to_peer(mls_mgr_ref, ws_cmd_tx, &sid, &sender_peer_id, &resp, bundle_keypair);
+                                            }
+                                            // Stream shard bytes.
+                                            if let Ok(pid) = sender_peer_id.parse::<PeerId>() {
+                                                let shard_temp_dir = crate::node::file_transfer::files_dir();
+                                                let shard_safe = &cid[..16.min(cid.len())];
+                                                let shard_temp = shard_temp_dir.join(format!(".stream_shard_{}_{}.tmp", shard_safe, si));
+                                                if let Ok(()) = std::fs::write(&shard_temp, &shard_data) {
+                                                    let shard_kind = super::stream_transfer::StreamKind::Shard { shard_index: si };
+                                                    stream_to_peer(
+                                                        swarm, ws_cmd_tx, ws_room_peers, connected_peers,
+                                                        &pid, &sender_peer_id, &shard_kind,
+                                                        &cid, &shard_temp, shard_data.len() as u64,
+                                                    ).await;
+                                                }
+                                            }
+                                        }
+                                        Err(_) => {
+                                            let resp = MessageEnvelope::ShardResponse {
+                                                sid, cid, si, data: String::new(), chunks: 0, found: false, target: None,
+                                            };
+                                            if let Some(mls_mgr_ref) = mls {
+                                                let _ = send_mls_to_peer(mls_mgr_ref, ws_cmd_tx, &server_id, &sender_peer_id, &resp, bundle_keypair);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            MessageEnvelope::ShardResponse { sid, cid, si, data, chunks, found, .. } => {
+                                hollow_log!("[HOLLOW-MLS-VAULT] ShardResponse: cid={cid} si={si} found={found}");
+                                if found && data.is_empty() {
+                                    // Streamed — register for binary stream arrival.
+                                    let key = format!("{cid}:{si}");
+                                    pending_shard_streams.insert(key, PendingShardStream {
+                                        server_id: sid, content_id: cid, shard_index: si,
+                                        shard_key: String::new(), k: 0, m: 0, total_size: 0, tier: String::new(),
+                                    });
+                                } else if found {
+                                    // Inline data.
+                                    if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
+                                        let _ = event_tx.send(NetworkEvent::ShardReceived {
+                                            server_id: sid, content_id: cid, shard_index: si,
+                                            from_peer: sender_peer_id.clone(),
+                                        }).await;
+                                    }
+                                }
+                            }
+
+                            MessageEnvelope::ShardResponseChunk { .. } => {
+                                // Chunked responses are legacy.
+                                hollow_log!("[HOLLOW-MLS-VAULT] ShardResponseChunk via MLS — legacy, ignoring");
+                            }
+
+                            MessageEnvelope::ShardProbe { sid, cid, .. } => {
+                                let is_member = server_states.get(&sid).map(|s| s.members.contains_key(&sender_peer_id)).unwrap_or(false);
+                                if !is_member { return; }
+                                let data_dir = crate::identity::data_dir().unwrap_or_default();
+                                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                let vault_dir = data_dir.join("vault");
+                                let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                let mut indices = Vec::new();
+                                if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                                    if let Ok(records) = cs.list_content_shards(&sid, &cid) {
+                                        indices = records.iter().map(|r| r.shard_index).collect();
+                                    }
+                                }
+                                let resp = MessageEnvelope::ShardProbeResponse {
+                                    sid: sid.clone(), cid, shards: indices, target: None,
+                                };
+                                if let Some(mls_mgr_ref) = mls {
+                                    let _ = send_mls_to_peer(mls_mgr_ref, ws_cmd_tx, &sid, &sender_peer_id, &resp, bundle_keypair);
+                                }
+                            }
+
+                            MessageEnvelope::ShardProbeResponse { sid, cid, shards, .. } => {
+                                hollow_log!("[HOLLOW-MLS-VAULT] ShardProbeResponse: cid={cid} shards={shards:?} from {sender_peer_id}");
+                                // Informational — download pipeline uses this.
+                            }
+
+                            MessageEnvelope::VaultManifestBroadcast { sid, cid, chid, manifest } => {
+                                hollow_log!("[HOLLOW-MLS-VAULT] VaultManifestBroadcast: cid={cid} in {chid}");
+                                if let Ok(manifest_obj) = serde_json::from_str::<crate::vault::pipeline::VaultManifest>(&manifest) {
+                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
+                                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                    let vault_dir = data_dir.join("vault");
+                                    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                    if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                                        let _ = cs.save_manifest(&sid, &chid, &manifest_obj);
+                                    }
+                                    // Link vault content_id to the file record via message_id.
+                                    if !manifest_obj.message_id.is_empty() {
+                                        if let Ok(ms) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                            let _ = ms.set_file_content_id(&manifest_obj.message_id, &manifest_obj.content_id);
+                                        }
+                                    }
+                                }
+                            }
+
+                            MessageEnvelope::ShardMigrate { sid, cid, si, sk, data, .. } => {
+                                let is_member = server_states.get(&sid).map(|s| s.members.contains_key(&sender_peer_id)).unwrap_or(false);
+                                if !is_member { return; }
+                                if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
+                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
+                                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                    let vault_dir = data_dir.join("vault");
+                                    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                    if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                                        let tier = crate::vault::content_store::StorageTier::Standard;
+                                        let _ = cs.store_shard(&sid, &cid, si, 0, 0, 0, tier, &shard_bytes);
+                                    }
+                                }
                             }
 
                             // DM-only envelopes should never arrive via MLS.
@@ -10626,24 +10861,31 @@ async fn handle_incoming_request(
                                             aes_nonce: Some(hex::encode(enc.nonce)),
                                             target: None,
                                         };
-                                        let header_json = serde_json::to_string(&header).unwrap_or_default();
+                                        // Send FileHeader via MLS (targeted) if possible, Olm fallback.
                                         if let Ok(pid) = peer_str.parse::<PeerId>() {
-                                            if olm.has_session(&peer_str) {
+                                            let ctx_sid = file_meta.context_id.split(':').next().unwrap_or("").to_string();
+                                            let mls_ok = mls.as_ref().is_some_and(|m| {
+                                                m.has_group(&ctx_sid) && m.group_members(&ctx_sid).contains(&peer_str)
+                                            });
+                                            if mls_ok {
+                                                let _ = send_mls_to_peer(mls.as_mut().unwrap(), ws_cmd_tx, &ctx_sid, &peer_str, &header, bundle_keypair);
+                                            } else if olm.has_session(&peer_str) {
+                                                let header_json = serde_json::to_string(&header).unwrap_or_default();
                                                 send_encrypted_message(
                                                     swarm, olm, crypto_store,
                                                     pending_requests, outbound_message_text,
                                                     &pid, &peer_str, &header_json, event_tx,
-                                                ws_cmd_tx, ws_room_peers, connected_peers,
+                                                    ws_cmd_tx, ws_room_peers, connected_peers,
                                                 ).await;
-
-                                                // Stream encrypted file bytes via stream_to_peer (WS or libp2p).
-                                                stream_to_peer(
-                                                    swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                                    &pid, &peer_str, &super::stream_transfer::StreamKind::File,
-                                                    &file_id, &temp_path, enc.ciphertext.len() as u64,
-                                                ).await;
-                                                hollow_log!("[HOLLOW-FILE] Streamed file {} to {peer_str}", file_id);
                                             }
+
+                                            // Stream encrypted file bytes via WS binary or libp2p.
+                                            stream_to_peer(
+                                                swarm, ws_cmd_tx, ws_room_peers, connected_peers,
+                                                &pid, &peer_str, &super::stream_transfer::StreamKind::File,
+                                                &file_id, &temp_path, enc.ciphertext.len() as u64,
+                                            ).await;
+                                            hollow_log!("[HOLLOW-FILE] Streamed file {} to {peer_str}", file_id);
                                         }
                                     }
                                 }

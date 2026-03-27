@@ -166,6 +166,9 @@ class FileTransferNotifier
     int? height,
     bool isVaultMode = false,
   }) {
+    // Don't overwrite an existing entry (e.g., from a sync batch that already
+    // set isComplete, or a prior live transfer). Only create new entries.
+    if (state.containsKey(fileId)) return;
     final updated = Map<String, FileTransferState>.from(state);
     updated[fileId] = FileTransferState(
       fileId: fileId,
@@ -175,7 +178,10 @@ class FileTransferNotifier
       isImage: isImage,
       width: width,
       height: height,
-      isDownloading: !isVaultMode, // Only downloading if P2P stream expected.
+      // Don't set isDownloading on header alone — it will be set when actual
+      // progress starts (FileProgress event) or by the download button.
+      // This prevents synced file metadata from showing "Downloading..." forever.
+      isDownloading: false,
     );
     state = updated;
   }
@@ -194,7 +200,7 @@ class FileTransferNotifier
         totalChunks: totalChunks,
         chunksReceived: chunksReceived,
         isSending: current.isSending,
-        isDownloading: current.isDownloading,
+        isDownloading: true, // Active progress → actively downloading.
         isImage: current.isImage,
         width: current.width,
         height: current.height,
@@ -208,14 +214,27 @@ class FileTransferNotifier
   /// Handle FileCompleted event.
   void onFileCompleted(String fileId, String diskPath) {
     final current = state[fileId];
-    if (current == null) return;
     final updated = Map<String, FileTransferState>.from(state);
-    updated[fileId] = current.copyWith(
-      isComplete: true,
-      isDownloading: false,
-      diskPath: diskPath,
-      chunksReceived: current.totalChunks > 0 ? current.totalChunks : 1,
-    );
+    if (current != null) {
+      updated[fileId] = current.copyWith(
+        isComplete: true,
+        isDownloading: false,
+        diskPath: diskPath,
+        chunksReceived: current.totalChunks > 0 ? current.totalChunks : 1,
+      );
+    } else {
+      // File completed without a prior header (e.g., received via sync then stream).
+      updated[fileId] = FileTransferState(
+        fileId: fileId,
+        fileName: 'file',
+        sizeBytes: 0,
+        totalChunks: 1,
+        chunksReceived: 1,
+        isComplete: true,
+        isDownloading: false,
+        diskPath: diskPath,
+      );
+    }
     state = updated;
   }
 
@@ -254,6 +273,7 @@ class FileTransferNotifier
   /// Handle vault download complete.
   void onVaultDownloadComplete(String contentId, String diskPath) {
     final updated = Map<String, FileTransferState>.from(state);
+    bool found = false;
     for (final entry in updated.entries) {
       if (entry.value.contentId == contentId) {
         updated[entry.key] = entry.value.copyWith(
@@ -262,8 +282,23 @@ class FileTransferNotifier
           diskPath: diskPath,
           vaultPhase: null,
         );
+        found = true;
         break;
       }
+    }
+    // If no entry matched by contentId, create one so the polling loop can find it.
+    if (!found) {
+      updated['vault:$contentId'] = FileTransferState(
+        fileId: 'vault:$contentId',
+        fileName: 'file',
+        sizeBytes: 0,
+        totalChunks: 1,
+        chunksReceived: 1,
+        isComplete: true,
+        isDownloading: false,
+        diskPath: diskPath,
+        contentId: contentId,
+      );
     }
     state = updated;
   }

@@ -524,6 +524,30 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     }
   }
 
+  /// Request a file from the original sender via P2P stream (for <6 member servers).
+  Future<void> _requestFileFromPeer(FileAttachment attachment, String senderId) async {
+    if (senderId.isEmpty) {
+      if (mounted) {
+        HollowToast.show(context, 'Cannot download: unknown sender', type: HollowToastType.error);
+      }
+      return;
+    }
+    try {
+      if (mounted) {
+        HollowToast.show(context, 'Requesting file from peer...', type: HollowToastType.info);
+      }
+      await network_api.requestFileFromPeer(
+        fileId: attachment.fileId,
+        peerId: senderId,
+        chunks: [],
+      );
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(context, 'File request failed: $e', type: HollowToastType.error);
+      }
+    }
+  }
+
   /// Download a vault file (reconstruct from shards), then open Save As dialog.
   Future<void> _vaultDownloadAndSave(FileAttachment attachment) async {
     if (_isPicking) return;
@@ -1056,7 +1080,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                                 if (msg.fileAttachment!.diskPath != null) {
                                   _saveFile(msg.fileAttachment!);
                                 } else {
-                                  _vaultDownloadAndSave(msg.fileAttachment!);
+                                  // For <6 member servers (full replication), request file from
+                                  // the sender via P2P stream. For 6+ members, use vault download.
+                                  final memberCount = ref.read(serverMembersProvider(widget.serverId)).valueOrNull?.length ?? 0;
+                                  if (memberCount >= 6) {
+                                    _vaultDownloadAndSave(msg.fileAttachment!);
+                                  } else {
+                                    _requestFileFromPeer(msg.fileAttachment!, msg.senderId);
+                                  }
                                 }
                               }
                             : null,
@@ -1362,16 +1393,13 @@ class _ChannelConnectionStatus extends ConsumerWidget {
             .where((m) => connectedPeers.containsKey(m.peerId))
             .toList();
 
-        final encryptedMembers = onlineMembers
-            .where((m) => connectedPeers[m.peerId]?.isEncrypted ?? false)
-            .toList();
-
         // Determine connection stage.
+        // With MLS, online members in a WS room are already encrypted (MLS group broadcast).
+        // The old Olm isEncrypted check is no longer relevant for server channels.
         final ConnectionStage stage;
         String? detail;
         if (onlineMembers.isEmpty) {
           stage = ConnectionStage.connecting;
-          // Check if we're trying to connect to members.
           final connStatus = ref.watch(connectionStatusProvider);
           final memberIds = otherMembers.map((m) => m.peerId).toList();
           final connectingCount = memberIds
@@ -1385,9 +1413,8 @@ class _ChannelConnectionStatus extends ConsumerWidget {
           detail = connectingCount > 0
               ? 'Connecting to $connectingCount member${connectingCount == 1 ? '' : 's'}...'
               : 'No members online';
-        } else if (encryptedMembers.isEmpty) {
-          stage = ConnectionStage.encrypting;
         } else {
+          // Online members present → MLS encrypted via WS room.
           stage = ConnectionStage.encrypted;
         }
 

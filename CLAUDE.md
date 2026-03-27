@@ -65,7 +65,7 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 ## Current Phase
 **Phase 5: WebSocket Relay Migration — COMPLETE.** All messages + file streaming now route through WS.
 
-**Phase 6: Pure MLS for Servers — Steps 1-7 DONE (Mar 26, 2026).** Steps 8-9 (DHT prekey removal, cleanup) NEXT.
+**Phase 6: Pure MLS for Servers — COMPLETE (Mar 26-27, 2026).** All server messages via MLS. DHT prekey removed. Vault shards via MLS. UI fixes done.
 
 **Phase 5 — WebSocket Relay (Mar 25-26, 2026) — DONE:**
 All messages and file/shard streaming now route through WS relay first with libp2p fallback. Sub-phases: (1) relay deployed, (2) client connected, (3) presence working, (4) all messages WS-first, (5) file/shard binary streaming via WS.
@@ -76,12 +76,14 @@ All messages and file/shard streaming now route through WS relay first with libp
 - `synced_peers` prevents duplicate sync race between WS and libp2p
 - 183 tests pass. Relay needs redeployment for BinaryDirect.
 
-**Phase 6 — Pure MLS for Servers (Mar 26-27, 2026) — Steps 1-9 DONE:**
+**Phase 6 — Pure MLS for Servers (Mar 26-27, 2026) — COMPLETE:**
 ALL server messages now route through MLS encryption via `SendToRoom` broadcast. Steps: (1-3) envelope variants + helpers + dispatcher, (4-7) migrate all send sites + SendToRoom optimization, (8) DHT prekey → WS KeyRequest, (9) cleanup.
 - WS keepalive: 30s ping in ws_client.rs. Sync dedup: `channel_sync_sent` 5s cooldown eliminates sync spam.
 - Bugs fixed: MLS batch dedup, WS room join, sync loop, FileHeader PendingFileStream, group_members check for MLS responses.
-- 183 tests pass. Tested between 2 machines — messages, CRDT, files, sync all working.
-- **Remaining:** Vault shard MLS dispatch, UI fixes ("Encrypting..." label, download progress), libp2p full removal (next session).
+- All vault/shard handlers dispatched via MLS. olm.has_session() gates removed from all vault paths.
+- UI: "Encrypting..." removed, download progress fixed, vault double-press fixed, synced file P2P request.
+- 183 tests pass. Tested between 2 machines + 6 school computers — messages, CRDT, files, vault shards all working.
+- **Next:** libp2p full removal, shard health monitor, HOLLOW_PLAN.md update.
 
 **Phase 4: Shared Vault — COMPLETE.** Phases 1-3.75 all COMPLETE.
 
