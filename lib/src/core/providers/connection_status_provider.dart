@@ -48,25 +48,9 @@ class PeerConnectionStatus {
   /// Human-readable status label for the UI.
   String get label {
     return switch (stage) {
-      PeerConnectionStage.dialing => switch (method) {
-          'relay' => 'Connecting via relay...',
-          'mdns' => 'Found on LAN...',
-          'quic' => 'Connecting (QUIC)...',
-          'tcp' => 'Connecting (TCP)...',
-          'wss' => 'Connecting (WSS)...',
-          'dcutr' => 'Hole punching...',
-          _ => 'Connecting...',
-        },
-      PeerConnectionStage.connected => switch (method) {
-          'relay' => 'Connected via relay',
-          'mdns' => 'Connected (LAN)',
-          'dcutr' => 'Direct connection',
-          _ => 'Connected',
-        },
+      PeerConnectionStage.dialing => 'Connecting...',
+      PeerConnectionStage.connected => 'Connected',
       PeerConnectionStage.keyExchange => switch (detail) {
-          'fetching_prekey' => 'Fetching encryption keys...',
-          'prekey_found' => 'Keys found, encrypting...',
-          'establishing_session' => 'Establishing session...',
           'key_request_sent' => 'Requesting keys...',
           'session_created' => 'Session created',
           _ => 'Encrypting...',
@@ -82,8 +66,6 @@ enum RelayConnectionStatus {
   disconnected,
   connecting,
   connected,
-  circuitRequested,
-  circuitReady,
   reconnecting,
 }
 
@@ -133,8 +115,6 @@ class ConnectionStatusState {
         RelayConnectionStatus.disconnected => 'Disconnected',
         RelayConnectionStatus.connecting => 'Connecting...',
         RelayConnectionStatus.connected => 'Connected',
-        RelayConnectionStatus.circuitRequested => 'Requesting circuit...',
-        RelayConnectionStatus.circuitReady => 'Circuit ready',
         RelayConnectionStatus.reconnecting => 'Reconnecting...',
       };
 }
@@ -183,47 +163,6 @@ class ConnectionStatusNotifier extends Notifier<ConnectionStatusState> {
     if (state.activePeers.isNotEmpty) {
       _scheduleCleanup();
     }
-  }
-
-  void onConnectionAttemptStarted(String peerId, String method) {
-    final current = state.peers[peerId];
-    if (current != null &&
-        current.stage == PeerConnectionStage.encrypted) {
-      return;
-    }
-    state = state.copyWithPeer(
-      peerId,
-      PeerConnectionStatus(
-        peerId: peerId,
-        stage: PeerConnectionStage.dialing,
-        method: method,
-        lastUpdated: DateTime.now(),
-      ),
-    );
-    _scheduleCleanup();
-  }
-
-  void onConnectionAttemptFailed(
-      String peerId, String method, String reason) {
-    final current = state.peers[peerId];
-    // Don't mark failed if already connected/encrypted via another transport.
-    if (current != null &&
-        (current.stage == PeerConnectionStage.connected ||
-            current.stage == PeerConnectionStage.keyExchange ||
-            current.stage == PeerConnectionStage.encrypted)) {
-      return;
-    }
-    state = state.copyWithPeer(
-      peerId,
-      PeerConnectionStatus(
-        peerId: peerId,
-        stage: PeerConnectionStage.failed,
-        method: method,
-        failReason: reason,
-        lastUpdated: DateTime.now(),
-      ),
-    );
-    _scheduleCleanup();
   }
 
   void onPeerConnected(String peerId) {
@@ -306,8 +245,6 @@ class ConnectionStatusNotifier extends Notifier<ConnectionStatusState> {
     final relayStatus = switch (status) {
       'connecting' => RelayConnectionStatus.connecting,
       'connected' => RelayConnectionStatus.connected,
-      'circuit_requested' => RelayConnectionStatus.circuitRequested,
-      'circuit_ready' => RelayConnectionStatus.circuitReady,
       'reconnecting' => RelayConnectionStatus.reconnecting,
       _ => RelayConnectionStatus.disconnected,
     };

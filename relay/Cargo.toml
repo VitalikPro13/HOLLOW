@@ -8,11 +8,6 @@ name = "hollow-relay"
 path = "src/main.rs"
 
 [dependencies]
-libp2p = { version = "0.56.0", features = [
-    "tcp", "noise", "yamux", "quic", "tokio", "macros",
-    "identify", "relay", "kad", "ping",
-    "dns", "websocket", "tls",
-] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "signal", "fs"] }
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }

@@ -19,9 +19,79 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::hollow_log;
-use super::stream_transfer::{StreamKind, StreamRequest, StreamProgress, stream_progress};
 use super::ws_client::WsCommand;
 use super::file_transfer::files_dir;
+
+// ── Shared stream types (moved from stream_transfer.rs) ─────
+
+/// What kind of transfer this is.
+#[derive(Debug, Clone)]
+pub enum StreamKind {
+    /// P2P file transfer (DM or channel file).
+    File,
+    /// Vault shard transfer.
+    Shard { shard_index: u16 },
+}
+
+/// The request type used for both sending and receiving.
+/// On the sender side, `temp_path` points to the file to stream FROM.
+/// On the receiver side, `temp_path` is where the received bytes were written.
+#[derive(Debug)]
+pub struct StreamRequest {
+    pub kind: StreamKind,
+    /// Hex identifier (file_id for files, content_id for shards).
+    pub id: String,
+    /// Total bytes to transfer.
+    pub size: u64,
+    /// Path to the data file (source on sender, destination on receiver).
+    pub temp_path: PathBuf,
+}
+
+/// Tracks bytes received per file_id. Polled by the event loop to emit FileProgress events.
+#[derive(Debug, Clone)]
+pub struct StreamProgress {
+    pub bytes_received: Arc<AtomicU64>,
+    pub total_bytes: u64,
+}
+
+/// Global progress map.
+pub fn stream_progress() -> &'static std::sync::Mutex<HashMap<String, StreamProgress>> {
+    static INSTANCE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, StreamProgress>>> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Create an outbound file stream request (reads encrypted file from disk).
+pub fn file_stream_request(file_id: &str, encrypted_path: PathBuf, size: u64) -> StreamRequest {
+    StreamRequest {
+        kind: StreamKind::File,
+        id: file_id.to_string(),
+        size,
+        temp_path: encrypted_path,
+    }
+}
+
+/// Create an outbound shard stream request (writes shard bytes to temp file first).
+pub fn shard_stream_request(
+    content_id: &str,
+    shard_index: u16,
+    shard_data: &[u8],
+) -> Result<StreamRequest, String> {
+    let temp_dir = files_dir();
+    let safe_prefix = &content_id[..16.min(content_id.len())];
+    let temp_name = format!(".stream_shard_{}_{}.tmp", safe_prefix, shard_index);
+    let temp_path = temp_dir.join(&temp_name);
+    std::fs::write(&temp_path, shard_data)
+        .map_err(|e| format!("Write shard temp file: {e}"))?;
+
+    Ok(StreamRequest {
+        kind: StreamKind::Shard { shard_index },
+        id: content_id.to_string(),
+        size: shard_data.len() as u64,
+        temp_path,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────
 
 /// 256 KB per WS binary frame payload.
 const WS_CHUNK_SIZE: usize = 256 * 1024;

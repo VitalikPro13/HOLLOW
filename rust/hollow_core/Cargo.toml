@@ -8,7 +8,6 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 flutter_rust_bridge = "=2.11.1"
-libp2p = { version = "0.56.0", features = ["tcp", "noise", "yamux", "mdns", "tokio", "macros", "identify", "request-response", "quic", "kad", "autonat", "dcutr", "relay", "ping", "dns", "websocket", "tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
@@ -27,12 +26,13 @@ openmls_rust_crypto = "0.5"
 openmls_basic_credential = "0.5"
 openmls_traits = "0.5"
 openmls_memory_storage = "0.5"
-shadowsocks-service = { version = "1.21", default-features = false, features = ["local-tunnel", "aead-cipher-2022"] }
 image = { version = "0.25", default-features = false, features = ["webp", "png", "jpeg", "gif", "bmp"] }
 reed-solomon-erasure = "6.0"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
 aes-gcm = "0.10"
+ed25519-dalek = { version = "2", features = ["pkcs8"] }
+bs58 = "0.5"
 
 [dev-dependencies]
 tempfile = "3"

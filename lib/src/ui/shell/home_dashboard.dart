@@ -904,13 +904,9 @@ class _RelayStatusCard extends ConsumerWidget {
     final Color dotColor;
     final bool pulse;
     switch (relayStatus) {
-      case RelayConnectionStatus.circuitReady:
+      case RelayConnectionStatus.connected:
         dotColor = hollow.success;
         pulse = false;
-      case RelayConnectionStatus.connected:
-      case RelayConnectionStatus.circuitRequested:
-        dotColor = hollow.accent;
-        pulse = true;
       case RelayConnectionStatus.connecting:
       case RelayConnectionStatus.reconnecting:
         dotColor = hollow.warning;

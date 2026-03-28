@@ -579,19 +579,7 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_RebalanceCompleted():
         break;
 
-      // -- Connection status events (granular UI) --
-      case NetworkEvent_ConnectionAttemptStarted(
-            :final peerId, :final method):
-        ref
-            .read(connectionStatusProvider.notifier)
-            .onConnectionAttemptStarted(peerId, method);
-
-      case NetworkEvent_ConnectionAttemptFailed(
-            :final peerId, :final method, :final reason):
-        ref
-            .read(connectionStatusProvider.notifier)
-            .onConnectionAttemptFailed(peerId, method, reason);
-
+      // -- Connection status events --
       case NetworkEvent_KeyExchangeStarted(:final peerId):
         ref
             .read(connectionStatusProvider.notifier)
@@ -602,11 +590,6 @@ class EventStreamNotifier extends Notifier<bool> {
         ref
             .read(connectionStatusProvider.notifier)
             .onKeyExchangeProgress(peerId, stage);
-
-      case NetworkEvent_RelayStatusChanged(:final status):
-        ref
-            .read(connectionStatusProvider.notifier)
-            .onRelayStatusChanged(status);
     }
     } catch (e, st) {
       debugPrint('[HOLLOW] Unhandled dispatch error: $e\n$st');

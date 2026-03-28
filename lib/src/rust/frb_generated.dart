@@ -3833,28 +3833,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           serverId: dco_decode_String(raw[1]),
         );
       case 62:
-        return NetworkEvent_ConnectionAttemptStarted(
-          peerId: dco_decode_String(raw[1]),
-          method: dco_decode_String(raw[2]),
-        );
-      case 63:
-        return NetworkEvent_ConnectionAttemptFailed(
-          peerId: dco_decode_String(raw[1]),
-          method: dco_decode_String(raw[2]),
-          reason: dco_decode_String(raw[3]),
-        );
-      case 64:
         return NetworkEvent_KeyExchangeStarted(
           peerId: dco_decode_String(raw[1]),
         );
-      case 65:
+      case 63:
         return NetworkEvent_KeyExchangeProgress(
           peerId: dco_decode_String(raw[1]),
           stage: dco_decode_String(raw[2]),
-        );
-      case 66:
-        return NetworkEvent_RelayStatusChanged(
-          status: dco_decode_String(raw[1]),
         );
       default:
         throw Exception("unreachable");
@@ -4885,33 +4870,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         return NetworkEvent_RebalanceCompleted(serverId: var_serverId);
       case 62:
         var var_peerId = sse_decode_String(deserializer);
-        var var_method = sse_decode_String(deserializer);
-        return NetworkEvent_ConnectionAttemptStarted(
-          peerId: var_peerId,
-          method: var_method,
-        );
-      case 63:
-        var var_peerId = sse_decode_String(deserializer);
-        var var_method = sse_decode_String(deserializer);
-        var var_reason = sse_decode_String(deserializer);
-        return NetworkEvent_ConnectionAttemptFailed(
-          peerId: var_peerId,
-          method: var_method,
-          reason: var_reason,
-        );
-      case 64:
-        var var_peerId = sse_decode_String(deserializer);
         return NetworkEvent_KeyExchangeStarted(peerId: var_peerId);
-      case 65:
+      case 63:
         var var_peerId = sse_decode_String(deserializer);
         var var_stage = sse_decode_String(deserializer);
         return NetworkEvent_KeyExchangeProgress(
           peerId: var_peerId,
           stage: var_stage,
         );
-      case 66:
-        var var_status = sse_decode_String(deserializer);
-        return NetworkEvent_RelayStatusChanged(status: var_status);
       default:
         throw UnimplementedError('');
     }
@@ -6028,35 +5994,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case NetworkEvent_RebalanceCompleted(serverId: final serverId):
         sse_encode_i_32(61, serializer);
         sse_encode_String(serverId, serializer);
-      case NetworkEvent_ConnectionAttemptStarted(
-        peerId: final peerId,
-        method: final method,
-      ):
-        sse_encode_i_32(62, serializer);
-        sse_encode_String(peerId, serializer);
-        sse_encode_String(method, serializer);
-      case NetworkEvent_ConnectionAttemptFailed(
-        peerId: final peerId,
-        method: final method,
-        reason: final reason,
-      ):
-        sse_encode_i_32(63, serializer);
-        sse_encode_String(peerId, serializer);
-        sse_encode_String(method, serializer);
-        sse_encode_String(reason, serializer);
       case NetworkEvent_KeyExchangeStarted(peerId: final peerId):
-        sse_encode_i_32(64, serializer);
+        sse_encode_i_32(62, serializer);
         sse_encode_String(peerId, serializer);
       case NetworkEvent_KeyExchangeProgress(
         peerId: final peerId,
         stage: final stage,
       ):
-        sse_encode_i_32(65, serializer);
+        sse_encode_i_32(63, serializer);
         sse_encode_String(peerId, serializer);
         sse_encode_String(stage, serializer);
-      case NetworkEvent_RelayStatusChanged(status: final status):
-        sse_encode_i_32(66, serializer);
-        sse_encode_String(status, serializer);
     }
   }
 

@@ -1,5 +1,4 @@
 mod config;
-mod relay_node;
 mod signaling_http;
 mod ws_router;
 
@@ -9,7 +8,7 @@ use std::sync::Arc;
 use clap::Parser;
 use tokio::sync::RwLock;
 
-use config::{Config, load_or_create_keypair};
+use config::Config;
 use signaling_http::RoomMap;
 
 #[tokio::main]
@@ -24,15 +23,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Config::parse();
 
-    // Load or create the relay node's persistent identity.
-    let keypair = load_or_create_keypair(&config.keypair_file)
-        .map_err(|e| format!("Keypair error: {e}"))?;
-    let peer_id = keypair.public().to_peer_id();
-
     tracing::info!("========================================");
-    tracing::info!("Hollow Relay + Signaling Server");
-    tracing::info!("PeerId: {peer_id}");
-    tracing::info!("libp2p port: {}", config.libp2p_port);
+    tracing::info!("Hollow Signaling + WebSocket Relay");
     tracing::info!("HTTP port: {}", config.http_port);
     tracing::info!("========================================");
 
@@ -42,11 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Shared state for the WebSocket room router.
     let ws_state = Arc::new(ws_router::WsState::new());
 
-    // Run both services concurrently. If either exits, we shut down.
+    // Run the HTTP/WS server. Ctrl+C shuts down.
     tokio::select! {
-        result = relay_node::run_relay_node(keypair, &config) => {
-            tracing::error!("Relay node exited: {result:?}");
-        }
         result = signaling_http::run_signaling_http(rooms, ws_state, config.http_port) => {
             tracing::error!("HTTP/WS server exited: {result:?}");
         }

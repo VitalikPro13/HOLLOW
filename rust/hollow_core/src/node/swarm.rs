@@ -1,10 +1,6 @@
 use std::collections::HashMap;
-use std::io;
 use std::time::Duration;
 
-use libp2p::futures::StreamExt;
-use libp2p::request_response::{self, ProtocolSupport};
-use libp2p::{autonat, dcutr, identify, identity, kad, mdns, noise, ping, relay, swarm::SwarmEvent, tcp, tls, yamux, Multiaddr, PeerId, SwarmBuilder};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -16,83 +12,6 @@ use crate::crdt::sync::{self as crdt_sync, StateVector};
 use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 use super::signaling::{self, SignalingCmd, SignalingEvent};
 
-// -- Relay node constants (OVH VPS, Belgium) --
-const RELAY_ADDR_TCP: &str = "/ip4/141.227.186.209/tcp/4001";
-const RELAY_ADDR_QUIC: &str = "/ip4/141.227.186.209/udp/4001/quic-v1";
-const RELAY_ADDR_WSS: &str = "/dns4/relay.anonlisten.com/tcp/443/tls/ws";
-const RELAY_PEER_ID: &str = "12D3KooWSN4XSvAZdyKULvTgnsxYqcfr4LEmqCkAcQoTzaotDX8s";
-
-/// Parse the relay PeerId from the hardcoded constant.
-/// Returns None if the relay hasn't been configured yet (empty string).
-fn relay_peer_id() -> Option<PeerId> {
-    if RELAY_PEER_ID.is_empty() {
-        return None;
-    }
-    RELAY_PEER_ID.parse().ok()
-}
-
-/// Build the relay multiaddrs including the peer ID suffix.
-fn relay_addrs() -> Vec<Multiaddr> {
-    if RELAY_PEER_ID.is_empty() {
-        return vec![];
-    }
-    [RELAY_ADDR_TCP, RELAY_ADDR_QUIC, RELAY_ADDR_WSS]
-        .iter()
-        .filter_map(|base| {
-            format!("{base}/p2p/{RELAY_PEER_ID}").parse().ok()
-        })
-        .collect()
-}
-
-/// Like `relay_addrs()`, but when proxy is enabled returns only the local
-/// tunnel address (TCP through Shadowsocks). QUIC/WSS can't be tunneled.
-fn proxy_aware_relay_addrs(proxy_enabled: bool) -> Vec<Multiaddr> {
-    if proxy_enabled {
-        if RELAY_PEER_ID.is_empty() {
-            return vec![];
-        }
-        vec![format!("{}/p2p/{RELAY_PEER_ID}", super::tunnel::PROXY_RELAY_ADDR)
-            .parse()
-            .unwrap()]
-    } else {
-        relay_addrs()
-    }
-}
-
-/// Filter addresses for signaling registration.
-/// Removes loopback, link-local, and private LAN addresses.
-/// Keeps relay circuit addresses and public IPs.
-fn is_registerable_address(addr: &str) -> bool {
-    // Always keep relay circuit addresses — they're routable from anywhere.
-    if addr.contains("p2p-circuit") {
-        return true;
-    }
-    // Exclude loopback.
-    if addr.contains("/ip4/127.") || addr.contains("/ip6/::1/") {
-        return false;
-    }
-    // Exclude link-local.
-    if addr.contains("/ip4/169.254.") || addr.contains("/ip6/fe80") {
-        return false;
-    }
-    // Exclude private LAN ranges (unreachable from other networks).
-    if addr.contains("/ip4/192.168.") || addr.contains("/ip4/10.") {
-        return false;
-    }
-    // 172.16.0.0 - 172.31.255.255
-    if let Some(pos) = addr.find("/ip4/172.") {
-        let after = &addr[pos + 9..];
-        if let Some(dot_pos) = after.find('.') {
-            if let Ok(second_octet) = after[..dot_pos].parse::<u8>() {
-                if (16..=31).contains(&second_octet) {
-                    return false;
-                }
-            }
-        }
-    }
-    true
-}
-
 /// Compute a deterministic DM room code for two peers.
 /// Both peers compute the same code so signaling can match them.
 /// Uses SHA-256 truncated to 32 hex chars for collision resistance.
@@ -103,21 +22,6 @@ fn dm_room_code(peer_a: &str, peer_b: &str) -> String {
     let combined = format!("dm-{}-{}", sorted[0], sorted[1]);
     let hash = Sha256::digest(combined.as_bytes());
     hex::encode(&hash[..16]) // 128-bit / 32 hex chars
-}
-
-/// Extract transport method from a multiaddr string for UI display.
-fn transport_method_from_addr(addr: &str) -> &'static str {
-    if addr.contains("p2p-circuit") {
-        "relay"
-    } else if addr.contains("/quic") {
-        "quic"
-    } else if addr.contains("/ws/") || addr.contains("/wss/") {
-        "wss"
-    } else if addr.contains("/tcp/") {
-        "tcp"
-    } else {
-        "unknown"
-    }
 }
 
 /// A discovered peer on the local network.
@@ -224,17 +128,14 @@ pub(crate) enum NetworkEvent {
     RebalanceStarted { server_id: String, shards_to_move: u32 },
     RebalanceProgress { server_id: String, moved: u32, total: u32 },
     RebalanceCompleted { server_id: String },
-    // -- Connection status events (granular UI) --
-    ConnectionAttemptStarted { peer_id: String, method: String },
-    ConnectionAttemptFailed { peer_id: String, method: String, reason: String },
+    // -- Connection status events --
     KeyExchangeStarted { peer_id: String },
     KeyExchangeProgress { peer_id: String, stage: String },
-    RelayStatusChanged { status: String },
 }
 
 /// Commands the FFI layer can send into the swarm event loop.
 pub(crate) enum NodeCommand {
-    SendMessage { peer_id: PeerId, text: String, message_id: String, reply_to_mid: Option<String> },
+    SendMessage { peer_id: String, text: String, message_id: String, reply_to_mid: Option<String> },
     SendChannelMessage { server_id: String, channel_id: String, text: String, message_id: String, reply_to_mid: Option<String> },
     JoinRoom { room_code: String },
     // -- CRDT commands (Phase 3) --
@@ -255,20 +156,20 @@ pub(crate) enum NodeCommand {
     UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>> },
     // -- Message editing (Phase 3.5) --
     EditChannelMessage { server_id: String, channel_id: String, message_id: String, new_text: String },
-    EditDmMessage { peer_id: PeerId, message_id: String, new_text: String },
+    EditDmMessage { peer_id: String, message_id: String, new_text: String },
     // -- Message deletion/hiding (Phase 3.5) --
     DeleteChannelMessage { server_id: String, channel_id: String, message_id: String },
-    DeleteDmMessage { peer_id: PeerId, message_id: String },
+    DeleteDmMessage { peer_id: String, message_id: String },
     // -- Emoji reactions (Phase 3.5) --
     AddChannelReaction { server_id: String, channel_id: String, message_id: String, emoji: String },
-    AddDmReaction { peer_id: PeerId, message_id: String, emoji: String },
+    AddDmReaction { peer_id: String, message_id: String, emoji: String },
     RemoveChannelReaction { server_id: String, channel_id: String, message_id: String, emoji: String },
-    RemoveDmReaction { peer_id: PeerId, message_id: String, emoji: String },
+    RemoveDmReaction { peer_id: String, message_id: String, emoji: String },
     // -- Friends (Phase 3.5) --
-    SendFriendRequest { peer_id: PeerId },
-    AcceptFriendRequest { peer_id: PeerId },
-    RejectFriendRequest { peer_id: PeerId },
-    RemoveFriend { peer_id: PeerId },
+    SendFriendRequest { peer_id: String },
+    AcceptFriendRequest { peer_id: String },
+    RejectFriendRequest { peer_id: String },
+    RemoveFriend { peer_id: String },
     // -- Typing indicators (Phase 3.5) --
     SendTypingIndicator { server_id: String, channel_id: String },
     // -- Channel layout (Phase 3.5) --
@@ -280,7 +181,7 @@ pub(crate) enum NodeCommand {
     SetStoragePledge { server_id: String, pledge_bytes: u64 },
     // -- File sharing (Phase 3.5) --
     SendFile {
-        peer_id: Option<PeerId>,          // For DMs (None for channels)
+        peer_id: Option<String>,           // For DMs (None for channels)
         server_id: Option<String>,         // For channels
         channel_id: Option<String>,        // For channels
         file_path: String,                 // Local path to file
@@ -289,7 +190,7 @@ pub(crate) enum NodeCommand {
     },
     RequestFile {
         file_id: String,
-        peer_id: PeerId,
+        peer_id: String,
         chunks: Vec<u32>,
     },
     // -- Vault shard distribution (Phase 4) --
@@ -1178,7 +1079,7 @@ struct DmSyncItem {
 /// Tracks a server that needs sync after reconnection.
 struct PendingServerSync {
     /// Peer IDs available for sync (connected members of this server).
-    available_peers: Vec<PeerId>,
+    available_peers: Vec<String>,
     /// Channels that need sync: (channel_id, our_latest_timestamp).
     channels: Vec<(String, i64)>,
     /// When the first peer for this server was registered.
@@ -1205,11 +1106,11 @@ impl SyncCoordinator {
     }
 
     /// Register a newly connected peer for a server's sync.
-    /// Called from ConnectionEstablished instead of directly sending sync requests.
+    /// Called from PeerJoined instead of directly sending sync requests.
     fn register_peer(
         &mut self,
         server_id: &str,
-        peer: PeerId,
+        peer_str: &str,
         channels_with_timestamps: Vec<(String, i64)>,
     ) {
         let entry = self.pending.entry(server_id.to_string()).or_insert_with(|| {
@@ -1220,8 +1121,9 @@ impl SyncCoordinator {
                 dispatched: false,
             }
         });
-        if !entry.available_peers.contains(&peer) {
-            entry.available_peers.push(peer);
+        let peer_string = peer_str.to_string();
+        if !entry.available_peers.contains(&peer_string) {
+            entry.available_peers.push(peer_string);
         }
         // Update channels if this registration provides more channels
         // (e.g., server state updated between connections).
@@ -1231,8 +1133,8 @@ impl SyncCoordinator {
     }
 
     /// Check which servers are ready to dispatch (collection window elapsed).
-    /// Returns: Vec<(server_id, assignments)> where assignments = Vec<(peer_id, Vec<(channel_id, our_latest)>)>
-    fn collect_ready(&mut self) -> Vec<(String, Vec<(PeerId, Vec<(String, i64)>)>)> {
+    /// Returns: Vec<(server_id, assignments)> where assignments = Vec<(peer_str, Vec<(channel_id, our_latest)>)>
+    fn collect_ready(&mut self) -> Vec<(String, Vec<(String, Vec<(String, i64)>)>)> {
         let now = std::time::Instant::now();
         let mut ready = Vec::new();
 
@@ -1253,13 +1155,13 @@ impl SyncCoordinator {
                 let peer_count = peers.len();
                 let use_backup = peer_count >= 3; // Only use backup peers if we have enough
 
-                let mut assignments: HashMap<PeerId, Vec<(String, i64)>> = HashMap::new();
+                let mut assignments: HashMap<String, Vec<(String, i64)>> = HashMap::new();
 
                 for (i, (cid, ts)) in sync.channels.iter().enumerate() {
                     // Primary peer: round-robin by channel index
                     let primary_idx = i % peer_count;
                     assignments
-                        .entry(peers[primary_idx])
+                        .entry(peers[primary_idx].clone())
                         .or_default()
                         .push((cid.clone(), *ts));
 
@@ -1268,14 +1170,14 @@ impl SyncCoordinator {
                         let backup_idx = (i + peer_count / 2 + 1) % peer_count;
                         if backup_idx != primary_idx {
                             assignments
-                                .entry(peers[backup_idx])
+                                .entry(peers[backup_idx].clone())
                                 .or_default()
                                 .push((cid.clone(), *ts));
                         }
                     }
                 }
 
-                let assignment_vec: Vec<(PeerId, Vec<(String, i64)>)> =
+                let assignment_vec: Vec<(String, Vec<(String, i64)>)> =
                     assignments.into_iter().collect();
                 ready.push((server_id.clone(), assignment_vec));
             }
@@ -1307,104 +1209,6 @@ impl SyncCoordinator {
     }
 }
 
-/// JSON codec for the Haven v2 protocol.
-#[derive(Debug, Clone, Default)]
-struct HavenCodec;
-
-impl request_response::Codec for HavenCodec {
-    type Protocol = &'static str;
-    type Request = HavenMessage;
-    type Response = HavenMessage;
-
-    fn read_request<'life0, 'life1, 'life2, 'async_trait, T>(
-        &'life0 mut self,
-        _protocol: &'life1 Self::Protocol,
-        io: &'life2 mut T,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Self::Request>> + Send + 'async_trait>>
-    where
-        T: libp2p::futures::AsyncRead + Unpin + Send + 'async_trait,
-        'life0: 'async_trait,
-        'life1: 'async_trait,
-        'life2: 'async_trait,
-        Self: 'async_trait,
-    {
-        Box::pin(async move {
-            // SECURITY: Cap message size to 50MB to prevent OOM from malicious peers.
-            let mut buf = Vec::new();
-            let mut limited = libp2p::futures::AsyncReadExt::take(io, 50 * 1024 * 1024);
-            libp2p::futures::AsyncReadExt::read_to_end(&mut limited, &mut buf).await?;
-            serde_json::from_slice(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-        })
-    }
-
-    fn read_response<'life0, 'life1, 'life2, 'async_trait, T>(
-        &'life0 mut self,
-        _protocol: &'life1 Self::Protocol,
-        io: &'life2 mut T,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Self::Response>> + Send + 'async_trait>>
-    where
-        T: libp2p::futures::AsyncRead + Unpin + Send + 'async_trait,
-        'life0: 'async_trait,
-        'life1: 'async_trait,
-        'life2: 'async_trait,
-        Self: 'async_trait,
-    {
-        Box::pin(async move {
-            // SECURITY: Cap message size to 50MB to prevent OOM from malicious peers.
-            let mut buf = Vec::new();
-            let mut limited = libp2p::futures::AsyncReadExt::take(io, 50 * 1024 * 1024);
-            libp2p::futures::AsyncReadExt::read_to_end(&mut limited, &mut buf).await?;
-            serde_json::from_slice(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-        })
-    }
-
-    fn write_request<'life0, 'life1, 'life2, 'async_trait, T>(
-        &'life0 mut self,
-        _protocol: &'life1 Self::Protocol,
-        io: &'life2 mut T,
-        req: Self::Request,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + 'async_trait>>
-    where
-        T: libp2p::futures::AsyncWrite + Unpin + Send + 'async_trait,
-        'life0: 'async_trait,
-        'life1: 'async_trait,
-        'life2: 'async_trait,
-        Self: 'async_trait,
-    {
-        Box::pin(async move {
-            let bytes = serde_json::to_vec(&req)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            libp2p::futures::AsyncWriteExt::write_all(io, &bytes).await?;
-            libp2p::futures::AsyncWriteExt::close(io).await?;
-            Ok(())
-        })
-    }
-
-    fn write_response<'life0, 'life1, 'life2, 'async_trait, T>(
-        &'life0 mut self,
-        _protocol: &'life1 Self::Protocol,
-        io: &'life2 mut T,
-        res: Self::Response,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + 'async_trait>>
-    where
-        T: libp2p::futures::AsyncWrite + Unpin + Send + 'async_trait,
-        'life0: 'async_trait,
-        'life1: 'async_trait,
-        'life2: 'async_trait,
-        Self: 'async_trait,
-    {
-        Box::pin(async move {
-            let bytes = serde_json::to_vec(&res)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            libp2p::futures::AsyncWriteExt::write_all(io, &bytes).await?;
-            libp2p::futures::AsyncWriteExt::close(io).await?;
-            Ok(())
-        })
-    }
-}
-
 // -- Per-message Ed25519 signing helpers --
 
 /// Build canonical payload for message signing.
@@ -1424,20 +1228,13 @@ fn message_signing_payload(
 /// Sign a message payload with the local keypair.
 /// Returns (signature_base64, public_key_base64).
 fn sign_message(
-    keypair: &identity::Keypair,
+    keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     payload: &str,
 ) -> (Option<String>, Option<String>) {
-    match keypair.sign(payload.as_bytes()) {
-        Ok(sig) => {
-            let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig);
-            (Some(sig_b64), Some(pub_key_b64.to_string()))
-        }
-        Err(e) => {
-            hollow_log!("[HOLLOW-CRYPTO] Failed to sign message: {e}");
-            (None, None)
-        }
-    }
+    let sig = keypair.sign(payload.as_bytes());
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig);
+    (Some(sig_b64), Some(pub_key_b64.to_string()))
 }
 
 /// Verify an Ed25519 signature on a message.
@@ -1448,6 +1245,8 @@ fn verify_message_signature(
     pk_b64: Option<&str>,
     payload: &str,
 ) -> bool {
+    use crate::identity::native_identity::NativeKeypair;
+
     let (sig, pk) = match (sig_b64, pk_b64) {
         (Some(s), Some(p)) => (s, p),
         _ => return false,
@@ -1456,16 +1255,19 @@ fn verify_message_signature(
     let Ok(pk_bytes) = base64::engine::general_purpose::STANDARD.decode(pk) else {
         return false;
     };
-    let Ok(public_key) = identity::PublicKey::try_decode_protobuf(&pk_bytes) else {
-        return false;
-    };
 
-    // Verify PeerId matches the public key.
-    let expected_pid = PeerId::from_public_key(&public_key);
-    let Ok(claimed_pid) = sender_peer_str.parse::<PeerId>() else {
-        return false;
-    };
-    if expected_pid != claimed_pid {
+    // Verify PeerId matches the public key (derive PeerId from pubkey protobuf).
+    if pk_bytes.len() >= 36 && pk_bytes[0] == 0x08 && pk_bytes[1] == 0x01 {
+        // Build a temporary NativeKeypair-style PeerId from the pubkey protobuf.
+        let mut multihash = Vec::with_capacity(2 + pk_bytes.len());
+        multihash.push(0x00); // Identity multihash code
+        multihash.push(pk_bytes.len() as u8);
+        multihash.extend_from_slice(&pk_bytes);
+        let derived_pid = bs58::encode(&multihash).with_alphabet(bs58::Alphabet::BITCOIN).into_string();
+        if derived_pid != sender_peer_str {
+            return false;
+        }
+    } else {
         return false;
     }
 
@@ -1473,154 +1275,33 @@ fn verify_message_signature(
     let Ok(sig_bytes) = base64::engine::general_purpose::STANDARD.decode(sig) else {
         return false;
     };
-    public_key.verify(payload.as_bytes(), &sig_bytes)
+    NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, payload.as_bytes())
+        .unwrap_or(false)
 }
 
-/// Our libp2p network behaviour — mDNS discovery + encrypted messaging + DHT + NAT traversal.
-#[derive(libp2p::swarm::NetworkBehaviour)]
-struct HavenBehaviour {
-    relay_client: relay::client::Behaviour,
-    identify: identify::Behaviour,
-    ping: ping::Behaviour,
-    kademlia: kad::Behaviour<kad::store::MemoryStore>,
-    autonat: autonat::Behaviour,
-    dcutr: dcutr::Behaviour,
-    mdns: mdns::tokio::Behaviour,
-    messaging: request_response::Behaviour<HavenCodec>,
-    file_streaming: request_response::Behaviour<super::stream_transfer::FileStreamCodec>,
-}
-
-/// Build and spawn the libp2p swarm. Returns the local peer ID and a join handle.
+/// Build and spawn the networking layer. Returns the local peer ID and a join handle.
 pub(crate) async fn spawn_node(
-    keypair: identity::Keypair,
+    native_keypair: crate::identity::native_identity::NativeKeypair,
     event_tx: mpsc::Sender<NetworkEvent>,
     cmd_rx: mpsc::Receiver<NodeCommand>,
     olm: OlmManager,
     crypto_store: CryptoStore,
-    proxy_enabled: bool,
 ) -> Result<(String, tokio::task::JoinHandle<()>), String> {
     // Clone keypair for signaling task (it needs to sign register requests).
-    let sig_keypair = keypair.clone();
-    // Clone keypair for prekey bundle signing in the swarm task.
-    let bundle_keypair = keypair.clone();
+    let sig_keypair = native_keypair.clone();
+    // Clone keypair for use in the event loop.
+    let bundle_keypair = native_keypair.clone();
 
-    let swarm = SwarmBuilder::with_existing_identity(keypair)
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )
-        .map_err(|e| format!("TCP setup failed: {e}"))?
-        .with_quic_config(|mut config| {
-            config.handshake_timeout = Duration::from_secs(10);
-            config
-        })
-        .with_dns()
-        .map_err(|e| format!("DNS setup failed: {e}"))?
-        .with_websocket(
-            (tls::Config::new, noise::Config::new),
-            yamux::Config::default,
-        )
-        .await
-        .map_err(|e| format!("WebSocket setup failed: {e}"))?
-        .with_relay_client(
-            (tls::Config::new, noise::Config::new),
-            yamux::Config::default,
-        )
-        .map_err(|e| format!("Relay client setup failed: {e}"))?
-        .with_behaviour(|key, relay_client| {
-            let local_peer_id = key.public().to_peer_id();
-
-            let mdns_config = mdns::Config {
-                ttl: Duration::from_secs(300),
-                query_interval: Duration::from_secs(5),
-                enable_ipv6: false,
-            };
-            let mdns = mdns::tokio::Behaviour::new(mdns_config, local_peer_id)
-                .expect("Failed to create mDNS behaviour");
-
-            let messaging = request_response::Behaviour::<HavenCodec>::new(
-                [("/hollow/msg/2.0.0", ProtocolSupport::Full)],
-                request_response::Config::default(),
-            );
-
-            // Streaming binary protocol for large file/shard transfers.
-            // Separate from `messaging` — uses ordered substreams, no Olm ratchet.
-            let file_streaming = request_response::Behaviour::<super::stream_transfer::FileStreamCodec>::new(
-                [("/hollow/stream/1.0.0", ProtocolSupport::Full)],
-                request_response::Config::default()
-                    .with_request_timeout(Duration::from_secs(300)), // 5 min for large files
-            );
-
-            // Kademlia DHT (MemoryStore — records lost on restart, fine for Phase 2)
-            let mut kademlia = kad::Behaviour::new(
-                local_peer_id,
-                kad::store::MemoryStore::new(local_peer_id),
-            );
-            kademlia.set_mode(Some(kad::Mode::Server));
-
-            // AutoNAT — probes other peers to discover our public address
-            let autonat = autonat::Behaviour::new(
-                local_peer_id,
-                autonat::Config::default(),
-            );
-
-            // DCUtR — hole punching via relay-assisted coordination
-            let dcutr = dcutr::Behaviour::new(local_peer_id);
-
-            // Identify — required for relay protocol to work.
-            let identify = identify::Behaviour::new(identify::Config::new(
-                "/hollow/1.0.0".to_string(),
-                key.public(),
-            ));
-
-            let ping = ping::Behaviour::new(
-                ping::Config::new()
-                    .with_interval(Duration::from_secs(5))
-                    .with_timeout(Duration::from_secs(5)),
-            );
-
-            Ok(HavenBehaviour {
-                relay_client,
-                identify,
-                ping,
-                kademlia,
-                autonat,
-                dcutr,
-                mdns,
-                messaging,
-                file_streaming,
-            })
-        })
-        .map_err(|e| format!("Behaviour setup failed: {e}"))?
-        .with_swarm_config(|cfg| {
-            cfg.with_idle_connection_timeout(Duration::from_secs(u64::MAX))
-        })
-        .build();
-
-    let peer_id_str = swarm.local_peer_id().to_string();
-
-    // Start Shadowsocks tunnels if proxy mode is enabled.
-    let tunnel_handles = if proxy_enabled {
-        hollow_log!("[HOLLOW] [PROXY] Proxy mode enabled, starting Shadowsocks tunnels...");
-        let handles = super::tunnel::start_tunnels().await?;
-        // Brief delay to ensure tunnels are listening before libp2p dials.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        Some(handles)
-    } else {
-        None
-    };
+    let peer_id_str = native_keypair.peer_id();
 
     // Spawn the signaling background task.
     let (sig_cmd_tx, sig_event_rx) =
-        signaling::spawn_signaling_task(sig_keypair, peer_id_str.clone(), proxy_enabled);
+        signaling::spawn_signaling_task(sig_keypair, peer_id_str.clone());
 
     // Spawn the WebSocket relay client.
-    let ws_keypair = bundle_keypair.clone();
-    let ws_proto = ws_keypair.to_protobuf_encoding().unwrap_or_default();
+    let ws_proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
     let ws_pub_b64 = base64::engine::general_purpose::STANDARD.encode(
-        ws_keypair.public().encode_protobuf(),
+        bundle_keypair.public_key_protobuf(),
     );
     let (ws_cmd_tx, ws_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (ws_event_tx, ws_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1630,90 +1311,30 @@ pub(crate) async fn spawn_node(
         ws_cmd_rx, ws_event_tx,
     );
 
-    let handle = tokio::spawn(run_swarm(
-        swarm, event_tx, cmd_rx, olm, crypto_store, sig_cmd_tx, sig_event_rx,
-        bundle_keypair, proxy_enabled, tunnel_handles, ws_cmd_tx, ws_event_rx,
+    let handle = tokio::spawn(run_event_loop(
+        event_tx, cmd_rx, olm, crypto_store, sig_cmd_tx, sig_event_rx,
+        bundle_keypair, ws_cmd_tx, ws_event_rx, peer_id_str.clone(),
     ));
 
     Ok((peer_id_str, handle))
 }
 
-/// The main swarm event loop. Runs until the task is aborted.
-async fn run_swarm(
-    mut swarm: libp2p::Swarm<HavenBehaviour>,
+/// The main event loop. Runs until the task is aborted.
+async fn run_event_loop(
     event_tx: mpsc::Sender<NetworkEvent>,
     mut cmd_rx: mpsc::Receiver<NodeCommand>,
     mut olm: OlmManager,
     crypto_store: CryptoStore,
     sig_cmd_tx: mpsc::Sender<SignalingCmd>,
     mut sig_event_rx: mpsc::Receiver<SignalingEvent>,
-    bundle_keypair: identity::Keypair,
-    proxy_enabled: bool,
-    tunnel_handles: Option<Vec<tokio::task::JoinHandle<()>>>,
+    bundle_keypair: crate::identity::native_identity::NativeKeypair,
     ws_cmd_tx: tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     mut ws_event_rx: tokio::sync::mpsc::UnboundedReceiver<super::ws_client::WsEvent>,
+    local_peer_str: String,
 ) {
     // Precompute public key base64 for prekey bundle signing.
-    let pub_key_proto = bundle_keypair.public().encode_protobuf();
+    let pub_key_proto = bundle_keypair.public_key_protobuf();
     let pub_key_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_key_proto);
-
-    // Listen on all interfaces — TCP and QUIC, random ports.
-    let tcp_addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
-    if let Err(e) = swarm.listen_on(tcp_addr) {
-        let _ = event_tx
-            .send(NetworkEvent::Error {
-                message: format!("Failed to listen (TCP): {e}"),
-            })
-            .await;
-        return;
-    }
-
-    let quic_addr: Multiaddr = "/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap();
-    if let Err(e) = swarm.listen_on(quic_addr) {
-        let _ = event_tx
-            .send(NetworkEvent::Error {
-                message: format!("Failed to listen (QUIC): {e}"),
-            })
-            .await;
-        // QUIC failure is non-fatal — TCP still works as fallback.
-    }
-
-    // Dial the relay node and request a reservation (for NAT traversal).
-    if let Some(relay_pid) = relay_peer_id() {
-        let _ = event_tx
-            .send(NetworkEvent::Error {
-                message: format!("[DEBUG] Dialing relay {relay_pid}..."),
-            })
-            .await;
-        for addr in proxy_aware_relay_addrs(proxy_enabled) {
-            let _ = event_tx
-                .send(NetworkEvent::Error {
-                    message: format!("[DEBUG] Relay addr: {addr}"),
-                })
-                .await;
-            swarm.add_peer_address(relay_pid, addr.clone());
-            swarm.behaviour_mut().kademlia.add_address(&relay_pid, addr);
-        }
-        let _ = event_tx.send(NetworkEvent::RelayStatusChanged {
-            status: "connecting".to_string(),
-        }).await;
-        if let Err(e) = swarm.dial(relay_pid) {
-            let _ = event_tx
-                .send(NetworkEvent::Error {
-                    message: format!("Failed to dial relay: {e}"),
-                })
-                .await;
-        }
-        // NOTE: listen_on for the relay circuit is deferred to
-        // ConnectionEstablished — calling it before the relay is
-        // connected causes libp2p to immediately close the listener.
-    } else {
-        let _ = event_tx
-            .send(NetworkEvent::Error {
-                message: "[DEBUG] No relay configured!".to_string(),
-            })
-            .await;
-    }
 
     // Decrypt failure cooldown: track last session-kill time per peer.
     // Prevents rapid session thrashing when many in-flight chunks fail decrypt
@@ -1721,61 +1342,14 @@ async fn run_swarm(
     let mut decrypt_fail_cooldown: HashMap<String, std::time::Instant> = HashMap::new();
     const REKEY_COOLDOWN: Duration = Duration::from_secs(5);
 
-    // Track outbound request IDs → peer for delivery confirmation.
-    let mut pending_requests = HashMap::<request_response::OutboundRequestId, String>::new();
-
     // Buffer messages while key exchange is in progress.
     let mut pending_messages: HashMap<String, Vec<String>> = HashMap::new();
 
     // Track which peers have an active key request in flight (avoid duplicate requests).
     let mut key_request_in_flight: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Track our own listen addresses for signaling registration.
-    let mut known_addresses: Vec<String> = Vec::new();
-
     // Track the active room code so we can re-bootstrap after getting a relay circuit address.
     let mut active_room: Option<String> = None;
-
-    // Prekey bundle republish timer (4 min interval).
-    // DHT prekey timer removed — Olm sessions now established via KeyRequest over WS.
-
-    // Track pending DHT prekey fetches: query_id → target peer_id string.
-    // pending_prekey_fetches removed — Olm sessions now via WS KeyRequest.
-    // Peers for whom a DHT prekey fetch is in flight.
-    // dht_fetch_in_flight removed — no more DHT prekey fetches.
-
-    // Track the original message text for outbound encrypted messages so we can
-    // re-queue on delivery failure. Maps request_id → (peer_id_str, text).
-    let mut outbound_message_text: HashMap<request_response::OutboundRequestId, (String, String)> = HashMap::new();
-
-    // Track which peers have active connections (excludes relay node).
-    let mut connected_peers: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
-
-    // Track peers we expect (discovered via signaling, mDNS, or relay inbound circuit).
-    // ConnectionEstablished only emits PeerDiscovered for peers in this set,
-    // preventing Kademlia routing connections from polluting the peer list.
-    let mut expected_peers: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
-
-    // Debounce PeerDisconnected events. When a connection closes with remaining=0,
-    // don't emit immediately — wait 2s. If ConnectionEstablished fires for the same
-    // peer within that window, cancel the disconnect. This prevents rapid
-    // add/remove/add UI churn when libp2p upgrades transports.
-    let mut pending_disconnects: HashMap<PeerId, std::time::Instant> = HashMap::new();
-    const DISCONNECT_DEBOUNCE: Duration = Duration::from_secs(2);
-
-    // Track peers we've already emitted PeerDiscovered for this session.
-    // Prevents flooding the UI with duplicate discovery events from multiple
-    // signaling rooms, bootstrap responses, or InboundCircuitEstablished events.
-    let mut discovered_peers: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
-
-    // Track peers that disconnected. Prevents ghost peers: if signaling
-    // returns a stale peer we already tried and failed, skip it.
-    // Cleared on room switch, removed on successful ConnectionEstablished.
-    // Track disconnected peers with the time they disconnected.
-    // Peers stay here for at least DISCONNECT_COOLDOWN to prevent ghost
-    // re-discovery from stale signaling entries.
-    let mut disconnected_peers: HashMap<PeerId, std::time::Instant> = HashMap::new();
-    const DISCONNECT_COOLDOWN: Duration = Duration::from_secs(180); // 3 min = signaling stale threshold
 
     // -- Vault shard assembly state (Phase 4) --
     // Tracks chunked shard reassembly. Key = "content_id:shard_index:sender_peer".
@@ -1789,13 +1363,12 @@ async fn run_swarm(
     // Key: content_id, Value: (server_id, shards_needed: k, shards_requested: count)
     let mut pending_vault_downloads: HashMap<String, (String, usize, usize)> = HashMap::new();
 
-    // -- WebSocket relay peer tracking (Phase 5) --
+    // -- WebSocket relay peer tracking --
     // Tracks which peers are in which WS rooms. Key: room_code, Value: set of peer_id strings.
     let mut ws_room_peers: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
 
     // Peers we've already triggered sync for this session.
-    // Prevents duplicate sync when both WS PeerJoined and libp2p ConnectionEstablished fire.
-    let mut synced_peers: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
+    let mut synced_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // -- WS stream transfer reassembly state (Phase 5.5) --
     let mut pending_ws_transfers: HashMap<String, super::ws_stream_transfer::WsTransferState> = HashMap::new();
@@ -1814,7 +1387,7 @@ async fn run_swarm(
                     for (server_id, json) in rows {
                         match serde_json::from_str::<ServerState>(&json) {
                             Ok(mut state) => {
-                                state.set_hlc(Hlc::new(swarm.local_peer_id().to_string()));
+                                state.set_hlc(Hlc::new(local_peer_str.to_string()));
                                 server_states.insert(server_id.clone(), state);
                                 // Join the WS relay room for this server.
                                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
@@ -1838,7 +1411,6 @@ async fn run_swarm(
     }
 
     // -- MLS state --
-    let local_peer_str = swarm.local_peer_id().to_string();
     let mut mls: Option<MlsManager> = {
         let data_dir = crate::identity::data_dir().unwrap_or_default();
         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
@@ -1934,24 +1506,13 @@ async fn run_swarm(
 
     // SECURITY: Per-peer rate limiter — token bucket (100 burst, refill 20/sec).
     // Prevents message flooding from malicious peers.
-    let mut peer_rate_tokens: HashMap<PeerId, (u32, std::time::Instant)> = HashMap::new();
+    let mut peer_rate_tokens: HashMap<String, (u32, std::time::Instant)> = HashMap::new();
     const RATE_LIMIT_BURST: u32 = 100;
     const RATE_LIMIT_REFILL: u32 = 20; // tokens per second
 
-    // Re-bootstrap timer (30 seconds) for mutual peer discovery.
-    // Fires unconditionally — BootstrapPeers handler skips connected
-    // and disconnected peers, so only genuinely new peers get processed.
+    // Re-bootstrap timer (30 seconds) for signaling re-registration.
     let mut rebootstrap_timer = tokio::time::interval(Duration::from_secs(30));
     rebootstrap_timer.tick().await; // consume immediate first tick
-
-    // Relay health check timer (60 seconds). Detects dropped relay connections
-    // and re-dials to restore circuit-based reachability.
-    let mut relay_health_timer = tokio::time::interval(Duration::from_secs(60));
-    relay_health_timer.tick().await; // consume immediate first tick
-
-    // Debounce timer for pending disconnects (500ms check interval).
-    let mut disconnect_debounce_timer = tokio::time::interval(Duration::from_millis(500));
-    disconnect_debounce_timer.tick().await; // consume immediate first tick
 
     // Vault rebalance + retention enforcement timer (30 min).
     let mut rebalance_timer = tokio::time::interval(Duration::from_secs(1800));
@@ -1974,30 +1535,13 @@ async fn run_swarm(
                                 room_code: old_room.clone(),
                             }).await;
                             let _ = event_tx.send(NetworkEvent::RoomCleared).await;
-                            connected_peers.clear();
-                            expected_peers.clear();
-                            disconnected_peers.clear();
-                            discovered_peers.clear();
-                            pending_disconnects.clear();
                         }
                         active_room = Some(room_code.clone());
-                        // Register ourselves and bootstrap from the signaling service.
-                        // Filter out loopback/link-local/private — only send routable addresses.
-                        let addrs: Vec<String> = known_addresses.iter()
-                            .filter(|a| is_registerable_address(a))
-                            .cloned()
-                            .collect();
-                        // Only register if we have routable addresses.
-                        // If empty (relay circuit not yet established), the
-                        // UpdateAddresses flow will register us once it is.
-                        if !addrs.is_empty() {
-                            let _ = sig_cmd_tx.send(SignalingCmd::Register {
-                                room_code: room_code.clone(),
-                                addresses: addrs,
-                            }).await;
-                        }
-                        // Always store the room code so UpdateAddresses can
-                        // register later, and always bootstrap to find peers.
+                        // Join the WS relay room for DMs.
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                            room_code: room_code.clone(),
+                        });
+                        // Also register with signaling for peer discovery.
                         let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
                             room_code: room_code.clone(),
                         }).await;
@@ -2005,12 +1549,11 @@ async fn run_swarm(
                             room_code,
                         }).await;
                     }
-                    NodeCommand::SendMessage { peer_id, text, message_id, reply_to_mid } => {
-                        let peer_id_str = peer_id.to_string();
+                    NodeCommand::SendMessage { peer_id: peer_id_str, text, message_id, reply_to_mid } => {
                         hollow_log!("[HOLLOW-SWARM] SendMessage received for {peer_id_str} mid={message_id}");
 
                         // Wrap DM in signed envelope.
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let dm_timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -2050,35 +1593,28 @@ async fn run_swarm(
                         if olm.has_session(&peer_id_str) {
                             // Session exists — encrypt and send.
                             send_encrypted_message(
-                                &mut swarm,
                                 &mut olm,
                                 &crypto_store,
-                                &mut pending_requests,
-                                &mut outbound_message_text,
-                                &peer_id,
                                 &peer_id_str,
                                 &envelope_json,
                                 &event_tx,
-                                                        &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                &ws_cmd_tx, &ws_room_peers,
                             ).await;
                         } else {
-                            // No session — queue the signed envelope and try DHT prekey fetch first.
+                            // No session — queue the signed envelope and send KeyRequest.
                             pending_messages
                                 .entry(peer_id_str.clone())
                                 .or_default()
                                 .push(envelope_json);
 
                             if !key_request_in_flight.contains(&peer_id_str) {
-                                // Send KeyRequest via WS to establish Olm session.
                                 hollow_log!("[HOLLOW-SWARM] No session for {peer_id_str}, sending KeyRequest");
-                                if let Ok(pid) = peer_id_str.parse::<PeerId>() {
-                                    if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, &peer_id_str) {
-                                        send_message_to_peer(
-                                            &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                            &pid, &peer_id_str, HavenMessage::KeyRequest,
-                                        );
-                                        key_request_in_flight.insert(peer_id_str.clone());
-                                    }
+                                if peer_is_reachable(&ws_room_peers, &peer_id_str) {
+                                    send_message_to_peer(
+                                        &ws_cmd_tx, &ws_room_peers,
+                                        &peer_id_str, HavenMessage::KeyRequest,
+                                    );
+                                    key_request_in_flight.insert(peer_id_str.clone());
                                 }
                             }
                         }
@@ -2097,7 +1633,7 @@ async fn run_swarm(
                             }
                         };
 
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -2133,17 +1669,14 @@ async fn run_swarm(
                                     hollow_log!("[HOLLOW-MLS] Encrypt failed, falling back to Olm: {e}");
                                     for member_peer_str in server.members.keys() {
                                         if member_peer_str == &local_peer { continue; }
-                                        if let Ok(member_pid) = member_peer_str.parse::<PeerId>() {
-                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &member_pid, member_peer_str) {
+                                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                 send_encrypted_message(
-                                                    &mut swarm, &mut olm, &crypto_store,
-                                                    &mut pending_requests, &mut outbound_message_text,
-                                                    &member_pid, member_peer_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    member_peer_str, &envelope_json,
                                                     &event_tx,
-                                                    &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                    &ws_cmd_tx, &ws_room_peers,
                                                 ).await;
                                             }
-                                        }
                                     }
                                 }
                             }
@@ -2151,17 +1684,14 @@ async fn run_swarm(
                             // Legacy Olm fan-out path.
                             for member_peer_str in server.members.keys() {
                                 if member_peer_str == &local_peer { continue; }
-                                if let Ok(member_pid) = member_peer_str.parse::<PeerId>() {
-                                    if peer_is_reachable(&ws_room_peers, &connected_peers, &member_pid, member_peer_str) {
+                                    if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                         send_encrypted_message(
-                                            &mut swarm, &mut olm, &crypto_store,
-                                            &mut pending_requests, &mut outbound_message_text,
-                                            &member_pid, member_peer_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    member_peer_str, &envelope_json,
                                             &event_tx,
-                                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                                                &ws_cmd_tx, &ws_room_peers,
                                         ).await;
                                     }
-                                }
                             }
                         }
 
@@ -2182,7 +1712,7 @@ async fn run_swarm(
                     // -- CRDT commands (Phase 3) --
 
                     NodeCommand::CreateServer { name } => {
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let server_id = hex::encode(&{
                             let mut buf = [0u8; 16];
                             getrandom::fill(&mut buf).expect("system RNG unavailable — cannot generate secure random bytes");
@@ -2229,7 +1759,7 @@ async fn run_swarm(
 
                         // Auto-pledge default storage (512 MB) for the owner
                         if let Some(state) = server_states.get_mut(&server_id) {
-                            let owner_peer = swarm.local_peer_id().to_string();
+                            let owner_peer = local_peer_str.to_string();
                             let default_pledge = 512u64 * 1024 * 1024;
                             let pledge_op = state.create_op(CrdtPayload::StoragePledgeChanged {
                                 peer_id: owner_peer,
@@ -2262,18 +1792,7 @@ async fn run_swarm(
                             server_id: server_id.clone(),
                             name,
                         }).await;
-
-                        // Register in signaling room for this server so joiners can discover us.
-                        let reg_addrs: Vec<String> = known_addresses.iter()
-                            .filter(|a| is_registerable_address(a))
-                            .cloned()
-                            .collect();
-                        if !reg_addrs.is_empty() {
-                            let _ = sig_cmd_tx.send(SignalingCmd::Register {
-                                room_code: server_id.clone(),
-                                addresses: reg_addrs,
-                            }).await;
-                        }
+                        
 
                         // No broadcast needed for CreateServer — the server only has
                         // one member (the creator) at this point. New members will
@@ -2282,7 +1801,7 @@ async fn run_swarm(
 
                     NodeCommand::CreateChannel { server_id, name, category } => {
                         if let Some(state) = server_states.get_mut(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
                             if !state.has_permission(&local_peer, Permission::MANAGE_CHANNELS) {
                                 hollow_log!("[HOLLOW-CRDT] Permission denied: cannot create channel in {server_id}");
                                 let _ = event_tx.send(NetworkEvent::Error {
@@ -2331,20 +1850,18 @@ async fn run_swarm(
                                         hollow_log!("[HOLLOW-MLS] CrdtOp broadcast failed: {e}");
                                     }
                                 } else {
-                                    let local_peer = swarm.local_peer_id().to_string();
+                                    let local_peer = local_peer_str.to_string();
                                     for member_peer_str in state.members.keys() {
                                         if member_peer_str == &local_peer { continue; }
-                                        if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                 send_message_to_peer(
-                                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                    &pid, member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    member_peer_str, HavenMessage::CrdtOpBroadcast {
                                                         server_id: server_id.clone(),
                                                         op_json: op_json.clone(),
                                                     },
                                                 );
                                             }
-                                        }
                                     }
                                 }
                             }
@@ -2357,7 +1874,7 @@ async fn run_swarm(
 
                     NodeCommand::RemoveChannel { server_id, channel_id } => {
                         if let Some(state) = server_states.get_mut(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
                             if !state.has_permission(&local_peer, Permission::MANAGE_CHANNELS) {
                                 hollow_log!("[HOLLOW-CRDT] Permission denied: cannot remove channel in {server_id}");
                                 let _ = event_tx.send(NetworkEvent::Error {
@@ -2398,20 +1915,18 @@ async fn run_swarm(
                                         hollow_log!("[HOLLOW-MLS] CrdtOp broadcast failed: {e}");
                                     }
                                 } else {
-                                    let local_peer = swarm.local_peer_id().to_string();
+                                    let local_peer = local_peer_str.to_string();
                                     for member_peer_str in state.members.keys() {
                                         if member_peer_str == &local_peer { continue; }
-                                        if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                 send_message_to_peer(
-                                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                    &pid, member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    member_peer_str, HavenMessage::CrdtOpBroadcast {
                                                         server_id: server_id.clone(),
                                                         op_json: op_json.clone(),
                                                     },
                                                 );
                                             }
-                                        }
                                     }
                                 }
                             }
@@ -2420,7 +1935,7 @@ async fn run_swarm(
 
                     NodeCommand::RenameServer { server_id, new_name } => {
                         if let Some(state) = server_states.get_mut(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
                             if !state.has_permission(&local_peer, Permission::MANAGE_SERVER) {
                                 hollow_log!("[HOLLOW-CRDT] Permission denied: cannot rename server {server_id}");
                                 let _ = event_tx.send(NetworkEvent::Error {
@@ -2460,20 +1975,18 @@ async fn run_swarm(
                                         hollow_log!("[HOLLOW-MLS] CrdtOp broadcast failed: {e}");
                                     }
                                 } else {
-                                    let local_peer = swarm.local_peer_id().to_string();
+                                    let local_peer = local_peer_str.to_string();
                                     for member_peer_str in state.members.keys() {
                                         if member_peer_str == &local_peer { continue; }
-                                        if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                 send_message_to_peer(
-                                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                    &pid, member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    member_peer_str, HavenMessage::CrdtOpBroadcast {
                                                         server_id: server_id.clone(),
                                                         op_json: op_json.clone(),
                                                     },
                                                 );
                                             }
-                                        }
                                     }
                                 }
                             }
@@ -2482,7 +1995,7 @@ async fn run_swarm(
 
                     NodeCommand::RenameChannel { server_id, channel_id, new_name } => {
                         if let Some(state) = server_states.get_mut(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
                             if !state.has_permission(&local_peer, Permission::MANAGE_CHANNELS) {
                                 hollow_log!("[HOLLOW-CRDT] Permission denied: cannot rename channel in {server_id}");
                                 let _ = event_tx.send(NetworkEvent::Error {
@@ -2525,20 +2038,18 @@ async fn run_swarm(
                                         hollow_log!("[HOLLOW-MLS] CrdtOp broadcast failed: {e}");
                                     }
                                 } else {
-                                    let local_peer = swarm.local_peer_id().to_string();
+                                    let local_peer = local_peer_str.to_string();
                                     for member_peer_str in state.members.keys() {
                                         if member_peer_str == &local_peer { continue; }
-                                        if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                 send_message_to_peer(
-                                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                    &pid, member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    member_peer_str, HavenMessage::CrdtOpBroadcast {
                                                         server_id: server_id.clone(),
                                                         op_json: op_json.clone(),
                                                     },
                                                 );
                                             }
-                                        }
                                     }
                                 }
                             }
@@ -2580,20 +2091,18 @@ async fn run_swarm(
                                         hollow_log!("[HOLLOW-MLS] CrdtOp broadcast failed: {e}");
                                     }
                                 } else {
-                                    let local_peer = swarm.local_peer_id().to_string();
+                                    let local_peer = local_peer_str.to_string();
                                     for member_peer_str in state.members.keys() {
                                         if member_peer_str == &local_peer { continue; }
-                                        if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                 send_message_to_peer(
-                                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                    &pid, member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    member_peer_str, HavenMessage::CrdtOpBroadcast {
                                                         server_id: server_id.clone(),
                                                         op_json: op_json.clone(),
                                                     },
                                                 );
                                             }
-                                        }
                                     }
                                 }
                             }
@@ -2603,7 +2112,7 @@ async fn run_swarm(
                     NodeCommand::DeleteServer { server_id } => {
                         // Only owner can delete a server.
                         if let Some(state) = server_states.get(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
                             if !state.has_permission(&local_peer, Permission::MANAGE_SERVER) {
                                 hollow_log!("[HOLLOW-CRDT] Permission denied: cannot delete server {server_id}");
                                 let _ = event_tx.send(NetworkEvent::Error {
@@ -2623,19 +2132,17 @@ async fn run_swarm(
                                 hollow_log!("[HOLLOW-MLS] ServerDelete broadcast failed: {e}");
                             }
                         } else if let Some(state) = server_states.get(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
                             for member_peer_str in state.members.keys() {
                                 if member_peer_str == &local_peer { continue; }
-                                if let Ok(member_pid) = member_peer_str.parse::<PeerId>() {
-                                    if peer_is_reachable(&ws_room_peers, &connected_peers, &member_pid, member_peer_str) {
+                                    if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                         send_message_to_peer(
-                                            &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                            &member_pid, member_peer_str, HavenMessage::ServerDeleteBroadcast {
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            member_peer_str, HavenMessage::ServerDeleteBroadcast {
                                                 server_id: server_id.clone(),
                                             },
                                         );
                                     }
-                                }
                             }
                         }
 
@@ -2671,16 +2178,7 @@ async fn run_swarm(
                         pending_server_joins.insert(server_id.clone());
 
                         // Join the signaling room with room_code = server_id.
-                        let addrs: Vec<String> = known_addresses.iter()
-                            .filter(|a| is_registerable_address(a))
-                            .cloned()
-                            .collect();
-                        if !addrs.is_empty() {
-                            let _ = sig_cmd_tx.send(SignalingCmd::Register {
-                                room_code: server_id.clone(),
-                                addresses: addrs,
-                            }).await;
-                        }
+                        
                         let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
                             room_code: server_id.clone(),
                         }).await;
@@ -2699,32 +2197,13 @@ async fn run_swarm(
                         // Send join requests to any peers we're already connected to.
                         // Also send via WS relay if available.
                         {
-                            let peer_ids: Vec<PeerId> = connected_peers.iter().copied().collect();
-                            for peer_id in peer_ids {
-                                let pid_str = peer_id.to_string();
-                                send_message_to_peer(
-                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                    &peer_id, &pid_str, HavenMessage::ServerJoinRequest {
-                                        server_id: server_id.clone(),
-                                    },
-                                );
-                                // Also send MLS KeyPackage if available.
-                                if let Some(ref kp) = mls_kp_b64 {
-                                    send_message_to_peer(
-                                        &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                        &peer_id, &pid_str, HavenMessage::MlsKeyPackage {
-                                            server_id: server_id.clone(),
-                                            key_package: kp.clone(),
-                                        },
-                                    );
-                                }
-                            }
+                            
                         }
                     }
 
                     NodeCommand::ChangeRole { server_id, peer_id, new_role } => {
                         if let Some(state) = server_states.get_mut(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
                             let new_member_role = crate::crdt::operations::MemberRole::from_str(&new_role);
 
                             // Permission check: can the local user change this peer's role?
@@ -2770,17 +2249,15 @@ async fn run_swarm(
                             if let Ok(op_json) = serde_json::to_string(&op) {
                                 for member_peer_str in state.members.keys() {
                                     if member_peer_str == &local_peer { continue; }
-                                    if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                        if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                        if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                             send_message_to_peer(
-                                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                &pid, member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                                &ws_cmd_tx, &ws_room_peers,
+                                                member_peer_str, HavenMessage::CrdtOpBroadcast {
                                                     server_id: server_id.clone(),
                                                     op_json: op_json.clone(),
                                                 },
                                             );
                                         }
-                                    }
                                 }
                             }
                         }
@@ -2788,7 +2265,7 @@ async fn run_swarm(
 
                     NodeCommand::KickMember { server_id, peer_id } => {
                         if let Some(state) = server_states.get_mut(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
 
                             // Permission check
                             if !state.can_kick(&local_peer, &peer_id) {
@@ -2833,17 +2310,15 @@ async fn run_swarm(
                             if let Ok(op_json) = serde_json::to_string(&op) {
                                 for member_peer_str in &broadcast_targets {
                                     if member_peer_str == &peer_id { continue; } // Kicked peer gets MemberKickBroadcast instead
-                                    if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                        if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                        if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                             send_message_to_peer(
-                                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                &pid, member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                                &ws_cmd_tx, &ws_room_peers,
+                                                member_peer_str, HavenMessage::CrdtOpBroadcast {
                                                     server_id: server_id.clone(),
                                                     op_json: op_json.clone(),
                                                 },
                                             );
                                         }
-                                    }
                                 }
                             }
 
@@ -2854,15 +2329,21 @@ async fn run_swarm(
                                 if let Err(e) = send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &peer_id, &envelope, &bundle_keypair) {
                                     hollow_log!("[HOLLOW-MLS] MemberKick targeted send failed: {e}");
                                 }
-                            } else if let Ok(pid) = peer_id.parse::<PeerId>() {
-                                if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, &peer_id) {
+                                if peer_is_reachable(&ws_room_peers, &peer_id) {
                                     send_message_to_peer(
-                                        &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                        &pid, &peer_id, HavenMessage::MemberKickBroadcast {
+                                        &ws_cmd_tx, &ws_room_peers,
+                                        &peer_id, HavenMessage::MemberKickBroadcast {
                                             server_id: server_id.clone(),
                                         },
                                     );
                                 }
+                            } else if peer_is_reachable(&ws_room_peers, &peer_id) {
+                                send_message_to_peer(
+                                    &ws_cmd_tx, &ws_room_peers,
+                                    &peer_id, HavenMessage::MemberKickBroadcast {
+                                        server_id: server_id.clone(),
+                                    },
+                                );
                             }
 
                             // MLS: remove member from group (epoch rotation for forward secrecy).
@@ -2877,17 +2358,15 @@ async fn run_swarm(
                                                     // Broadcast MLS commit to remaining members.
                                                     for member_peer_str in &broadcast_targets {
                                                         if member_peer_str == &peer_id { continue; }
-                                                        if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                                 send_message_to_peer(
-                                                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                                    &pid, member_peer_str, HavenMessage::MlsCommit {
+                                                                    &ws_cmd_tx, &ws_room_peers,
+                                                                    member_peer_str, HavenMessage::MlsCommit {
                                                                         server_id: server_id.clone(),
                                                                         commit: commit_b64.clone(),
                                                                     },
                                                                 );
                                                             }
-                                                        }
                                                     }
                                                     hollow_log!("[HOLLOW-MLS] Removed {peer_id} from MLS group, epoch rotated");
                                                 }
@@ -2903,7 +2382,7 @@ async fn run_swarm(
 
                     NodeCommand::SetNickname { server_id, peer_id, nickname } => {
                         if let Some(state) = server_states.get_mut(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
 
                             // Members can set their own nickname. Admins+ can set others'.
                             if peer_id != local_peer && !state.has_permission(&local_peer, crate::crdt::operations::Permission::MANAGE_ROLES) {
@@ -2940,17 +2419,15 @@ async fn run_swarm(
                             if let Ok(op_json) = serde_json::to_string(&op) {
                                 for member_peer_str in state.members.keys() {
                                     if member_peer_str == &local_peer { continue; }
-                                    if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                        if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                        if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                             send_message_to_peer(
-                                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                &pid, member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                                &ws_cmd_tx, &ws_room_peers,
+                                                member_peer_str, HavenMessage::CrdtOpBroadcast {
                                                     server_id: server_id.clone(),
                                                     op_json: op_json.clone(),
                                                 },
                                             );
                                         }
-                                    }
                                 }
                             }
                         }
@@ -2977,14 +2454,13 @@ async fn run_swarm(
                                     let sender_ts = store
                                         .get_per_sender_timestamps(&server_id, &channel_id)
                                         .unwrap_or_default();
-                                    let local_peer = swarm.local_peer_id().to_string();
+                                    let local_peer = local_peer_str.to_string();
                                     for member_peer_str in state.members.keys() {
                                         if member_peer_str == &local_peer { continue; }
-                                        if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                 send_message_to_peer(
-                                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                    &pid, member_peer_str, HavenMessage::ChannelSyncRequest {
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    member_peer_str, HavenMessage::ChannelSyncRequest {
                                                         server_id: server_id.clone(),
                                                         channel_id: channel_id.clone(),
                                                         since_timestamp: since,
@@ -2992,7 +2468,6 @@ async fn run_swarm(
                                                     },
                                                 );
                                             }
-                                        }
                                     }
                                 }
                             }
@@ -3066,23 +2541,14 @@ async fn run_swarm(
                             avatar_b64: avatar_b64.clone(),
                             banner_b64: banner_b64.clone(),
                         };
-                        hollow_log!("[HOLLOW-SWARM] Broadcasting profile update to {} peers", connected_peers.len());
+                        hollow_log!("[HOLLOW-SWARM] Broadcasting profile update");
                         {
-                            let peer_ids: Vec<PeerId> = connected_peers.iter().copied().collect();
-                            for pid in peer_ids {
-                                if relay_peer_id() == Some(pid) { continue; }
-                                let pid_str = pid.to_string();
-                                if mls_reached.contains(&pid_str) { continue; }
-                                send_message_to_peer(
-                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                    &pid, &pid_str, msg.clone(),
-                                );
-                            }
+                            
                         }
 
                         // Emit event so Dart updates UI.
                         let _ = event_tx.send(NetworkEvent::ProfileUpdated {
-                            peer_id: local_peer_str.clone(),
+                            peer_id: local_peer_str.to_string(),
                         }).await;
                     }
 
@@ -3099,7 +2565,7 @@ async fn run_swarm(
                             }
                         };
 
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let edit_timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -3143,17 +2609,14 @@ async fn run_swarm(
                                     hollow_log!("[HOLLOW-MLS] Edit encrypt failed, falling back to Olm: {e}");
                                     for member_peer_str in server.members.keys() {
                                         if member_peer_str == &local_peer { continue; }
-                                        if let Ok(member_pid) = member_peer_str.parse::<PeerId>() {
-                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &member_pid, member_peer_str) {
+                                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                 send_encrypted_message(
-                                                    &mut swarm, &mut olm, &crypto_store,
-                                                    &mut pending_requests, &mut outbound_message_text,
-                                                    &member_pid, member_peer_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    member_peer_str, &envelope_json,
                                                     &event_tx,
-                                                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                                                                &ws_cmd_tx, &ws_room_peers,
                                                 ).await;
                                             }
-                                        }
                                     }
                                 }
                             }
@@ -3161,17 +2624,14 @@ async fn run_swarm(
                             // Olm fan-out fallback.
                             for member_peer_str in server.members.keys() {
                                 if member_peer_str == &local_peer { continue; }
-                                if let Ok(member_pid) = member_peer_str.parse::<PeerId>() {
-                                    if peer_is_reachable(&ws_room_peers, &connected_peers, &member_pid, member_peer_str) {
+                                    if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                         send_encrypted_message(
-                                            &mut swarm, &mut olm, &crypto_store,
-                                            &mut pending_requests, &mut outbound_message_text,
-                                            &member_pid, member_peer_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    member_peer_str, &envelope_json,
                                             &event_tx,
-                                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                                                &ws_cmd_tx, &ws_room_peers,
                                         ).await;
                                     }
-                                }
                             }
                         }
 
@@ -3185,8 +2645,7 @@ async fn run_swarm(
                         }).await;
                     }
 
-                    NodeCommand::EditDmMessage { peer_id, message_id, new_text } => {
-                        let peer_id_str = peer_id.to_string();
+                    NodeCommand::EditDmMessage { peer_id: peer_id_str, message_id, new_text } => {
                         hollow_log!("[HOLLOW-SWARM] EditDmMessage {message_id} for {peer_id_str}");
 
                         let edit_timestamp = std::time::SystemTime::now()
@@ -3226,11 +2685,10 @@ async fn run_swarm(
 
                         if olm.has_session(&peer_id_str) {
                             send_encrypted_message(
-                                &mut swarm, &mut olm, &crypto_store,
-                                &mut pending_requests, &mut outbound_message_text,
-                                &peer_id, &peer_id_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    &peer_id_str, &envelope_json,
                                 &event_tx,
-                                                        &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                        &ws_cmd_tx, &ws_room_peers,
                             ).await;
                         }
 
@@ -3256,7 +2714,7 @@ async fn run_swarm(
                             }
                         };
 
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let delete_timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -3299,17 +2757,14 @@ async fn run_swarm(
                                     hollow_log!("[HOLLOW-MLS] Delete encrypt failed, falling back to Olm: {e}");
                                     for member_peer_str in server.members.keys() {
                                         if member_peer_str == &local_peer { continue; }
-                                        if let Ok(member_pid) = member_peer_str.parse::<PeerId>() {
-                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &member_pid, member_peer_str) {
+                                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                 send_encrypted_message(
-                                                    &mut swarm, &mut olm, &crypto_store,
-                                                    &mut pending_requests, &mut outbound_message_text,
-                                                    &member_pid, member_peer_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    member_peer_str, &envelope_json,
                                                     &event_tx,
-                                                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                                                                &ws_cmd_tx, &ws_room_peers,
                                                 ).await;
                                             }
-                                        }
                                     }
                                 }
                             }
@@ -3317,17 +2772,14 @@ async fn run_swarm(
                             // Olm fan-out fallback.
                             for member_peer_str in server.members.keys() {
                                 if member_peer_str == &local_peer { continue; }
-                                if let Ok(member_pid) = member_peer_str.parse::<PeerId>() {
-                                    if peer_is_reachable(&ws_room_peers, &connected_peers, &member_pid, member_peer_str) {
+                                    if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                         send_encrypted_message(
-                                            &mut swarm, &mut olm, &crypto_store,
-                                            &mut pending_requests, &mut outbound_message_text,
-                                            &member_pid, member_peer_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    member_peer_str, &envelope_json,
                                             &event_tx,
-                                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                                                &ws_cmd_tx, &ws_room_peers,
                                         ).await;
                                     }
-                                }
                             }
                         }
 
@@ -3340,8 +2792,7 @@ async fn run_swarm(
                         }).await;
                     }
 
-                    NodeCommand::DeleteDmMessage { peer_id, message_id } => {
-                        let peer_id_str = peer_id.to_string();
+                    NodeCommand::DeleteDmMessage { peer_id: peer_id_str, message_id } => {
                         hollow_log!("[HOLLOW-SWARM] DeleteDmMessage {message_id} for {peer_id_str}");
 
                         let delete_timestamp = std::time::SystemTime::now()
@@ -3380,11 +2831,10 @@ async fn run_swarm(
 
                         if olm.has_session(&peer_id_str) {
                             send_encrypted_message(
-                                &mut swarm, &mut olm, &crypto_store,
-                                &mut pending_requests, &mut outbound_message_text,
-                                &peer_id, &peer_id_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    &peer_id_str, &envelope_json,
                                 &event_tx,
-                                                        &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                        &ws_cmd_tx, &ws_room_peers,
                             ).await;
                         }
 
@@ -3409,7 +2859,7 @@ async fn run_swarm(
                             }
                         };
 
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let reaction_ts = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -3452,34 +2902,28 @@ async fn run_swarm(
                                     hollow_log!("[HOLLOW-MLS] Reaction encrypt failed, falling back to Olm: {e}");
                                     for member_peer_str in server.members.keys() {
                                         if member_peer_str == &local_peer { continue; }
-                                        if let Ok(member_pid) = member_peer_str.parse::<PeerId>() {
-                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &member_pid, member_peer_str) {
+                                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                 send_encrypted_message(
-                                                    &mut swarm, &mut olm, &crypto_store,
-                                                    &mut pending_requests, &mut outbound_message_text,
-                                                    &member_pid, member_peer_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    member_peer_str, &envelope_json,
                                                     &event_tx,
-                                                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                                                                &ws_cmd_tx, &ws_room_peers,
                                                 ).await;
                                             }
-                                        }
                                     }
                                 }
                             }
                         } else {
                             for member_peer_str in server.members.keys() {
                                 if member_peer_str == &local_peer { continue; }
-                                if let Ok(member_pid) = member_peer_str.parse::<PeerId>() {
-                                    if peer_is_reachable(&ws_room_peers, &connected_peers, &member_pid, member_peer_str) {
+                                    if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                         send_encrypted_message(
-                                            &mut swarm, &mut olm, &crypto_store,
-                                            &mut pending_requests, &mut outbound_message_text,
-                                            &member_pid, member_peer_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    member_peer_str, &envelope_json,
                                             &event_tx,
-                                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                                                &ws_cmd_tx, &ws_room_peers,
                                         ).await;
                                     }
-                                }
                             }
                         }
 
@@ -3493,11 +2937,10 @@ async fn run_swarm(
                         }).await;
                     }
 
-                    NodeCommand::AddDmReaction { peer_id, message_id, emoji } => {
-                        let peer_id_str = peer_id.to_string();
+                    NodeCommand::AddDmReaction { peer_id: peer_id_str, message_id, emoji } => {
                         hollow_log!("[HOLLOW-SWARM] AddDmReaction {emoji} on {message_id} for {peer_id_str}");
 
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let reaction_ts = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -3534,11 +2977,10 @@ async fn run_swarm(
 
                         if olm.has_session(&peer_id_str) {
                             send_encrypted_message(
-                                &mut swarm, &mut olm, &crypto_store,
-                                &mut pending_requests, &mut outbound_message_text,
-                                &peer_id, &peer_id_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    &peer_id_str, &envelope_json,
                                 &event_tx,
-                                                        &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                        &ws_cmd_tx, &ws_room_peers,
                             ).await;
                         }
 
@@ -3564,7 +3006,7 @@ async fn run_swarm(
                             }
                         };
 
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let remove_ts = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -3607,34 +3049,28 @@ async fn run_swarm(
                                     hollow_log!("[HOLLOW-MLS] Remove reaction encrypt failed, Olm fallback: {e}");
                                     for member_peer_str in server.members.keys() {
                                         if member_peer_str == &local_peer { continue; }
-                                        if let Ok(member_pid) = member_peer_str.parse::<PeerId>() {
-                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &member_pid, member_peer_str) {
+                                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                 send_encrypted_message(
-                                                    &mut swarm, &mut olm, &crypto_store,
-                                                    &mut pending_requests, &mut outbound_message_text,
-                                                    &member_pid, member_peer_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    member_peer_str, &envelope_json,
                                                     &event_tx,
-                                                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                                                                &ws_cmd_tx, &ws_room_peers,
                                                 ).await;
                                             }
-                                        }
                                     }
                                 }
                             }
                         } else {
                             for member_peer_str in server.members.keys() {
                                 if member_peer_str == &local_peer { continue; }
-                                if let Ok(member_pid) = member_peer_str.parse::<PeerId>() {
-                                    if peer_is_reachable(&ws_room_peers, &connected_peers, &member_pid, member_peer_str) {
+                                    if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                         send_encrypted_message(
-                                            &mut swarm, &mut olm, &crypto_store,
-                                            &mut pending_requests, &mut outbound_message_text,
-                                            &member_pid, member_peer_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    member_peer_str, &envelope_json,
                                             &event_tx,
-                                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                                                &ws_cmd_tx, &ws_room_peers,
                                         ).await;
                                     }
-                                }
                             }
                         }
 
@@ -3648,11 +3084,10 @@ async fn run_swarm(
                         }).await;
                     }
 
-                    NodeCommand::RemoveDmReaction { peer_id, message_id, emoji } => {
-                        let peer_id_str = peer_id.to_string();
+                    NodeCommand::RemoveDmReaction { peer_id: peer_id_str, message_id, emoji } => {
                         hollow_log!("[HOLLOW-SWARM] RemoveDmReaction {emoji} on {message_id} for {peer_id_str}");
 
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let remove_ts = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -3689,11 +3124,10 @@ async fn run_swarm(
 
                         if olm.has_session(&peer_id_str) {
                             send_encrypted_message(
-                                &mut swarm, &mut olm, &crypto_store,
-                                &mut pending_requests, &mut outbound_message_text,
-                                &peer_id, &peer_id_str, &envelope_json,
+                                                    &mut olm, &crypto_store,
+                                                    &peer_id_str, &envelope_json,
                                 &event_tx,
-                                                        &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                        &ws_cmd_tx, &ws_room_peers,
                             ).await;
                         }
 
@@ -3706,8 +3140,7 @@ async fn run_swarm(
                         }).await;
                     }
 
-                    NodeCommand::SendFriendRequest { peer_id } => {
-                        let peer_id_str = peer_id.to_string();
+                    NodeCommand::SendFriendRequest { peer_id: peer_id_str } => {
                         hollow_log!("[HOLLOW-FRIENDS] Sending friend request to {peer_id_str}");
 
                         let now = std::time::SystemTime::now()
@@ -3728,18 +3161,8 @@ async fn run_swarm(
 
                         // Register DM room code immediately so signaling can help
                         // discover the peer even before they accept.
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let room = dm_room_code(&local_peer, &peer_id_str);
-                        let addrs: Vec<String> = known_addresses.iter()
-                            .filter(|a| is_registerable_address(a))
-                            .cloned()
-                            .collect();
-                        if !addrs.is_empty() {
-                            let _ = sig_cmd_tx.send(SignalingCmd::Register {
-                                room_code: room.clone(),
-                                addresses: addrs,
-                            }).await;
-                        }
                         let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
                             room_code: room.clone(),
                         }).await;
@@ -3752,10 +3175,10 @@ async fn run_swarm(
                         });
 
                         // Send to peer if connected or reachable via WS.
-                        if peer_is_reachable(&ws_room_peers, &connected_peers, &peer_id, &peer_id_str) {
+                        if peer_is_reachable(&ws_room_peers, &peer_id_str) {
                             send_message_to_peer(
-                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                &peer_id, &peer_id_str, HavenMessage::FriendRequest { requested_at: now },
+                                &ws_cmd_tx, &ws_room_peers,
+                                &peer_id_str, HavenMessage::FriendRequest { requested_at: now },
                             );
                         }
 
@@ -3764,8 +3187,7 @@ async fn run_swarm(
                         }).await;
                     }
 
-                    NodeCommand::AcceptFriendRequest { peer_id } => {
-                        let peer_id_str = peer_id.to_string();
+                    NodeCommand::AcceptFriendRequest { peer_id: peer_id_str } => {
                         hollow_log!("[HOLLOW-FRIENDS] Accepting friend request from {peer_id_str}");
 
                         // Update to accepted.
@@ -3784,26 +3206,16 @@ async fn run_swarm(
                         }
 
                         // Send acceptance to peer.
-                        if peer_is_reachable(&ws_room_peers, &connected_peers, &peer_id, &peer_id_str) {
+                        if peer_is_reachable(&ws_room_peers, &peer_id_str) {
                             send_message_to_peer(
-                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                &peer_id, &peer_id_str, HavenMessage::FriendAccept,
+                                &ws_cmd_tx, &ws_room_peers,
+                                &peer_id_str, HavenMessage::FriendAccept,
                             );
                         }
 
                         // Register DM room code with signaling for internet discovery.
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let room = dm_room_code(&local_peer, &peer_id_str);
-                        let addrs: Vec<String> = known_addresses.iter()
-                            .filter(|a| is_registerable_address(a))
-                            .cloned()
-                            .collect();
-                        if !addrs.is_empty() {
-                            let _ = sig_cmd_tx.send(SignalingCmd::Register {
-                                room_code: room.clone(),
-                                addresses: addrs,
-                            }).await;
-                        }
                         let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
                             room_code: room.clone(),
                         }).await;
@@ -3820,8 +3232,7 @@ async fn run_swarm(
                         }).await;
                     }
 
-                    NodeCommand::RejectFriendRequest { peer_id } => {
-                        let peer_id_str = peer_id.to_string();
+                    NodeCommand::RejectFriendRequest { peer_id: peer_id_str } => {
                         hollow_log!("[HOLLOW-FRIENDS] Rejecting friend request from {peer_id_str}");
 
                         // Remove from friends table.
@@ -3835,10 +3246,10 @@ async fn run_swarm(
                             }
                         }
 
-                        if peer_is_reachable(&ws_room_peers, &connected_peers, &peer_id, &peer_id_str) {
+                        if peer_is_reachable(&ws_room_peers, &peer_id_str) {
                             send_message_to_peer(
-                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                &peer_id, &peer_id_str, HavenMessage::FriendReject,
+                                &ws_cmd_tx, &ws_room_peers,
+                                &peer_id_str, HavenMessage::FriendReject,
                             );
                         }
 
@@ -3847,8 +3258,7 @@ async fn run_swarm(
                         }).await;
                     }
 
-                    NodeCommand::RemoveFriend { peer_id } => {
-                        let peer_id_str = peer_id.to_string();
+                    NodeCommand::RemoveFriend { peer_id: peer_id_str } => {
                         hollow_log!("[HOLLOW-FRIENDS] Removing friend {peer_id_str}");
 
                         {
@@ -3861,10 +3271,10 @@ async fn run_swarm(
                             }
                         }
 
-                        if peer_is_reachable(&ws_room_peers, &connected_peers, &peer_id, &peer_id_str) {
+                        if peer_is_reachable(&ws_room_peers, &peer_id_str) {
                             send_message_to_peer(
-                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                &peer_id, &peer_id_str, HavenMessage::FriendRemove,
+                                &ws_cmd_tx, &ws_room_peers,
+                                &peer_id_str, HavenMessage::FriendRemove,
                             );
                         }
 
@@ -3881,14 +3291,12 @@ async fn run_swarm(
 
                         if server_id.is_empty() {
                             // DM typing: channel_id is actually the peer ID.
-                            if let Ok(pid) = channel_id.parse::<PeerId>() {
-                                if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, &channel_id) {
+                                if peer_is_reachable(&ws_room_peers, &channel_id) {
                                     send_message_to_peer(
-                                        &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                        &pid, &channel_id, msg,
+                                        &ws_cmd_tx, &ws_room_peers,
+                                        &channel_id, msg,
                                     );
                                 }
-                            }
                         } else {
                             // Channel typing: MLS broadcast first, plaintext fallback.
                             let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
@@ -3898,18 +3306,16 @@ async fn run_swarm(
                                     hollow_log!("[HOLLOW-MLS] Typing broadcast failed: {e}");
                                 }
                             } else {
-                                let local_peer = swarm.local_peer_id().to_string();
+                                let local_peer = local_peer_str.to_string();
                                 if let Some(server) = server_states.get(&server_id) {
                                     for member_peer_str in server.members.keys() {
                                         if member_peer_str == &local_peer { continue; }
-                                        if let Ok(member_pid) = member_peer_str.parse::<PeerId>() {
-                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &member_pid, member_peer_str) {
+                                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                 send_message_to_peer(
-                                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                    &member_pid, member_peer_str, msg.clone(),
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    member_peer_str, msg.clone(),
                                                 );
                                             }
-                                        }
                                     }
                                 }
                             }
@@ -3918,7 +3324,7 @@ async fn run_swarm(
 
                     NodeCommand::UpdateChannelLayout { server_id, layout_json } => {
                         if let Some(state) = server_states.get_mut(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
 
                             if !state.has_permission(&local_peer, crate::crdt::operations::Permission::MANAGE_CHANNELS) {
                                 hollow_log!("[HOLLOW-CRDT] Permission denied: cannot update channel layout in {server_id}");
@@ -3949,17 +3355,15 @@ async fn run_swarm(
                             if let Ok(op_json) = serde_json::to_string(&op) {
                                 for member_peer_str in state.members.keys() {
                                     if member_peer_str == &local_peer { continue; }
-                                    if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                        if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                        if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                             send_message_to_peer(
-                                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                &pid, member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                                &ws_cmd_tx, &ws_room_peers,
+                                                member_peer_str, HavenMessage::CrdtOpBroadcast {
                                                     server_id: server_id.clone(),
                                                     op_json: op_json.clone(),
                                                 },
                                             );
                                         }
-                                    }
                                 }
                             }
                         }
@@ -3967,7 +3371,7 @@ async fn run_swarm(
 
                     NodeCommand::PinMessage { server_id, channel_id, message_id } => {
                         if let Some(state) = server_states.get_mut(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
 
                             if !state.has_permission(&local_peer, crate::crdt::operations::Permission::MANAGE_CHANNELS) {
                                 hollow_log!("[HOLLOW-CRDT] Permission denied: cannot pin in {server_id}");
@@ -4001,17 +3405,15 @@ async fn run_swarm(
                             if let Ok(op_json) = serde_json::to_string(&op) {
                                 for member_peer_str in state.members.keys() {
                                     if member_peer_str == &local_peer { continue; }
-                                    if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                        if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                        if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                             send_message_to_peer(
-                                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                &pid, member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                                &ws_cmd_tx, &ws_room_peers,
+                                                member_peer_str, HavenMessage::CrdtOpBroadcast {
                                                     server_id: server_id.clone(),
                                                     op_json: op_json.clone(),
                                                 },
                                             );
                                         }
-                                    }
                                 }
                             }
                         }
@@ -4019,7 +3421,7 @@ async fn run_swarm(
 
                     NodeCommand::UnpinMessage { server_id, channel_id, message_id } => {
                         if let Some(state) = server_states.get_mut(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
 
                             if !state.has_permission(&local_peer, crate::crdt::operations::Permission::MANAGE_CHANNELS) {
                                 hollow_log!("[HOLLOW-CRDT] Permission denied: cannot unpin in {server_id}");
@@ -4053,17 +3455,15 @@ async fn run_swarm(
                             if let Ok(op_json) = serde_json::to_string(&op) {
                                 for member_peer_str in state.members.keys() {
                                     if member_peer_str == &local_peer { continue; }
-                                    if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                        if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                        if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                             send_message_to_peer(
-                                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                &pid, member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                                &ws_cmd_tx, &ws_room_peers,
+                                                member_peer_str, HavenMessage::CrdtOpBroadcast {
                                                     server_id: server_id.clone(),
                                                     op_json: op_json.clone(),
                                                 },
                                             );
                                         }
-                                    }
                                 }
                             }
                         }
@@ -4072,7 +3472,7 @@ async fn run_swarm(
                     // -- Storage pledge (Phase 4) --
                     NodeCommand::SetStoragePledge { server_id, pledge_bytes } => {
                         if let Some(state) = server_states.get_mut(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
 
                             hollow_log!("[HOLLOW-VAULT] Setting storage pledge to {pledge_bytes} bytes in {server_id}");
                             let op = state.create_op(CrdtPayload::StoragePledgeChanged {
@@ -4099,17 +3499,15 @@ async fn run_swarm(
                             if let Ok(op_json) = serde_json::to_string(&op) {
                                 for member_peer_str in state.members.keys() {
                                     if member_peer_str == &local_peer { continue; }
-                                    if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                        if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                        if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                             send_message_to_peer(
-                                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                &pid, member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                                &ws_cmd_tx, &ws_room_peers,
+                                                member_peer_str, HavenMessage::CrdtOpBroadcast {
                                                     server_id: server_id.clone(),
                                                     op_json: op_json.clone(),
                                                 },
                                             );
                                         }
-                                    }
                                 }
                             }
                         }
@@ -4237,8 +3635,7 @@ async fn run_swarm(
                                             let si: u16 = ep[0].parse().unwrap_or(0);
                                             let target_peer = ep[1];
                                             let shard_key = ep[2];
-                                            if let Ok(pid) = target_peer.parse::<PeerId>() {
-                                                if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, target_peer) {
+                                                if peer_is_reachable(&ws_room_peers, target_peer) {
                                                     let envelope = MessageEnvelope::ShardRequest {
                                                         sid: server_id.clone(),
                                                         cid: content_id.clone(),
@@ -4257,16 +3654,14 @@ async fn run_swarm(
                                                     } else {
                                                         let json = serde_json::to_string(&envelope).unwrap_or_default();
                                                         send_encrypted_message(
-                                                            &mut swarm, &mut olm, &crypto_store,
-                                                            &mut pending_requests, &mut outbound_message_text,
-                                                            &pid, target_peer, &json, &event_tx,
-                                                            &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                    &mut olm, &crypto_store,
+                                                    target_peer, &json, &event_tx,
+                                                            &ws_cmd_tx, &ws_room_peers,
                                                         ).await;
                                                     }
                                                     hollow_log!("[HOLLOW-VAULT] Requested shard si={si} from {target_peer}");
                                                     requested += 1;
                                                 }
-                                            }
                                         }
                                     }
 
@@ -4310,7 +3705,7 @@ async fn run_swarm(
                         let upload_result: Result<(), String> = (|| {
                             let state = server_states.get(&server_id)
                                 .ok_or_else(|| format!("Server {server_id} not found"))?;
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
 
                             // Build members + pledges from server state
                             let members: Vec<String> = state.members.keys().cloned().collect();
@@ -4368,7 +3763,7 @@ async fn run_swarm(
                             Ok(()) => {
                                 // Re-prepare plan for shard distribution (need the data again)
                                 if let Some(state) = server_states.get(&server_id) {
-                                    let local_peer = swarm.local_peer_id().to_string();
+                                    let local_peer = local_peer_str.to_string();
                                     let members: Vec<String> = state.members.keys().cloned().collect();
                                     let pledges: std::collections::HashMap<String, u64> = state.storage_pledges
                                         .iter().map(|(k, v)| (k.clone(), *v.read())).collect();
@@ -4384,8 +3779,7 @@ async fn run_swarm(
                                         for placement in &plan.placements {
                                             if placement.target_peer != local_peer {
                                                 if let Some((_, shard_data)) = plan.shards.iter().find(|(idx, _)| *idx == placement.shard_index) {
-                                                    if let Ok(pid) = placement.target_peer.parse::<PeerId>() {
-                                                        if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, &placement.target_peer) {
+                                                        if peer_is_reachable(&ws_room_peers, &placement.target_peer) {
                                                             // Send ShardStore metadata via MLS or Olm.
                                                             let envelope = MessageEnvelope::ShardStore {
                                                                 sid: server_id.clone(), cid: content_id.clone(),
@@ -4406,10 +3800,9 @@ async fn run_swarm(
                                                             } else {
                                                                 let json = serde_json::to_string(&envelope).unwrap_or_default();
                                                                 send_encrypted_message(
-                                                                    &mut swarm, &mut olm, &crypto_store,
-                                                                    &mut pending_requests, &mut outbound_message_text,
-                                                                    &pid, &placement.target_peer, &json, &event_tx,
-                                                                    &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                    &mut olm, &crypto_store,
+                                                    &placement.target_peer, &json, &event_tx,
+                                                                    &ws_cmd_tx, &ws_room_peers,
                                                                 ).await;
                                                             }
 
@@ -4419,16 +3812,15 @@ async fn run_swarm(
                                                             let shard_temp_name = format!(".stream_shard_{}_{}.tmp", shard_safe_prefix, placement.shard_index);
                                                             let shard_temp_path = shard_temp_dir.join(&shard_temp_name);
                                                             if let Ok(()) = std::fs::write(&shard_temp_path, shard_data) {
-                                                                let shard_kind = super::stream_transfer::StreamKind::Shard { shard_index: placement.shard_index };
+                                                                let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index: placement.shard_index };
                                                                 stream_to_peer(
-                                                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                                    &pid, &placement.target_peer, &shard_kind,
+                                                                    &ws_cmd_tx, &ws_room_peers,
+                                                                    &placement.target_peer, &shard_kind,
                                                                     &content_id, &shard_temp_path, shard_data.len() as u64,
                                                                 ).await;
                                                                 hollow_log!("[HOLLOW-VAULT] Streaming shard si={} ({} bytes) to {}", placement.shard_index, shard_data.len(), placement.target_peer);
                                                             }
                                                         }
-                                                    }
                                                 }
                                             }
                                         }
@@ -4450,16 +3842,13 @@ async fn run_swarm(
                                             let manifest_env_json = serde_json::to_string(&manifest_envelope).unwrap_or_default();
                                             for member_peer_str in state.members.keys() {
                                                 if member_peer_str == &local_peer { continue; }
-                                                if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                                    if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) && olm.has_session(member_peer_str) {
+                                                    if peer_is_reachable(&ws_room_peers, member_peer_str) && olm.has_session(member_peer_str) {
                                                         send_encrypted_message(
-                                                            &mut swarm, &mut olm, &crypto_store,
-                                                            &mut pending_requests, &mut outbound_message_text,
-                                                            &pid, member_peer_str, &manifest_env_json, &event_tx,
-                                                            &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                    &mut olm, &crypto_store,
+                                                    member_peer_str, &manifest_env_json, &event_tx,
+                                                            &ws_cmd_tx, &ws_room_peers,
                                                         ).await;
                                                     }
-                                                }
                                             }
                                         }
                                     }
@@ -4486,7 +3875,7 @@ async fn run_swarm(
 
                     NodeCommand::DeleteVaultContent { server_id, content_id } => {
                         if let Some(state) = server_states.get(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
                             if !state.has_permission(&local_peer, crate::crdt::operations::Permission::MANAGE_SERVER) {
                                 hollow_log!("[HOLLOW-VAULT] Permission denied: cannot delete vault content in {server_id}");
                                 continue;
@@ -4520,16 +3909,13 @@ async fn run_swarm(
                                 let delete_json = serde_json::to_string(&delete_envelope).unwrap_or_default();
                                 for member_peer_str in state.members.keys() {
                                     if member_peer_str == &local_peer { continue; }
-                                    if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                        if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) && olm.has_session(member_peer_str) {
+                                        if peer_is_reachable(&ws_room_peers, member_peer_str) && olm.has_session(member_peer_str) {
                                             send_encrypted_message(
-                                                &mut swarm, &mut olm, &crypto_store,
-                                                &mut pending_requests, &mut outbound_message_text,
-                                                &pid, member_peer_str, &delete_json, &event_tx,
-                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                    &mut olm, &crypto_store,
+                                                    member_peer_str, &delete_json, &event_tx,
+                                                &ws_cmd_tx, &ws_room_peers,
                                             ).await;
                                         }
-                                    }
                                 }
                             }
 
@@ -4542,8 +3928,7 @@ async fn run_swarm(
 
                     NodeCommand::RequestShardFromPeer { server_id, content_id, shard_index, shard_key, target_peer } => {
                         hollow_log!("[HOLLOW-VAULT] RequestShardFromPeer: cid={content_id} si={shard_index} from {target_peer}");
-                        if let Ok(pid) = target_peer.parse::<PeerId>() {
-                            if !peer_is_reachable(&ws_room_peers, &connected_peers, &pid, &target_peer) {
+                            if !peer_is_reachable(&ws_room_peers, &target_peer) {
                                 hollow_log!("[HOLLOW-VAULT] Cannot request shard: peer {target_peer} not reachable");
                                 let _ = event_tx.send(NetworkEvent::ShardRequestFailed {
                                     server_id, content_id, shard_index,
@@ -4567,25 +3952,22 @@ async fn run_swarm(
                                 } else {
                                     let json = serde_json::to_string(&envelope).unwrap_or_default();
                                     send_encrypted_message(
-                                        &mut swarm, &mut olm, &crypto_store,
-                                        &mut pending_requests, &mut outbound_message_text,
-                                        &pid, &target_peer, &json, &event_tx,
-                                        &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                    &mut olm, &crypto_store,
+                                                    &target_peer, &json, &event_tx,
+                                        &ws_cmd_tx, &ws_room_peers,
                                     ).await;
                                 }
                             }
-                        }
                     }
 
                     NodeCommand::StoreShardOnPeer {
                         server_id, content_id, shard_index, shard_key,
                         k, m, total_data_size, storage_tier, data, target_peer,
                     } => {
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         hollow_log!("[HOLLOW-VAULT] StoreShardOnPeer: cid={content_id} si={shard_index} -> {target_peer}");
 
-                        if let Ok(pid) = target_peer.parse::<PeerId>() {
-                            if !peer_is_reachable(&ws_room_peers, &connected_peers, &pid, &target_peer) {
+                            if !peer_is_reachable(&ws_room_peers, &target_peer) {
                                 hollow_log!("[HOLLOW-VAULT] Cannot store shard: peer {target_peer} not reachable");
                                 let _ = event_tx.send(NetworkEvent::ShardStoreFailed {
                                     server_id: server_id.clone(),
@@ -4619,10 +4001,9 @@ async fn run_swarm(
                                 } else {
                                     let json = serde_json::to_string(&envelope).unwrap_or_default();
                                     send_encrypted_message(
-                                        &mut swarm, &mut olm, &crypto_store,
-                                        &mut pending_requests, &mut outbound_message_text,
-                                        &pid, &target_peer, &json, &event_tx,
-                                        &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                    &mut olm, &crypto_store,
+                                                    &target_peer, &json, &event_tx,
+                                        &ws_cmd_tx, &ws_room_peers,
                                     ).await;
                                 }
 
@@ -4632,19 +4013,16 @@ async fn run_swarm(
                                 let shard_temp_name = format!(".stream_shard_{}_{}.tmp", shard_safe_prefix, shard_index);
                                 let shard_temp_path = shard_temp_dir.join(&shard_temp_name);
                                 if let Ok(()) = std::fs::write(&shard_temp_path, &data) {
-                                    let shard_kind = super::stream_transfer::StreamKind::Shard { shard_index };
+                                    let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index };
                                     stream_to_peer(
-                                        &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                        &pid, &target_peer, &shard_kind,
+                                        &ws_cmd_tx, &ws_room_peers,
+                                        &target_peer, &shard_kind,
                                         &content_id, &shard_temp_path, data.len() as u64,
                                     ).await;
                                     hollow_log!("[HOLLOW-VAULT] Streaming shard si={shard_index} ({} bytes) to {target_peer}", data.len());
                                 }
                             }
-                        } else {
-                            hollow_log!("[HOLLOW-VAULT] Invalid target_peer: {target_peer}");
                         }
-                    }
 
                     // -- File sharing (Phase 3.5) --
                     NodeCommand::SendFile { peer_id, server_id, channel_id, file_path, message_id, message_text } => {
@@ -4744,7 +4122,7 @@ async fn run_swarm(
                             }
                         }
 
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let timestamp = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -4758,7 +4136,7 @@ async fn run_swarm(
                             ctx_id = format!("{}:{}", sid, channel_id.as_deref().unwrap_or(""));
                         } else {
                             ctx_type = "dm";
-                            ctx_id = peer_id.map(|p| p.to_string()).unwrap_or_default();
+                            ctx_id = peer_id.clone().unwrap_or_default();
                         }
 
                         {
@@ -4792,9 +4170,8 @@ async fn run_swarm(
 
                         let (sig, pk) = sign_message(&bundle_keypair, &pub_key_b64, &signing_payload_text);
 
-                        if let Some(target_peer) = peer_id {
+                        if let Some(peer_str) = peer_id {
                             // DM path
-                            let peer_str = target_peer.to_string();
                             let envelope = MessageEnvelope::DirectMessage {
                                 text: signing_payload_text.clone(),
                                 ts: timestamp,
@@ -4826,15 +4203,14 @@ async fn run_swarm(
                             if olm.has_session(&peer_str) {
                                 // Send message envelope.
                                 send_encrypted_message(
-                                    &mut swarm, &mut olm, &crypto_store,
-                                    &mut pending_requests, &mut outbound_message_text,
-                                    &target_peer, &peer_str, &envelope_json, &event_tx,
-                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                    &mut olm, &crypto_store,
+                                                    &peer_str, &envelope_json, &event_tx,
+                                                                &ws_cmd_tx, &ws_room_peers,
                                 ).await;
 
                                 // Only send file data if peer is reachable right now.
                                 // If offline, the file_id is in the message — sync will request it later.
-                                if peer_is_reachable(&ws_room_peers, &connected_peers, &target_peer, &peer_str) {
+                                if peer_is_reachable(&ws_room_peers, &peer_str) {
 
                                 // AES-encrypt the file, write ciphertext to temp file.
                                 let encrypted = crate::vault::pipeline::aes_encrypt(&final_data);
@@ -4867,16 +4243,15 @@ async fn run_swarm(
                                         };
                                         let header_json = serde_json::to_string(&header).unwrap_or_default();
                                         send_encrypted_message(
-                                            &mut swarm, &mut olm, &crypto_store,
-                                            &mut pending_requests, &mut outbound_message_text,
-                                            &target_peer, &peer_str, &header_json, &event_tx,
-                                                                                &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                    &mut olm, &crypto_store,
+                                                    &peer_str, &header_json, &event_tx,
+                                                                                &ws_cmd_tx, &ws_room_peers,
                                         ).await;
 
                                         // Stream encrypted file bytes via stream_to_peer (WS or libp2p).
                                         stream_to_peer(
-                                            &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                            &target_peer, &peer_str, &super::stream_transfer::StreamKind::File,
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            &peer_str, &super::ws_stream_transfer::StreamKind::File,
                                             &file_id, &temp_path, enc.ciphertext.len() as u64,
                                         ).await;
                                         hollow_log!("[HOLLOW-FILE] Streaming {file_id} ({} bytes) to DM {peer_str}", enc.ciphertext.len());
@@ -4929,14 +4304,12 @@ async fn run_swarm(
                                     if let Some(state) = server_states.get(&sid) {
                                         for member_peer_str in state.members.keys() {
                                             if member_peer_str == &local_peer { continue; }
-                                            if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                                if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                                if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                     send_message_to_peer(
-                                                        &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                        &pid, member_peer_str, mls_msg.clone(),
+                                                        &ws_cmd_tx, &ws_room_peers,
+                                                        member_peer_str, mls_msg.clone(),
                                                     );
                                                 }
-                                            }
                                         }
                                     }
                                 }
@@ -4995,16 +4368,13 @@ async fn run_swarm(
                                         // Olm fallback: send FileHeader to each member individually.
                                         for member_peer_str in state.members.keys() {
                                             if member_peer_str == &local_peer { continue; }
-                                            if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                                if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) && olm.has_session(member_peer_str) {
+                                                if peer_is_reachable(&ws_room_peers, member_peer_str) && olm.has_session(member_peer_str) {
                                                     send_encrypted_message(
-                                                        &mut swarm, &mut olm, &crypto_store,
-                                                        &mut pending_requests, &mut outbound_message_text,
-                                                        &pid, member_peer_str, &header_json, &event_tx,
-                                                        &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                                    &mut olm, &crypto_store,
+                                                    member_peer_str, &header_json, &event_tx,
+                                                        &ws_cmd_tx, &ws_room_peers,
                                                     ).await;
                                                 }
-                                            }
                                         }
                                     }
 
@@ -5014,15 +4384,13 @@ async fn run_swarm(
                                         // Full replication: stream encrypted file bytes to each member.
                                         for member_peer_str in state.members.keys() {
                                             if member_peer_str == &local_peer { continue; }
-                                            if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                                if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                                if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                     stream_to_peer(
-                                                        &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                        &pid, member_peer_str, &super::stream_transfer::StreamKind::File,
+                                                        &ws_cmd_tx, &ws_room_peers,
+                                                        member_peer_str, &super::ws_stream_transfer::StreamKind::File,
                                                         &file_id, &temp_path, ct_size,
                                                     ).await;
                                                 }
-                                            }
                                         }
                                     }
                                 }
@@ -5032,15 +4400,14 @@ async fn run_swarm(
                         }
                     }
 
-                    NodeCommand::RequestFile { file_id, peer_id, chunks } => {
+                    NodeCommand::RequestFile { file_id, peer_id: peer_id_str, chunks } => {
                         // Send a FileRequest HavenMessage to the remote peer,
                         // asking them to send us the file data.
-                        let peer_id_str = peer_id.to_string();
                         hollow_log!("[HOLLOW-FILE] Requesting file {file_id} from peer {peer_id_str}");
-                        if peer_is_reachable(&ws_room_peers, &connected_peers, &peer_id, &peer_id_str) {
+                        if peer_is_reachable(&ws_room_peers, &peer_id_str) {
                             send_message_to_peer(
-                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                &peer_id, &peer_id_str, HavenMessage::FileRequest {
+                                &ws_cmd_tx, &ws_room_peers,
+                                &peer_id_str, HavenMessage::FileRequest {
                                     file_id,
                                     chunks,
                                 },
@@ -5049,19 +4416,7 @@ async fn run_swarm(
                     }
 
                     NodeCommand::NotifyShutdown => {
-                        // Broadcast graceful disconnect to all connected peers.
-                        hollow_log!("[HOLLOW-SWARM] Notifying {} peers of shutdown", connected_peers.len());
-                        {
-                            let peer_ids: Vec<PeerId> = connected_peers.iter().copied().collect();
-                            for pid in peer_ids {
-                                if relay_peer_id() == Some(pid) { continue; }
-                                let pid_str = pid.to_string();
-                                send_message_to_peer(
-                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                    &pid, &pid_str, HavenMessage::PeerDisconnecting,
-                                );
-                            }
-                        }
+                        hollow_log!("[HOLLOW-SWARM] Notifying peers of shutdown");
 
                         // Unregister from signaling server so peers don't see us as online.
                         if let Some(room) = active_room.as_ref() {
@@ -5077,842 +4432,6 @@ async fn run_swarm(
                     }
                 }
             }
-            // Handle swarm events.
-            event = swarm.select_next_some() => {
-                match event {
-                    SwarmEvent::NewListenAddr { address, .. } => {
-                        let addr_str = address.to_string();
-                        let is_new = !known_addresses.contains(&addr_str);
-                        let is_circuit = addr_str.contains("p2p-circuit");
-                        if is_new {
-                            known_addresses.push(addr_str.clone());
-
-                            // Push updated addresses to signaling so relay circuit
-                            // addresses get registered for other peers to find us.
-                            let registerable: Vec<String> = known_addresses.iter()
-                                .filter(|a| is_registerable_address(a))
-                                .cloned()
-                                .collect();
-                            let _ = sig_cmd_tx.send(SignalingCmd::UpdateAddresses {
-                                addresses: registerable,
-                            }).await;
-
-                            // When a relay circuit address appears, bootstrap to
-                            // discover peers that registered before us.
-                            if is_circuit {
-                                if let Some(room) = &active_room {
-                                    let _ = event_tx
-                                        .send(NetworkEvent::Error {
-                                            message: "[DEBUG] Relay circuit up — bootstrapping...".to_string(),
-                                        })
-                                        .await;
-                                    let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
-                                        room_code: room.clone(),
-                                    }).await;
-                                }
-
-                                // Register + bootstrap in all server signaling rooms.
-                                let reg_addrs: Vec<String> = known_addresses.iter()
-                                    .filter(|a| is_registerable_address(a))
-                                    .cloned()
-                                    .collect();
-                                for sid in server_states.keys() {
-                                    let _ = sig_cmd_tx.send(SignalingCmd::Register {
-                                        room_code: sid.clone(),
-                                        addresses: reg_addrs.clone(),
-                                    }).await;
-                                    let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
-                                        room_code: sid.clone(),
-                                    }).await;
-                                }
-
-                                // Register + bootstrap DM room codes for all accepted friends.
-                                {
-                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                            if let Ok(friends) = store.load_friends(None) {
-                                                let local_peer = swarm.local_peer_id().to_string();
-                                                hollow_log!("[HOLLOW-FRIENDS] Registering {} friend DM room codes", friends.len());
-                                                for (friend_pid, _, _, _, _) in &friends {
-                                                    let room = dm_room_code(&local_peer, friend_pid);
-                                                    let _ = sig_cmd_tx.send(SignalingCmd::Register {
-                                                        room_code: room.clone(),
-                                                        addresses: reg_addrs.clone(),
-                                                    }).await;
-                                                    let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
-                                                        room_code: room.clone(),
-                                                    }).await;
-                                                    let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
-                                                        room_code: room.clone(),
-                                                    }).await;
-                                                    // Join WS relay room for this DM.
-                                                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
-                                                        room_code: room,
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                            }
-                        }
-                        let _ = event_tx
-                            .send(NetworkEvent::Listening {
-                                address: addr_str,
-                            })
-                            .await;
-                    }
-                    SwarmEvent::Behaviour(HavenBehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
-                        for (peer_id, addr) in peers {
-                            swarm.add_peer_address(peer_id, addr.clone());
-                            // Seed Kademlia DHT from LAN peers discovered via mDNS.
-                            swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
-                            expected_peers.insert(peer_id);
-                            let _ = event_tx.send(NetworkEvent::ConnectionAttemptStarted {
-                                peer_id: peer_id.to_string(),
-                                method: "mdns".to_string(),
-                            }).await;
-                            // Dedup: only emit PeerDiscovered once per session.
-                            if discovered_peers.insert(peer_id) {
-                                let peer_id_str = peer_id.to_string();
-                                let _ = event_tx
-                                    .send(NetworkEvent::PeerDiscovered {
-                                        peer: DiscoveredPeer {
-                                            peer_id: peer_id_str.clone(),
-                                            addresses: vec![addr.to_string()],
-                                        },
-                                    })
-                                    .await;
-                                if olm.has_session(&peer_id_str) {
-                                    let _ = event_tx
-                                        .send(NetworkEvent::SessionEstablished {
-                                            peer_id: peer_id_str,
-                                        })
-                                        .await;
-                                }
-                            }
-                        }
-                    }
-                    SwarmEvent::Behaviour(HavenBehaviourEvent::Mdns(mdns::Event::Expired(peers))) => {
-                        for (peer_id, _addr) in peers {
-                            let _ = event_tx
-                                .send(NetworkEvent::PeerExpired {
-                                    peer_id: peer_id.to_string(),
-                                })
-                                .await;
-                        }
-                    }
-                    SwarmEvent::Behaviour(HavenBehaviourEvent::Messaging(event)) => {
-                        match event {
-                            request_response::Event::Message { peer, message, .. } => {
-                                match message {
-                                    request_response::Message::Request { request, channel, .. } => {
-                                        // SECURITY: Per-peer rate limiting.
-                                        {
-                                            let (tokens, last_refill) = peer_rate_tokens
-                                                .entry(peer)
-                                                .or_insert((RATE_LIMIT_BURST, std::time::Instant::now()));
-                                            let elapsed = last_refill.elapsed().as_secs_f64();
-                                            let refill = (elapsed * RATE_LIMIT_REFILL as f64) as u32;
-                                            if refill > 0 {
-                                                *tokens = (*tokens + refill).min(RATE_LIMIT_BURST);
-                                                *last_refill = std::time::Instant::now();
-                                            }
-                                            if *tokens == 0 {
-                                                hollow_log!("[HOLLOW-SECURITY] Rate limited peer {peer} — dropping message");
-                                                let _ = swarm.behaviour_mut().messaging.send_response(channel, HavenMessage::Ack);
-                                                continue;
-                                            }
-                                            *tokens -= 1;
-                                        }
-                                        handle_incoming_request(
-                                            &mut swarm,
-                                            &mut olm,
-                                            &crypto_store,
-                                            &event_tx,
-                                            &mut pending_requests,
-                                            &mut outbound_message_text,
-                                            &mut pending_messages,
-                                            &mut key_request_in_flight,
-                                            &mut server_states,
-                                            &bundle_keypair,
-                                            &mut connected_peers,
-                                            &mut pending_server_joins,
-                                            &mut pending_sync_requests,
-                                            &mut mls,
-                                            &mut discovered_peers,
-                                            &mut disconnected_peers,
-                                            &mut pending_disconnects,
-                                            &mut mls_bootstrap_requested,
-                                            &sig_cmd_tx,
-                                            &known_addresses,
-                                            &mut pending_shard_assembly,
-                                            &mut pending_file_streams,
-                                            &mut pending_shard_streams,
-                                            &mut decrypt_fail_cooldown,
-                                            &mut pending_mls_key_packages,
-                                            &mut mls_decrypt_failures,
-                                            &ws_cmd_tx,
-                                            &ws_room_peers,
-                                            &mut channel_sync_sent,
-                                            peer,
-                                            request,
-                                            Some(channel),
-                                        ).await;
-                                    }
-                                    request_response::Message::Response { request_id, response, .. } => {
-                                        handle_incoming_response(
-                                            &mut swarm,
-                                            &mut olm,
-                                            &crypto_store,
-                                            &event_tx,
-                                            &mut pending_requests,
-                                            &mut outbound_message_text,
-                                            &mut pending_messages,
-                                            &mut key_request_in_flight,
-                                            &mut pending_sync_requests,
-                                            &bundle_keypair,
-                                            request_id,
-                                            response,
-                                            &ws_cmd_tx,
-                                            &ws_room_peers,
-                                            &connected_peers,
-                                        ).await;
-                                    }
-                                }
-                            }
-                            request_response::Event::OutboundFailure { request_id, error, .. } => {
-                                if let Some(to_peer) = pending_requests.remove(&request_id) {
-                                    key_request_in_flight.remove(&to_peer);
-
-                                    // If this was an encrypted message, re-queue the original
-                                    // text so it can be retried when the connection is established.
-                                    if let Some((_peer_str, original_text)) = outbound_message_text.remove(&request_id) {
-                                        hollow_log!("[HOLLOW-SWARM] OutboundFailure for {to_peer}, re-queuing message for retry");
-                                        pending_messages
-                                            .entry(to_peer.clone())
-                                            .or_default()
-                                            .push(original_text);
-                                        // Don't remove the Olm session here — transport failures
-                                        // (relay timeout, connection drop) don't mean the crypto
-                                        // session is broken. Removing it causes a dual-outbound
-                                        // race on reconnect where both peers create new sessions
-                                        // from DHT prekeys and neither can decrypt the other's.
-                                    } else {
-                                        // Not a message send (was a KeyRequest or similar) — report failure.
-                                        let _ = event_tx
-                                            .send(NetworkEvent::MessageSendFailed {
-                                                to_peer,
-                                                error: format!("{error:?}"),
-                                            })
-                                            .await;
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // -- File streaming events (/hollow/stream/1.0.0) --
-                    SwarmEvent::Behaviour(HavenBehaviourEvent::FileStreaming(event)) => {
-                        match event {
-                            request_response::Event::Message { peer, message, .. } => {
-                                match message {
-                                    request_response::Message::Request { request, channel, .. } => {
-                                        // Inbound stream transfer completed — codec wrote data to temp file.
-                                        let peer_str = peer.to_string();
-                                        handle_completed_stream(
-                                            request,
-                                            &peer_str,
-                                            &mut pending_file_streams,
-                                            &mut pending_shard_streams,
-                                            &mut pending_vault_downloads,
-                                            &bundle_keypair,
-                                            &event_tx,
-                                        ).await;
-
-                                        // Send ack response.
-                                        let _ = swarm.behaviour_mut().file_streaming.send_response(
-                                            channel,
-                                            super::stream_transfer::StreamResponse { ok: true },
-                                        );
-                                    }
-                                    request_response::Message::Response { .. } => {
-                                        // Outbound stream completed — clean up temp files.
-                                        hollow_log!("[HOLLOW-STREAM] Outbound stream transfer completed");
-                                    }
-                                }
-                            }
-                            request_response::Event::OutboundFailure { request_id, error, .. } => {
-                                hollow_log!("[HOLLOW-STREAM] Stream transfer failed: {error:?}");
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // -- Kademlia DHT events --
-                    SwarmEvent::Behaviour(HavenBehaviourEvent::Kademlia(event)) => {
-                        match event {
-                            kad::Event::RoutingUpdated { peer, addresses, .. } => {
-                                // A peer was added/updated in the routing table.
-                                for addr in addresses.iter() {
-                                    swarm.add_peer_address(peer, addr.clone());
-                                }
-                            }
-                            kad::Event::OutboundQueryProgressed { id, result, .. } => {
-                                match result {
-                                    kad::QueryResult::Bootstrap(Ok(_)) => {
-                                        // Bootstrap completed — DHT routing table populated.
-                                    }
-                                    kad::QueryResult::Bootstrap(Err(e)) => {
-                                        let _ = event_tx
-                                            .send(NetworkEvent::Error {
-                                                message: format!("Kademlia bootstrap failed: {e:?}"),
-                                            })
-                                            .await;
-                                    }
-                                    kad::QueryResult::PutRecord(Ok(_)) => {
-                                        let _ = event_tx.send(NetworkEvent::Error {
-                                            message: "[DHT] put_record succeeded".to_string(),
-                                        }).await;
-                                    }
-                                    kad::QueryResult::PutRecord(Err(e)) => {
-                                        let _ = event_tx.send(NetworkEvent::Error {
-                                            message: format!("[DHT] put_record failed: {e:?}"),
-                                        }).await;
-                                    }
-                                    // DHT GetRecord results — prekey fetch removed, Olm sessions now via WS KeyRequest.
-                                    kad::QueryResult::GetRecord(..) => {}
-                                    _ => {}
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // -- AutoNAT events --
-                    SwarmEvent::Behaviour(HavenBehaviourEvent::Autonat(
-                        autonat::Event::StatusChanged { new, .. }
-                    )) => {
-                        match new {
-                            autonat::NatStatus::Public(addr) => {
-                                // We're publicly reachable — advertise our address.
-                                let addr_str = addr.to_string();
-                                if !known_addresses.contains(&addr_str) {
-                                    known_addresses.push(addr_str);
-                                }
-                                swarm.add_external_address(addr);
-                            }
-                            autonat::NatStatus::Private => {
-                                // Behind NAT — rely on relay + hole punching.
-                            }
-                            autonat::NatStatus::Unknown => {}
-                        }
-                    }
-                    SwarmEvent::Behaviour(HavenBehaviourEvent::Autonat(_)) => {}
-
-                    // -- DCUtR (hole punching) events --
-                    SwarmEvent::Behaviour(HavenBehaviourEvent::Dcutr(event)) => {
-                        match event.result {
-                            Ok(_connection_id) => {
-                                let _ = event_tx
-                                    .send(NetworkEvent::Listening {
-                                        address: format!("hole-punch-ok:{}", event.remote_peer_id),
-                                    })
-                                    .await;
-                            }
-                            Err(error) => {
-                                let _ = event_tx
-                                    .send(NetworkEvent::Error {
-                                        message: format!("Hole punch failed to {}: {error}", event.remote_peer_id),
-                                    })
-                                    .await;
-                            }
-                        }
-                    }
-
-                    // -- Relay client events --
-                    SwarmEvent::Behaviour(HavenBehaviourEvent::RelayClient(event)) => {
-                        match event {
-                            relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
-                                let _ = event_tx.send(NetworkEvent::RelayStatusChanged {
-                                    status: "circuit_ready".to_string(),
-                                }).await;
-                                if !renewal {
-                                    let _ = event_tx
-                                        .send(NetworkEvent::Listening {
-                                            address: format!("relay-reserved:{relay_peer_id}"),
-                                        })
-                                        .await;
-                                }
-                            }
-                            relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
-                                let _ = event_tx
-                                    .send(NetworkEvent::Listening {
-                                        address: format!("relay-circuit-out:{relay_peer_id}"),
-                                    })
-                                    .await;
-                            }
-                            relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
-                                let _ = event_tx
-                                    .send(NetworkEvent::Listening {
-                                        address: format!("relay-circuit-in:{src_peer_id}"),
-                                    })
-                                    .await;
-                                // Peer is genuinely connecting to us — clear from
-                                // disconnected set so they can be re-discovered.
-                                disconnected_peers.remove(&src_peer_id);
-                                // Cancel any pending debounced disconnect.
-                                pending_disconnects.remove(&src_peer_id);
-                                expected_peers.insert(src_peer_id);
-                                // Emit PeerDiscovered + SessionEstablished (dedup: only once per session).
-                                if discovered_peers.insert(src_peer_id) {
-                                    let src_peer_str = src_peer_id.to_string();
-                                    let circuit_base = if proxy_enabled { RELAY_ADDR_TCP } else { RELAY_ADDR_QUIC };
-                                    let _ = event_tx
-                                        .send(NetworkEvent::PeerDiscovered {
-                                            peer: DiscoveredPeer {
-                                                peer_id: src_peer_str.clone(),
-                                                addresses: vec![format!(
-                                                    "{}/p2p/{}/p2p-circuit/p2p/{}",
-                                                    circuit_base, RELAY_PEER_ID, src_peer_id
-                                                )],
-                                            },
-                                        })
-                                        .await;
-                                    if olm.has_session(&src_peer_str) {
-                                        let _ = event_tx
-                                            .send(NetworkEvent::SessionEstablished {
-                                                peer_id: src_peer_str,
-                                            })
-                                            .await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // -- Identify events --
-                    SwarmEvent::Behaviour(HavenBehaviourEvent::Identify(
-                        identify::Event::Received { peer_id, info, .. },
-                    )) => {
-                        // Add identified peer's addresses to Kademlia.
-                        for addr in info.listen_addrs {
-                            swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
-                        }
-                    }
-                    SwarmEvent::Behaviour(HavenBehaviourEvent::Identify(_)) => {}
-
-                    // -- Ping events --
-                    SwarmEvent::Behaviour(HavenBehaviourEvent::Ping(_)) => {}
-
-                    // -- Debug: connection lifecycle --
-                    SwarmEvent::ConnectionEstablished { peer_id, num_established, endpoint, .. } => {
-                        let _ = event_tx
-                            .send(NetworkEvent::Error {
-                                message: format!("[DEBUG] Connected to {peer_id} via {endpoint:?}"),
-                            })
-                            .await;
-
-                        // Track connected peers (skip relay node).
-                        if relay_peer_id() != Some(peer_id) {
-                            connected_peers.insert(peer_id);
-                            // Cancel any pending debounced disconnect for this peer.
-                            pending_disconnects.remove(&peer_id);
-                            // Peer genuinely reconnected — allow future bootstraps to re-add them.
-                            disconnected_peers.remove(&peer_id);
-
-                            // Send join requests for any pending server joins.
-                            {
-                                let pid_str = peer_id.to_string();
-                                for sid in pending_server_joins.iter() {
-                                    send_message_to_peer(
-                                        &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                        &peer_id, &pid_str, HavenMessage::ServerJoinRequest {
-                                            server_id: sid.clone(),
-                                        },
-                                    );
-                                }
-                            }
-
-                            // Treat a connection as "first" if num_established==1 (truly first)
-                            // OR the peer is not in discovered_peers (was gracefully disconnected
-                            // but the old transport lingers, so num_established > 1).
-                            let is_first_connection = num_established.get() == 1
-                                || !discovered_peers.contains(&peer_id);
-
-                            // Only emit PeerDiscovered for peers we expect (from
-                            // signaling bootstrap, mDNS, or relay inbound circuit).
-                            // This prevents Kademlia routing connections from
-                            // polluting the peer list.
-                            if is_first_connection && expected_peers.contains(&peer_id) {
-                                let peer_id_str = peer_id.to_string();
-                                // Dedup: only emit PeerDiscovered if not already emitted this session.
-                                if discovered_peers.insert(peer_id) {
-                                    let _ = event_tx
-                                        .send(NetworkEvent::PeerDiscovered {
-                                            peer: DiscoveredPeer {
-                                                peer_id: peer_id_str.clone(),
-                                                addresses: vec![format!("{endpoint:?}")],
-                                            },
-                                        })
-                                        .await;
-                                }
-                                if olm.has_session(&peer_id_str) {
-                                    // Re-emit SessionEstablished so the lock icon appears.
-                                    let _ = event_tx
-                                        .send(NetworkEvent::SessionEstablished {
-                                            peer_id: peer_id_str.clone(),
-                                        })
-                                        .await;
-                                    // Retry any failed sync batches on reconnect.
-                                    flush_pending_sync_requests(
-                                        &mut pending_sync_requests, &peer_id_str, &peer_id,
-                                        &mut swarm, &mut olm, &crypto_store,
-                                        &mut pending_requests, &mut outbound_message_text,
-                                        &bundle_keypair, &event_tx,
-                                        &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                    ).await;
-                                } else if !key_request_in_flight.contains(&peer_id_str) {
-                                    // No Olm session — send KeyRequest via WS.
-                                    hollow_log!("[HOLLOW-SWARM] Proactive key exchange for {peer_id_str}");
-                                    send_message_to_peer(
-                                        &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                        &peer_id, &peer_id_str, HavenMessage::KeyRequest,
-                                    );
-                                    key_request_in_flight.insert(peer_id_str);
-                                }
-                            }
-
-                            // -- Trigger CRDT sync + message sync for shared servers --
-                            // Only on FIRST connection to this peer (not duplicate TCP/QUIC/relay).
-                            // Skip if WS PeerJoined already triggered sync for this peer.
-                            if is_first_connection && synced_peers.insert(peer_id) {
-                                let reconnected_peer_str = peer_id.to_string();
-                                let mut is_server_member = false;
-                                for (sid, state) in server_states.iter() {
-                                    if state.members.contains_key(&reconnected_peer_str) {
-                                        is_server_member = true;
-                                        // CRDT state sync — MLS targeted first, plaintext fallback.
-                                        let our_vector = StateVector::from_server_state(state);
-                                        if let Ok(sv_json) = serde_json::to_string(&our_vector) {
-                                            let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(sid));
-                                            if mls_ok {
-                                                let envelope = MessageEnvelope::SyncReq {
-                                                    sid: sid.clone(), state_vector_json: sv_json, target: None,
-                                                };
-                                                if let Err(e) = send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, sid, &reconnected_peer_str, &envelope, &bundle_keypair) {
-                                                    hollow_log!("[HOLLOW-MLS] SyncReq targeted send failed: {e}");
-                                                }
-                                            } else {
-                                                send_message_to_peer(
-                                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                    &peer_id, &reconnected_peer_str, HavenMessage::SyncRequest {
-                                                        server_id: sid.clone(),
-                                                        state_vector_json: sv_json,
-                                                    },
-                                                );
-                                            }
-                                        }
-
-                                        // Channel message sync — register with fan-out coordinator.
-                                        // Instead of syncing every channel from this one peer,
-                                        // the coordinator collects peers for 500ms, then assigns
-                                        // channels evenly across all available peers.
-                                        {
-                                            let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                            if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                                                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                                    let channels_ts: Vec<(String, i64)> = state.channels.keys()
-                                                        .map(|cid| {
-                                                            let ts = store
-                                                                .get_latest_channel_timestamp(sid, cid)
-                                                                .unwrap_or(None)
-                                                                .unwrap_or(0);
-                                                            (cid.clone(), ts)
-                                                        })
-                                                        .collect();
-                                                    sync_coordinator.register_peer(sid, peer_id, channels_ts);
-                                                }
-                                            }
-                                        }
-
-                                        // MLS: if we're the owner and this peer isn't in the MLS group yet,
-                                        // request their KeyPackage so we can add them.
-                                        if let Some(ref mls_mgr) = mls {
-                                            if mls_mgr.has_group(sid) {
-                                                let mls_members = mls_mgr.group_members(sid);
-                                                if !mls_members.contains(&reconnected_peer_str) {
-                                                    let local_peer = swarm.local_peer_id().to_string();
-                                                    let is_owner = state.roles.get(&local_peer)
-                                                        .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
-                                                        .unwrap_or(false);
-                                                    if is_owner {
-                                                        hollow_log!("[HOLLOW-MLS] Requesting KeyPackage from {reconnected_peer_str} for server {sid}");
-                                                        send_message_to_peer(
-                                                            &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                            &peer_id, &reconnected_peer_str, HavenMessage::MlsKeyPackageRequest {
-                                                                server_id: sid.clone(),
-                                                            },
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // DM sync — request missed DMs from this peer.
-                                {
-                                    let dm_peer_str = peer_id.to_string();
-                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                            let since = store
-                                                .get_latest_dm_timestamp(&dm_peer_str)
-                                                .unwrap_or(None)
-                                                .unwrap_or(0);
-                                            send_message_to_peer(
-                                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                &peer_id, &dm_peer_str, HavenMessage::DmSyncRequest {
-                                                    since_timestamp: since,
-                                                },
-                                            );
-                                        }
-                                    }
-                                }
-
-                                // Send our profile to the newly connected peer.
-                                {
-                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                        if let Ok(db) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                            if let Ok(Some(profile)) = db.load_profile(&local_peer_str) {
-                                                if !profile.display_name.is_empty() {
-                                                    use base64::Engine;
-                                                    let avatar_b64 = profile.avatar_bytes.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)).unwrap_or_default();
-                                                    let banner_b64 = profile.banner_bytes.as_ref().map(|b| base64::engine::general_purpose::STANDARD.encode(b)).unwrap_or_default();
-                                                    send_message_to_peer(
-                                                        &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                        &peer_id, &reconnected_peer_str, HavenMessage::ProfileUpdate {
-                                                            display_name: profile.display_name,
-                                                            status: profile.status,
-                                                            about_me: profile.about_me,
-                                                            updated_at: profile.updated_at,
-                                                            avatar_b64,
-                                                            banner_b64,
-                                                        },
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Ensure peers show as online in UI even if they
-                                // weren't in expected_peers (e.g., direct connection
-                                // before signaling bootstrap, or DM-only peers).
-                                if !expected_peers.contains(&peer_id) && (is_server_member || olm.has_session(&reconnected_peer_str)) {
-                                    if discovered_peers.insert(peer_id) {
-                                        let _ = event_tx
-                                            .send(NetworkEvent::PeerDiscovered {
-                                                peer: DiscoveredPeer {
-                                                    peer_id: reconnected_peer_str.clone(),
-                                                    addresses: vec![format!("{endpoint:?}")],
-                                                },
-                                            })
-                                            .await;
-                                    }
-                                    if olm.has_session(&reconnected_peer_str) {
-                                        let _ = event_tx
-                                            .send(NetworkEvent::SessionEstablished {
-                                                peer_id: reconnected_peer_str,
-                                            })
-                                            .await;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Once connected to the relay, request a circuit reservation.
-                        // Use the transport that actually connected (check endpoint).
-                        // When proxy is enabled, always use real TCP addr (tunnel is transparent).
-                        if relay_peer_id() == Some(peer_id) {
-                            let base = if proxy_enabled {
-                                RELAY_ADDR_TCP
-                            } else {
-                                let ep_str = format!("{endpoint:?}");
-                                if ep_str.contains("quic") {
-                                    RELAY_ADDR_QUIC
-                                } else if ep_str.contains("ws") || ep_str.contains("443") {
-                                    RELAY_ADDR_WSS
-                                } else {
-                                    RELAY_ADDR_TCP
-                                }
-                            };
-                            let relay_circuit: Multiaddr = format!(
-                                "{base}/p2p/{RELAY_PEER_ID}/p2p-circuit"
-                            )
-                            .parse()
-                            .unwrap();
-                            let _ = event_tx
-                                .send(NetworkEvent::Error {
-                                    message: format!("[DEBUG] Connected to relay! Requesting circuit via: {relay_circuit}"),
-                                })
-                                .await;
-                            let _ = event_tx.send(NetworkEvent::RelayStatusChanged {
-                                status: "connected".to_string(),
-                            }).await;
-                            let _ = event_tx.send(NetworkEvent::RelayStatusChanged {
-                                status: "circuit_requested".to_string(),
-                            }).await;
-                            if let Err(e) = swarm.listen_on(relay_circuit) {
-                                let _ = event_tx
-                                    .send(NetworkEvent::Error {
-                                        message: format!("Failed to listen on relay circuit: {e}"),
-                                    })
-                                    .await;
-                            }
-                        } else {
-                            // Connected to a non-relay peer. If we have pending messages
-                            // for them (re-queued after a failed send), initiate key
-                            // exchange or send them now.
-                            let peer_str = peer_id.to_string();
-                            if pending_messages.contains_key(&peer_str) {
-                                hollow_log!("[HOLLOW-SWARM] Connection established to {peer_str}, flushing pending messages");
-                                if olm.has_session(&peer_str) {
-                                    // Session exists — flush immediately.
-                                    if let Some(queued) = pending_messages.remove(&peer_str) {
-                                        for text in queued {
-                                            send_encrypted_message(
-                                                &mut swarm, &mut olm, &crypto_store,
-                                                &mut pending_requests, &mut outbound_message_text,
-                                                &peer_id, &peer_str, &text, &event_tx,
-                                                                                        &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                            ).await;
-                                        }
-                                    }
-                                } else if !key_request_in_flight.contains(&peer_str) {
-                                    // No session — send KeyRequest via WS.
-                                    hollow_log!("[HOLLOW-SWARM] Sending KeyRequest to {peer_str}");
-                                    send_message_to_peer(
-                                        &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                        &peer_id, &peer_str, HavenMessage::KeyRequest,
-                                    );
-                                    key_request_in_flight.insert(peer_str.clone());
-                                }
-                            }
-                        }
-                    }
-                    SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
-                        let _ = event_tx
-                            .send(NetworkEvent::Error {
-                                message: format!("[DEBUG] Dial failed to {peer_id:?}: {error}"),
-                            })
-                            .await;
-                        if let Some(pid) = peer_id {
-                            let err_str = format!("{error}");
-                            let method = if err_str.contains("p2p-circuit") { "relay" }
-                                else if err_str.contains("quic") { "quic" }
-                                else if err_str.contains("ws") || err_str.contains("443") { "wss" }
-                                else if err_str.contains("tcp") { "tcp" }
-                                else { "unknown" };
-                            let reason: String = err_str.chars().take(200).collect();
-                            let _ = event_tx.send(NetworkEvent::ConnectionAttemptFailed {
-                                peer_id: pid.to_string(),
-                                method: method.to_string(),
-                                reason,
-                            }).await;
-                        }
-                    }
-                    SwarmEvent::ListenerError { listener_id, error } => {
-                        let _ = event_tx
-                            .send(NetworkEvent::Error {
-                                message: format!("[DEBUG] Listener error ({listener_id:?}): {error}"),
-                            })
-                            .await;
-                    }
-                    SwarmEvent::ListenerClosed { listener_id, reason, .. } => {
-                        let _ = event_tx
-                            .send(NetworkEvent::Error {
-                                message: format!("[DEBUG] Listener closed ({listener_id:?}): {reason:?}"),
-                            })
-                            .await;
-                    }
-
-                    SwarmEvent::ConnectionClosed { peer_id, num_established, cause, .. } => {
-                        let _ = event_tx
-                            .send(NetworkEvent::Error {
-                                message: format!(
-                                    "[DEBUG] Connection to {peer_id} closed (remaining: {num_established}, cause: {cause:?})"
-                                ),
-                            })
-                            .await;
-
-                        // When ALL connections to this peer are gone, queue a
-                        // debounced disconnect instead of emitting immediately.
-                        // This prevents rapid add/remove/add UI churn when libp2p
-                        // is upgrading transports (multiple connections established
-                        // then pruned down to one within the same second).
-                        if num_established == 0 && relay_peer_id() != Some(peer_id) {
-                            connected_peers.remove(&peer_id);
-                            // Only queue debounced disconnect if not already handled
-                            // by a graceful PeerDisconnecting message.
-                            if !disconnected_peers.contains_key(&peer_id) {
-                                pending_disconnects.insert(peer_id, std::time::Instant::now());
-                            }
-                        }
-
-                        // Relay connection lost — immediately re-dial to restore circuit.
-                        if num_established == 0 && relay_peer_id() == Some(peer_id) {
-                            let _ = event_tx.send(NetworkEvent::Error {
-                                message: "[RELAY] Relay connection lost! Re-dialing in 5s...".to_string(),
-                            }).await;
-                            let _ = event_tx.send(NetworkEvent::RelayStatusChanged {
-                                status: "reconnecting".to_string(),
-                            }).await;
-                            // Remove stale relay circuit addresses.
-                            known_addresses.retain(|a| !a.contains("p2p-circuit"));
-                            // Brief delay before re-dial to avoid tight reconnect loops.
-                            let relay_pid = peer_id;
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                            let addrs = proxy_aware_relay_addrs(proxy_enabled);
-                            for addr in &addrs {
-                                swarm.add_peer_address(relay_pid, addr.clone());
-                                swarm.behaviour_mut().kademlia.add_address(&relay_pid, addr.clone());
-                            }
-                            // When proxy is on, dial the specific tunnel address to avoid
-                            // libp2p trying cached direct QUIC/WSS/TCP addresses.
-                            let dial_result = if proxy_enabled {
-                                if let Some(addr) = addrs.into_iter().next() {
-                                    swarm.dial(addr)
-                                } else {
-                                    Err(libp2p::swarm::DialError::NoAddresses.into())
-                                }
-                            } else {
-                                swarm.dial(relay_pid)
-                            };
-                            if let Err(e) = dial_result {
-                                let _ = event_tx.send(NetworkEvent::Error {
-                                    message: format!("[RELAY] Re-dial failed: {e}"),
-                                }).await;
-                            }
-                        }
-                    }
-
-                    _ => {}
-                }
-            }
             // Handle signaling service events (bootstrap peer discovery).
             Some(sig_event) = sig_event_rx.recv() => {
                 match sig_event {
@@ -5924,90 +4443,24 @@ async fn run_swarm(
                             .await;
                         for bp in peers {
                             // Skip ourselves.
-                            let Ok(peer_id) = bp.peer_id.parse::<PeerId>() else {
-                                continue;
-                            };
-                            if peer_id == *swarm.local_peer_id() {
+                            if bp.peer_id == local_peer_str {
                                 continue;
                             }
-                            // Skip peers we already tried and disconnected from.
-                            // Prevents ghost peers from stale signaling entries.
-                            if disconnected_peers.contains_key(&peer_id) {
+                            // Skip peers already visible via WS relay.
+                            let already_ws = ws_room_peers.values().any(|ps| ps.contains(&bp.peer_id));
+                            if already_ws {
                                 continue;
                             }
-                            // Skip peers we're already connected to (libp2p or WS).
-                            let bp_str = peer_id.to_string();
-                            let already_ws = ws_room_peers.values().any(|ps| ps.contains(&bp_str));
-                            if connected_peers.contains(&peer_id) || already_ws {
-                                continue;
-                            }
-
-                            // Register addresses from signaling + add relay circuits.
-                            // Strategy: dial relay circuit FIRST for instant connectivity,
-                            // then add direct addresses so libp2p can upgrade later.
-                            // This avoids 10s+ timeouts on stale direct addresses.
-
-                            let mut relay_circuit_addrs = Vec::new();
-
-                            // Build relay circuit addresses (fast, reliable path).
-                            if let Some(relay_pid) = relay_peer_id() {
-                                let bases: Vec<&str> = if proxy_enabled {
-                                    vec![RELAY_ADDR_TCP]
-                                } else {
-                                    vec![RELAY_ADDR_TCP, RELAY_ADDR_WSS]
-                                };
-                                for base in bases {
-                                    if let Ok(circuit_addr) = format!(
-                                        "{}/p2p/{}/p2p-circuit/p2p/{}",
-                                        base, relay_pid, peer_id
-                                    ).parse::<Multiaddr>() {
-                                        relay_circuit_addrs.push(circuit_addr);
-                                    }
-                                }
-                            }
-
-                            // Add relay circuit addresses and dial them first.
-                            // This gives us a connection within ~1s via relay.
-                            for addr in &relay_circuit_addrs {
-                                swarm.add_peer_address(peer_id, addr.clone());
-                            }
-
-                            // Mark as expected so ConnectionEstablished can emit PeerDiscovered.
-                            expected_peers.insert(peer_id);
-
-                            // Notify Dart of the discovered peer (dedup: only emit once per session).
-                            if discovered_peers.insert(peer_id) {
-                                let _ = event_tx
-                                    .send(NetworkEvent::PeerDiscovered {
-                                        peer: DiscoveredPeer {
-                                            peer_id: bp.peer_id.clone(),
-                                            addresses: bp.addresses.clone(),
-                                        },
-                                    })
-                                    .await;
-                            }
-
-                            // Dial relay circuit first for fast connection.
-                            let _ = event_tx.send(NetworkEvent::ConnectionAttemptStarted {
-                                peer_id: bp.peer_id.clone(),
-                                method: "relay".to_string(),
-                            }).await;
-                            let _ = swarm.dial(peer_id);
-
-                            // NOW add direct addresses from signaling (for potential
-                            // direct upgrade via DCUtR/hole-punching later).
-                            for addr_str in &bp.addresses {
-                                if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                                    swarm.add_peer_address(peer_id, addr.clone());
-                                    if !addr_str.contains("p2p-circuit") {
-                                        swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
-                                    }
-                                }
-                            }
+                            // Emit PeerDiscovered for the UI.
+                            let _ = event_tx
+                                .send(NetworkEvent::PeerDiscovered {
+                                    peer: DiscoveredPeer {
+                                        peer_id: bp.peer_id.clone(),
+                                        addresses: vec!["ws-relay".to_string()],
+                                    },
+                                })
+                                .await;
                         }
-
-                        // Trigger Kademlia bootstrap to populate routing table.
-                        let _ = swarm.behaviour_mut().kademlia.bootstrap();
                     }
                     SignalingEvent::Error { message } => {
                         let _ = event_tx
@@ -6037,7 +4490,7 @@ async fn run_swarm(
                                 let passphrase = hex::encode(&proto[..32.min(proto.len())]);
                                 if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
                                     if let Ok(friends) = store.load_friends(None) {
-                                        let local_peer = swarm.local_peer_id().to_string();
+                                        let local_peer = local_peer_str.to_string();
                                         for (friend_pid, _, _, _, _) in &friends {
                                             let room = dm_room_code(&local_peer, friend_pid);
                                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
@@ -6064,13 +4517,11 @@ async fn run_swarm(
                     WsEvent::PeerJoined { room, peer_id } => {
                         hollow_log!("[HOLLOW-WS] Peer {peer_id} joined room {room}");
                         ws_room_peers.entry(room.clone()).or_default().insert(peer_id.clone());
-                        if let Ok(pid) = peer_id.parse::<PeerId>() {
-                            if pid != *swarm.local_peer_id() {
-                                expected_peers.insert(pid);
+                            if peer_id != local_peer_str {
 
                                 // Only trigger sync if not already synced this session
                                 // (prevents duplicate sync when both WS and libp2p fire).
-                                let is_new = synced_peers.insert(pid);
+                                let is_new = synced_peers.insert(peer_id.clone());
 
                                 let _ = event_tx.send(NetworkEvent::PeerDiscovered {
                                     peer: DiscoveredPeer {
@@ -6086,18 +4537,17 @@ async fn run_swarm(
                                             peer_id: peer_id.clone(),
                                         }).await;
                                         flush_pending_sync_requests(
-                                            &mut pending_sync_requests, &peer_id, &pid,
-                                            &mut swarm, &mut olm, &crypto_store,
-                                            &mut pending_requests, &mut outbound_message_text,
+                                            &mut pending_sync_requests, &peer_id,
+                                            &mut olm, &crypto_store,
                                             &bundle_keypair, &event_tx,
-                                            &ws_cmd_tx, &ws_room_peers, &connected_peers,
+                                            &ws_cmd_tx, &ws_room_peers,
                                         ).await;
                                     } else if !key_request_in_flight.contains(&peer_id) {
                                         // No Olm session — send KeyRequest via WS.
                                         hollow_log!("[HOLLOW-WS] Proactive key exchange for {peer_id}");
                                         send_message_to_peer(
-                                            &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                            &pid, &peer_id, HavenMessage::KeyRequest,
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            &peer_id, HavenMessage::KeyRequest,
                                         );
                                         key_request_in_flight.insert(peer_id.clone());
                                     }
@@ -6118,8 +4568,8 @@ async fn run_swarm(
                                                     }
                                                 } else {
                                                     send_message_to_peer(
-                                                        &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                        &pid, &peer_id, HavenMessage::SyncRequest {
+                                                        &ws_cmd_tx, &ws_room_peers,
+                                                        &peer_id, HavenMessage::SyncRequest {
                                                             server_id: sid.clone(),
                                                             state_vector_json: sv_json,
                                                         },
@@ -6143,7 +4593,7 @@ async fn run_swarm(
                                                                 (cid.clone(), ts)
                                                             })
                                                             .collect();
-                                                        sync_coordinator.register_peer(sid, pid, channels_ts);
+                                                        sync_coordinator.register_peer(sid, &peer_id, channels_ts);
                                                     }
                                                 }
                                             }
@@ -6153,14 +4603,14 @@ async fn run_swarm(
                                                 if mls_mgr.has_group(sid) {
                                                     let mls_members = mls_mgr.group_members(sid);
                                                     if !mls_members.contains(&peer_id) {
-                                                        let local_peer = swarm.local_peer_id().to_string();
+                                                        let local_peer = local_peer_str.to_string();
                                                         let is_owner = state.roles.get(&local_peer)
                                                             .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
                                                             .unwrap_or(false);
                                                         if is_owner {
                                                             send_message_to_peer(
-                                                                &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                                &pid, &peer_id, HavenMessage::MlsKeyPackageRequest {
+                                                                &ws_cmd_tx, &ws_room_peers,
+                                                                &peer_id, HavenMessage::MlsKeyPackageRequest {
                                                                     server_id: sid.clone(),
                                                                 },
                                                             );
@@ -6183,8 +4633,8 @@ async fn run_swarm(
                                                     .unwrap_or(None)
                                                     .unwrap_or(0);
                                                 send_message_to_peer(
-                                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                    &pid, &peer_id, HavenMessage::DmSyncRequest {
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    &peer_id, HavenMessage::DmSyncRequest {
                                                         since_timestamp: since,
                                                     },
                                                 );
@@ -6193,7 +4643,6 @@ async fn run_swarm(
                                     }
                                 }
                             }
-                        }
                     }
                     WsEvent::PeerLeft { room, peer_id } => {
                         hollow_log!("[HOLLOW-WS] Peer {peer_id} left room {room}");
@@ -6203,22 +4652,18 @@ async fn run_swarm(
                                 ws_room_peers.remove(&room);
                             }
                         }
-                        if let Ok(pid) = peer_id.parse::<PeerId>() {
-                            // Only emit disconnect if peer is no longer reachable via
-                            // either WS rooms or libp2p.
-                            let still_ws = ws_room_peers.values().any(|ps| ps.contains(&peer_id));
-                            if !still_ws && !connected_peers.contains(&pid) {
-                                discovered_peers.remove(&pid);
-                                synced_peers.remove(&pid);
-                                let _ = event_tx.send(NetworkEvent::PeerDisconnected {
-                                    peer_id: peer_id.clone(),
-                                }).await;
-                            }
+                        // Only emit disconnect if peer is no longer reachable via any WS room.
+                        let still_ws = ws_room_peers.values().any(|ps| ps.contains(&peer_id));
+                        if !still_ws {
+                            synced_peers.remove(&peer_id);
+                            let _ = event_tx.send(NetworkEvent::PeerDisconnected {
+                                peer_id: peer_id.clone(),
+                            }).await;
                         }
                     }
                     WsEvent::RoomMembers { room, peers } => {
                         hollow_log!("[HOLLOW-WS] Room {room}: {} members", peers.len());
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let room_set: std::collections::HashSet<String> = peers.iter()
                             .filter(|p| *p != &local_peer)
                             .cloned()
@@ -6226,15 +4671,12 @@ async fn run_swarm(
                         ws_room_peers.insert(room, room_set);
                         for pid_str in &peers {
                             if pid_str != &local_peer {
-                                if let Ok(pid) = pid_str.parse::<PeerId>() {
-                                    expected_peers.insert(pid);
                                     let _ = event_tx.send(NetworkEvent::PeerDiscovered {
                                         peer: DiscoveredPeer {
                                             peer_id: pid_str.clone(),
                                             addresses: vec!["ws-relay".to_string()],
                                         },
                                     }).await;
-                                }
                             }
                         }
                     }
@@ -6257,11 +4699,10 @@ async fn run_swarm(
                         // Route incoming WS messages through the same handler as libp2p.
                         if let Ok(text) = String::from_utf8(data) {
                             if let Ok(msg) = serde_json::from_str::<HavenMessage>(&text) {
-                                if let Ok(peer) = from.parse::<PeerId>() {
                                     // Rate limiting (same as libp2p path).
                                     let rate_ok = {
                                         let (tokens, last_refill) = peer_rate_tokens
-                                            .entry(peer)
+                                            .entry(from.clone())
                                             .or_insert((RATE_LIMIT_BURST, std::time::Instant::now()));
                                         let elapsed = last_refill.elapsed().as_secs_f64();
                                         let refill = (elapsed * RATE_LIMIT_REFILL as f64) as u32;
@@ -6277,29 +4718,25 @@ async fn run_swarm(
                                         }
                                     };
                                     if !rate_ok {
-                                        hollow_log!("[HOLLOW-SECURITY] Rate limited WS peer {peer} — dropping message");
+                                        hollow_log!("[HOLLOW-SECURITY] Rate limited WS peer {from} — dropping message");
                                         continue;
                                     }
 
                                     handle_incoming_request(
-                                        &mut swarm, &mut olm, &crypto_store, &event_tx,
-                                        &mut pending_requests, &mut outbound_message_text,
+                                        &mut olm, &crypto_store, &event_tx,
                                         &mut pending_messages, &mut key_request_in_flight,
                                         &mut server_states, &bundle_keypair,
-                                        &mut connected_peers, &mut pending_server_joins,
+                                        &mut pending_server_joins,
                                         &mut pending_sync_requests, &mut mls,
-                                        &mut discovered_peers, &mut disconnected_peers,
-                                        &mut pending_disconnects, &mut mls_bootstrap_requested,
-                                        &sig_cmd_tx, &known_addresses,
+                                        &mut mls_bootstrap_requested,
+                                        &sig_cmd_tx,
                                         &mut pending_shard_assembly, &mut pending_file_streams,
                                         &mut pending_shard_streams, &mut decrypt_fail_cooldown,
                                         &mut pending_mls_key_packages, &mut mls_decrypt_failures,
                                         &ws_cmd_tx, &ws_room_peers,
                                         &mut channel_sync_sent,
-                                        peer, msg,
-                                        None, // No response channel for WS messages
+                                        &local_peer_str, &from, msg,
                                     ).await;
-                                }
                             } else {
                                 hollow_log!("[HOLLOW-WS] Failed to parse HavenMessage from {from} in {room}");
                             }
@@ -6339,36 +4776,32 @@ async fn run_swarm(
 
                                     // Send Welcome to all new joiners.
                                     for peer_id_str in &added_peers {
-                                        if let Ok(pid) = peer_id_str.parse::<PeerId>() {
-                                            if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, peer_id_str) {
+                                            if peer_is_reachable(&ws_room_peers, peer_id_str) {
                                                 send_message_to_peer(
-                                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                    &pid, peer_id_str, HavenMessage::MlsWelcome {
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    peer_id_str, HavenMessage::MlsWelcome {
                                                         server_id: server_id.clone(),
                                                         welcome: welcome_b64.clone(),
                                                     },
                                                 );
                                             }
-                                        }
                                     }
 
                                     // Broadcast single Commit to all existing members.
                                     if let Some(state) = server_states.get(&server_id) {
-                                        let local_peer = swarm.local_peer_id().to_string();
+                                        let local_peer = local_peer_str.to_string();
                                         for member_peer_str in state.members.keys() {
                                             if member_peer_str == &local_peer { continue; }
                                             if added_peers.contains(member_peer_str) { continue; }
-                                            if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                                if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                                if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                     send_message_to_peer(
-                                                        &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                                        &pid, member_peer_str, HavenMessage::MlsCommit {
+                                                        &ws_cmd_tx, &ws_room_peers,
+                                                        member_peer_str, HavenMessage::MlsCommit {
                                                             server_id: server_id.clone(),
                                                             commit: commit_b64.clone(),
                                                         },
                                                     );
                                                 }
-                                            }
                                         }
                                     }
 
@@ -6381,47 +4814,15 @@ async fn run_swarm(
                 }
             }
 
-            // Periodic re-bootstrap for mutual peer discovery.
+            // Periodic re-bootstrap for signaling re-registration.
             _ = rebootstrap_timer.tick() => {
-                // Clear disconnected peers that have cooled down past the stale threshold.
-                // This prevents ghost re-discovery from signaling entries that haven't
-                // been cleaned up yet. Only peers disconnected > 3 min ago are cleared.
-                if !disconnected_peers.is_empty() {
-                    let now = std::time::Instant::now();
-                    let before = disconnected_peers.len();
-                    disconnected_peers.retain(|_, disconnected_at| {
-                        now.duration_since(*disconnected_at) < DISCONNECT_COOLDOWN
-                    });
-                    let cleared = before - disconnected_peers.len();
-                    if cleared > 0 {
-                        hollow_log!("[HOLLOW-SWARM] Cleared {cleared} cooled-down disconnected peers ({} still cooling)", disconnected_peers.len());
-                    }
-                }
-                // Re-register with signaling to prevent stale cleanup (3-min threshold).
-                let reg_addrs: Vec<String> = known_addresses.iter()
-                    .filter(|a| is_registerable_address(a))
-                    .cloned()
-                    .collect();
-
+                // Re-bootstrap signaling rooms to discover new peers.
                 if let Some(room) = &active_room {
-                    if !reg_addrs.is_empty() {
-                        let _ = sig_cmd_tx.send(SignalingCmd::Register {
-                            room_code: room.clone(),
-                            addresses: reg_addrs.clone(),
-                        }).await;
-                    }
                     let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
                         room_code: room.clone(),
                     }).await;
                 }
-                // Also re-register + re-bootstrap all server signaling rooms.
                 for sid in server_states.keys() {
-                    if !reg_addrs.is_empty() {
-                        let _ = sig_cmd_tx.send(SignalingCmd::Register {
-                            room_code: sid.clone(),
-                            addresses: reg_addrs.clone(),
-                        }).await;
-                    }
                     let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
                         room_code: sid.clone(),
                     }).await;
@@ -6476,8 +4877,8 @@ async fn run_swarm(
                                 }
                             } else {
                                 send_message_to_peer(
-                                    &mut swarm, &ws_cmd_tx, &ws_room_peers, &connected_peers,
-                                    peer, &peer_str, HavenMessage::ChannelSyncProbe {
+                                    &ws_cmd_tx, &ws_room_peers,
+                                    &peer_str, HavenMessage::ChannelSyncProbe {
                                         server_id: server_id.clone(),
                                         channel_id: channel_id.clone(),
                                         our_latest: *our_latest,
@@ -6500,85 +4901,11 @@ async fn run_swarm(
             }
 
             // Flush pending disconnects that have passed the debounce window.
-            _ = disconnect_debounce_timer.tick() => {
-                if !pending_disconnects.is_empty() {
-                    let now = std::time::Instant::now();
-                    let mut to_emit = Vec::new();
-                    pending_disconnects.retain(|peer_id, queued_at| {
-                        if now.duration_since(*queued_at) >= DISCONNECT_DEBOUNCE {
-                            to_emit.push(*peer_id);
-                            false
-                        } else {
-                            true
-                        }
-                    });
-                    for peer_id in to_emit {
-                        // Only emit if the peer is still not connected AND wasn't
-                        // already handled by a graceful PeerDisconnecting (which adds
-                        // to disconnected_peers immediately).
-                        let pid_str = peer_id.to_string();
-                        let still_ws = ws_room_peers.values().any(|ps| ps.contains(&pid_str));
-                        if !connected_peers.contains(&peer_id) && !disconnected_peers.contains_key(&peer_id) && !still_ws {
-                            disconnected_peers.insert(peer_id, now);
-                            discovered_peers.remove(&peer_id);
-                            synced_peers.remove(&peer_id);
-                            let _ = event_tx
-                                .send(NetworkEvent::PeerDisconnected {
-                                    peer_id: pid_str,
-                                })
-                                .await;
-                        }
-                    }
-                }
-            }
-
-            // Relay health check — re-dial relay if connection dropped.
-            _ = relay_health_timer.tick() => {
-                if let Some(relay_pid) = relay_peer_id() {
-                    if !swarm.is_connected(&relay_pid) {
-                        let _ = event_tx.send(NetworkEvent::Error {
-                            message: "[RELAY] Not connected to relay, re-dialing...".to_string(),
-                        }).await;
-                        // Remove stale relay circuit addresses.
-                        known_addresses.retain(|a| !a.contains("p2p-circuit"));
-                        // Re-add relay addresses and dial.
-                        let addrs = proxy_aware_relay_addrs(proxy_enabled);
-                        for addr in &addrs {
-                            swarm.add_peer_address(relay_pid, addr.clone());
-                            swarm.behaviour_mut().kademlia.add_address(&relay_pid, addr.clone());
-                        }
-                        // When proxy is on, dial specific tunnel address.
-                        if proxy_enabled {
-                            if let Some(addr) = addrs.into_iter().next() {
-                                let _ = swarm.dial(addr);
-                            }
-                        } else {
-                            let _ = swarm.dial(relay_pid);
-                        }
-                    } else {
-                        // Connected to relay but check if we have a circuit address.
-                        let has_circuit = known_addresses.iter().any(|a| a.contains("p2p-circuit"));
-                        if !has_circuit {
-                            let _ = event_tx.send(NetworkEvent::Error {
-                                message: "[RELAY] Connected but no circuit address, re-requesting...".to_string(),
-                            }).await;
-                            // Re-request circuit reservation.
-                            let circuit_base = if proxy_enabled { RELAY_ADDR_TCP } else { RELAY_ADDR_QUIC };
-                            let relay_circuit: Multiaddr = format!(
-                                "{}/p2p/{}/p2p-circuit",
-                                circuit_base, RELAY_PEER_ID
-                            ).parse().unwrap();
-                            let _ = swarm.listen_on(relay_circuit);
-                        }
-                    }
-                }
-            }
-
             // -- Stream transfer progress poll (every 500ms) --
             _ = stream_progress_timer.tick() => {
                 // Snapshot progress under lock, then emit events outside lock.
                 let snapshot: Vec<(String, u64, u64)> = {
-                    let Ok(map) = super::stream_transfer::stream_progress().lock() else { continue };
+                    let Ok(map) = super::ws_stream_transfer::stream_progress().lock() else { continue };
                     map.iter().map(|(id, p)| {
                         (id.clone(), p.bytes_received.load(std::sync::atomic::Ordering::Relaxed), p.total_bytes)
                     }).collect()
@@ -6597,7 +4924,7 @@ async fn run_swarm(
             // -- Vault rebalance + retention enforcement (every 30 min) --
             _ = rebalance_timer.tick() => {
                 hollow_log!("[HOLLOW-VAULT] Running rebalance + retention check");
-                let local_peer = swarm.local_peer_id().to_string();
+                let local_peer = local_peer_str.to_string();
                 let data_dir = crate::identity::data_dir().unwrap_or_default();
                 let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                 let vault_dir = data_dir.join("vault");
@@ -6613,11 +4940,9 @@ async fn run_swarm(
 
                     for (server_id, state) in &server_states {
                         for member_peer_str in state.members.keys() {
-                            if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                                if peer_is_reachable(&ws_room_peers, &connected_peers, &pid, member_peer_str) {
+                                if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                     let _ = cs.update_member_last_seen(server_id, member_peer_str, now_ts);
                                 }
-                            }
                         }
 
                         // 2. Retention enforcement: delete expired manifests
@@ -6650,28 +4975,21 @@ async fn run_swarm(
         }
     }
 
-    // Abort tunnel tasks on shutdown.
-    if let Some(handles) = tunnel_handles {
-        for h in handles {
-            h.abort();
-        }
-        hollow_log!("[HOLLOW] [PROXY] Shadowsocks tunnels stopped");
-    }
 }
 
 /// Handle a completed stream transfer (file or shard).
 /// Shared between libp2p FileStreaming and WS BinaryDirect receive paths.
 async fn handle_completed_stream(
-    request: super::stream_transfer::StreamRequest,
+    request: super::ws_stream_transfer::StreamRequest,
     sender_peer: &str,
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
     pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
-    bundle_keypair: &identity::Keypair,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
     use crate::node::file_transfer;
-    use super::stream_transfer::StreamKind;
+    use super::ws_stream_transfer::StreamKind;
 
     match request.kind {
         StreamKind::File => {
@@ -6804,7 +5122,7 @@ async fn handle_completed_stream(
 }
 
 /// Persist MLS state (signer + credential + storage) to SQLCipher.
-fn persist_mls_state(mls: &MlsManager, keypair: &identity::Keypair) {
+fn persist_mls_state(mls: &MlsManager, keypair: &crate::identity::native_identity::NativeKeypair) {
     let signer = match mls.signer_bytes() {
         Ok(s) => s,
         Err(e) => { hollow_log!("[HOLLOW-MLS] Failed to serialize signer: {e}"); return; }
@@ -6826,15 +5144,12 @@ fn persist_mls_state(mls: &MlsManager, keypair: &identity::Keypair) {
     }
 }
 
-/// Check if a peer is reachable via either WS relay or libp2p.
+/// Check if a peer is reachable via WS relay.
 fn peer_is_reachable(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    connected_peers: &std::collections::HashSet<PeerId>,
-    peer: &PeerId,
     peer_str: &str,
 ) -> bool {
     ws_room_peers.values().any(|peers| peers.contains(peer_str))
-        || connected_peers.contains(peer)
 }
 
 /// Find a WS room containing the given peer.
@@ -6858,7 +5173,7 @@ fn send_mls_broadcast(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     server_id: &str,
     envelope: &MessageEnvelope,
-    keypair: &identity::Keypair,
+    keypair: &crate::identity::native_identity::NativeKeypair,
 ) -> Result<(), String> {
     let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
     let ciphertext = mls.encrypt(server_id, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
@@ -6884,7 +5199,7 @@ fn send_mls_to_peer(
     server_id: &str,
     target_peer: &str,
     envelope: &MessageEnvelope,
-    keypair: &identity::Keypair,
+    keypair: &crate::identity::native_identity::NativeKeypair,
 ) -> Result<(), String> {
     // Clone envelope and inject target — callers construct without target, we add it here.
     let mut json_value = serde_json::to_value(envelope).map_err(|e| format!("serialize: {e}"))?;
@@ -6907,65 +5222,32 @@ fn send_mls_to_peer(
     Ok(())
 }
 
-/// Stream file or shard data to a peer, preferring WS binary frames over libp2p.
+/// Stream file or shard data to a peer via WS binary frames.
 async fn stream_to_peer(
-    swarm: &mut libp2p::Swarm<HavenBehaviour>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    connected_peers: &std::collections::HashSet<PeerId>,
-    peer: &PeerId,
     peer_str: &str,
-    kind: &super::stream_transfer::StreamKind,
+    kind: &super::ws_stream_transfer::StreamKind,
     id: &str,
     source_path: &std::path::Path,
     total_size: u64,
 ) {
-    // Try WS first.
     if let Some(room) = ws_room_for_peer(ws_room_peers, peer_str) {
         super::ws_stream_transfer::ws_stream_send(
             ws_cmd_tx, &room, peer_str, kind, id, source_path, total_size,
         ).await;
-    } else if connected_peers.contains(peer) {
-        // Fall back to libp2p stream protocol.
-        let stream_req = match kind {
-            super::stream_transfer::StreamKind::File => {
-                super::stream_transfer::file_stream_request(id, source_path.to_path_buf(), total_size)
-            }
-            super::stream_transfer::StreamKind::Shard { shard_index } => {
-                // For shard fallback, read shard data from the temp file.
-                let shard_data = match std::fs::read(source_path) {
-                    Ok(d) => d,
-                    Err(_) => {
-                        hollow_log!("[HOLLOW-STREAM] Failed to read shard data for libp2p fallback: {id}");
-                        return;
-                    }
-                };
-                match super::stream_transfer::shard_stream_request(id, *shard_index, &shard_data) {
-                    Ok(req) => req,
-                    Err(e) => {
-                        hollow_log!("[HOLLOW-STREAM] Failed to create shard stream request: {e}");
-                        return;
-                    }
-                }
-            }
-        };
-        swarm.behaviour_mut().file_streaming.send_request(peer, stream_req);
     } else {
-        hollow_log!("[HOLLOW-STREAM] Peer {peer_str} unreachable — cannot stream {id}");
+        hollow_log!("[HOLLOW-STREAM] Peer {peer_str} unreachable via WS — cannot stream {id}");
     }
 }
 
-/// Send an unencrypted HavenMessage to a peer, preferring WS relay over libp2p.
+/// Send an unencrypted HavenMessage to a peer via WS relay.
 fn send_message_to_peer(
-    swarm: &mut libp2p::Swarm<HavenBehaviour>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    connected_peers: &std::collections::HashSet<PeerId>,
-    peer: &PeerId,
     peer_str: &str,
     msg: HavenMessage,
 ) {
-    // Try WS first: find a room containing this peer.
     if let Some(room) = ws_room_for_peer(ws_room_peers, peer_str) {
         let json = serde_json::to_string(&msg).unwrap_or_default();
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
@@ -6973,28 +5255,20 @@ fn send_message_to_peer(
             target_peer: peer_str.to_string(),
             data: json.into_bytes(),
         });
-    } else if connected_peers.contains(peer) {
-        // Fall back to libp2p.
-        swarm.behaviour_mut().messaging.send_request(peer, msg);
     }
     // else: peer unreachable — drop silently
 }
 
-/// Encrypt and send a message to a peer. Prefers WS relay, falls back to libp2p.
+/// Encrypt and send a message to a peer via WS relay.
 /// Returns `true` on success, `false` if encryption failed.
 async fn send_encrypted_message(
-    swarm: &mut libp2p::Swarm<HavenBehaviour>,
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
-    pending_requests: &mut HashMap<request_response::OutboundRequestId, String>,
-    outbound_message_text: &mut HashMap<request_response::OutboundRequestId, (String, String)>,
-    peer_id: &PeerId,
     peer_id_str: &str,
     text: &str,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    connected_peers: &std::collections::HashSet<PeerId>,
 ) -> bool {
     match olm.encrypt(peer_id_str, text.as_bytes()) {
         Ok((msg_type, ciphertext)) => {
@@ -7016,7 +5290,6 @@ async fn send_encrypted_message(
                 identity_key,
             };
 
-            // Try WS first.
             if let Some(room) = ws_room_for_peer(ws_room_peers, peer_id_str) {
                 let json = serde_json::to_string(&haven_msg).unwrap_or_default();
                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
@@ -7024,13 +5297,7 @@ async fn send_encrypted_message(
                     target_peer: peer_id_str.to_string(),
                     data: json.into_bytes(),
                 });
-            } else if connected_peers.contains(peer_id) {
-                // Fall back to libp2p.
-                let req_id = swarm.behaviour_mut().messaging.send_request(peer_id, haven_msg);
-                pending_requests.insert(req_id, peer_id_str.to_string());
-                outbound_message_text.insert(req_id, (peer_id_str.to_string(), text.to_string()));
             }
-            // else: peer unreachable — encrypt succeeded but no transport available
             true
         }
         Err(e) => {
@@ -7047,26 +5314,18 @@ async fn send_encrypted_message(
 
 /// Handle an incoming request from a peer.
 async fn handle_incoming_request(
-    swarm: &mut libp2p::Swarm<HavenBehaviour>,
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
-    pending_requests: &mut HashMap<request_response::OutboundRequestId, String>,
-    outbound_message_text: &mut HashMap<request_response::OutboundRequestId, (String, String)>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     key_request_in_flight: &mut std::collections::HashSet<String>,
     server_states: &mut HashMap<String, ServerState>,
-    bundle_keypair: &identity::Keypair,
-    connected_peers: &mut std::collections::HashSet<PeerId>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pending_server_joins: &mut std::collections::HashSet<String>,
     pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
     mls: &mut Option<MlsManager>,
-    discovered_peers: &mut std::collections::HashSet<PeerId>,
-    disconnected_peers: &mut HashMap<PeerId, std::time::Instant>,
-    pending_disconnects: &mut HashMap<PeerId, std::time::Instant>,
     mls_bootstrap_requested: &mut std::collections::HashSet<String>,
     sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
-    known_addresses: &[String],
     pending_shard_assembly: &mut HashMap<String, PendingShardAssembly>,
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
@@ -7076,11 +5335,10 @@ async fn handle_incoming_request(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     channel_sync_sent: &mut HashMap<String, std::time::Instant>,
-    peer: PeerId,
+    local_peer_str: &str,
+    peer_str: &str,
     request: HavenMessage,
-    mut channel: Option<request_response::ResponseChannel<HavenMessage>>,
 ) {
-    let peer_str = peer.to_string();
 
     match request {
         HavenMessage::KeyRequest => {
@@ -7097,15 +5355,59 @@ async fn handle_incoming_request(
                 identity_key,
                 one_time_key: otk,
             };
-            if let Some(ch) = channel.take() {
-                // libp2p path: respond on the request-response channel.
-                let _ = swarm.behaviour_mut().messaging.send_response(ch, key_bundle);
+            // Send key bundle back via WS.
+            send_message_to_peer(
+                ws_cmd_tx, ws_room_peers,
+                peer_str, key_bundle,
+            );
+        }
+
+        HavenMessage::KeyBundle { identity_key, one_time_key } => {
+            // Peer responded with their key bundle — create outbound Olm session.
+            if olm.has_session(peer_str) {
+                hollow_log!("[HOLLOW-CRYPTO] Already have session with {peer_str}, ignoring KeyBundle");
             } else {
-                // WS path: send as a direct message back to the requester.
-                send_message_to_peer(
-                    swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                    &peer, &peer_str, key_bundle,
-                );
+                match olm.create_outbound_session(peer_str, &identity_key, &one_time_key) {
+                    Ok(()) => {
+                        hollow_log!("[HOLLOW-CRYPTO] Created outbound session with {peer_str} via KeyBundle");
+                        persist_crypto_state(olm, crypto_store, peer_str);
+                        key_request_in_flight.remove(peer_str);
+
+                        let _ = event_tx.send(NetworkEvent::SessionEstablished {
+                            peer_id: peer_str.to_string(),
+                        }).await;
+
+                        // Send encrypted SessionAck to upgrade the ratchet.
+                        let ack_json = serde_json::to_string(&MessageEnvelope::SessionAck)
+                            .unwrap_or_default();
+                        send_encrypted_message(
+                            olm, crypto_store, peer_str, &ack_json, event_tx,
+                            ws_cmd_tx, ws_room_peers,
+                        ).await;
+
+                        // Drain pending messages for this peer.
+                        if let Some(queued) = pending_messages.remove(peer_str) {
+                            hollow_log!("[HOLLOW-CRYPTO] Draining {} pending messages for {peer_str}", queued.len());
+                            for text in queued {
+                                send_encrypted_message(
+                                    olm, crypto_store, peer_str, &text, event_tx,
+                                    ws_cmd_tx, ws_room_peers,
+                                ).await;
+                            }
+                        }
+
+                        // Flush pending sync requests.
+                        flush_pending_sync_requests(
+                            pending_sync_requests, peer_str,
+                            olm, crypto_store, bundle_keypair, event_tx,
+                            ws_cmd_tx, ws_room_peers,
+                        ).await;
+                    }
+                    Err(e) => {
+                        hollow_log!("[HOLLOW-CRYPTO] Failed to create outbound session with {peer_str}: {e}");
+                        key_request_in_flight.remove(peer_str);
+                    }
+                }
             }
         }
 
@@ -7118,7 +5420,7 @@ async fn handle_incoming_request(
                             message: format!("Failed to decode message from {peer_str}: {e}"),
                         })
                         .await;
-                    if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+                    
                     return;
                 }
             };
@@ -7133,7 +5435,7 @@ async fn handle_incoming_request(
                                 message: format!("PreKeyMessage from {peer_str} missing identity_key"),
                             })
                             .await;
-                        if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+                        
                         return;
                     }
                 };
@@ -7160,55 +5462,52 @@ async fn handle_incoming_request(
                                 Ok(pt) => {
                                     let _ = event_tx
                                         .send(NetworkEvent::SessionEstablished {
-                                            peer_id: peer_str.clone(),
+                                            peer_id: peer_str.to_string(),
                                         })
                                         .await;
-                                    key_request_in_flight.remove(&peer_str);
+                                    key_request_in_flight.remove(peer_str);
                                     // Send encrypted SessionAck to upgrade peer's outbound ratchet.
                                     let ack_json = serde_json::to_string(&MessageEnvelope::SessionAck).unwrap_or_default();
                                     send_encrypted_message(
-                                        swarm, olm, crypto_store, pending_requests,
-                                        outbound_message_text, &peer, &peer_str, &ack_json, event_tx,
-                                    ws_cmd_tx, ws_room_peers, connected_peers,
+                                        olm, crypto_store, &peer_str, &ack_json, event_tx,
+                                    ws_cmd_tx, ws_room_peers,
                                     ).await;
-                                    if let Some(queued) = pending_messages.remove(&peer_str) {
+                                    if let Some(queued) = pending_messages.remove(peer_str) {
                                         for text in queued {
                                             send_encrypted_message(
-                                                swarm, olm, crypto_store, pending_requests,
-                                                outbound_message_text, &peer, &peer_str, &text, event_tx,
-                                            ws_cmd_tx, ws_room_peers, connected_peers,
+                                                olm, crypto_store, &peer_str, &text, event_tx,
+                                            ws_cmd_tx, ws_room_peers,
                                             ).await;
                                         }
                                     }
                                     flush_pending_sync_requests(
-                                        pending_sync_requests, &peer_str, &peer,
-                                        swarm, olm, crypto_store,
-                                        pending_requests, outbound_message_text,
+                                        pending_sync_requests, peer_str,
+                                        olm, crypto_store,
                                         bundle_keypair, event_tx,
-                                        ws_cmd_tx, ws_room_peers, connected_peers,
+                                        ws_cmd_tx, ws_room_peers,
                                     ).await;
                                     pt
                                 }
                                 Err(e2) => {
                                     // Both paths failed. Apply cooldown to prevent flood.
                                     let now = std::time::Instant::now();
-                                    let should_rekey = match decrypt_fail_cooldown.get(&peer_str) {
+                                    let should_rekey = match decrypt_fail_cooldown.get(peer_str) {
                                         Some(last) => now.duration_since(*last) >= Duration::from_secs(5),
                                         None => true,
                                     };
                                     if should_rekey {
                                         hollow_log!("[HOLLOW-CRYPTO] PreKey session creation also failed for {peer_str}: {e2} — initiating re-key");
-                                        decrypt_fail_cooldown.insert(peer_str.clone(), now);
-                                        if !key_request_in_flight.contains(&peer_str) {
-                                            key_request_in_flight.insert(peer_str.clone());
+                                        decrypt_fail_cooldown.insert(peer_str.to_string(), now);
+                                        if !key_request_in_flight.contains(peer_str) {
+                                            key_request_in_flight.insert(peer_str.to_string());
                                             send_message_to_peer(
-                                                swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                                &peer, &peer_str, HavenMessage::KeyRequest,
+                                                ws_cmd_tx, ws_room_peers,
+                                                peer_str, HavenMessage::KeyRequest,
                                             );
                                         }
                                     }
                                     persist_crypto_state(olm, crypto_store, &peer_str);
-                                    if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+                                    
                                     return;
                                 }
                             }
@@ -7220,55 +5519,52 @@ async fn handle_incoming_request(
                         Ok(pt) => {
                             let _ = event_tx
                                 .send(NetworkEvent::SessionEstablished {
-                                    peer_id: peer_str.clone(),
+                                    peer_id: peer_str.to_string(),
                                 })
                                 .await;
-                            key_request_in_flight.remove(&peer_str);
+                            key_request_in_flight.remove(peer_str);
                             // Send encrypted SessionAck to upgrade peer's outbound ratchet.
                             let ack_json = serde_json::to_string(&MessageEnvelope::SessionAck).unwrap_or_default();
                             send_encrypted_message(
-                                swarm, olm, crypto_store, pending_requests,
-                                outbound_message_text, &peer, &peer_str, &ack_json, event_tx,
-                            ws_cmd_tx, ws_room_peers, connected_peers,
+                                olm, crypto_store, &peer_str, &ack_json, event_tx,
+                            ws_cmd_tx, ws_room_peers,
                             ).await;
-                            if let Some(queued) = pending_messages.remove(&peer_str) {
+                            if let Some(queued) = pending_messages.remove(peer_str) {
                                 for text in queued {
                                     send_encrypted_message(
-                                        swarm, olm, crypto_store, pending_requests,
-                                        outbound_message_text, &peer, &peer_str, &text, event_tx,
-                                    ws_cmd_tx, ws_room_peers, connected_peers,
+                                        olm, crypto_store, &peer_str, &text, event_tx,
+                                    ws_cmd_tx, ws_room_peers,
                                     ).await;
                                 }
                             }
                             flush_pending_sync_requests(
-                                pending_sync_requests, &peer_str, &peer,
-                                swarm, olm, crypto_store,
-                                pending_requests, outbound_message_text,
+                                pending_sync_requests, peer_str,
+                                olm, crypto_store,
                                 bundle_keypair, event_tx,
-                                ws_cmd_tx, ws_room_peers, connected_peers,
+                                ws_cmd_tx, ws_room_peers,
                             ).await;
                             pt
                         }
                         Err(e) => {
                             // Apply cooldown to prevent flood from stale PreKey messages.
                             let now = std::time::Instant::now();
-                            let should_rekey = match decrypt_fail_cooldown.get(&peer_str) {
+                            let should_rekey = match decrypt_fail_cooldown.get(peer_str) {
                                 Some(last) => now.duration_since(*last) >= Duration::from_secs(5),
                                 None => true,
                             };
                             if should_rekey {
                                 hollow_log!("[HOLLOW-CRYPTO] PreKey session creation failed for {peer_str}: {e} — initiating re-key");
-                                decrypt_fail_cooldown.insert(peer_str.clone(), now);
-                                if !key_request_in_flight.contains(&peer_str) {
-                                    key_request_in_flight.insert(peer_str.clone());
+                                decrypt_fail_cooldown.insert(peer_str.to_string(), now);
+                                if !key_request_in_flight.contains(peer_str) {
+                                    key_request_in_flight.insert(peer_str.to_string());
                                     send_message_to_peer(
-                                        swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                        &peer, &peer_str, HavenMessage::KeyRequest,
+                                        ws_cmd_tx, ws_room_peers,
+                                        peer_str, HavenMessage::KeyRequest,
                                     );
                                 }
                             }
                             persist_crypto_state(olm, crypto_store, &peer_str);
-                            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+                            
                             return;
                         }
                     }
@@ -7282,7 +5578,7 @@ async fn handle_incoming_request(
                         // This prevents rapid session thrashing when many in-flight
                         // chunks fail (e.g., large file transfer with 1000+ chunks).
                         let now = std::time::Instant::now();
-                        let should_rekey = match decrypt_fail_cooldown.get(&peer_str) {
+                        let should_rekey = match decrypt_fail_cooldown.get(peer_str) {
                             Some(last_kill) => now.duration_since(*last_kill) >= Duration::from_secs(5),
                             None => true, // First failure — allow rekey
                         };
@@ -7291,7 +5587,7 @@ async fn handle_incoming_request(
                             hollow_log!("[HOLLOW-SWARM] Decrypt failed for {peer_str}: {e} — removing stale session");
                             olm.remove_session(&peer_str);
                             persist_crypto_state(olm, crypto_store, &peer_str);
-                            decrypt_fail_cooldown.insert(peer_str.clone(), now);
+                            decrypt_fail_cooldown.insert(peer_str.to_string(), now);
 
                             let _ = event_tx
                                 .send(NetworkEvent::Error {
@@ -7302,7 +5598,7 @@ async fn handle_incoming_request(
                             // Emit MessageSyncFailed for any servers where this peer is a member
                             // so the UI doesn't stay stuck on "Syncing...".
                             for (sid, state) in server_states.iter() {
-                                if state.members.contains_key(&peer_str) {
+                                if state.members.contains_key(peer_str) {
                                     let _ = event_tx.send(NetworkEvent::MessageSyncFailed {
                                         server_id: sid.clone(),
                                         error: format!("Decrypt failed with {peer_str}, re-keying"),
@@ -7311,17 +5607,17 @@ async fn handle_incoming_request(
                             }
 
                             // Send a KeyRequest to re-establish the session.
-                            if !key_request_in_flight.contains(&peer_str) {
-                                key_request_in_flight.insert(peer_str.clone());
+                            if !key_request_in_flight.contains(peer_str) {
+                                key_request_in_flight.insert(peer_str.to_string());
                                 send_message_to_peer(
-                                    swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                    &peer, &peer_str, HavenMessage::KeyRequest,
+                                    ws_cmd_tx, ws_room_peers,
+                                    peer_str, HavenMessage::KeyRequest,
                                 );
                             }
                         }
                         // else: within cooldown — silently skip this stale message
 
-                        if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+                        
                         return;
                     }
                 }
@@ -7336,7 +5632,7 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::ChannelMessage { sid, cid, text: msg_text, ts, sig, pk, mid, reply_to, file_id }) => {
                     // SECURITY: Verify sender is a member of the claimed server.
                     if let Some(state) = server_states.get(&sid) {
-                        if !state.members.contains_key(&peer_str) {
+                        if !state.members.contains_key(peer_str) {
                             hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelMessage from {peer_str} — not a member of server {sid}");
                             return;
                         }
@@ -7385,7 +5681,7 @@ async fn handle_incoming_request(
                             .send(NetworkEvent::ChannelMessageReceived {
                                 server_id: sid,
                                 channel_id: cid,
-                                from_peer: peer_str,
+                                from_peer: peer_str.to_string(),
                                 text: msg_text,
                                 timestamp: ts,
                                 message_id: mid.unwrap_or_default(),
@@ -7396,7 +5692,7 @@ async fn handle_incoming_request(
                 }
                 Ok(MessageEnvelope::ChannelSyncBatch { sid, cid, messages, total, has_more, .. }) => {
                     hollow_log!("[HOLLOW-SYNC] Received {} sync messages for {cid} in {sid} (total: {total}, has_more: {has_more:?})", messages.len());
-                    let local_peer = swarm.local_peer_id().to_string();
+                    let local_peer = local_peer_str.to_string();
                     let mut new_count = 0u32;
                     let received_count = messages.len() as u32;
 
@@ -7479,8 +5775,8 @@ async fn handle_incoming_request(
                                     .unwrap_or(0);
                                 hollow_log!("[HOLLOW-SYNC] Requesting next page for {cid} in {sid}");
                                 send_message_to_peer(
-                                    swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                    &peer, &peer_str, HavenMessage::ChannelSyncRequest {
+                                    ws_cmd_tx, ws_room_peers,
+                                    peer_str, HavenMessage::ChannelSyncRequest {
                                         server_id: sid.clone(),
                                         channel_id: cid.clone(),
                                         since_timestamp: since,
@@ -7518,7 +5814,7 @@ async fn handle_incoming_request(
 
                     // Verify DM signature if present.
                     if sig.is_some() {
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         let payload = message_signing_payload(
                             "dm", &local_peer, &peer_str, ts, &msg_text,
                         );
@@ -7553,7 +5849,7 @@ async fn handle_incoming_request(
                     if is_new {
                         let _ = event_tx
                             .send(NetworkEvent::MessageReceived {
-                                from_peer: peer_str,
+                                from_peer: peer_str.to_string(),
                                 text: msg_text,
                                 timestamp: ts,
                                 message_id: mid.unwrap_or_default(),
@@ -7564,7 +5860,7 @@ async fn handle_incoming_request(
                 }
                 Ok(MessageEnvelope::DmSyncBatch { messages, has_more }) => {
                     hollow_log!("[HOLLOW-SYNC] Received {} DM sync messages from {peer_str} (has_more: {has_more:?})", messages.len());
-                    let local_peer = swarm.local_peer_id().to_string();
+                    let local_peer = local_peer_str.to_string();
                     let mut new_count = 0u32;
 
                     let data_dir = crate::identity::data_dir().unwrap_or_default();
@@ -7621,7 +5917,7 @@ async fn handle_incoming_request(
                                         message_id: fm.mid.clone().unwrap_or_default(),
                                         sender_id: fm.sender.clone(),
                                         server_id: String::new(),
-                                        channel_id: peer_str.clone(),
+                                        channel_id: peer_str.to_string(),
                                     }).await;
                                 }
 
@@ -7644,8 +5940,8 @@ async fn handle_incoming_request(
                                     .unwrap_or(0);
                                 hollow_log!("[HOLLOW-SYNC] Requesting next DM page from {peer_str} since {since}");
                                 send_message_to_peer(
-                                    swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                    &peer, &peer_str, HavenMessage::DmSyncRequest {
+                                    ws_cmd_tx, ws_room_peers,
+                                    peer_str, HavenMessage::DmSyncRequest {
                                         since_timestamp: since,
                                     },
                                 );
@@ -7660,7 +5956,7 @@ async fn handle_incoming_request(
                     // Only emit completion when there are no more pages.
                     if has_more != Some(true) {
                         let _ = event_tx.send(NetworkEvent::DmSyncCompleted {
-                            peer_id: peer_str,
+                            peer_id: peer_str.to_string(),
                             new_message_count: new_count,
                         }).await;
                     }
@@ -7715,7 +6011,7 @@ async fn handle_incoming_request(
                             }).await;
                         } else {
                             let _ = event_tx.send(NetworkEvent::DmMessageEdited {
-                                peer_id: peer_str,
+                                peer_id: peer_str.to_string(),
                                 message_id: mid,
                                 new_text,
                                 edited_at: ts,
@@ -7770,7 +6066,7 @@ async fn handle_incoming_request(
                         }).await;
                     } else {
                         let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
-                            peer_id: peer_str,
+                            peer_id: peer_str.to_string(),
                             message_id: mid,
                             deleted_at: ts,
                         }).await;
@@ -7802,15 +6098,15 @@ async fn handle_incoming_request(
                             channel_id,
                             message_id: mid,
                             emoji,
-                            reactor: peer_str,
+                            reactor: peer_str.to_string(),
                             added_at: ts,
                         }).await;
                     } else {
                         let _ = event_tx.send(NetworkEvent::DmReactionAdded {
-                            peer_id: peer_str.clone(),
+                            peer_id: peer_str.to_string(),
                             message_id: mid,
                             emoji,
-                            reactor: peer_str,
+                            reactor: peer_str.to_string(),
                             added_at: ts,
                         }).await;
                     }
@@ -7836,15 +6132,15 @@ async fn handle_incoming_request(
                             channel_id,
                             message_id: mid,
                             emoji,
-                            reactor: peer_str,
+                            reactor: peer_str.to_string(),
                             removed_at: ts,
                         }).await;
                     } else {
                         let _ = event_tx.send(NetworkEvent::DmReactionRemoved {
-                            peer_id: peer_str.clone(),
+                            peer_id: peer_str.to_string(),
                             message_id: mid,
                             emoji,
-                            reactor: peer_str,
+                            reactor: peer_str.to_string(),
                             removed_at: ts,
                         }).await;
                     }
@@ -7876,7 +6172,7 @@ async fn handle_incoming_request(
                     let ctx_type = if sid.is_some() { "channel" } else { "dm" };
                     let ctx_id = match (&sid, &cid) {
                         (Some(s), Some(c)) => format!("{s}:{c}"),
-                        _ => peer_str.clone(),
+                        _ => peer_str.to_string(),
                     };
 
                     // Save file metadata to DB.
@@ -7897,7 +6193,7 @@ async fn handle_incoming_request(
 
                     let mid_str = mid.unwrap_or_default();
                     let sid_str = sid.unwrap_or_default();
-                    let cid_str = cid.unwrap_or_else(|| peer_str.clone());
+                    let cid_str = cid.unwrap_or_else(|| peer_str.to_string());
 
                     // If aes_key is present, this is a streamed transfer — register for stream receive.
                     if let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
@@ -7906,7 +6202,7 @@ async fn handle_incoming_request(
                             aes_nonce: an,
                             file_name: name.clone(),
                             ext: ext.clone(),
-                            sender: peer_str.clone(),
+                            sender: peer_str.to_string(),
                             server_id: sid_str.clone(),
                             channel_id: cid_str.clone(),
                             message_id: mid_str.clone(),
@@ -7925,7 +6221,7 @@ async fn handle_incoming_request(
                         width: w,
                         height: h,
                         message_id: mid_str,
-                        sender_id: peer_str.clone(),
+                        sender_id: peer_str.to_string(),
                         server_id: sid_str,
                         channel_id: cid_str,
                     }).await;
@@ -7995,7 +6291,7 @@ async fn handle_incoming_request(
 
                     // Verify sender is a member of the server
                     let is_member = server_states.get(&sid)
-                        .map(|s| s.members.contains_key(&peer_str))
+                        .map(|s| s.members.contains_key(peer_str))
                         .unwrap_or(false);
                     if !is_member {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED ShardStore from {peer_str} — not a member of {sid}");
@@ -8011,7 +6307,7 @@ async fn handle_incoming_request(
                         // Inline shard (legacy) — decode and store immediately
                         if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
                             // Check pledge capacity
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
                             let pledge = server_states.get(&sid)
                                 .map(|s| s.get_storage_pledge(&local_peer))
                                 .unwrap_or(0);
@@ -8031,14 +6327,12 @@ async fn handle_incoming_request(
                                         target: None,
                                     };
                                     let ack_json = serde_json::to_string(&ack).unwrap_or_default();
-                                    if let Ok(pid) = peer_str.parse::<PeerId>() {
                                         send_encrypted_message(
-                                            swarm, olm, crypto_store,
-                                            pending_requests, outbound_message_text,
-                                            &pid, &peer_str, &ack_json, event_tx,
-                                        ws_cmd_tx, ws_room_peers, connected_peers,
+                                            olm, crypto_store,
+                                            
+                                            &peer_str, &ack_json, event_tx,
+                                        ws_cmd_tx, ws_room_peers,
                                         ).await;
-                                    }
                                 } else {
                                     // Store the shard
                                     let tier_enum = crate::vault::content_store::StorageTier::from_str(&tier);
@@ -8049,7 +6343,7 @@ async fn handle_incoming_request(
                                                 server_id: sid.clone(),
                                                 content_id: cid.clone(),
                                                 shard_index: si,
-                                                from_peer: peer_str.clone(),
+                                                from_peer: peer_str.to_string(),
                                             }).await;
                                             // Send ack
                                             let ack = MessageEnvelope::ShardStoreAck {
@@ -8057,14 +6351,12 @@ async fn handle_incoming_request(
                                                 target: None,
                                             };
                                             let ack_json = serde_json::to_string(&ack).unwrap_or_default();
-                                            if let Ok(pid) = peer_str.parse::<PeerId>() {
                                                 send_encrypted_message(
-                                                    swarm, olm, crypto_store,
-                                                    pending_requests, outbound_message_text,
-                                                    &pid, &peer_str, &ack_json, event_tx,
-                                                ws_cmd_tx, ws_room_peers, connected_peers,
+                                                    olm, crypto_store,
+                                                    
+                                                    &peer_str, &ack_json, event_tx,
+                                                ws_cmd_tx, ws_room_peers,
                                                 ).await;
-                                            }
                                         }
                                         Err(e) => {
                                             hollow_log!("[HOLLOW-VAULT] Failed to store shard: {e}");
@@ -8074,14 +6366,12 @@ async fn handle_incoming_request(
                                                 target: None,
                                             };
                                             let ack_json = serde_json::to_string(&ack).unwrap_or_default();
-                                            if let Ok(pid) = peer_str.parse::<PeerId>() {
                                                 send_encrypted_message(
-                                                    swarm, olm, crypto_store,
-                                                    pending_requests, outbound_message_text,
-                                                    &pid, &peer_str, &ack_json, event_tx,
-                                                ws_cmd_tx, ws_room_peers, connected_peers,
+                                                    olm, crypto_store,
+                                                    
+                                                    &peer_str, &ack_json, event_tx,
+                                                ws_cmd_tx, ws_room_peers,
                                                 ).await;
-                                            }
                                         }
                                     }
                                 }
@@ -8102,7 +6392,7 @@ async fn handle_incoming_request(
                             expected_chunks: chunks,
                             received: std::collections::HashSet::new(),
                             chunk_data: Vec::new(),
-                            sender_peer: peer_str.clone(),
+                            sender_peer: peer_str.to_string(),
                             received_at: std::time::Instant::now(),
                         });
                     }
@@ -8143,21 +6433,19 @@ async fn handle_incoming_request(
                                                 server_id: asm.server_id.clone(),
                                                 content_id: asm.content_id.clone(),
                                                 shard_index: asm.shard_index,
-                                                from_peer: peer_str.clone(),
+                                                from_peer: peer_str.to_string(),
                                             }).await;
                                             let ack = MessageEnvelope::ShardStoreAck {
                                                 sid: asm.server_id, cid: asm.content_id, si: asm.shard_index, ok: true, err: None,
                                                 target: None,
                                             };
                                             let ack_json = serde_json::to_string(&ack).unwrap_or_default();
-                                            if let Ok(pid) = peer_str.parse::<PeerId>() {
                                                 send_encrypted_message(
-                                                    swarm, olm, crypto_store,
-                                                    pending_requests, outbound_message_text,
-                                                    &pid, &peer_str, &ack_json, event_tx,
-                                                ws_cmd_tx, ws_room_peers, connected_peers,
+                                                    olm, crypto_store,
+                                                    
+                                                    &peer_str, &ack_json, event_tx,
+                                                ws_cmd_tx, ws_room_peers,
                                                 ).await;
-                                            }
                                         }
                                         Err(e) => {
                                             hollow_log!("[HOLLOW-VAULT] Failed to store assembled shard: {e}");
@@ -8166,14 +6454,12 @@ async fn handle_incoming_request(
                                                 target: None,
                                             };
                                             let ack_json = serde_json::to_string(&ack).unwrap_or_default();
-                                            if let Ok(pid) = peer_str.parse::<PeerId>() {
                                                 send_encrypted_message(
-                                                    swarm, olm, crypto_store,
-                                                    pending_requests, outbound_message_text,
-                                                    &pid, &peer_str, &ack_json, event_tx,
-                                                ws_cmd_tx, ws_room_peers, connected_peers,
+                                                    olm, crypto_store,
+                                                    
+                                                    &peer_str, &ack_json, event_tx,
+                                                ws_cmd_tx, ws_room_peers,
                                                 ).await;
-                                            }
                                         }
                                     }
                                 }
@@ -8213,7 +6499,7 @@ async fn handle_incoming_request(
                     // Verify sender is a member with MANAGE_SERVER permission
                     let allowed = server_states.get(&sid)
                         .map(|s| {
-                            s.members.contains_key(&peer_str) &&
+                            s.members.contains_key(peer_str) &&
                             s.has_permission(&peer_str, crate::crdt::operations::Permission::MANAGE_SERVER)
                         })
                         .unwrap_or(false);
@@ -8243,7 +6529,7 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::ShardRequest { sid, cid, si, sk, .. }) => {
                     hollow_log!("[HOLLOW-VAULT] ShardRequest: cid={cid} si={si} from {peer_str}");
                     let is_member = server_states.get(&sid)
-                        .map(|s| s.members.contains_key(&peer_str))
+                        .map(|s| s.members.contains_key(peer_str))
                         .unwrap_or(false);
                     if !is_member {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED ShardRequest from {peer_str} — not a member of {sid}");
@@ -8264,12 +6550,11 @@ async fn handle_incoming_request(
                                         target: None,
                                     };
                                     let json = serde_json::to_string(&resp).unwrap_or_default();
-                                    if let Ok(pid) = peer_str.parse::<PeerId>() {
                                         send_encrypted_message(
-                                            swarm, olm, crypto_store,
-                                            pending_requests, outbound_message_text,
-                                            &pid, &peer_str, &json, event_tx,
-                                        ws_cmd_tx, ws_room_peers, connected_peers,
+                                            olm, crypto_store,
+                                            
+                                            &peer_str, &json, event_tx,
+                                        ws_cmd_tx, ws_room_peers,
                                         ).await;
 
                                         // Stream shard bytes via stream_to_peer (WS or libp2p).
@@ -8278,15 +6563,14 @@ async fn handle_incoming_request(
                                         let shard_temp_name = format!(".stream_shard_{}_{}.tmp", shard_safe_prefix, si);
                                         let shard_temp_path = shard_temp_dir.join(&shard_temp_name);
                                         if let Ok(()) = std::fs::write(&shard_temp_path, &shard_data) {
-                                            let shard_kind = super::stream_transfer::StreamKind::Shard { shard_index: si };
+                                            let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index: si };
                                             stream_to_peer(
-                                                swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                                &pid, &peer_str, &shard_kind,
+                                                ws_cmd_tx, ws_room_peers,
+                                                &peer_str, &shard_kind,
                                                 &cid, &shard_temp_path, shard_data.len() as u64,
                                             ).await;
                                             hollow_log!("[HOLLOW-VAULT] Streaming shard response si={si} ({} bytes) to {peer_str}", shard_data.len());
                                         }
-                                    }
                                 }
                                 Err(_) => {
                                     let resp = MessageEnvelope::ShardResponse {
@@ -8294,14 +6578,12 @@ async fn handle_incoming_request(
                                         target: None,
                                     };
                                     let json = serde_json::to_string(&resp).unwrap_or_default();
-                                    if let Ok(pid) = peer_str.parse::<PeerId>() {
                                         send_encrypted_message(
-                                            swarm, olm, crypto_store,
-                                            pending_requests, outbound_message_text,
-                                            &pid, &peer_str, &json, event_tx,
-                                        ws_cmd_tx, ws_room_peers, connected_peers,
+                                            olm, crypto_store,
+                                            
+                                            &peer_str, &json, event_tx,
+                                        ws_cmd_tx, ws_room_peers,
                                         ).await;
-                                    }
                                 }
                             }
                         }
@@ -8339,7 +6621,7 @@ async fn handle_incoming_request(
                             }
                             let _ = event_tx.send(NetworkEvent::ShardReceived {
                                 server_id: sid, content_id: cid, shard_index: si,
-                                from_peer: peer_str.clone(),
+                                from_peer: peer_str.to_string(),
                             }).await;
                         }
                     }
@@ -8360,7 +6642,7 @@ async fn handle_incoming_request(
                                 let _full_data: Vec<u8> = sorted.into_iter().flat_map(|(_, d)| d).collect();
                                 let _ = event_tx.send(NetworkEvent::ShardReceived {
                                     server_id: sid, content_id: cid, shard_index: si,
-                                    from_peer: peer_str.clone(),
+                                    from_peer: peer_str.to_string(),
                                 }).await;
                             }
                         }
@@ -8370,7 +6652,7 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::ShardProbe { sid, cid, .. }) => {
                     hollow_log!("[HOLLOW-VAULT] ShardProbe: cid={cid} from {peer_str}");
                     let is_member = server_states.get(&sid)
-                        .map(|s| s.members.contains_key(&peer_str))
+                        .map(|s| s.members.contains_key(peer_str))
                         .unwrap_or(false);
                     if is_member {
                         let data_dir = crate::identity::data_dir().unwrap_or_default();
@@ -8390,14 +6672,12 @@ async fn handle_incoming_request(
                             target: None,
                         };
                         let json = serde_json::to_string(&resp).unwrap_or_default();
-                        if let Ok(pid) = peer_str.parse::<PeerId>() {
                             send_encrypted_message(
-                                swarm, olm, crypto_store,
-                                pending_requests, outbound_message_text,
-                                &pid, &peer_str, &json, event_tx,
-                            ws_cmd_tx, ws_room_peers, connected_peers,
+                                olm, crypto_store,
+                                
+                                &peer_str, &json, event_tx,
+                            ws_cmd_tx, ws_room_peers,
                             ).await;
-                        }
                     }
                 }
 
@@ -8430,7 +6710,7 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-VAULT] ShardMigrate received: cid={cid} si={si} from {peer_str}");
                     // Same logic as ShardStore inline — verify membership, store shard
                     let is_member = server_states.get(&sid)
-                        .map(|s| s.members.contains_key(&peer_str))
+                        .map(|s| s.members.contains_key(peer_str))
                         .unwrap_or(false);
                     if is_member {
                         if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
@@ -8478,7 +6758,7 @@ async fn handle_incoming_request(
                         .as_millis() as i64;
                     let _ = event_tx
                         .send(NetworkEvent::MessageReceived {
-                            from_peer: peer_str,
+                            from_peer: peer_str.to_string(),
                             text,
                             timestamp: legacy_ts,
                             message_id: String::new(),
@@ -8489,14 +6769,14 @@ async fn handle_incoming_request(
             }
 
             // Ack.
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
         }
 
         // -- CRDT sync message handlers --
 
         HavenMessage::SyncRequest { server_id, state_vector_json } => {
             hollow_log!("[HOLLOW-CRDT] SyncRequest from {peer_str} for server {server_id}");
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             if let Some(state) = server_states.get(&server_id) {
                 // Compute what they're missing
@@ -8506,8 +6786,8 @@ async fn handle_incoming_request(
                         if let Ok(ops_json) = serde_json::to_string(&delta) {
                             hollow_log!("[HOLLOW-CRDT] Sending {} delta ops to {peer_str}", delta.len());
                             send_message_to_peer(
-                                swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                &peer, &peer_str, HavenMessage::SyncResponse {
+                                ws_cmd_tx, ws_room_peers,
+                                peer_str, HavenMessage::SyncResponse {
                                     server_id: server_id.clone(),
                                     ops_json,
                                 },
@@ -8523,7 +6803,7 @@ async fn handle_incoming_request(
 
         HavenMessage::SyncResponse { server_id, ops_json } => {
             hollow_log!("[HOLLOW-CRDT] SyncResponse from {peer_str} for server {server_id}");
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             // Room gating: only accept sync for servers we already know about
             // or are actively trying to join.
@@ -8536,8 +6816,8 @@ async fn handle_incoming_request(
 
             if let Ok(incoming_ops) = serde_json::from_str::<Vec<crate::crdt::operations::CrdtOp>>(&ops_json) {
                 let state = server_states.entry(server_id.clone()).or_insert_with(|| {
-                    let mut s = ServerState::new(server_id.clone(), "".into(), peer_str.clone());
-                    s.set_hlc(Hlc::new(swarm.local_peer_id().to_string()));
+                    let mut s = ServerState::new(server_id.clone(), "".into(), peer_str.to_string());
+                    s.set_hlc(Hlc::new(local_peer_str.to_string()));
                     s
                 });
 
@@ -8573,7 +6853,7 @@ async fn handle_incoming_request(
 
                             // Auto-pledge min_pledge_mb for the newly joined server
                             {
-                                let local_peer = swarm.local_peer_id().to_string();
+                                let local_peer = local_peer_str.to_string();
                                 if state.get_storage_pledge(&local_peer) == 0 {
                                     let min_pledge_bytes = state.min_pledge_mb() * 1024 * 1024;
                                     hollow_log!("[HOLLOW-VAULT] Auto-pledging {} MB for server {server_id}", min_pledge_bytes / (1024 * 1024));
@@ -8605,17 +6885,15 @@ async fn handle_incoming_request(
                                         } else {
                                             for member in state.members_list() {
                                                 if member.peer_id == local_peer { continue; }
-                                                if let Ok(pid) = member.peer_id.parse::<PeerId>() {
-                                                    if peer_is_reachable(ws_room_peers, connected_peers, &pid, &member.peer_id) {
+                                                    if peer_is_reachable(ws_room_peers, &member.peer_id) {
                                                         send_message_to_peer(
-                                                            swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                                            &pid, &member.peer_id, HavenMessage::CrdtOpBroadcast {
+                                                            ws_cmd_tx, ws_room_peers,
+                                                            &member.peer_id, HavenMessage::CrdtOpBroadcast {
                                                                 server_id: server_id.clone(),
                                                                 op_json: op_json.clone(),
                                                             },
                                                         );
                                                     }
-                                                }
                                             }
                                         }
                                     }
@@ -8626,10 +6904,9 @@ async fn handle_incoming_request(
                             // connected to but don't have sessions with yet.
                             // Also emit PeerDiscovered so they show as online.
                             for member in state.members_list() {
-                                let local_id = swarm.local_peer_id().to_string();
+                                let local_id = local_peer_str.to_string();
                                 if member.peer_id != local_id {
-                                    if let Ok(member_pid) = member.peer_id.parse::<PeerId>() {
-                                        if peer_is_reachable(ws_room_peers, connected_peers, &member_pid, &member.peer_id) {
+                                        if peer_is_reachable(ws_room_peers, &member.peer_id) {
                                             // Ensure member shows as online in UI.
                                             let _ = event_tx.send(NetworkEvent::PeerDiscovered {
                                                 peer: DiscoveredPeer {
@@ -8643,13 +6920,12 @@ async fn handle_incoming_request(
                                             {
                                                 hollow_log!("[HOLLOW-SWARM] No Olm session with server member {}, sending KeyRequest", member.peer_id);
                                                 send_message_to_peer(
-                                                    swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                                    &member_pid, &member.peer_id, HavenMessage::KeyRequest,
+                                                    ws_cmd_tx, ws_room_peers,
+                                                    &member.peer_id, HavenMessage::KeyRequest,
                                                 );
                                                 key_request_in_flight.insert(member.peer_id.clone());
                                             }
                                         }
-                                    }
                                 }
                             }
 
@@ -8660,27 +6936,25 @@ async fn handle_incoming_request(
                                 if !mls_mgr.has_group(&server_id) {
                                     hollow_log!("[HOLLOW-MLS] No MLS group after join, sending KeyPackage to owner for MLS bootstrap");
                                     // Find the owner and send KeyPackage.
-                                    let local_id = swarm.local_peer_id().to_string();
+                                    let local_id = local_peer_str.to_string();
                                     for member in state.members_list() {
                                         if member.peer_id == local_id { continue; }
                                         let is_owner = state.roles.get(&member.peer_id)
                                             .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
                                             .unwrap_or(false);
                                         if is_owner {
-                                            if let Ok(owner_pid) = member.peer_id.parse::<PeerId>() {
-                                                if peer_is_reachable(ws_room_peers, connected_peers, &owner_pid, &member.peer_id) {
+                                                if peer_is_reachable(ws_room_peers, &member.peer_id) {
                                                     if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
                                                         let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                                                         send_message_to_peer(
-                                                            swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                                            &owner_pid, &member.peer_id, HavenMessage::MlsKeyPackage {
+                                                            ws_cmd_tx, ws_room_peers,
+                                                            &member.peer_id, HavenMessage::MlsKeyPackage {
                                                                 server_id: server_id.clone(),
                                                                 key_package: kp_b64,
                                                             },
                                                         );
                                                     }
                                                 }
-                                            }
                                             break;
                                         }
                                     }
@@ -8700,7 +6974,7 @@ async fn handle_incoming_request(
 
         HavenMessage::CrdtOpBroadcast { server_id, op_json } => {
             hollow_log!("[HOLLOW-CRDT] CrdtOpBroadcast from {peer_str} for server {server_id}");
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             // Room gating: only accept ops for servers we're a member of.
             if !server_states.contains_key(&server_id) {
@@ -8751,7 +7025,7 @@ async fn handle_incoming_request(
                         // Members can add other members (via invite), change own nickname,
                         // pin/unpin messages (if they have MANAGE_CHANNELS), create servers
                         CrdtPayload::MemberAdded { .. } => {
-                            state.members.contains_key(&peer_str)
+                            state.members.contains_key(peer_str)
                         }
                         CrdtPayload::NicknameChanged { peer_id, .. } => {
                             // Members can only change their own nickname
@@ -8793,20 +7067,18 @@ async fn handle_incoming_request(
                     }
 
                     // Forward to other connected server members (simple gossip).
-                    let local_peer = swarm.local_peer_id().to_string();
+                    let local_peer = local_peer_str.to_string();
                     for member_peer_str in state.members.keys() {
-                        if member_peer_str == &local_peer { continue; }
-                        if let Ok(pid) = member_peer_str.parse::<PeerId>() {
-                            if pid != peer && peer_is_reachable(ws_room_peers, connected_peers, &pid, member_peer_str) {
+                        if member_peer_str == &local_peer || member_peer_str == peer_str { continue; }
+                            if peer_is_reachable(ws_room_peers, member_peer_str) {
                                 send_message_to_peer(
-                                    swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                    &pid, member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                    ws_cmd_tx, ws_room_peers,
+                                    member_peer_str, HavenMessage::CrdtOpBroadcast {
                                         server_id: server_id.clone(),
                                         op_json: op_json.clone(),
                                     },
                                 );
                             }
-                        }
                     }
 
                     // Emit specific events based on op payload so Dart UI updates correctly.
@@ -8884,7 +7156,7 @@ async fn handle_incoming_request(
 
         HavenMessage::ServerJoinRequest { server_id } => {
             hollow_log!("[HOLLOW-CRDT] ServerJoinRequest from {peer_str} for server {server_id}");
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             if let Some(state) = server_states.get_mut(&server_id) {
                 // Check if peer is already a member
@@ -8894,7 +7166,7 @@ async fn handle_incoming_request(
                     // Add the new member via CRDT op
                     let display_name = format!("{}...{}", &peer_str[..4.min(peer_str.len())], &peer_str[peer_str.len().saturating_sub(4)..]);
                     let op = state.create_op(CrdtPayload::MemberAdded {
-                        peer_id: peer_str.clone(),
+                        peer_id: peer_str.to_string(),
                         display_name,
                     });
                     let _ = state.apply_op(&op);
@@ -8920,32 +7192,34 @@ async fn handle_incoming_request(
                                 hollow_log!("[HOLLOW-MLS] CrdtOp MemberAdded broadcast failed: {e}");
                             }
                         } else {
-                            let peer_ids: Vec<PeerId> = connected_peers.iter().copied().collect();
-                            for other_peer in peer_ids {
-                                let other_str = other_peer.to_string();
-                                send_message_to_peer(
-                                    swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                    &other_peer, &other_str, HavenMessage::CrdtOpBroadcast {
-                                        server_id: server_id.clone(),
-                                        op_json: op_json.clone(),
-                                    },
-                                );
+                            // Plaintext fallback: broadcast to all WS room peers.
+                            if let Some(room_peers) = ws_room_peers.get(&server_id) {
+                                for other_str in room_peers.iter() {
+                                    if other_str == local_peer_str || other_str == peer_str { continue; }
+                                    send_message_to_peer(
+                                        ws_cmd_tx, ws_room_peers,
+                                        other_str, HavenMessage::CrdtOpBroadcast {
+                                            server_id: server_id.clone(),
+                                            op_json: op_json.clone(),
+                                        },
+                                    );
+                                }
                             }
                         }
                     }
 
                     let _ = event_tx.send(NetworkEvent::MemberJoined {
                         server_id: server_id.clone(),
-                        peer_id: peer_str.clone(),
+                        peer_id: peer_str.to_string(),
                     }).await;
 
                     // Emit PeerDiscovered so the new member shows as online
                     // in the member panel (they may have connected via mDNS
                     // before being a server member, skipping the normal path).
-                    if peer_is_reachable(ws_room_peers, connected_peers, &peer, &peer_str) {
+                    if peer_is_reachable(ws_room_peers, &peer_str) {
                         let _ = event_tx.send(NetworkEvent::PeerDiscovered {
                             peer: DiscoveredPeer {
-                                peer_id: peer_str.clone(),
+                                peer_id: peer_str.to_string(),
                                 addresses: vec![],
                             },
                         }).await;
@@ -8957,8 +7231,8 @@ async fn handle_incoming_request(
                 if let Ok(ops_json) = serde_json::to_string(&all_ops) {
                     hollow_log!("[HOLLOW-CRDT] Sending {} ops to joiner {peer_str}", all_ops.len());
                     send_message_to_peer(
-                        swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                        &peer, &peer_str, HavenMessage::SyncResponse {
+                        ws_cmd_tx, ws_room_peers,
+                        peer_str, HavenMessage::SyncResponse {
                             server_id,
                             ops_json,
                         },
@@ -8967,13 +7241,13 @@ async fn handle_incoming_request(
 
                 // Proactively establish Olm session with the new member so
                 // encrypted channel sync batches can be sent immediately.
-                if !olm.has_session(&peer_str) && !key_request_in_flight.contains(&peer_str) {
+                if !olm.has_session(&peer_str) && !key_request_in_flight.contains(peer_str) {
                     hollow_log!("[HOLLOW-SWARM] No Olm session with new member {peer_str}, sending KeyRequest");
                     send_message_to_peer(
-                        swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                        &peer, &peer_str, HavenMessage::KeyRequest,
+                        ws_cmd_tx, ws_room_peers,
+                        peer_str, HavenMessage::KeyRequest,
                     );
-                    key_request_in_flight.insert(peer_str.clone());
+                    key_request_in_flight.insert(peer_str.to_string());
                 }
             } else {
                 hollow_log!("[HOLLOW-CRDT] ServerJoinRequest for unknown server {server_id}");
@@ -8982,7 +7256,7 @@ async fn handle_incoming_request(
 
         HavenMessage::ServerDeleteBroadcast { server_id } => {
             hollow_log!("[HOLLOW-CRDT] ServerDeleteBroadcast from {peer_str} for server {server_id}");
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             // SECURITY: Verify sender is the server Owner before deleting.
             if let Some(state) = server_states.get(&server_id) {
@@ -9020,13 +7294,13 @@ async fn handle_incoming_request(
 
         HavenMessage::MemberKickBroadcast { server_id } => {
             hollow_log!("[HOLLOW-CRDT] MemberKickBroadcast from {peer_str} — kicked from server {server_id}");
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             // SECURITY: Verify sender has KICK_MEMBERS permission and outranks us.
             if let Some(state) = server_states.get(&server_id) {
                 let sender_role = state.get_role(&peer_str);
                 let sender_perms = sender_role.default_permissions();
-                let local_peer = swarm.local_peer_id().to_string();
+                let local_peer = local_peer_str.to_string();
                 let our_role = state.get_role(&local_peer);
                 if (sender_perms & crate::crdt::operations::Permission::KICK_MEMBERS) == 0 {
                     hollow_log!("[HOLLOW-SECURITY] REJECTED MemberKickBroadcast from {peer_str} — no KICK_MEMBERS permission (role: {:?})", sender_role);
@@ -9064,7 +7338,7 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::ChannelSyncRequest { server_id, channel_id, since_timestamp, sender_timestamps } => {
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             // Room gating: only respond for servers we're a member of.
             if !server_states.contains_key(&server_id) {
@@ -9169,7 +7443,7 @@ async fn handle_incoming_request(
                         // Don't use MLS if peer hasn't joined yet (they sent plaintext request
                         // before receiving Welcome) — they can't decrypt the MLS response.
                         let mls_ok = mls.as_ref().is_some_and(|m| {
-                            m.has_group(&server_id) && m.group_members(&server_id).contains(&peer_str)
+                            m.has_group(&server_id) && m.group_members(&server_id).contains(&peer_str.to_string())
                         });
                         if mls_ok {
                             if let Err(e) = send_mls_to_peer(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &peer_str, &envelope, bundle_keypair) {
@@ -9178,10 +7452,10 @@ async fn handle_incoming_request(
                         } else {
                             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                             let _ok = send_encrypted_message(
-                                swarm, olm, crypto_store,
-                                pending_requests, outbound_message_text,
-                                &peer, &peer_str, &envelope_json, event_tx,
-                            ws_cmd_tx, ws_room_peers, connected_peers,
+                                olm, crypto_store,
+                                
+                                peer_str, &envelope_json, event_tx,
+                            ws_cmd_tx, ws_room_peers,
                             ).await;
                         }
                     }
@@ -9192,7 +7466,7 @@ async fn handle_incoming_request(
         // -- Multi-peer fan-out sync probe handlers --
 
         HavenMessage::ChannelSyncProbe { server_id, channel_id, our_latest, msg_count: _probe_count } => {
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             // Room gating: only respond for servers we're a member of.
             if !server_states.contains_key(&server_id) {
@@ -9216,8 +7490,8 @@ async fn handle_incoming_request(
                     );
 
                     send_message_to_peer(
-                        swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                        &peer, &peer_str, HavenMessage::ChannelSyncProbeResponse {
+                        ws_cmd_tx, ws_room_peers,
+                        peer_str, HavenMessage::ChannelSyncProbeResponse {
                             server_id,
                             channel_id,
                             their_latest,
@@ -9229,7 +7503,7 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::ChannelSyncProbeResponse { server_id, channel_id, their_latest, msg_count } => {
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             // Compare: if the peer has newer messages than us, fire a full sync request.
             let data_dir = crate::identity::data_dir().unwrap_or_default();
@@ -9257,8 +7531,8 @@ async fn handle_incoming_request(
                             "[HOLLOW-SYNC] Probe response: {channel_id} needs sync (ts: ours={our_latest} peer={their_latest}, count: ours={our_msg_count} peer={msg_count}). Requesting from {peer_str}"
                         );
                         send_message_to_peer(
-                            swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                            &peer, &peer_str, HavenMessage::ChannelSyncRequest {
+                            ws_cmd_tx, ws_room_peers,
+                            peer_str, HavenMessage::ChannelSyncRequest {
                                 server_id: server_id.clone(),
                                 channel_id: channel_id.clone(),
                                 since_timestamp: our_latest,
@@ -9281,7 +7555,7 @@ async fn handle_incoming_request(
 
         HavenMessage::DmSyncRequest { since_timestamp } => {
             hollow_log!("[HOLLOW-SYNC] DmSyncRequest from {peer_str} since {since_timestamp}");
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             let data_dir = crate::identity::data_dir().unwrap_or_default();
             let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
@@ -9344,10 +7618,10 @@ async fn handle_incoming_request(
                             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
                             send_encrypted_message(
-                                swarm, olm, crypto_store,
-                                pending_requests, outbound_message_text,
-                                &peer, &peer_str, &envelope_json, event_tx,
-                            ws_cmd_tx, ws_room_peers, connected_peers,
+                                olm, crypto_store,
+                                
+                                peer_str, &envelope_json, event_tx,
+                            ws_cmd_tx, ws_room_peers,
                             ).await;
                         }
                     }
@@ -9357,23 +7631,17 @@ async fn handle_incoming_request(
 
         HavenMessage::PeerDisconnecting => {
             hollow_log!("[HOLLOW-SWARM] Peer {peer_str} is disconnecting gracefully");
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
-            // Graceful disconnect bypasses debounce — emit immediately.
-            // Remove from connected_peers so the subsequent ConnectionClosed + debounce
-            // won't emit a second PeerDisconnected.
-            connected_peers.remove(&peer);
-            pending_disconnects.remove(&peer);
-            discovered_peers.remove(&peer);
-            disconnected_peers.insert(peer, std::time::Instant::now());
+            
+            // Peer is gracefully disconnecting — emit PeerDisconnected.
             let _ = event_tx.send(NetworkEvent::PeerDisconnected {
-                peer_id: peer_str,
+                peer_id: peer_str.to_string(),
             }).await;
         }
 
         // -- MLS message handlers --
 
         HavenMessage::MlsChannelMessage { server_id, body } => {
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             if let Some(mls_mgr) = mls {
                 if !mls_mgr.has_group(&server_id) {
@@ -9384,21 +7652,20 @@ async fn handle_incoming_request(
                     // Only do this once per server to avoid spamming the owner.
                     if !mls_bootstrap_requested.contains(&server_id) {
                         if let Some(state) = server_states.get(&server_id) {
-                            let local_peer = swarm.local_peer_id().to_string();
+                            let local_peer = local_peer_str.to_string();
                             for member in state.members_list() {
                                 if member.peer_id == local_peer { continue; }
                                 let is_owner = state.roles.get(&member.peer_id)
                                     .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
                                     .unwrap_or(false);
                                 if is_owner {
-                                    if let Ok(owner_pid) = member.peer_id.parse::<PeerId>() {
-                                        if peer_is_reachable(ws_room_peers, connected_peers, &owner_pid, &member.peer_id) {
+                                        if peer_is_reachable(ws_room_peers, &member.peer_id) {
                                             hollow_log!("[HOLLOW-MLS] Sending KeyPackage to owner for MLS bootstrap (triggered by message)");
                                             if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
                                                 let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                                                 send_message_to_peer(
-                                                    swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                                    &owner_pid, &member.peer_id, HavenMessage::MlsKeyPackage {
+                                                    ws_cmd_tx, ws_room_peers,
+                                                    &member.peer_id, HavenMessage::MlsKeyPackage {
                                                         server_id: server_id.clone(),
                                                         key_package: kp_b64,
                                                     },
@@ -9406,7 +7673,6 @@ async fn handle_incoming_request(
                                                 mls_bootstrap_requested.insert(server_id.clone());
                                             }
                                         }
-                                    }
                                     break;
                                 }
                             }
@@ -9438,7 +7704,7 @@ async fn handle_incoming_request(
 
                         // Target filtering: if this envelope has a target and it's not us, discard.
                         // The ratchet already advanced by decrypting — that's the point.
-                        let local_peer = swarm.local_peer_id().to_string();
+                        let local_peer = local_peer_str.to_string();
                         if let Some(target) = envelope.target() {
                             if target != local_peer {
                                 return; // Not for us — discard silently.
@@ -9556,7 +7822,7 @@ async fn handle_incoming_request(
                                         channel_id: c_id,
                                         message_id: mid,
                                         emoji,
-                                        reactor: peer_str,
+                                        reactor: peer_str.to_string(),
                                         added_at: ts,
                                     }).await;
                                 }
@@ -9578,7 +7844,7 @@ async fn handle_incoming_request(
                                         channel_id: c_id,
                                         message_id: mid,
                                         emoji,
-                                        reactor: peer_str,
+                                        reactor: peer_str.to_string(),
                                         removed_at: ts,
                                     }).await;
                                 }
@@ -10252,19 +8518,17 @@ async fn handle_incoming_request(
                                                 let _ = send_mls_to_peer(mls_mgr_ref, ws_cmd_tx, &sid, &sender_peer_id, &resp, bundle_keypair);
                                             }
                                             // Stream shard bytes.
-                                            if let Ok(pid) = sender_peer_id.parse::<PeerId>() {
                                                 let shard_temp_dir = crate::node::file_transfer::files_dir();
                                                 let shard_safe = &cid[..16.min(cid.len())];
                                                 let shard_temp = shard_temp_dir.join(format!(".stream_shard_{}_{}.tmp", shard_safe, si));
                                                 if let Ok(()) = std::fs::write(&shard_temp, &shard_data) {
-                                                    let shard_kind = super::stream_transfer::StreamKind::Shard { shard_index: si };
+                                                    let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index: si };
                                                     stream_to_peer(
-                                                        swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                                        &pid, &sender_peer_id, &shard_kind,
+                                                        ws_cmd_tx, ws_room_peers,
+                                                        &sender_peer_id, &shard_kind,
                                                         &cid, &shard_temp, shard_data.len() as u64,
                                                     ).await;
                                                 }
-                                            }
                                         }
                                         Err(_) => {
                                             let resp = MessageEnvelope::ShardResponse {
@@ -10390,20 +8654,19 @@ async fn handle_incoming_request(
                             persist_mls_state(mls_mgr, bundle_keypair);
 
                             if let Some(state) = server_states.get(&server_id) {
-                                let local_peer = swarm.local_peer_id().to_string();
+                                let local_peer = local_peer_str.to_string();
                                 for member in state.members_list() {
                                     if member.peer_id == local_peer { continue; }
                                     let is_owner = state.roles.get(&member.peer_id)
                                         .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
                                         .unwrap_or(false);
                                     if is_owner {
-                                        if let Ok(owner_pid) = member.peer_id.parse::<PeerId>() {
-                                            if peer_is_reachable(ws_room_peers, connected_peers, &owner_pid, &member.peer_id) {
+                                            if peer_is_reachable(ws_room_peers, &member.peer_id) {
                                                 if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
                                                     let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                                                     send_message_to_peer(
-                                                        swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                                        &owner_pid, &member.peer_id, HavenMessage::MlsKeyPackage {
+                                                        ws_cmd_tx, ws_room_peers,
+                                                        &member.peer_id, HavenMessage::MlsKeyPackage {
                                                             server_id: server_id.clone(),
                                                             key_package: kp_b64,
                                                         },
@@ -10412,7 +8675,6 @@ async fn handle_incoming_request(
                                                     hollow_log!("[HOLLOW-MLS] Sent recovery KeyPackage to owner for {server_id}");
                                                 }
                                             }
-                                        }
                                         break;
                                     }
                                 }
@@ -10425,10 +8687,10 @@ async fn handle_incoming_request(
 
         HavenMessage::MlsKeyPackage { server_id, key_package } => {
             hollow_log!("[HOLLOW-MLS] MlsKeyPackage from {peer_str} for server {server_id}");
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             // Only the server owner processes KeyPackages (single-committer model).
-            let local_peer = swarm.local_peer_id().to_string();
+            let local_peer = local_peer_str.to_string();
             let is_owner = server_states.get(&server_id)
                 .map(|s| {
                     s.roles.get(&local_peer)
@@ -10453,7 +8715,7 @@ async fn handle_incoming_request(
                 }
 
                 // Duplicate check: skip if peer is already in the MLS group.
-                let already_member = mls_mgr.group_members(&server_id).contains(&peer_str);
+                let already_member = mls_mgr.group_members(&server_id).contains(&peer_str.to_string());
                 if already_member {
                     hollow_log!("[HOLLOW-MLS] Peer {peer_str} already in MLS group for {server_id}, skipping");
                     return;
@@ -10468,14 +8730,14 @@ async fn handle_incoming_request(
                 pending_mls_key_packages
                     .entry(server_id.clone())
                     .or_default()
-                    .push((peer_str.clone(), kp_bytes));
+                    .push((peer_str.to_string(), kp_bytes));
                 hollow_log!("[HOLLOW-MLS] Queued KeyPackage from {peer_str} for batch add to {server_id}");
             }
         }
 
         HavenMessage::MlsWelcome { server_id, welcome } => {
             hollow_log!("[HOLLOW-MLS] MlsWelcome from {peer_str} for server {server_id}");
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             if let Some(mls_mgr) = mls {
                 let welcome_bytes = match base64::engine::general_purpose::STANDARD.decode(&welcome) {
@@ -10530,7 +8792,7 @@ async fn handle_incoming_request(
 
         HavenMessage::MlsCommit { server_id, commit } => {
             hollow_log!("[HOLLOW-MLS] MlsCommit from {peer_str} for server {server_id}");
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             if let Some(mls_mgr) = mls {
                 let commit_bytes = match base64::engine::general_purpose::STANDARD.decode(&commit) {
@@ -10554,20 +8816,19 @@ async fn handle_incoming_request(
                             persist_mls_state(mls_mgr, bundle_keypair);
 
                             if let Some(state) = server_states.get(&server_id) {
-                                let local_peer = swarm.local_peer_id().to_string();
+                                let local_peer = local_peer_str.to_string();
                                 for member in state.members_list() {
                                     if member.peer_id == local_peer { continue; }
                                     let is_owner = state.roles.get(&member.peer_id)
                                         .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
                                         .unwrap_or(false);
                                     if is_owner {
-                                        if let Ok(owner_pid) = member.peer_id.parse::<PeerId>() {
-                                            if peer_is_reachable(ws_room_peers, connected_peers, &owner_pid, &member.peer_id) {
+                                            if peer_is_reachable(ws_room_peers, &member.peer_id) {
                                                 if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
                                                     let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                                                     send_message_to_peer(
-                                                        swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                                        &owner_pid, &member.peer_id, HavenMessage::MlsKeyPackage {
+                                                        ws_cmd_tx, ws_room_peers,
+                                                        &member.peer_id, HavenMessage::MlsKeyPackage {
                                                             server_id: server_id.clone(),
                                                             key_package: kp_b64,
                                                         },
@@ -10575,7 +8836,6 @@ async fn handle_incoming_request(
                                                     mls_bootstrap_requested.insert(server_id.clone());
                                                 }
                                             }
-                                        }
                                         break;
                                     }
                                 }
@@ -10588,7 +8848,7 @@ async fn handle_incoming_request(
 
         HavenMessage::MlsKeyPackageRequest { server_id } => {
             hollow_log!("[HOLLOW-MLS] MlsKeyPackageRequest from {peer_str} for server {server_id}");
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             // Respond with our KeyPackage if we have an MLS identity.
             // Skip if we already have the MLS group (reconnecting peer, not a new joiner).
@@ -10601,8 +8861,8 @@ async fn handle_incoming_request(
                     Ok(kp_bytes) => {
                         let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                         send_message_to_peer(
-                            swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                            &peer, &peer_str, HavenMessage::MlsKeyPackage {
+                            ws_cmd_tx, ws_room_peers,
+                            peer_str, HavenMessage::MlsKeyPackage {
                                 server_id,
                                 key_package: kp_b64,
                             },
@@ -10616,7 +8876,7 @@ async fn handle_incoming_request(
         // -- Profile sync (Phase 3.5) --
 
         HavenMessage::FriendRequest { requested_at } => {
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
             hollow_log!("[HOLLOW-FRIENDS] Friend request from {peer_str}");
 
             // Save as pending incoming.
@@ -10632,18 +8892,8 @@ async fn handle_incoming_request(
             }
 
             // Register DM room code so we can rediscover this peer.
-            let local_peer = swarm.local_peer_id().to_string();
+            let local_peer = local_peer_str.to_string();
             let room = dm_room_code(&local_peer, &peer_str);
-            let addrs: Vec<String> = known_addresses.iter()
-                .filter(|a| is_registerable_address(a))
-                .cloned()
-                .collect();
-            if !addrs.is_empty() {
-                let _ = sig_cmd_tx.send(SignalingCmd::Register {
-                    room_code: room.clone(),
-                    addresses: addrs,
-                }).await;
-            }
             let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
                 room_code: room.clone(),
             }).await;
@@ -10652,12 +8902,12 @@ async fn handle_incoming_request(
             }).await;
 
             let _ = event_tx.send(NetworkEvent::FriendRequestReceived {
-                peer_id: peer_str,
+                peer_id: peer_str.to_string(),
             }).await;
         }
 
         HavenMessage::FriendAccept => {
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
             hollow_log!("[HOLLOW-FRIENDS] Friend accepted by {peer_str}");
 
             // Update our outgoing request to accepted.
@@ -10677,18 +8927,8 @@ async fn handle_incoming_request(
             }
 
             // Register DM room code with signaling for internet discovery.
-            let local_peer = swarm.local_peer_id().to_string();
+            let local_peer = local_peer_str.to_string();
             let room = dm_room_code(&local_peer, &peer_str);
-            let addrs: Vec<String> = known_addresses.iter()
-                .filter(|a| is_registerable_address(a))
-                .cloned()
-                .collect();
-            if !addrs.is_empty() {
-                let _ = sig_cmd_tx.send(SignalingCmd::Register {
-                    room_code: room.clone(),
-                    addresses: addrs,
-                }).await;
-            }
             let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
                 room_code: room.clone(),
             }).await;
@@ -10697,12 +8937,12 @@ async fn handle_incoming_request(
             }).await;
 
             let _ = event_tx.send(NetworkEvent::FriendRequestAccepted {
-                peer_id: peer_str,
+                peer_id: peer_str.to_string(),
             }).await;
         }
 
         HavenMessage::FriendReject => {
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
             hollow_log!("[HOLLOW-FRIENDS] Friend rejected by {peer_str}");
 
             // Remove our outgoing request.
@@ -10718,12 +8958,12 @@ async fn handle_incoming_request(
             }
 
             let _ = event_tx.send(NetworkEvent::FriendRequestRejected {
-                peer_id: peer_str,
+                peer_id: peer_str.to_string(),
             }).await;
         }
 
         HavenMessage::FriendRemove => {
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
             hollow_log!("[HOLLOW-FRIENDS] Friend removed by {peer_str}");
 
             {
@@ -10738,22 +8978,22 @@ async fn handle_incoming_request(
             }
 
             let _ = event_tx.send(NetworkEvent::FriendRemoved {
-                peer_id: peer_str,
+                peer_id: peer_str.to_string(),
             }).await;
         }
 
         HavenMessage::TypingIndicator { server_id, channel_id } => {
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             let _ = event_tx.send(NetworkEvent::TypingStarted {
-                peer_id: peer_str,
+                peer_id: peer_str.to_string(),
                 server_id,
                 channel_id,
             }).await;
         }
 
         HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64 } => {
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
 
             // SECURITY: Truncate profile fields to prevent oversized strings from malicious peers.
             // Slightly above UI limits (32/48/128) as a safety backstop.
@@ -10808,13 +9048,13 @@ async fn handle_incoming_request(
 
             // Notify Dart to refresh UI.
             let _ = event_tx.send(NetworkEvent::ProfileUpdated {
-                peer_id: peer_str,
+                peer_id: peer_str.to_string(),
             }).await;
         }
 
         // File request — respond with file chunks via Olm.
         HavenMessage::FileRequest { file_id, chunks } => {
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
+            
             use crate::node::file_transfer;
             hollow_log!("[HOLLOW-FILE] FileRequest from {peer_str} for {file_id}");
 
@@ -10862,31 +9102,29 @@ async fn handle_incoming_request(
                                             target: None,
                                         };
                                         // Send FileHeader via MLS (targeted) if possible, Olm fallback.
-                                        if let Ok(pid) = peer_str.parse::<PeerId>() {
                                             let ctx_sid = file_meta.context_id.split(':').next().unwrap_or("").to_string();
                                             let mls_ok = mls.as_ref().is_some_and(|m| {
-                                                m.has_group(&ctx_sid) && m.group_members(&ctx_sid).contains(&peer_str)
+                                                m.has_group(&ctx_sid) && m.group_members(&ctx_sid).contains(&peer_str.to_string())
                                             });
                                             if mls_ok {
                                                 let _ = send_mls_to_peer(mls.as_mut().unwrap(), ws_cmd_tx, &ctx_sid, &peer_str, &header, bundle_keypair);
                                             } else if olm.has_session(&peer_str) {
                                                 let header_json = serde_json::to_string(&header).unwrap_or_default();
                                                 send_encrypted_message(
-                                                    swarm, olm, crypto_store,
-                                                    pending_requests, outbound_message_text,
-                                                    &pid, &peer_str, &header_json, event_tx,
-                                                    ws_cmd_tx, ws_room_peers, connected_peers,
+                                                    olm, crypto_store,
+                                                    
+                                                    &peer_str, &header_json, event_tx,
+                                                    ws_cmd_tx, ws_room_peers,
                                                 ).await;
                                             }
 
                                             // Stream encrypted file bytes via WS binary or libp2p.
                                             stream_to_peer(
-                                                swarm, ws_cmd_tx, ws_room_peers, connected_peers,
-                                                &pid, &peer_str, &super::stream_transfer::StreamKind::File,
+                                                ws_cmd_tx, ws_room_peers,
+                                                &peer_str, &super::ws_stream_transfer::StreamKind::File,
                                                 &file_id, &temp_path, enc.ciphertext.len() as u64,
                                             ).await;
                                             hollow_log!("[HOLLOW-FILE] Streamed file {} to {peer_str}", file_id);
-                                        }
                                     }
                                 }
                             }
@@ -10896,100 +9134,7 @@ async fn handle_incoming_request(
             }
         }
 
-        // KeyBundle and Ack shouldn't arrive as requests, but handle gracefully.
-        _ => {
-            if let Some(ch) = channel.take() { let _ = swarm.behaviour_mut().messaging.send_response(ch, HavenMessage::Ack); }
-        }
-    }
-}
-
-/// Handle an incoming response to one of our outbound requests.
-async fn handle_incoming_response(
-    swarm: &mut libp2p::Swarm<HavenBehaviour>,
-    olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    pending_requests: &mut HashMap<request_response::OutboundRequestId, String>,
-    outbound_message_text: &mut HashMap<request_response::OutboundRequestId, (String, String)>,
-    pending_messages: &mut HashMap<String, Vec<String>>,
-    key_request_in_flight: &mut std::collections::HashSet<String>,
-    pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
-    bundle_keypair: &identity::Keypair,
-    request_id: request_response::OutboundRequestId,
-    response: HavenMessage,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    connected_peers: &std::collections::HashSet<PeerId>,
-) {
-    let Some(to_peer) = pending_requests.remove(&request_id) else {
-        return;
-    };
-
-    match response {
-        HavenMessage::KeyBundle { identity_key, one_time_key } => {
-            // We got the peer's key bundle — create outbound session.
-            key_request_in_flight.remove(&to_peer);
-
-            // Guard: don't overwrite an existing session (e.g. inbound session
-            // from peer's PreKey that arrived while our KeyRequest was in flight).
-            if olm.has_session(&to_peer) {
-                hollow_log!("[HOLLOW-SWARM] Session already exists for {to_peer}, skipping KeyBundle session creation");
-            } else {
-                if let Err(e) = olm.create_outbound_session(&to_peer, &identity_key, &one_time_key) {
-                    let _ = event_tx
-                        .send(NetworkEvent::Error {
-                            message: format!("Failed to create outbound session with {to_peer}: {e}"),
-                        })
-                        .await;
-                    return;
-                }
-
-                // Persist crypto state.
-                persist_crypto_state(olm, crypto_store, &to_peer);
-
-                let _ = event_tx
-                    .send(NetworkEvent::SessionEstablished {
-                        peer_id: to_peer.clone(),
-                    })
-                    .await;
-            }
-
-            // Always flush pending messages + sync — session is good either way.
-            let peer_id: PeerId = match to_peer.parse() {
-                Ok(p) => p,
-                Err(_) => return,
-            };
-            if let Some(queued) = pending_messages.remove(&to_peer) {
-                for text in queued {
-                    send_encrypted_message(
-                        swarm, olm, crypto_store, pending_requests,
-                        outbound_message_text, &peer_id, &to_peer, &text, event_tx,
-                    ws_cmd_tx, ws_room_peers, connected_peers,
-                    ).await;
-                }
-            }
-
-            // Retry any sync batches that failed due to encryption before re-key.
-            flush_pending_sync_requests(
-                pending_sync_requests, &to_peer, &peer_id,
-                swarm, olm, crypto_store,
-                pending_requests, outbound_message_text,
-                bundle_keypair, event_tx,
-                ws_cmd_tx, ws_room_peers, connected_peers,
-            ).await;
-        }
-
-        HavenMessage::Ack => {
-            // Delivery confirmation for an encrypted message.
-            outbound_message_text.remove(&request_id);
-            let _ = event_tx
-                .send(NetworkEvent::MessageSent { to_peer })
-                .await;
-        }
-
-        _ => {
-            // Unexpected response type — ignore.
-        }
+        _ => {}
     }
 }
 
@@ -10999,17 +9144,12 @@ async fn handle_incoming_response(
 async fn flush_pending_sync_requests(
     pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
     peer_str: &str,
-    peer: &PeerId,
-    swarm: &mut libp2p::Swarm<HavenBehaviour>,
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
-    pending_requests: &mut HashMap<request_response::OutboundRequestId, String>,
-    outbound_message_text: &mut HashMap<request_response::OutboundRequestId, (String, String)>,
-    bundle_keypair: &identity::Keypair,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    connected_peers: &std::collections::HashSet<PeerId>,
 ) {
     let Some(entries) = pending_sync_requests.remove(peer_str) else {
         return;
@@ -11109,10 +9249,9 @@ async fn flush_pending_sync_requests(
 
                 let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                 let ok = send_encrypted_message(
-                    swarm, olm, crypto_store,
-                    pending_requests, outbound_message_text,
-                    peer, peer_str, &envelope_json, event_tx,
-                    ws_cmd_tx, ws_room_peers, connected_peers,
+                    olm, crypto_store,
+                    peer_str, &envelope_json, event_tx,
+                    ws_cmd_tx, ws_room_peers,
                 ).await;
 
                 if !ok {

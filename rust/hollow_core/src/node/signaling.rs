@@ -1,18 +1,10 @@
-use libp2p::identity;
+use crate::identity::native_identity::NativeKeypair;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
 const SIGNALING_URL: &str = "http://141.227.186.209:8080";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(120); // 2 minutes (must be < stale threshold of 3 min)
-
-fn effective_signaling_url(proxy_enabled: bool) -> &'static str {
-    if proxy_enabled {
-        super::tunnel::PROXY_SIGNALING_URL
-    } else {
-        SIGNALING_URL
-    }
-}
 
 // -- Commands & Events --
 
@@ -84,30 +76,28 @@ struct BootstrapPeerWire {
 /// Spawn the signaling background task.
 /// Returns a command sender and event receiver.
 pub(crate) fn spawn_signaling_task(
-    keypair: identity::Keypair,
+    keypair: NativeKeypair,
     peer_id_str: String,
-    proxy_enabled: bool,
 ) -> (mpsc::Sender<SignalingCmd>, mpsc::Receiver<SignalingEvent>) {
     let (cmd_tx, cmd_rx) = mpsc::channel::<SignalingCmd>(32);
     let (event_tx, event_rx) = mpsc::channel::<SignalingEvent>(32);
 
-    tokio::spawn(signaling_loop(keypair, peer_id_str, proxy_enabled, cmd_rx, event_tx));
+    tokio::spawn(signaling_loop(keypair, peer_id_str, cmd_rx, event_tx));
 
     (cmd_tx, event_rx)
 }
 
 async fn signaling_loop(
-    keypair: identity::Keypair,
+    keypair: NativeKeypair,
     peer_id_str: String,
-    proxy_enabled: bool,
     mut cmd_rx: mpsc::Receiver<SignalingCmd>,
     event_tx: mpsc::Sender<SignalingEvent>,
 ) {
     let client = reqwest::Client::new();
-    let signaling_url = effective_signaling_url(proxy_enabled);
+    let signaling_url = SIGNALING_URL;
 
     // Encode the public key as base64 protobuf (36 bytes for Ed25519).
-    let pub_key_proto = keypair.public().encode_protobuf();
+    let pub_key_proto = keypair.public_key_protobuf();
     let pub_key_b64 = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         &pub_key_proto,
@@ -200,7 +190,7 @@ async fn signaling_loop(
 async fn do_register(
     client: &reqwest::Client,
     signaling_url: &str,
-    keypair: &identity::Keypair,
+    keypair: &NativeKeypair,
     peer_id_str: &str,
     pub_key_b64: &str,
     room_code: &str,
@@ -217,9 +207,7 @@ async fn do_register(
 
     // Sign: "hollow-register:{room_code}:{peer_id}:{addresses_joined}:{timestamp}"
     let message = format!("hollow-register:{room_code}:{peer_id_str}:{addrs_joined}:{timestamp}");
-    let signature = keypair
-        .sign(message.as_bytes())
-        .map_err(|e| format!("Signing failed: {e}"))?;
+    let signature = keypair.sign(message.as_bytes());
     let sig_b64 = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         &signature,
@@ -254,7 +242,7 @@ async fn do_register(
 async fn do_unregister(
     client: &reqwest::Client,
     signaling_url: &str,
-    keypair: &identity::Keypair,
+    keypair: &NativeKeypair,
     peer_id_str: &str,
     pub_key_b64: &str,
     room_code: &str,
@@ -266,9 +254,7 @@ async fn do_unregister(
 
     // Sign: "hollow-unregister:{room_code}:{peer_id}:{timestamp}"
     let message = format!("hollow-unregister:{room_code}:{peer_id_str}:{timestamp}");
-    let signature = keypair
-        .sign(message.as_bytes())
-        .map_err(|e| format!("Signing failed: {e}"))?;
+    let signature = keypair.sign(message.as_bytes());
     let sig_b64 = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         &signature,

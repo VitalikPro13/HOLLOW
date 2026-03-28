@@ -6,10 +6,10 @@ Hollow is a fully distributed, encrypted Discord alternative. No central servers
 ## Tech Stack
 - **UI:** Flutter (Dart) — all platforms (Windows, macOS, Linux, Android, iOS, Web)
 - **Backend:** Rust via `flutter_rust_bridge` v2.11.1 FFI
-- **Networking:** WebSocket relay (primary transport) + libp2p 0.56 (legacy, being phased out)
+- **Networking:** WebSocket relay (sole transport) — libp2p fully removed
 - **E2EE:** vodozemac (Olm/Double Ratchet) for 1:1, OpenMLS 0.8 for server channels
 - **Local DB:** SQLCipher (encrypted SQLite)
-- **Identity:** Ed25519 keypairs via BIP-39 mnemonic
+- **Identity:** Ed25519 keypairs via BIP-39 mnemonic (ed25519-dalek, NativeKeypair)
 - **Org ID:** com.anonlisten
 - **Project name:** hollow
 
@@ -32,11 +32,11 @@ HOLLOW/
 ├── rust/hollow_core/      # Rust library crate (networking, crypto, storage)
 │   └── src/
 │       ├── api/          # FFI layer (flutter_rust_bridge scans these)
-│       ├── node/         # libp2p swarm + signaling client
-│       ├── crypto/       # Olm encryption + persistence
-│       ├── identity/     # Ed25519 keypair management
+│       ├── node/         # WS relay client, signaling, event loop (swarm.rs)
+│       ├── crypto/       # Olm encryption + MLS + persistence
+│       ├── identity/     # Ed25519 keypair management (native_identity.rs, keys.rs)
 │       └── storage/      # SQLCipher message store
-├── relay/                # Combined relay + signaling + WebSocket room router (standalone binary, deployed on OVH VPS)
+├── relay/                # Signaling HTTP + WebSocket room router (standalone binary, deployed on OVH VPS)
 ├── rust_builder/         # flutter_rust_bridge build system (cargokit)
 ├── HOLLOW_PLAN.md         # Full architecture & design document (~1500 lines)
 └── CLAUDE.md             # This file
@@ -63,27 +63,10 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 ```
 
 ## Current Phase
-**Phase 5: WebSocket Relay Migration — COMPLETE.** All messages + file streaming now route through WS.
+**Phase 7: libp2p Full Removal — COMPLETE (Mar 27-28, 2026).** libp2p fully removed. WSS relay is sole transport. ed25519-dalek replaces libp2p identity. Relay server simplified (signaling + WS only). 184 tests pass.
 
-**Phase 6: Pure MLS for Servers — COMPLETE (Mar 26-27, 2026).** All server messages via MLS. DHT prekey removed. Vault shards via MLS. UI fixes done.
-
-**Phase 5 — WebSocket Relay (Mar 25-26, 2026) — DONE:**
-All messages and file/shard streaming now route through WS relay first with libp2p fallback. Sub-phases: (1) relay deployed, (2) client connected, (3) presence working, (4) all messages WS-first, (5) file/shard binary streaming via WS.
-- `send_message_to_peer()` / `send_encrypted_message()` — WS-first routing
-- `stream_to_peer()` — WS binary first, libp2p fallback for file/shard streaming
-- `ws_stream_transfer.rs` — 256KB chunked binary transfers over WS
-- Relay `0x02` BinaryDirect frame type for target-specific binary forwarding
-- `synced_peers` prevents duplicate sync race between WS and libp2p
-- 183 tests pass. Relay needs redeployment for BinaryDirect.
-
-**Phase 6 — Pure MLS for Servers (Mar 26-27, 2026) — COMPLETE:**
-ALL server messages now route through MLS encryption via `SendToRoom` broadcast. Steps: (1-3) envelope variants + helpers + dispatcher, (4-7) migrate all send sites + SendToRoom optimization, (8) DHT prekey → WS KeyRequest, (9) cleanup.
-- WS keepalive: 30s ping in ws_client.rs. Sync dedup: `channel_sync_sent` 5s cooldown eliminates sync spam.
-- Bugs fixed: MLS batch dedup, WS room join, sync loop, FileHeader PendingFileStream, group_members check for MLS responses.
-- All vault/shard handlers dispatched via MLS. olm.has_session() gates removed from all vault paths.
-- UI: "Encrypting..." removed, download progress fixed, vault double-press fixed, synced file P2P request.
-- 183 tests pass. Tested between 2 machines + 6 school computers — messages, CRDT, files, vault shards all working.
-- **Next:** libp2p full removal, shard health monitor, HOLLOW_PLAN.md update.
+**Phase 5: WebSocket Relay — COMPLETE (Mar 25-26).** All messages + file streaming via WSS.
+**Phase 6: Pure MLS for Servers — COMPLETE (Mar 26-27).** Servers = MLS, DMs = Olm, transport = WS.
 
 **Phase 4: Shared Vault — COMPLETE.** Phases 1-3.75 all COMPLETE.
 
@@ -155,7 +138,7 @@ All UI uses custom Hollow widgets — no Material defaults.
 - **StatusDot:** Optional `pulse` for breathing glow (3s cycle).
 
 ## Key Architecture Notes
-- **Peer state tracking in swarm.rs:** `connected_peers`, `expected_peers`, `disconnected_peers` HashSets. `ConnectionEstablished` triggers DHT prekey fetch. Ping: 5s/5s. Rebootstrap: 60s.
+- **Peer state tracking in swarm.rs:** `ws_room_peers` (room → peer set), `synced_peers` (HashSet<String>). WS PeerJoined triggers key exchange + sync. 30s keepalive ping in ws_client.rs.
 - **Event streaming:** Rust→Dart via `StreamSink` (flutter_rust_bridge). `watch_network_events()` in `api/network.rs`, `EventStreamNotifier` in `event_provider.dart`
 - **Navigation shell:** Two layout modes (persisted via `layoutModeProvider`):
   - **Dock mode (default):** FriendsBar (top) | ChannelSidebar + ChatPane + MemberPanel | BottomBar (bottom). Split view support. Home dashboard.
@@ -166,7 +149,7 @@ All UI uses custom Hollow widgets — no Material defaults.
 - **Icons:** `lucide_icons: ^0.257.0`. All `LucideIcons.*` (camelCase). v0.257.0 uses `alertTriangle`/`alertCircle`. No `cloudCheck` — uses `cloud`.
 - `hollow_log!` macro logs to stderr + `hollow_debug.log` (works in release builds, rotates at 10MB)
 - Relay: OVH VPS 141.227.186.209, Nginx TLS on 443 → WS 127.0.0.1:9001. Domain: relay.anonlisten.com
-- Connection priority: LAN (mDNS) → Hole punch (DCUtR) → QUIC relay → TCP relay → WSS relay
+- **Transport:** Single persistent WSS connection to relay. No P2P fallback.
 
 ## Coding Conventions
 - Dart: follow standard `flutter_lints` / `analysis_options.yaml`

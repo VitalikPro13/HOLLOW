@@ -2,11 +2,11 @@ use std::fs;
 use std::path::PathBuf;
 
 use bip39::Mnemonic;
-use libp2p::identity;
+use super::native_identity::NativeKeypair;
 
 /// The result of identity generation/loading.
 pub(crate) struct IdentityData {
-    pub keypair: identity::Keypair,
+    pub keypair: NativeKeypair,
     pub peer_id: String,
     pub mnemonic: Option<String>,
 }
@@ -39,8 +39,8 @@ pub(crate) fn generate_new_identity() -> Result<IdentityData, String> {
         .map_err(|e| format!("Mnemonic generation failed: {e}"))?;
     let mnemonic_phrase = mnemonic.to_string();
 
-    let keypair = keypair_from_mnemonic(&mnemonic)?;
-    let peer_id = keypair.public().to_peer_id().to_string();
+    let keypair = NativeKeypair::from_mnemonic(&mnemonic)?;
+    let peer_id = keypair.peer_id();
 
     // Save the keypair to disk.
     save_keypair(&keypair)?;
@@ -58,8 +58,8 @@ pub(crate) fn restore_identity_from_mnemonic(phrase: &str) -> Result<IdentityDat
         .parse()
         .map_err(|e| format!("Invalid mnemonic: {e}"))?;
 
-    let keypair = keypair_from_mnemonic(&mnemonic)?;
-    let peer_id = keypair.public().to_peer_id().to_string();
+    let keypair = NativeKeypair::from_mnemonic(&mnemonic)?;
+    let peer_id = keypair.peer_id();
 
     // Save the restored keypair to disk.
     save_keypair(&keypair)?;
@@ -78,9 +78,9 @@ pub(crate) fn load_or_create_identity() -> Result<IdentityData, String> {
     if path.exists() {
         // Load existing keypair.
         let bytes = fs::read(&path).map_err(|e| format!("Failed to read identity file: {e}"))?;
-        let keypair = identity::Keypair::from_protobuf_encoding(&bytes)
+        let keypair = NativeKeypair::from_protobuf_encoding(&bytes)
             .map_err(|e| format!("Failed to decode identity: {e}"))?;
-        let peer_id = keypair.public().to_peer_id().to_string();
+        let peer_id = keypair.peer_id();
 
         Ok(IdentityData {
             keypair,
@@ -93,28 +93,10 @@ pub(crate) fn load_or_create_identity() -> Result<IdentityData, String> {
     }
 }
 
-/// Derive an Ed25519 keypair from a BIP-39 mnemonic.
-fn keypair_from_mnemonic(mnemonic: &Mnemonic) -> Result<identity::Keypair, String> {
-    // BIP-39 seed: PBKDF2-HMAC-SHA512, 2048 rounds, no passphrase.
-    let seed = mnemonic.to_seed("");
-
-    // Take first 32 bytes of the 64-byte seed as the Ed25519 secret key.
-    let mut secret_bytes = [0u8; 32];
-    secret_bytes.copy_from_slice(&seed[..32]);
-
-    // Build the libp2p Ed25519 keypair from the secret key bytes.
-    // SecretKey::try_from_bytes takes 32-byte secret, then we derive the full keypair.
-    let secret = identity::ed25519::SecretKey::try_from_bytes(&mut secret_bytes)
-        .map_err(|e| format!("Invalid Ed25519 secret key: {e}"))?;
-    let ed25519_keypair = identity::ed25519::Keypair::from(secret);
-    Ok(identity::Keypair::from(ed25519_keypair))
-}
-
-/// Save a keypair to disk in protobuf encoding.
-fn save_keypair(keypair: &identity::Keypair) -> Result<(), String> {
+/// Save a keypair to disk in protobuf encoding (backward compatible with libp2p).
+fn save_keypair(keypair: &NativeKeypair) -> Result<(), String> {
     let path = keypair_path()?;
-    let bytes = keypair
-        .to_protobuf_encoding()
+    let bytes = keypair.to_protobuf_encoding()
         .map_err(|e| format!("Failed to encode keypair: {e}"))?;
     fs::write(&path, bytes).map_err(|e| format!("Failed to write identity file: {e}"))?;
     Ok(())

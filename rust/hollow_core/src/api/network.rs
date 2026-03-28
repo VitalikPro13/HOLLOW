@@ -1,7 +1,6 @@
 use std::sync::{Mutex, OnceLock};
 
 use flutter_rust_bridge::frb;
-use libp2p::PeerId;
 use tokio::sync::mpsc;
 
 use crate::crypto::{CryptoStore, OlmManager};
@@ -114,12 +113,9 @@ pub enum NetworkEvent {
     RebalanceStarted { server_id: String, shards_to_move: u32 },
     RebalanceProgress { server_id: String, moved: u32, total: u32 },
     RebalanceCompleted { server_id: String },
-    // -- Connection status events (granular UI) --
-    ConnectionAttemptStarted { peer_id: String, method: String },
-    ConnectionAttemptFailed { peer_id: String, method: String, reason: String },
+    // -- Connection status events --
     KeyExchangeStarted { peer_id: String },
     KeyExchangeProgress { peer_id: String, stage: String },
-    RelayStatusChanged { status: String },
 }
 
 /// Holds all mutable state for the running node.
@@ -279,20 +275,11 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::MessageUnpinned { server_id, channel_id, message_id } => {
             hollow_log!("[HOLLOW] Message {message_id} unpinned in {server_id}/{channel_id}");
         }
-        node::NetworkEvent::ConnectionAttemptStarted { peer_id, method } => {
-            hollow_log!("[HOLLOW] Connection attempt: {peer_id} via {method}");
-        }
-        node::NetworkEvent::ConnectionAttemptFailed { peer_id, method, reason } => {
-            hollow_log!("[HOLLOW] Connection failed: {peer_id} via {method}: {reason}");
-        }
         node::NetworkEvent::KeyExchangeStarted { peer_id } => {
             hollow_log!("[HOLLOW] Key exchange started: {peer_id}");
         }
         node::NetworkEvent::KeyExchangeProgress { peer_id, stage } => {
             hollow_log!("[HOLLOW] Key exchange: {peer_id} stage={stage}");
-        }
-        node::NetworkEvent::RelayStatusChanged { status } => {
-            hollow_log!("[HOLLOW] Relay: {status}");
         }
         _ => {}
     }
@@ -481,20 +468,11 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::RebalanceCompleted { server_id } => {
             NetworkEvent::RebalanceCompleted { server_id }
         }
-        node::NetworkEvent::ConnectionAttemptStarted { peer_id, method } => {
-            NetworkEvent::ConnectionAttemptStarted { peer_id, method }
-        }
-        node::NetworkEvent::ConnectionAttemptFailed { peer_id, method, reason } => {
-            NetworkEvent::ConnectionAttemptFailed { peer_id, method, reason }
-        }
         node::NetworkEvent::KeyExchangeStarted { peer_id } => {
             NetworkEvent::KeyExchangeStarted { peer_id }
         }
         node::NetworkEvent::KeyExchangeProgress { peer_id, stage } => {
             NetworkEvent::KeyExchangeProgress { peer_id, stage }
-        }
-        node::NetworkEvent::RelayStatusChanged { status } => {
-            NetworkEvent::RelayStatusChanged { status }
         }
     }
 }
@@ -557,15 +535,6 @@ pub fn start_node() -> Result<String, String> {
     // Extract fingerprint before moving OlmManager into the swarm task.
     let olm_fingerprint = olm.identity_key_base64();
 
-    // Load proxy setting from DB before opening CryptoStore.
-    let proxy_enabled = {
-        let store = MessageStore::open(&db_path, &passphrase)?;
-        store.load_setting("proxy_enabled").unwrap_or(None) == Some("true".to_string())
-    };
-    if proxy_enabled {
-        hollow_log!("[HOLLOW] Proxy mode ENABLED — will start Shadowsocks tunnels");
-    }
-
     // Open the CryptoStore persistence actor (runs in its own blocking thread).
     let rt = get_runtime();
     let crypto_store = rt.block_on(async {
@@ -576,7 +545,7 @@ pub fn start_node() -> Result<String, String> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<node::NodeCommand>(100);
 
     let (peer_id_str, handle) = rt
-        .block_on(node::spawn_node(id.keypair, event_tx, cmd_rx, olm, crypto_store, proxy_enabled))
+        .block_on(node::spawn_node(id.keypair, event_tx, cmd_rx, olm, crypto_store))
         .map_err(|e| format!("Failed to start node: {e}"))?;
 
     // Store event receiver separately so watch_network_events() can take it.
@@ -659,15 +628,11 @@ pub fn send_message(peer_id: String, text: String, message_id: String, reply_to_
 
     let state = guard.as_ref().ok_or("Node is not running")?;
 
-    let peer: PeerId = peer_id
-        .parse()
-        .map_err(|e| format!("Invalid peer ID: {e}"))?;
-
     let rt = get_runtime();
     rt.block_on(
         state
             .cmd_tx
-            .send(node::NodeCommand::SendMessage { peer_id: peer, text, message_id, reply_to_mid }),
+            .send(node::NodeCommand::SendMessage { peer_id, text, message_id, reply_to_mid }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
 
@@ -740,9 +705,7 @@ pub fn edit_dm_message(
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
 
-    let peer: PeerId = peer_id
-        .parse()
-        .map_err(|e| format!("Invalid peer ID: {e}"))?;
+    let peer = peer_id;
 
     let rt = get_runtime();
     rt.block_on(
@@ -792,9 +755,7 @@ pub fn delete_dm_message(
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
 
-    let peer: PeerId = peer_id
-        .parse()
-        .map_err(|e| format!("Invalid peer ID: {e}"))?;
+    let peer = peer_id;
 
     let rt = get_runtime();
     rt.block_on(
@@ -871,9 +832,7 @@ pub fn add_dm_reaction(
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
 
-    let peer: PeerId = peer_id
-        .parse()
-        .map_err(|e| format!("Invalid peer ID: {e}"))?;
+    let peer = peer_id;
 
     let rt = get_runtime();
     rt.block_on(
@@ -899,9 +858,7 @@ pub fn remove_dm_reaction(
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
 
-    let peer: PeerId = peer_id
-        .parse()
-        .map_err(|e| format!("Invalid peer ID: {e}"))?;
+    let peer = peer_id;
 
     let rt = get_runtime();
     rt.block_on(
@@ -923,9 +880,7 @@ pub fn send_friend_request(peer_id: String) -> Result<(), String> {
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
 
-    let peer: PeerId = peer_id
-        .parse()
-        .map_err(|e| format!("Invalid peer ID: {e}"))?;
+    let peer = peer_id;
 
     let rt = get_runtime();
     rt.block_on(state.cmd_tx.send(node::NodeCommand::SendFriendRequest { peer_id: peer }))
@@ -940,9 +895,7 @@ pub fn accept_friend_request(peer_id: String) -> Result<(), String> {
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
 
-    let peer: PeerId = peer_id
-        .parse()
-        .map_err(|e| format!("Invalid peer ID: {e}"))?;
+    let peer = peer_id;
 
     let rt = get_runtime();
     rt.block_on(state.cmd_tx.send(node::NodeCommand::AcceptFriendRequest { peer_id: peer }))
@@ -957,9 +910,7 @@ pub fn reject_friend_request(peer_id: String) -> Result<(), String> {
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
 
-    let peer: PeerId = peer_id
-        .parse()
-        .map_err(|e| format!("Invalid peer ID: {e}"))?;
+    let peer = peer_id;
 
     let rt = get_runtime();
     rt.block_on(state.cmd_tx.send(node::NodeCommand::RejectFriendRequest { peer_id: peer }))
@@ -974,9 +925,7 @@ pub fn remove_friend(peer_id: String) -> Result<(), String> {
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
 
-    let peer: PeerId = peer_id
-        .parse()
-        .map_err(|e| format!("Invalid peer ID: {e}"))?;
+    let peer = peer_id;
 
     let rt = get_runtime();
     rt.block_on(state.cmd_tx.send(node::NodeCommand::RemoveFriend { peer_id: peer }))
@@ -1141,13 +1090,7 @@ pub fn send_file(
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
 
-    let peer: Option<libp2p::PeerId> = match &peer_id {
-        Some(id) if !id.is_empty() => Some(
-            id.parse()
-                .map_err(|e| format!("Invalid peer ID: {e}"))?,
-        ),
-        _ => None,
-    };
+    let peer = peer_id.filter(|id| !id.is_empty());
 
     let rt = get_runtime();
     rt.block_on(
@@ -1178,17 +1121,13 @@ pub fn request_file_from_peer(
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
 
-    let peer: libp2p::PeerId = peer_id
-        .parse()
-        .map_err(|e| format!("Invalid peer ID: {e}"))?;
-
     let rt = get_runtime();
     rt.block_on(
         state
             .cmd_tx
             .send(node::NodeCommand::RequestFile {
                 file_id,
-                peer_id: peer,
+                peer_id,
                 chunks,
             }),
     )

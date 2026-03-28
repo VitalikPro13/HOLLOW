@@ -262,10 +262,9 @@ async fn connect_and_auth(
     let sign_payload = format!("hollow-ws-auth:{}:{}", peer_id, timestamp);
 
     // Sign with Ed25519 keypair.
-    let keypair = libp2p::identity::Keypair::from_protobuf_encoding(keypair_proto)
+    let keypair = crate::identity::native_identity::NativeKeypair::from_protobuf_encoding(keypair_proto)
         .map_err(|e| format!("Failed to decode keypair: {e}"))?;
-    let sig_bytes = keypair.sign(sign_payload.as_bytes())
-        .map_err(|e| format!("Failed to sign: {e}"))?;
+    let sig_bytes = keypair.sign(sign_payload.as_bytes());
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig_bytes);
 
     let auth = ClientMsg::Auth {
