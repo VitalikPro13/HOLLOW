@@ -1234,15 +1234,19 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 **Deliverable:** Server files live distributed across members. No single point of failure. Automatic mode selection — small groups get full sync, larger servers get space-efficient erasure coding. Rich status indicators keep users informed.
 
-### Phase 4.5: Account Recovery & Backup
+### Phase 4.5: Account Recovery & Backup — COMPLETE
 
-**Goal:** Identity recovery mechanisms that leverage the Shared Vault infrastructure.
+**Goal:** Identity recovery and account portability.
 
-- [ ] Social Recovery: guardian designation + Shamir's Secret Sharing (split identity key into k-of-n shares, distribute to trusted contacts via E2EE)
-- [ ] Encrypted Vault Backup: password-based recovery (Argon2id KDF, encrypted blob stored as high-redundancy shard in the Shared Vault)
-- [ ] Recovery UI flows (guardian approval, password entry, shard reconstruction). 🎞️ Animate: step-by-step wizard transitions, shard gathering progress, recovery success celebration
+- [X] **Security tab in User Settings** — recovery phrase viewer with spoiler toggle (numbered 4x6 grid), copy button, warning text
+- [X] **First-launch Welcome dialog** — three paths: Create New Account, Restore from Recovery Phrase (24-word input + validation), Restore from Backup (.hollow file)
+- [X] **Passphrase-encrypted backup export/import** — full account backup (identity.key + messages.db + optional vault shards) encrypted with Argon2id KDF + AES-256-GCM. `.hollow` file format with magic header. Wrong passphrase = clear error, brute-force protected by Argon2id cost (64MB memory, ~500ms per attempt)
+- [X] **Mnemonic persistence** — 24-word phrase saved to SQLCipher DB on first generation, retrievable anytime from Security tab
+- [X] **has_identity() FFI** — checks if identity.key exists on disk, drives Welcome dialog vs normal bootstrap flow
+- [ ] Social Recovery (Shamir's Secret Sharing) — deferred, nice-to-have for users who lose backup + mnemonic
+- [ ] Device Linking (QR code transfer) — deferred to multi-device/mobile phase
 
-**Deliverable:** Users can recover their identity after total device loss via guardians or a recovery password.
+**Deliverable:** Users can recover their full account (identity + all data) via encrypted backup file, or identity-only via 24-word mnemonic. Backup is passphrase-protected with Argon2id brute-force resistance.
 
 ### Phase 5A: WebRTC Data Channels — P2P File & Shard Streaming
 

@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
@@ -12,6 +13,7 @@ import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -81,7 +83,7 @@ Color _bannerColorFromId(String id) {
 }
 
 /// Settings tab enum.
-enum _SettingsTab { profile, system }
+enum _SettingsTab { profile, system, security }
 
 class _UserSettingsContent extends ConsumerStatefulWidget {
   final String localPeerId;
@@ -457,6 +459,15 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                                   onTap: () => setState(() =>
                                       _activeTab = _SettingsTab.system),
                                 ),
+                                const SizedBox(height: HollowSpacing.xxs),
+                                _TabItem(
+                                  icon: LucideIcons.shield,
+                                  label: 'Security',
+                                  isActive:
+                                      _activeTab == _SettingsTab.security,
+                                  onTap: () => setState(() =>
+                                      _activeTab = _SettingsTab.security),
+                                ),
                               ],
                             ),
                           ),
@@ -473,9 +484,11 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
 
                           // Right: content area
                           Expanded(
-                            child: _activeTab == _SettingsTab.profile
-                                ? _buildProfileTab(hollow)
-                                : _buildSystemTab(hollow),
+                            child: switch (_activeTab) {
+                              _SettingsTab.profile => _buildProfileTab(hollow),
+                              _SettingsTab.system => _buildSystemTab(hollow),
+                              _SettingsTab.security => _SecurityTab(),
+                            },
                           ),
                         ],
                       ),
@@ -927,6 +940,383 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Security tab — recovery phrase viewer + account backup.
+class _SecurityTab extends StatefulWidget {
+  @override
+  State<_SecurityTab> createState() => _SecurityTabState();
+}
+
+class _SecurityTabState extends State<_SecurityTab> {
+  bool _revealed = false;
+  bool _loading = true;
+  bool _includeVault = false;
+  String? _mnemonic;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMnemonic();
+  }
+
+  Future<void> _loadMnemonic() async {
+    try {
+      final mnemonic = await storage_api.getMnemonic();
+      if (!mounted) return;
+      setState(() {
+        _mnemonic = mnemonic;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _exportBackup() async {
+    // Ask for passphrase.
+    final passphrase = await _askPassphrase(context, 'Set Backup Passphrase', confirm: true);
+    if (passphrase == null || !mounted) return;
+
+    final result = await FilePicker.platform.saveFile(
+      dialogTitle: 'Export Backup',
+      fileName: 'hollow-backup.hollow',
+      type: FileType.custom,
+      allowedExtensions: ['hollow'],
+    );
+    if (result == null || !mounted) return;
+
+    try {
+      final size = await storage_api.exportBackup(
+        outputPath: result,
+        includeVault: _includeVault,
+        passphrase: passphrase,
+      );
+      if (!mounted) return;
+      final mb = (size.toDouble() / (1024 * 1024)).toStringAsFixed(1);
+      HollowToast.show(context, 'Backup exported ($mb MB)', type: HollowToastType.success);
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Export failed: $e', type: HollowToastType.error);
+    }
+  }
+
+  Future<String?> _askPassphrase(BuildContext context, String title, {bool confirm = false}) async {
+    final controller = TextEditingController();
+    final confirmController = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        final hollow = HollowTheme.of(ctx);
+        return AlertDialog(
+          backgroundColor: hollow.surface,
+          title: Text(title, style: HollowTypography.heading.copyWith(color: hollow.textPrimary)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: controller,
+                obscureText: true,
+                autofocus: true,
+                decoration: InputDecoration(
+                  hintText: 'Enter passphrase',
+                  hintStyle: TextStyle(color: hollow.textSecondary),
+                ),
+                style: TextStyle(color: hollow.textPrimary),
+                onSubmitted: confirm ? null : (val) {
+                  if (val.isNotEmpty) Navigator.of(ctx).pop(val);
+                },
+              ),
+              if (confirm) ...[
+                const SizedBox(height: HollowSpacing.sm),
+                TextField(
+                  controller: confirmController,
+                  obscureText: true,
+                  decoration: InputDecoration(
+                    hintText: 'Confirm passphrase',
+                    hintStyle: TextStyle(color: hollow.textSecondary),
+                  ),
+                  style: TextStyle(color: hollow.textPrimary),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(null),
+              child: Text('Cancel', style: TextStyle(color: hollow.textSecondary)),
+            ),
+            TextButton(
+              onPressed: () {
+                final pass = controller.text.trim();
+                if (pass.isEmpty) return;
+                if (confirm && pass != confirmController.text.trim()) {
+                  HollowToast.show(ctx, 'Passphrases don\'t match', type: HollowToastType.error);
+                  return;
+                }
+                Navigator.of(ctx).pop(pass);
+              },
+              child: Text('OK', style: TextStyle(color: hollow.accent)),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+
+    return SingleChildScrollView(
+      key: const ValueKey('security'),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Recovery Phrase ──
+          _SectionLabel(label: 'RECOVERY PHRASE'),
+          const SizedBox(height: HollowSpacing.sm),
+
+          if (_loading)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(HollowSpacing.xl),
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: hollow.accent,
+                  ),
+                ),
+              ),
+            )
+          else if (_error != null)
+            Text(
+              'Failed to load mnemonic: $_error',
+              style: HollowTypography.body.copyWith(color: hollow.error),
+            )
+          else if (_mnemonic == null)
+            Text(
+              'No recovery phrase stored. This identity may have been restored from a backup.',
+              style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+            )
+          else ...[
+            // Mnemonic container — blurred when hidden
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(HollowSpacing.md),
+              decoration: BoxDecoration(
+                color: hollow.background,
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
+                border: Border.all(
+                  color: _revealed
+                      ? hollow.warning.withValues(alpha: 0.4)
+                      : hollow.border,
+                ),
+              ),
+              child: AnimatedOpacity(
+                opacity: _revealed ? 1.0 : 0.0,
+                duration: const Duration(milliseconds: 200),
+                child: _revealed
+                    ? _buildWordGrid(hollow)
+                    : const SizedBox(height: 72),
+              ),
+            ),
+
+            if (!_revealed) ...[
+              // Show placeholder text when hidden
+              Transform.translate(
+                offset: const Offset(0, -76),
+                child: Container(
+                  width: double.infinity,
+                  height: 72 + HollowSpacing.md * 2,
+                  alignment: Alignment.center,
+                  child: Text(
+                    'Hidden for security',
+                    style: HollowTypography.body.copyWith(
+                      color: hollow.textSecondary.withValues(alpha: 0.5),
+                    ),
+                  ),
+                ),
+              ),
+              // Compensate for transform
+              const SizedBox(height: 0),
+            ],
+
+            const SizedBox(height: HollowSpacing.sm),
+
+            // Reveal / Hide button + Copy button
+            Row(
+              children: [
+                HollowButton.ghost(
+                  onPressed: () => setState(() => _revealed = !_revealed),
+                  icon: Icon(
+                    _revealed ? LucideIcons.eyeOff : LucideIcons.eye,
+                    size: 16,
+                  ),
+                  child: Text(_revealed ? 'Hide' : 'Reveal'),
+                ),
+                if (_revealed) ...[
+                  const SizedBox(width: HollowSpacing.sm),
+                  HollowButton.ghost(
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: _mnemonic!));
+                      HollowToast.show(
+                        context,
+                        'Copied to clipboard',
+                        type: HollowToastType.success,
+                      );
+                    },
+                    icon: Icon(LucideIcons.copy, size: 16),
+                    child: const Text('Copy'),
+                  ),
+                ],
+              ],
+            ),
+
+            const SizedBox(height: HollowSpacing.sm),
+
+            // Warning text
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Icon(
+                    LucideIcons.alertTriangle,
+                    size: 14,
+                    color: hollow.warning,
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.xs),
+                Expanded(
+                  child: Text(
+                    'Anyone with these words can access your account. Never share them.',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.warning,
+                      fontSize: 11,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+
+          const SizedBox(height: HollowSpacing.xl),
+
+          // ── Account Backup ──
+          _SectionLabel(label: 'ACCOUNT BACKUP'),
+          const SizedBox(height: HollowSpacing.sm),
+
+          Text(
+            'Exports your identity, profile, servers, friends, and messages.',
+            style: HollowTypography.body.copyWith(
+              color: hollow.textSecondary,
+              fontSize: 12,
+            ),
+          ),
+
+          const SizedBox(height: HollowSpacing.md),
+
+          // Include vault checkbox
+          GestureDetector(
+            onTap: () => setState(() => _includeVault = !_includeVault),
+            child: Row(
+              children: [
+                Container(
+                  width: 18,
+                  height: 18,
+                  decoration: BoxDecoration(
+                    color: _includeVault ? hollow.accent : Colors.transparent,
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                      color: _includeVault ? hollow.accent : hollow.border,
+                      width: 1.5,
+                    ),
+                  ),
+                  child: _includeVault
+                      ? Icon(LucideIcons.check, size: 12, color: Colors.white)
+                      : null,
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                Text(
+                  'Include vault shard data',
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: HollowSpacing.md),
+
+          HollowButton.filled(
+            onPressed: _exportBackup,
+            icon: Icon(LucideIcons.download, size: 16),
+            child: const Text('Export Backup'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildWordGrid(HollowTheme hollow) {
+    final words = _mnemonic!.split(' ');
+    // 4 rows x 6 columns
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (int row = 0; row < 4; row++)
+          Padding(
+            padding: EdgeInsets.only(
+              bottom: row < 3 ? HollowSpacing.xs : 0,
+            ),
+            child: Row(
+              children: [
+                for (int col = 0; col < 6; col++) ...[
+                  if (col > 0) const SizedBox(width: HollowSpacing.xs),
+                  Expanded(
+                    child: Builder(builder: (context) {
+                      final index = row * 6 + col;
+                      if (index >= words.length) return const SizedBox();
+                      return RichText(
+                        text: TextSpan(
+                          children: [
+                            TextSpan(
+                              text: '${index + 1}. ',
+                              style: HollowTypography.mono.copyWith(
+                                color: hollow.textSecondary.withValues(alpha: 0.5),
+                                fontSize: 10,
+                              ),
+                            ),
+                            TextSpan(
+                              text: words[index],
+                              style: HollowTypography.mono.copyWith(
+                                color: hollow.textPrimary,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }),
+                  ),
+                ],
+              ],
+            ),
+          ),
+      ],
     );
   }
 }

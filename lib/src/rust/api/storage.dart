@@ -156,6 +156,41 @@ Future<List<String>> getMissingImageFileIdsForServer({
   serverId: serverId,
 );
 
+/// Save the recovery mnemonic to the database (called once on first identity generation).
+Future<void> saveMnemonic({required String mnemonic}) =>
+    RustLib.instance.api.crateApiStorageSaveMnemonic(mnemonic: mnemonic);
+
+/// Retrieve the stored recovery mnemonic.
+Future<String?> getMnemonic() =>
+    RustLib.instance.api.crateApiStorageGetMnemonic();
+
+/// Check if an identity key file exists on disk.
+Future<bool> hasIdentity() => RustLib.instance.api.crateApiStorageHasIdentity();
+
+/// Export account backup as a passphrase-encrypted blob (.hollow file).
+/// Includes identity.key + messages.db. Optionally includes vault/ shard data.
+/// The backup is: [16-byte salt][12-byte nonce][AES-256-GCM ciphertext of zip bytes]
+/// Key derived from passphrase via Argon2id (memory=64MB, iterations=3, parallelism=1).
+Future<BigInt> exportBackup({
+  required String outputPath,
+  required bool includeVault,
+  required String passphrase,
+}) => RustLib.instance.api.crateApiStorageExportBackup(
+  outputPath: outputPath,
+  includeVault: includeVault,
+  passphrase: passphrase,
+);
+
+/// Import account backup from a passphrase-encrypted .hollow file.
+/// Must be called BEFORE start_node() since it overwrites the data directory.
+Future<void> importBackup({
+  required String backupPath,
+  required String passphrase,
+}) => RustLib.instance.api.crateApiStorageImportBackup(
+  backupPath: backupPath,
+  passphrase: passphrase,
+);
+
 /// A friend entry returned to Dart.
 class FriendFfi {
   final String peerId;

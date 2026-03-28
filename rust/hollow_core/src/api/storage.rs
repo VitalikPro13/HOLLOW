@@ -489,3 +489,180 @@ pub fn get_missing_image_file_ids_for_server(server_id: String) -> Result<Vec<St
     let ms = guard.as_ref().ok_or("Message store is not open")?;
     ms.get_missing_image_file_ids_for_server(&server_id)
 }
+
+/// Save the recovery mnemonic to the database (called once on first identity generation).
+#[frb]
+pub fn save_mnemonic(mnemonic: String) -> Result<(), String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    ms.save_setting("recovery_mnemonic", &mnemonic)
+}
+
+/// Retrieve the stored recovery mnemonic.
+#[frb]
+pub fn get_mnemonic() -> Result<Option<String>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    ms.load_setting("recovery_mnemonic")
+}
+
+/// Check if an identity key file exists on disk.
+#[frb]
+pub fn has_identity() -> Result<bool, String> {
+    let dir = crate::identity::data_dir()?;
+    Ok(dir.join("identity.key").exists())
+}
+
+/// Export account backup as a passphrase-encrypted blob (.hollow file).
+/// Includes identity.key + messages.db. Optionally includes vault/ shard data.
+/// The backup is: [16-byte salt][12-byte nonce][AES-256-GCM ciphertext of zip bytes]
+/// Key derived from passphrase via Argon2id (memory=64MB, iterations=3, parallelism=1).
+#[frb]
+pub fn export_backup(output_path: String, include_vault: bool, passphrase: String) -> Result<u64, String> {
+    use std::io::Write;
+    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+    use aes_gcm::Nonce;
+
+    let data_dir = crate::identity::data_dir()?;
+
+    // Build zip in memory.
+    let mut zip_buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut zip_buf);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        let key_path = data_dir.join("identity.key");
+        if key_path.exists() {
+            let data = std::fs::read(&key_path).map_err(|e| format!("Failed to read identity.key: {e}"))?;
+            zip.start_file("identity.key", options).map_err(|e| format!("Zip error: {e}"))?;
+            zip.write_all(&data).map_err(|e| format!("Zip write error: {e}"))?;
+        }
+
+        let db_path = data_dir.join("messages.db");
+        if db_path.exists() {
+            let data = std::fs::read(&db_path).map_err(|e| format!("Failed to read messages.db: {e}"))?;
+            zip.start_file("messages.db", options).map_err(|e| format!("Zip error: {e}"))?;
+            zip.write_all(&data).map_err(|e| format!("Zip write error: {e}"))?;
+        }
+
+        if include_vault {
+            let vault_dir = data_dir.join("vault");
+            if vault_dir.exists() && vault_dir.is_dir() {
+                for entry in std::fs::read_dir(&vault_dir).map_err(|e| format!("Failed to read vault dir: {e}"))? {
+                    if let Ok(entry) = entry {
+                        let path = entry.path();
+                        if path.is_file() {
+                            let name = format!("vault/{}", entry.file_name().to_string_lossy());
+                            let data = std::fs::read(&path).map_err(|e| format!("Failed to read vault file: {e}"))?;
+                            zip.start_file(&name, options).map_err(|e| format!("Zip error: {e}"))?;
+                            zip.write_all(&data).map_err(|e| format!("Zip write error: {e}"))?;
+                        }
+                    }
+                }
+            }
+        }
+
+        zip.finish().map_err(|e| format!("Failed to finalize zip: {e}"))?;
+    }
+    let zip_bytes = zip_buf.into_inner();
+
+    // Derive encryption key from passphrase via Argon2id.
+    let mut salt = [0u8; 16];
+    getrandom::fill(&mut salt).map_err(|e| format!("RNG error: {e}"))?;
+    let params = argon2::Params::new(65536, 3, 1, Some(32))
+        .map_err(|e| format!("Argon2 params error: {e}"))?;
+    let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let mut key = [0u8; 32];
+    argon.hash_password_into(passphrase.as_bytes(), &salt, &mut key)
+        .map_err(|e| format!("Argon2 hash error: {e}"))?;
+
+    // Encrypt zip with AES-256-GCM.
+    let mut nonce_bytes = [0u8; 12];
+    getrandom::fill(&mut nonce_bytes).map_err(|e| format!("RNG error: {e}"))?;
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|e| format!("Cipher init error: {e}"))?;
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher.encrypt(nonce, zip_bytes.as_slice())
+        .map_err(|_| "Encryption failed".to_string())?;
+
+    // Write: [magic:6][salt:16][nonce:12][ciphertext...]
+    let mut output = Vec::with_capacity(6 + 16 + 12 + ciphertext.len());
+    output.extend_from_slice(b"HOLLOW"); // magic header
+    output.extend_from_slice(&salt);
+    output.extend_from_slice(&nonce_bytes);
+    output.extend_from_slice(&ciphertext);
+    std::fs::write(&output_path, &output)
+        .map_err(|e| format!("Failed to write backup: {e}"))?;
+
+    Ok(output.len() as u64)
+}
+
+/// Import account backup from a passphrase-encrypted .hollow file.
+/// Must be called BEFORE start_node() since it overwrites the data directory.
+#[frb]
+pub fn import_backup(backup_path: String, passphrase: String) -> Result<(), String> {
+    use std::io::Read;
+    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+    use aes_gcm::Nonce;
+
+    let blob = std::fs::read(&backup_path)
+        .map_err(|e| format!("Failed to read backup: {e}"))?;
+
+    // Validate magic header.
+    if blob.len() < 6 + 16 + 12 + 16 || &blob[..6] != b"HOLLOW" {
+        return Err("Invalid backup file (not a Hollow backup)".into());
+    }
+
+    let salt = &blob[6..22];
+    let nonce_bytes = &blob[22..34];
+    let ciphertext = &blob[34..];
+
+    // Derive decryption key.
+    let params = argon2::Params::new(65536, 3, 1, Some(32))
+        .map_err(|e| format!("Argon2 params error: {e}"))?;
+    let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let mut key = [0u8; 32];
+    argon.hash_password_into(passphrase.as_bytes(), salt, &mut key)
+        .map_err(|e| format!("Argon2 hash error: {e}"))?;
+
+    // Decrypt.
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|e| format!("Cipher init error: {e}"))?;
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let zip_bytes = cipher.decrypt(nonce, ciphertext)
+        .map_err(|_| "Wrong passphrase or corrupted backup".to_string())?;
+
+    // Extract zip to data directory.
+    let data_dir = crate::identity::data_dir()?;
+    let cursor = std::io::Cursor::new(zip_bytes);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| format!("Invalid backup data: {e}"))?;
+
+    let has_key = (0..archive.len()).any(|i| {
+        archive.by_index(i).map(|f| f.name() == "identity.key").unwrap_or(false)
+    });
+    if !has_key {
+        return Err("Backup does not contain identity.key".into());
+    }
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("Zip read error: {e}"))?;
+        let name = entry.name().to_string();
+        let out_path = data_dir.join(&name);
+
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {e}"))?;
+        }
+
+        if entry.is_file() {
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).map_err(|e| format!("Failed to read zip entry: {e}"))?;
+            std::fs::write(&out_path, &data).map_err(|e| format!("Failed to write {name}: {e}"))?;
+        }
+    }
+
+    Ok(())
+}

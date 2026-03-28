@@ -39,6 +39,8 @@ import 'package:hollow/src/ui/components/notification_overlay.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
+import 'package:hollow/src/ui/dialogs/welcome_dialog.dart';
+import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/ui/settings/server_settings_panel.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
@@ -133,12 +135,30 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (_initialized) return;
     _initialized = true;
 
+    // Check if an identity already exists on disk.
+    final hasExisting = await storage_api.hasIdentity();
+
+    // First launch — show welcome dialog before creating identity.
+    if (!hasExisting && mounted) {
+      final result = await showWelcomeDialog(context);
+      if (!mounted) return;
+
+      // 'restored_mnemonic' / 'restored_backup' — identity already on disk.
+      // 'create_new' / null — proceed to normal load (will generate new).
+      if (result == 'restored_mnemonic' || result == 'restored_backup') {
+        // Identity was just written to disk; load() will pick it up.
+      }
+    }
+
     await ref.read(identityProvider.notifier).load();
 
     final identity = ref.read(identityProvider);
     if (identity.error != null) return;
 
     if (identity.mnemonic != null && mounted) {
+      // New identity was generated — save mnemonic to DB then show dialog.
+      await storage_api.saveMnemonic(mnemonic: identity.mnemonic!);
+      if (!mounted) return;
       showMnemonicDialog(context, identity.mnemonic!);
     }
 
