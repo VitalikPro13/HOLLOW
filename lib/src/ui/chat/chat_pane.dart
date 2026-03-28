@@ -311,6 +311,22 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final file = result.files.first;
     if (file.path == null) { _isPicking = false; return; }
 
+    // Enforce 34 MB limit for DMs (always on default relay).
+    const maxDmBytes = 34 * 1024 * 1024;
+    if (file.size > maxDmBytes) {
+      if (mounted) {
+        final fileMb = (file.size / (1024 * 1024)).toStringAsFixed(1);
+        HollowToast.show(
+          context,
+          'File too large (${fileMb}MB). DM limit is 34 MB.',
+          type: HollowToastType.error,
+          duration: const Duration(seconds: 4),
+        );
+      }
+      _isPicking = false;
+      return;
+    }
+
     final messageId = generateMessageId();
     final fileName = file.name;
     final ext = fileName.contains('.')

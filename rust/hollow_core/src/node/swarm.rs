@@ -1390,6 +1390,13 @@ async fn run_event_loop(
                         match serde_json::from_str::<ServerState>(&json) {
                             Ok(mut state) => {
                                 state.set_hlc(Hlc::new(local_peer_str.to_string()));
+                                // Log custom relay URL if set.
+                                if let Some(relay_reg) = state.settings.get("relay_url") {
+                                    let url = relay_reg.read();
+                                    if !url.is_empty() && url != "wss://relay.anonlisten.com/ws" {
+                                        hollow_log!("[HOLLOW] Server {server_id} uses custom relay: {url}");
+                                    }
+                                }
                                 server_states.insert(server_id.clone(), state);
                                 // Join the WS relay room for this server.
                                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
@@ -4102,8 +4109,8 @@ async fn run_event_loop(
                             .to_string_lossy()
                             .to_lowercase();
 
-                        // 3. Check size limit (34MB default).
-                        let max_size = if let Some(ref sid) = server_id {
+                        // 3. Check size limit (34MB default, hard cap on default relay).
+                        let mut max_size = if let Some(ref sid) = server_id {
                             server_states.get(sid)
                                 .and_then(|s| s.settings.get("max_file_size_mb"))
                                 .and_then(|reg| reg.read().parse::<u64>().ok())
@@ -4111,6 +4118,16 @@ async fn run_event_loop(
                         } else {
                             file_transfer::DEFAULT_MAX_FILE_SIZE
                         };
+                        // Enforce 34 MB hard cap on default relay (custom relay unlocks higher limits).
+                        if let Some(ref sid) = server_id {
+                            let relay_url = server_states.get(sid)
+                                .and_then(|s| s.settings.get("relay_url"))
+                                .map(|reg| reg.read().clone())
+                                .unwrap_or_default();
+                            if relay_url.is_empty() || relay_url == "wss://relay.anonlisten.com/ws" {
+                                max_size = max_size.min(file_transfer::DEFAULT_MAX_FILE_SIZE);
+                            }
+                        }
 
                         if file_data.len() as u64 > max_size {
                             hollow_log!("[HOLLOW-FILE] File too large: {} > {}", file_data.len(), max_size);
@@ -4602,16 +4619,23 @@ async fn run_event_loop(
                                     // CRDT sync + message sync for shared servers.
                                     for (sid, state) in server_states.iter() {
                                         if state.members.contains_key(&peer_id) {
-                                            // CRDT state sync — MLS targeted first, plaintext fallback.
+                                            // CRDT state sync via MLS.
                                             let our_vector = StateVector::from_server_state(state);
                                             if let Ok(sv_json) = serde_json::to_string(&our_vector) {
                                                 let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(sid));
                                                 if mls_ok {
                                                     let envelope = MessageEnvelope::SyncReq {
-                                                        sid: sid.clone(), state_vector_json: sv_json, target: None,
+                                                        sid: sid.clone(), state_vector_json: sv_json.clone(), target: None,
                                                     };
                                                     if let Err(e) = send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, sid, &peer_id, &envelope, &bundle_keypair) {
-                                                        hollow_log!("[HOLLOW-MLS] SyncReq targeted send failed: {e}");
+                                                        hollow_log!("[HOLLOW-MLS] SyncReq targeted send failed: {e}, falling back to plaintext");
+                                                        send_message_to_peer(
+                                                            &ws_cmd_tx, &ws_room_peers,
+                                                            &peer_id, HavenMessage::SyncRequest {
+                                                                server_id: sid.clone(),
+                                                                state_vector_json: sv_json,
+                                                            },
+                                                        );
                                                     }
                                                 } else {
                                                     send_message_to_peer(
@@ -4716,15 +4740,46 @@ async fn run_event_loop(
                             .filter(|p| *p != &local_peer)
                             .cloned()
                             .collect();
-                        ws_room_peers.insert(room, room_set);
+                        ws_room_peers.insert(room.clone(), room_set);
                         for pid_str in &peers {
                             if pid_str != &local_peer {
-                                    let _ = event_tx.send(NetworkEvent::PeerDiscovered {
-                                        peer: DiscoveredPeer {
-                                            peer_id: pid_str.clone(),
-                                            addresses: vec!["ws-relay".to_string()],
-                                        },
-                                    }).await;
+                                let _ = event_tx.send(NetworkEvent::PeerDiscovered {
+                                    peer: DiscoveredPeer {
+                                        peer_id: pid_str.clone(),
+                                        addresses: vec!["ws-relay".to_string()],
+                                    },
+                                }).await;
+
+                                // Trigger CRDT sync for existing room members (RoomMembers fires
+                                // on join with all current members, before individual PeerJoined).
+                                let is_new = synced_peers.insert(pid_str.clone());
+                                if is_new {
+                                    // Send CRDT SyncReq for servers shared with this peer.
+                                    for (sid, state) in server_states.iter() {
+                                        if state.members.contains_key(pid_str) {
+                                            let our_vector = StateVector::from_server_state(state);
+                                            if let Ok(sv_json) = serde_json::to_string(&our_vector) {
+                                                let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(sid));
+                                                if mls_ok {
+                                                    let envelope = MessageEnvelope::SyncReq {
+                                                        sid: sid.clone(), state_vector_json: sv_json.clone(), target: None,
+                                                    };
+                                                    if let Err(e) = send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, sid, pid_str, &envelope, &bundle_keypair) {
+                                                        hollow_log!("[HOLLOW-MLS] RoomMembers SyncReq failed: {e}");
+                                                    }
+                                                } else {
+                                                    send_message_to_peer(
+                                                        &ws_cmd_tx, &ws_room_peers,
+                                                        pid_str, HavenMessage::SyncRequest {
+                                                            server_id: sid.clone(),
+                                                            state_vector_json: sv_json,
+                                                        },
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -6199,7 +6254,7 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-FILE] FileHeader received: {fid} ({name}, {size} bytes, {chunks} chunks)");
 
                     // SECURITY: Validate file size against server limit (or default 34MB for DMs).
-                    let max_bytes: u64 = if let Some(ref s) = sid {
+                    let mut max_bytes: u64 = if let Some(ref s) = sid {
                         if let Some(state) = server_states.get(s) {
                             let max_mb_str = state.settings.get("max_file_size_mb")
                                 .map(|r| r.read().clone())
@@ -6212,6 +6267,16 @@ async fn handle_incoming_request(
                     } else {
                         34 * 1024 * 1024
                     };
+                    // Enforce 34 MB cap on default relay.
+                    if let Some(ref s) = sid {
+                        let relay_url = server_states.get(s)
+                            .and_then(|st| st.settings.get("relay_url"))
+                            .map(|r| r.read().clone())
+                            .unwrap_or_default();
+                        if relay_url.is_empty() || relay_url == "wss://relay.anonlisten.com/ws" {
+                            max_bytes = max_bytes.min(34 * 1024 * 1024);
+                        }
+                    }
                     if size > max_bytes {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED FileHeader from {peer_str} — size {size} exceeds max {max_bytes} bytes");
                         return;
@@ -6785,13 +6850,74 @@ async fn handle_incoming_request(
                 }
 
                 // Phase 6 MLS envelope variants — should not arrive via Olm, log and ignore.
-                Ok(MessageEnvelope::CrdtOp { .. })
-                | Ok(MessageEnvelope::ServerDelete { .. })
+                // CrdtOp via Olm fallback — apply it (may arrive when MLS is out of sync).
+                Ok(MessageEnvelope::CrdtOp { sid, op_json, .. }) => {
+                    if let Ok(op) = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json) {
+                        if let Some(state) = server_states.get_mut(&sid) {
+                            if let Ok(()) = state.apply_op(&op) {
+                                state.op_log.push(op.clone());
+                                if let Ok(json) = serde_json::to_string(&*state) {
+                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
+                                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                        let _ = store.save_server_state(&sid, &json);
+                                        let _ = store.insert_crdt_op(&op);
+                                    }
+                                }
+                                let _ = event_tx.send(NetworkEvent::SyncCompleted {
+                                    server_id: sid, ops_applied: 1,
+                                }).await;
+                            }
+                        }
+                    }
+                }
+                // SyncReq/SyncResp via Olm fallback — handle normally.
+                Ok(MessageEnvelope::SyncReq { sid, state_vector_json, .. }) => {
+                    if let Some(state) = server_states.get(&sid) {
+                        if let Ok(their_vector) = serde_json::from_str::<crate::crdt::sync::StateVector>(&state_vector_json) {
+                            let delta = crate::crdt::sync::compute_delta(&state.op_log, &their_vector);
+                            if !delta.is_empty() {
+                                let ops_json = serde_json::to_string(&delta).unwrap_or_default();
+                                // Respond via plaintext since Olm is the active path.
+                                send_message_to_peer(
+                                    ws_cmd_tx, ws_room_peers,
+                                    peer_str, HavenMessage::SyncResponse {
+                                        server_id: sid,
+                                        ops_json,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(MessageEnvelope::SyncResp { sid, ops_json, .. }) => {
+                    if let Some(state) = server_states.get_mut(&sid) {
+                        if let Ok(incoming_ops) = serde_json::from_str::<Vec<crate::crdt::operations::CrdtOp>>(&ops_json) {
+                            if let Ok(applied) = crate::crdt::sync::merge_ops(state, incoming_ops) {
+                                if applied > 0 {
+                                    if let Ok(json) = serde_json::to_string(&*state) {
+                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
+                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                            let _ = store.save_server_state(&sid, &json);
+                                        }
+                                    }
+                                    let _ = event_tx.send(NetworkEvent::SyncCompleted {
+                                        server_id: sid, ops_applied: applied as u32,
+                                    }).await;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(MessageEnvelope::ServerDelete { .. })
                 | Ok(MessageEnvelope::MemberKick { .. })
                 | Ok(MessageEnvelope::Typing { .. })
                 | Ok(MessageEnvelope::ProfileUpdate { .. })
-                | Ok(MessageEnvelope::SyncReq { .. })
-                | Ok(MessageEnvelope::SyncResp { .. })
                 | Ok(MessageEnvelope::ChannelSyncReq { .. })
                 | Ok(MessageEnvelope::ChannelProbe { .. })
                 | Ok(MessageEnvelope::ChannelProbeResp { .. }) => {
@@ -7906,7 +8032,15 @@ async fn handle_incoming_request(
                                         .map(|r| r.read().clone())
                                         .unwrap_or_else(|| "34".to_string())
                                 } else { "34".to_string() };
-                                let max_bytes = max_mb_str.parse::<u64>().unwrap_or(34) * 1024 * 1024;
+                                let mut max_bytes = max_mb_str.parse::<u64>().unwrap_or(34) * 1024 * 1024;
+                                // Enforce 34 MB cap on default relay.
+                                let relay_url = server_states.get(&server_id)
+                                    .and_then(|st| st.settings.get("relay_url"))
+                                    .map(|r| r.read().clone())
+                                    .unwrap_or_default();
+                                if relay_url.is_empty() || relay_url == "wss://relay.anonlisten.com/ws" {
+                                    max_bytes = max_bytes.min(34 * 1024 * 1024);
+                                }
                                 if size > max_bytes {
                                     hollow_log!("[HOLLOW-SECURITY] REJECTED MLS FileHeader from {sender_peer_id} — size {size} exceeds max {max_bytes}");
                                     return;
@@ -8221,10 +8355,12 @@ async fn handle_incoming_request(
                             }
 
                             MessageEnvelope::SyncReq { sid, state_vector_json, .. } => {
-                                // Handle CRDT sync request via MLS (same as HavenMessage::SyncRequest).
+                                // Handle CRDT sync request via MLS.
+                                hollow_log!("[HOLLOW-CRDT] MLS SyncReq from {sender_peer_id} for {sid}, our op_log has {} ops", server_states.get(&sid).map(|s| s.op_log.len()).unwrap_or(0));
                                 if let Some(state) = server_states.get(&sid) {
                                     if let Ok(their_vector) = serde_json::from_str::<crate::crdt::sync::StateVector>(&state_vector_json) {
                                         let delta = crate::crdt::sync::compute_delta(&state.op_log, &their_vector);
+                                        hollow_log!("[HOLLOW-CRDT] Delta for {sid}: {} ops to send (their vector has {} entries)", delta.len(), their_vector.entries.len());
                                         if !delta.is_empty() {
                                             let ops_json = serde_json::to_string(&delta).unwrap_or_default();
                                             let resp = MessageEnvelope::SyncResp {

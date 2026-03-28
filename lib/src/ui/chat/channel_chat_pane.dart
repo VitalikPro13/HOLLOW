@@ -422,20 +422,27 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     final file = result.files.first;
     if (file.path == null) { _isPicking = false; return; }
 
-    // Check file size against server limit.
+    // Check file size against server limit (34 MB cap on default relay).
     try {
       final maxMbStr = await crdt_api.getServerSetting(
         serverId: widget.serverId,
         key: 'max_file_size_mb',
       );
-      final maxMb = int.tryParse(maxMbStr) ?? 34;
+      var maxMb = int.tryParse(maxMbStr) ?? 34;
+      // Enforce 34 MB cap on default relay.
+      final relayUrl = await crdt_api.getServerSetting(
+        serverId: widget.serverId,
+        key: 'relay_url',
+      );
+      final isDefaultRelay = relayUrl.isEmpty || relayUrl == 'wss://relay.anonlisten.com/ws';
+      if (isDefaultRelay) maxMb = maxMb.clamp(1, 34);
       final maxBytes = maxMb * 1024 * 1024;
       if (file.size > maxBytes) {
         if (mounted) {
           final fileMb = (file.size / (1024 * 1024)).toStringAsFixed(1);
           HollowToast.show(
             context,
-            'File too large (${fileMb}MB). Server limit is ${maxMb}MB.',
+            'File too large (${fileMb}MB). Limit is ${maxMb}MB${isDefaultRelay ? ' (default relay)' : ''}.',
             type: HollowToastType.error,
             duration: const Duration(seconds: 4),
           );
