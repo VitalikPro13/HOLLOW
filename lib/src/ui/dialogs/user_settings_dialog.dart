@@ -849,16 +849,6 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
             const SizedBox(height: HollowSpacing.md),
           ],
 
-          // Proxy toggle
-          _ToggleRow(
-            icon: LucideIcons.shield,
-            label: 'Use Proxy',
-            subtitle: 'For restricted networks',
-            value: _pendingProxy,
-            onChanged: (value) =>
-                setState(() => _pendingProxy = value),
-          ),
-
           const SizedBox(height: HollowSpacing.xl),
 
           // ── Keyboard Shortcuts ──

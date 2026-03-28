@@ -40,7 +40,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
   bool _saving = false;
   bool _savingNickname = false;
   int _maxFileSizeMb = 34;
-  String _relayUrl = '';
 
   @override
   void initState() {
@@ -51,7 +50,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     _loadDescription();
     _loadNickname();
     _loadMaxFileSize();
-    _loadRelayUrl();
   }
 
   Future<void> _loadDescription() async {
@@ -92,20 +90,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       }
     } catch (_) {}
   }
-
-  Future<void> _loadRelayUrl() async {
-    try {
-      final val = await crdt_api.getServerSetting(
-        serverId: widget.server.serverId,
-        key: 'relay_url',
-      );
-      if (mounted && val.isNotEmpty) {
-        setState(() => _relayUrl = val);
-      }
-    } catch (_) {}
-  }
-
-  bool get _isDefaultRelay => _relayUrl.isEmpty || _relayUrl == 'wss://relay.anonlisten.com/ws';
 
   @override
   void didUpdateWidget(OverviewTab oldWidget) {
@@ -371,73 +355,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                 HollowTypography.label.copyWith(color: hollow.textSecondary),
           ),
           const SizedBox(height: HollowSpacing.sm),
-          // -- Relay Server --
-          Row(
-            children: [
-              Icon(LucideIcons.radio, size: 16, color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Relay server',
-                      style: HollowTypography.body.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      _isDefaultRelay ? 'Default (relay.anonlisten.com)' : _relayUrl,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary.withValues(alpha: 0.5),
-                        fontSize: 10,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              SizedBox(
-                width: 220,
-                child: HollowTextField(
-                  controller: TextEditingController(text: _isDefaultRelay ? '' : _relayUrl),
-                  isDense: true,
-                  hintText: 'wss://your-relay.com/ws',
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontSize: 12,
-                  ),
-                  borderRadius: hollow.radiusSm,
-                  onSubmitted: (val) async {
-                    final trimmed = val.trim();
-                    if (trimmed.isNotEmpty && !trimmed.startsWith('wss://') && !trimmed.startsWith('ws://')) {
-                      HollowToast.show(context, 'Must start with wss:// or ws://', type: HollowToastType.error);
-                      return;
-                    }
-                    setState(() => _relayUrl = trimmed);
-                    try {
-                      await crdt_api.updateServerSetting(
-                        serverId: widget.server.serverId,
-                        key: 'relay_url',
-                        value: trimmed,
-                      );
-                      if (mounted) {
-                        HollowToast.show(
-                          context,
-                          trimmed.isEmpty ? 'Relay reset to default' : 'Relay set to $trimmed',
-                          type: HollowToastType.success,
-                        );
-                      }
-                    } catch (_) {}
-                  },
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.md),
-
-          // -- Max File Size --
           Row(
             children: [
               Icon(LucideIcons.fileUp, size: 16, color: hollow.textSecondary),
@@ -447,7 +364,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Maximum file upload size',
+                      'Maximum file upload size for this server',
                       style: HollowTypography.body.copyWith(
                         color: hollow.textSecondary,
                         fontSize: 12,
@@ -455,9 +372,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      _isDefaultRelay
-                          ? '34 MB limit on default relay'
-                          : '1–500 MB  •  Enter to save',
+                      '1–500 MB  •  Enter to save',
                       style: HollowTypography.caption.copyWith(
                         color: hollow.textSecondary.withValues(alpha: 0.5),
                         fontSize: 10,
@@ -466,25 +381,18 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                   ],
                 ),
               ),
-              IgnorePointer(
-                ignoring: _isDefaultRelay,
-                child: AnimatedOpacity(
-                  opacity: _isDefaultRelay ? 0.4 : 1.0,
-                  duration: const Duration(milliseconds: 150),
-                  child: SizedBox(
+              SizedBox(
                 width: 100,
                 child: HollowTextField(
-                  controller: TextEditingController(
-                    text: _isDefaultRelay ? '34' : _maxFileSizeMb.toString(),
-                  ),
+                  controller: TextEditingController(text: _maxFileSizeMb.toString()),
                   isDense: true,
-                  hintText: _isDefaultRelay ? '34' : '1–500',
+                  hintText: '1–500',
                   style: HollowTypography.body.copyWith(
-                    color: _isDefaultRelay ? hollow.textSecondary : hollow.textPrimary,
+                    color: hollow.textPrimary,
                     fontSize: 13,
                   ),
                   borderRadius: hollow.radiusSm,
-                  onSubmitted: _isDefaultRelay ? null : (val) async {
+                  onSubmitted: (val) async {
                     final mb = int.tryParse(val.trim());
                     if (mb == null || mb < 1 || mb > 500) {
                       HollowToast.show(context, 'Must be between 1 and 500 MB', type: HollowToastType.error);
@@ -502,13 +410,11 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                   },
                 ),
               ),
-              ),
-              ),
               const SizedBox(width: HollowSpacing.sm),
               Text(
                 'MB',
                 style: HollowTypography.body.copyWith(
-                  color: _isDefaultRelay ? hollow.textSecondary : hollow.textPrimary,
+                  color: hollow.textPrimary,
                   fontWeight: FontWeight.w600,
                   fontSize: 13,
                 ),

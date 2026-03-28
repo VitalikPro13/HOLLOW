@@ -2203,11 +2203,25 @@ async fn run_event_loop(
                             }
                         });
 
-                        // Send join requests to any peers we're already connected to.
-                        // Also send via WS relay if available.
-                        {
-                            
+                        // Join the WS relay room for this server so we can discover members.
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                            room_code: server_id.clone(),
+                        });
+
+                        // Send join request to any peers already visible in WS rooms.
+                        if let Some(room_peers) = ws_room_peers.get(&server_id) {
+                            for peer in room_peers.iter() {
+                                send_message_to_peer(
+                                    &ws_cmd_tx, &ws_room_peers,
+                                    peer, HavenMessage::ServerJoinRequest {
+                                        server_id: server_id.clone(),
+                                    },
+                                );
+                                hollow_log!("[HOLLOW-CRDT] Sent join request to {peer} for {server_id}");
+                            }
                         }
+                        // If no peers found yet, the PeerJoined/RoomMembers handler
+                        // will pick up pending_server_joins and send the request then.
                     }
 
                     NodeCommand::ChangeRole { server_id, peer_id, new_role } => {
@@ -4118,17 +4132,6 @@ async fn run_event_loop(
                         } else {
                             file_transfer::DEFAULT_MAX_FILE_SIZE
                         };
-                        // Enforce 34 MB hard cap on default relay (custom relay unlocks higher limits).
-                        if let Some(ref sid) = server_id {
-                            let relay_url = server_states.get(sid)
-                                .and_then(|s| s.settings.get("relay_url"))
-                                .map(|reg| reg.read().clone())
-                                .unwrap_or_default();
-                            if relay_url.is_empty() || relay_url == "wss://relay.anonlisten.com/ws" {
-                                max_size = max_size.min(file_transfer::DEFAULT_MAX_FILE_SIZE);
-                            }
-                        }
-
                         if file_data.len() as u64 > max_size {
                             hollow_log!("[HOLLOW-FILE] File too large: {} > {}", file_data.len(), max_size);
                             let _ = event_tx.send(NetworkEvent::FileFailed {
@@ -4778,6 +4781,17 @@ async fn run_event_loop(
                                                 }
                                             }
                                         }
+                                    }
+
+                                    // Send join request if this room matches a pending server join.
+                                    if pending_server_joins.contains(&room) {
+                                        send_message_to_peer(
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            pid_str, HavenMessage::ServerJoinRequest {
+                                                server_id: room.clone(),
+                                            },
+                                        );
+                                        hollow_log!("[HOLLOW-CRDT] Sent pending join request to {pid_str} for {room}");
                                     }
                                 }
                             }
@@ -6267,16 +6281,6 @@ async fn handle_incoming_request(
                     } else {
                         34 * 1024 * 1024
                     };
-                    // Enforce 34 MB cap on default relay.
-                    if let Some(ref s) = sid {
-                        let relay_url = server_states.get(s)
-                            .and_then(|st| st.settings.get("relay_url"))
-                            .map(|r| r.read().clone())
-                            .unwrap_or_default();
-                        if relay_url.is_empty() || relay_url == "wss://relay.anonlisten.com/ws" {
-                            max_bytes = max_bytes.min(34 * 1024 * 1024);
-                        }
-                    }
                     if size > max_bytes {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED FileHeader from {peer_str} — size {size} exceeds max {max_bytes} bytes");
                         return;
@@ -8032,15 +8036,7 @@ async fn handle_incoming_request(
                                         .map(|r| r.read().clone())
                                         .unwrap_or_else(|| "34".to_string())
                                 } else { "34".to_string() };
-                                let mut max_bytes = max_mb_str.parse::<u64>().unwrap_or(34) * 1024 * 1024;
-                                // Enforce 34 MB cap on default relay.
-                                let relay_url = server_states.get(&server_id)
-                                    .and_then(|st| st.settings.get("relay_url"))
-                                    .map(|r| r.read().clone())
-                                    .unwrap_or_default();
-                                if relay_url.is_empty() || relay_url == "wss://relay.anonlisten.com/ws" {
-                                    max_bytes = max_bytes.min(34 * 1024 * 1024);
-                                }
+                                let max_bytes = max_mb_str.parse::<u64>().unwrap_or(34) * 1024 * 1024;
                                 if size > max_bytes {
                                     hollow_log!("[HOLLOW-SECURITY] REJECTED MLS FileHeader from {sender_peer_id} — size {size} exceeds max {max_bytes}");
                                     return;
