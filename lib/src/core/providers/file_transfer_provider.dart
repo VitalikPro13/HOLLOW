@@ -188,11 +188,21 @@ class FileTransferNotifier
 
   /// Handle FileProgress event.
   void onFileProgress(String fileId, int chunksReceived, int totalChunks) {
-    final current = state[fileId];
-    if (current == null) return;
     final updated = Map<String, FileTransferState>.from(state);
-    // For streamed transfers, chunks represent MB received / MB total.
-    if (current.totalChunks == 0 && totalChunks > 0) {
+    final current = state[fileId];
+    if (current == null) {
+      // WebRTC race: progress arrived before FileHeader. Create a minimal entry
+      // so the UI shows the progress bar.
+      updated[fileId] = FileTransferState(
+        fileId: fileId,
+        fileName: '',
+        sizeBytes: 0,
+        totalChunks: totalChunks,
+        chunksReceived: chunksReceived,
+        isDownloading: true,
+      );
+    } else if (current.totalChunks == 0 && totalChunks > 0) {
+      // For streamed transfers, chunks represent MB received / MB total.
       updated[fileId] = FileTransferState(
         fileId: current.fileId,
         fileName: current.fileName,

@@ -63,10 +63,11 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 ```
 
 ## Current Phase
-**Phase 7: libp2p Full Removal — COMPLETE (Mar 27-28, 2026).** libp2p fully removed. WSS relay is sole transport. ed25519-dalek replaces libp2p identity. Relay server simplified (signaling + WS only). 184 tests pass.
+**Phase 5A: WebRTC Data Channels — COMPLETE (Mar 29, 2026).** P2P file/shard streaming via WebRTC data channels. flutter_webrtc 1.4.1 (libwebrtc m144). ~9 MB/s throughput, tested up to 131MB. 85-90% of heavy transfers bypass relay. STUN only (no TURN yet). WSS relay fallback for symmetric NAT. Keepalive pings (30s), auto-reconnect, early-arrival handling, `getBufferedAmount()` backpressure.
 
-**Phase 5: WebSocket Relay — COMPLETE (Mar 25-26).** All messages + file streaming via WSS.
-**Phase 6: Pure MLS for Servers — COMPLETE (Mar 26-27).** Servers = MLS, DMs = Olm, transport = WS.
+**Phase 7: libp2p Full Removal — COMPLETE (Mar 27-28, 2026).** libp2p fully removed. WSS relay is sole transport. ed25519-dalek replaces libp2p identity. Relay server simplified (signaling + WS only). 184 tests pass.
+**Phase 5 (old): WebSocket Relay — COMPLETE (Mar 25-26).** All messages + file streaming via WSS.
+**Phase 6 (old): Pure MLS for Servers — COMPLETE (Mar 26-27).** Servers = MLS, DMs = Olm, transport = WS.
 
 **Phase 4: Shared Vault — COMPLETE.** Phases 1-3.75 all COMPLETE.
 
@@ -149,7 +150,7 @@ All UI uses custom Hollow widgets — no Material defaults.
 - **Icons:** `lucide_icons: ^0.257.0`. All `LucideIcons.*` (camelCase). v0.257.0 uses `alertTriangle`/`alertCircle`. No `cloudCheck` — uses `cloud`.
 - `hollow_log!` macro logs to stderr + `hollow_debug.log` (works in release builds, rotates at 10MB)
 - Relay: OVH VPS 141.227.186.209, Nginx TLS on 443 → WS 127.0.0.1:9001. Domain: relay.anonlisten.com
-- **Transport:** Single persistent WSS connection to relay. No P2P fallback.
+- **Transport:** WSS connection to relay (signaling + text/CRDT/MLS) + WebRTC data channels for files/shards (85-90% P2P, WSS fallback).
 
 ## Coding Conventions
 - Dart: follow standard `flutter_lints` / `analysis_options.yaml`

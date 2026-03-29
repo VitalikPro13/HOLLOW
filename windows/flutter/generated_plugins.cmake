@@ -3,6 +3,7 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  flutter_webrtc
   local_notifier
   screen_retriever_windows
   tray_manager

@@ -26,6 +26,7 @@ import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/vault_status_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
+import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -75,12 +76,14 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_PeerExpired(:final peerId):
         ref.read(peersProvider.notifier).removePeer(peerId);
+        ref.read(webRtcProvider.notifier).disconnectPeer(peerId);
         // Don't deselect — friends stay visible when offline.
 
       case NetworkEvent_PeerDisconnected(:final peerId):
         debugPrint('[HOLLOW] Peer disconnected: $peerId');
         ref.read(peersProvider.notifier).removePeer(peerId);
         ref.read(connectionStatusProvider.notifier).onPeerDisconnected(peerId);
+        ref.read(webRtcProvider.notifier).disconnectPeer(peerId);
         // Don't deselect — friends stay visible when offline.
 
       case NetworkEvent_RoomCleared():
@@ -151,6 +154,8 @@ class EventStreamNotifier extends Notifier<bool> {
         // After re-key, clear any "Sync failed" status for servers where this
         // peer is a member, so the UI recovers automatically.
         _clearFailedSyncForPeer(peerId);
+        // Proactively establish WebRTC data channel for P2P file transfers.
+        ref.read(webRtcProvider.notifier).ensureConnection(peerId);
 
       case NetworkEvent_MessageSent():
         break;
@@ -595,6 +600,18 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_VaultUploadReplicationFallback(
             :final serverId, :final contentId, :final online, :final needed):
         debugPrint('[HOLLOW] Vault upload fallback: $online online < $needed needed for $contentId in $serverId — using replication');
+
+      // -- WebRTC events (Phase 5A) --
+      case NetworkEvent_WebRtcSignal(
+            :final peerId, :final signalType, :final payload, :final connId):
+        ref.read(webRtcProvider.notifier).handleSignal(
+              peerId, signalType, payload, connId);
+
+      case NetworkEvent_WebRtcSendFile(
+            :final peerId, :final transferId, :final filePath,
+            :final totalSize, :final kind, :final shardIndex):
+        ref.read(webRtcProvider.notifier).handleSendFile(
+              peerId, transferId, filePath, totalSize.toInt(), kind, shardIndex);
 
     }
     } catch (e, st) {

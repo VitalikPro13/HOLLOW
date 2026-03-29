@@ -133,6 +133,11 @@ pub(crate) enum NetworkEvent {
     // -- Connection status events --
     KeyExchangeStarted { peer_id: String },
     KeyExchangeProgress { peer_id: String, stage: String },
+    // -- WebRTC events (Phase 5A) --
+    /// Forward incoming WebRTC signaling message to Dart.
+    WebRtcSignal { peer_id: String, signal_type: String, payload: String, conn_id: String },
+    /// Tell Dart to send a file over WebRTC data channel.
+    WebRtcSendFile { peer_id: String, transfer_id: String, file_path: String, total_size: u64, kind: String, shard_index: u16 },
 }
 
 /// Commands the FFI layer can send into the swarm event loop.
@@ -217,6 +222,13 @@ pub(crate) enum NodeCommand {
         shard_key: String,
         target_peer: String,
     },
+    // -- WebRTC commands (Phase 5A) --
+    WebRtcPeerConnected { peer_id: String },
+    WebRtcPeerDisconnected { peer_id: String },
+    WebRtcSendSignal { peer_id: String, signal_type: String, payload: String, conn_id: String },
+    WebRtcTransferComplete { transfer_id: String, temp_path: String, sender_peer_id: String, kind: String, shard_index: u16 },
+    WebRtcSendComplete { transfer_id: String },
+    WebRtcTransferFailed { transfer_id: String, peer_id: String, error: String },
     StoreShardOnPeer {
         server_id: String,
         content_id: String,
@@ -443,6 +455,31 @@ enum HavenMessage {
         has_file: bool,
         #[serde(default)]
         available_chunks: Vec<u32>,
+    },
+
+    // -- WebRTC signaling (Phase 5A) --
+
+    /// SDP offer for WebRTC data channel connection.
+    #[serde(rename = "rtc_offer")]
+    RtcOffer {
+        sdp: String,
+        conn_id: String,
+    },
+
+    /// SDP answer for WebRTC data channel connection.
+    #[serde(rename = "rtc_answer")]
+    RtcAnswer {
+        sdp: String,
+        conn_id: String,
+    },
+
+    /// ICE candidate for WebRTC connection establishment.
+    #[serde(rename = "rtc_ice")]
+    RtcIceCandidate {
+        candidate: String,
+        sdp_mid: String,
+        sdp_mline_index: u32,
+        conn_id: String,
     },
 }
 
@@ -1359,6 +1396,9 @@ async fn run_event_loop(
 
     // -- Pending stream transfer state --
     let mut pending_file_streams: HashMap<String, PendingFileStream> = HashMap::new();
+    // Early-arrival file streams: WebRTC bytes arrived before the FileHeader.
+    // Key: file_id, Value: (temp_path, size, sender_peer_id)
+    let mut early_file_streams: HashMap<String, (std::path::PathBuf, u64, String)> = HashMap::new();
     let mut pending_shard_streams: HashMap<String, PendingShardStream> = HashMap::new();
 
     // Pending vault downloads waiting for remote shards.
@@ -1371,6 +1411,13 @@ async fn run_event_loop(
 
     // Peers we've already triggered sync for this session.
     let mut synced_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // -- WebRTC peer tracking (Phase 5A) --
+    // Peers with active WebRTC data channels (Dart notifies us via NodeCommand).
+    let mut webrtc_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Pending WebRTC sends — stored so we can retry via WSS on failure.
+    // Key: transfer_id, Value: (peer_id, kind, id, source_path, total_size)
+    let mut pending_webrtc_sends: HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)> = HashMap::new();
 
     // -- WS stream transfer reassembly state (Phase 5.5) --
     let mut pending_ws_transfers: HashMap<String, super::ws_stream_transfer::WsTransferState> = HashMap::new();
@@ -3899,6 +3946,7 @@ async fn run_event_loop(
                                                                 let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index: placement.shard_index };
                                                                 stream_to_peer(
                                                                     &ws_cmd_tx, &ws_room_peers,
+                                                                    &webrtc_peers, &mut pending_webrtc_sends, &event_tx,
                                                                     &placement.target_peer, &shard_kind,
                                                                     &content_id, &shard_temp_path, shard_data.len() as u64,
                                                                 ).await;
@@ -4100,6 +4148,7 @@ async fn run_event_loop(
                                     let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index };
                                     stream_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
+                                        &webrtc_peers, &mut pending_webrtc_sends, &event_tx,
                                         &target_peer, &shard_kind,
                                         &content_id, &shard_temp_path, data.len() as u64,
                                     ).await;
@@ -4331,9 +4380,10 @@ async fn run_event_loop(
                                                                                 &ws_cmd_tx, &ws_room_peers,
                                         ).await;
 
-                                        // Stream encrypted file bytes via stream_to_peer (WS or libp2p).
+                                        // Stream encrypted file bytes via WebRTC or WS relay.
                                         stream_to_peer(
                                             &ws_cmd_tx, &ws_room_peers,
+                                            &webrtc_peers, &mut pending_webrtc_sends, &event_tx,
                                             &peer_str, &super::ws_stream_transfer::StreamKind::File,
                                             &file_id, &temp_path, enc.ciphertext.len() as u64,
                                         ).await;
@@ -4464,12 +4514,13 @@ async fn run_event_loop(
                                     if use_vault_only {
                                         hollow_log!("[HOLLOW-FILE] Erasure coding active ({member_count} members) — skipping full-file streaming, vault handles shard distribution");
                                     } else {
-                                        // Full replication: stream encrypted file bytes to each member.
+                                        // Full replication: stream encrypted file bytes to each member via WebRTC or WS.
                                         for member_peer_str in state.members.keys() {
                                             if member_peer_str == &local_peer { continue; }
                                                 if peer_is_reachable(&ws_room_peers, member_peer_str) {
                                                     stream_to_peer(
                                                         &ws_cmd_tx, &ws_room_peers,
+                                                        &webrtc_peers, &mut pending_webrtc_sends, &event_tx,
                                                         member_peer_str, &super::ws_stream_transfer::StreamKind::File,
                                                         &file_id, &temp_path, ct_size,
                                                     ).await;
@@ -4493,6 +4544,100 @@ async fn run_event_loop(
                                 &peer_id_str, HavenMessage::FileRequest {
                                     file_id,
                                     chunks,
+                                },
+                            );
+                        }
+                    }
+
+                    // -- WebRTC commands (Phase 5A) --
+                    NodeCommand::WebRtcPeerConnected { peer_id } => {
+                        hollow_log!("[HOLLOW-WEBRTC] Data channel ready for {peer_id}");
+                        webrtc_peers.insert(peer_id);
+                    }
+                    NodeCommand::WebRtcPeerDisconnected { peer_id } => {
+                        hollow_log!("[HOLLOW-WEBRTC] Data channel closed for {peer_id}");
+                        webrtc_peers.remove(&peer_id);
+                    }
+                    NodeCommand::WebRtcSendSignal { peer_id, signal_type, payload, conn_id } => {
+                        let msg = match signal_type.as_str() {
+                            "offer" => HavenMessage::RtcOffer { sdp: payload, conn_id },
+                            "answer" => HavenMessage::RtcAnswer { sdp: payload, conn_id },
+                            "ice" => {
+                                // Parse ICE candidate JSON payload.
+                                if let Ok(ice) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                    HavenMessage::RtcIceCandidate {
+                                        candidate: ice["candidate"].as_str().unwrap_or("").to_string(),
+                                        sdp_mid: ice["sdpMid"].as_str().unwrap_or("").to_string(),
+                                        sdp_mline_index: ice["sdpMLineIndex"].as_u64().unwrap_or(0) as u32,
+                                        conn_id,
+                                    }
+                                } else {
+                                    hollow_log!("[HOLLOW-WEBRTC] Failed to parse ICE payload");
+                                    continue;
+                                }
+                            }
+                            _ => {
+                                hollow_log!("[HOLLOW-WEBRTC] Unknown signal type: {signal_type}");
+                                continue;
+                            }
+                        };
+                        send_message_to_peer(&ws_cmd_tx, &ws_room_peers, &peer_id, msg);
+                    }
+                    NodeCommand::WebRtcTransferComplete { transfer_id, temp_path, sender_peer_id, kind, shard_index } => {
+                        hollow_log!("[HOLLOW-WEBRTC] Transfer complete: {transfer_id} from {sender_peer_id}");
+                        let stream_kind = if kind == "shard" {
+                            super::ws_stream_transfer::StreamKind::Shard { shard_index }
+                        } else {
+                            super::ws_stream_transfer::StreamKind::File
+                        };
+                        let request = super::ws_stream_transfer::StreamRequest {
+                            kind: stream_kind,
+                            id: transfer_id,
+                            size: std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0),
+                            temp_path: std::path::PathBuf::from(temp_path),
+                        };
+                        handle_completed_stream(
+                            request,
+                            &sender_peer_id,
+                            &mut pending_file_streams,
+                            &mut pending_shard_streams,
+                            &mut pending_vault_downloads,
+                            &mut early_file_streams,
+                            &bundle_keypair,
+                            &event_tx,
+                        ).await;
+                    }
+                    NodeCommand::WebRtcSendComplete { transfer_id } => {
+                        hollow_log!("[HOLLOW-WEBRTC] Send complete: {transfer_id}");
+                        if let Some((_, _, _, path, _)) = pending_webrtc_sends.remove(&transfer_id) {
+                            // Clean up the temp encrypted file if it's a .stream_send_ temp.
+                            if path.file_name().map(|n| n.to_string_lossy().starts_with(".stream_send_")).unwrap_or(false) {
+                                let _ = std::fs::remove_file(&path);
+                            }
+                        }
+                    }
+                    NodeCommand::WebRtcTransferFailed { transfer_id, peer_id, error } => {
+                        hollow_log!("[HOLLOW-WEBRTC] Transfer failed: {transfer_id} to/from {peer_id}: {error}");
+                        webrtc_peers.remove(&peer_id);
+                        // Sender-side retry: re-send via WSS relay.
+                        if let Some((_, kind, id, source_path, total_size)) = pending_webrtc_sends.remove(&transfer_id) {
+                            hollow_log!("[HOLLOW-WEBRTC] Sender fallback: retrying {id} via WSS relay");
+                            stream_to_peer(
+                                &ws_cmd_tx, &ws_room_peers,
+                                &webrtc_peers, &mut pending_webrtc_sends, &event_tx,
+                                &peer_id, &kind, &id, &source_path, total_size,
+                            ).await;
+                        }
+                        // Receiver-side retry: if we have a pending file stream for this transfer,
+                        // send a FileRequest to get it via WSS. Also remove early arrival if present.
+                        if pending_file_streams.contains_key(&transfer_id) || early_file_streams.contains_key(&transfer_id) {
+                            early_file_streams.remove(&transfer_id);
+                            hollow_log!("[HOLLOW-WEBRTC] Receiver fallback: requesting {transfer_id} via FileRequest");
+                            send_message_to_peer(
+                                &ws_cmd_tx, &ws_room_peers,
+                                &peer_id, HavenMessage::FileRequest {
+                                    file_id: transfer_id,
+                                    chunks: vec![],
                                 },
                             );
                         }
@@ -4868,6 +5013,7 @@ async fn run_event_loop(
                                 &mut pending_file_streams,
                                 &mut pending_shard_streams,
                                 &mut pending_vault_downloads,
+                                &mut early_file_streams,
                                 &bundle_keypair,
                                 &event_tx,
                             ).await;
@@ -4909,9 +5055,11 @@ async fn run_event_loop(
                                         &mut mls_bootstrap_requested,
                                         &sig_cmd_tx,
                                         &mut pending_shard_assembly, &mut pending_file_streams,
-                                        &mut pending_shard_streams, &mut decrypt_fail_cooldown,
+                                        &mut pending_shard_streams, &mut early_file_streams,
+                                        &mut decrypt_fail_cooldown,
                                         &mut pending_mls_key_packages, &mut mls_decrypt_failures,
                                         &ws_cmd_tx, &ws_room_peers,
+                                        &webrtc_peers, &mut pending_webrtc_sends,
                                         &mut channel_sync_sent,
                                         &local_peer_str, &from, msg,
                                     ).await;
@@ -5236,6 +5384,7 @@ async fn handle_completed_stream(
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
     pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
+    early_file_streams: &mut HashMap<String, (std::path::PathBuf, u64, String)>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
@@ -5289,8 +5438,10 @@ async fn handle_completed_stream(
                 }
                 let _ = std::fs::remove_file(&request.temp_path);
             } else {
-                hollow_log!("[HOLLOW-STREAM] No pending FileHeader for stream {file_id} — ignoring");
-                let _ = std::fs::remove_file(&request.temp_path);
+                // WebRTC race: bytes arrived before FileHeader. Save for later.
+                hollow_log!("[HOLLOW-STREAM] No pending FileHeader for stream {file_id} — saving as early arrival");
+                early_file_streams.insert(file_id, (request.temp_path.clone(), request.size, sender_peer.to_string()));
+                // Don't delete the temp file — FileHeader handler will pick it up.
             }
         }
         StreamKind::Shard { shard_index } => {
@@ -5473,16 +5624,47 @@ fn send_mls_to_peer(
     Ok(())
 }
 
-/// Stream file or shard data to a peer via WS binary frames.
+/// Stream file or shard data to a peer. Prefers WebRTC data channel if available,
+/// falls back to WS binary frames via relay.
 async fn stream_to_peer(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
     peer_str: &str,
     kind: &super::ws_stream_transfer::StreamKind,
     id: &str,
     source_path: &std::path::Path,
     total_size: u64,
 ) {
+    // Prefer WebRTC data channel if peer has one active.
+    if webrtc_peers.contains(peer_str) {
+        let kind_str = match kind {
+            super::ws_stream_transfer::StreamKind::File => "file",
+            super::ws_stream_transfer::StreamKind::Shard { .. } => "shard",
+        };
+        let shard_index = match kind {
+            super::ws_stream_transfer::StreamKind::Shard { shard_index } => *shard_index,
+            _ => 0,
+        };
+        // Store for fallback on failure.
+        pending_webrtc_sends.insert(id.to_string(), (
+            peer_str.to_string(), kind.clone(), id.to_string(),
+            source_path.to_path_buf(), total_size,
+        ));
+        let _ = event_tx.send(NetworkEvent::WebRtcSendFile {
+            peer_id: peer_str.to_string(),
+            transfer_id: id.to_string(),
+            file_path: source_path.to_string_lossy().to_string(),
+            total_size,
+            kind: kind_str.to_string(),
+            shard_index,
+        }).await;
+        hollow_log!("[HOLLOW-WEBRTC] Routing {id} to {peer_str} via WebRTC data channel");
+        return;
+    }
+    // Fallback: WSS relay binary streaming.
     if let Some(room) = ws_room_for_peer(ws_room_peers, peer_str) {
         super::ws_stream_transfer::ws_stream_send(
             ws_cmd_tx, &room, peer_str, kind, id, source_path, total_size,
@@ -5580,11 +5762,14 @@ async fn handle_incoming_request(
     pending_shard_assembly: &mut HashMap<String, PendingShardAssembly>,
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
+    early_file_streams: &mut HashMap<String, (std::path::PathBuf, u64, String)>,
     decrypt_fail_cooldown: &mut HashMap<String, std::time::Instant>,
     pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
     mls_decrypt_failures: &mut HashMap<String, u32>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
     channel_sync_sent: &mut HashMap<String, std::time::Instant>,
     local_peer_str: &str,
     peer_str: &str,
@@ -6462,6 +6647,24 @@ async fn handle_incoming_request(
                             height: h,
                         });
                         hollow_log!("[HOLLOW-FILE] Registered pending stream for {fid} (streamed transfer)");
+
+                        // Check if WebRTC bytes already arrived before this FileHeader (race condition).
+                        if let Some((temp_path, file_size, sender)) = early_file_streams.remove(&fid) {
+                            hollow_log!("[HOLLOW-FILE] Early arrival found for {fid} — processing now");
+                            let request = super::ws_stream_transfer::StreamRequest {
+                                kind: super::ws_stream_transfer::StreamKind::File,
+                                id: fid.clone(),
+                                size: file_size,
+                                temp_path,
+                            };
+                            let mut empty_vault_dl = HashMap::new();
+                            handle_completed_stream(
+                                request, &sender,
+                                pending_file_streams, pending_shard_streams,
+                                &mut empty_vault_dl, early_file_streams,
+                                bundle_keypair, event_tx,
+                            ).await;
+                        }
                     }
 
                     let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
@@ -6817,6 +7020,7 @@ async fn handle_incoming_request(
                                             let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index: si };
                                             stream_to_peer(
                                                 ws_cmd_tx, ws_room_peers,
+                                                webrtc_peers, pending_webrtc_sends, event_tx,
                                                 &peer_str, &shard_kind,
                                                 &cid, &shard_temp_path, shard_data.len() as u64,
                                             ).await;
@@ -8212,6 +8416,24 @@ async fn handle_incoming_request(
                                         height: h,
                                     });
                                     hollow_log!("[HOLLOW-FILE] Registered pending stream for {fid} (MLS streamed transfer)");
+
+                                    // Check if WebRTC bytes already arrived before this FileHeader.
+                                    if let Some((temp_path, file_size, sender)) = early_file_streams.remove(&fid) {
+                                        hollow_log!("[HOLLOW-FILE] Early arrival found for {fid} (MLS path) — processing now");
+                                        let request = super::ws_stream_transfer::StreamRequest {
+                                            kind: super::ws_stream_transfer::StreamKind::File,
+                                            id: fid.clone(),
+                                            size: file_size,
+                                            temp_path,
+                                        };
+                                        let mut empty_vault_dl = HashMap::new();
+                                        handle_completed_stream(
+                                            request, &sender,
+                                            pending_file_streams, pending_shard_streams,
+                                            &mut empty_vault_dl, early_file_streams,
+                                            bundle_keypair, event_tx,
+                                        ).await;
+                                    }
                                 }
 
                                 let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
@@ -8839,6 +9061,7 @@ async fn handle_incoming_request(
                                                     let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index: si };
                                                     stream_to_peer(
                                                         ws_cmd_tx, ws_room_peers,
+                                                        webrtc_peers, pending_webrtc_sends, event_tx,
                                                         &sender_peer_id, &shard_kind,
                                                         &cid, &shard_temp, shard_data.len() as u64,
                                                     ).await;
@@ -9432,9 +9655,10 @@ async fn handle_incoming_request(
                                                 ).await;
                                             }
 
-                                            // Stream encrypted file bytes via WS binary or libp2p.
+                                            // Stream encrypted file bytes via WebRTC or WS relay.
                                             stream_to_peer(
                                                 ws_cmd_tx, ws_room_peers,
+                                                webrtc_peers, pending_webrtc_sends, event_tx,
                                                 &peer_str, &super::ws_stream_transfer::StreamKind::File,
                                                 &file_id, &temp_path, enc.ciphertext.len() as u64,
                                             ).await;
@@ -9446,6 +9670,42 @@ async fn handle_incoming_request(
                     }
                 }
             }
+        }
+
+        // -- WebRTC signaling (Phase 5A) --
+        HavenMessage::RtcOffer { sdp, conn_id } => {
+            hollow_log!("[HOLLOW-WEBRTC] RtcOffer from {peer_str} conn={conn_id}");
+            // sdp is the raw SDP string (not JSON-wrapped).
+            let _ = event_tx.send(NetworkEvent::WebRtcSignal {
+                peer_id: peer_str.to_string(),
+                signal_type: "offer".to_string(),
+                payload: sdp,
+                conn_id,
+            }).await;
+        }
+        HavenMessage::RtcAnswer { sdp, conn_id } => {
+            hollow_log!("[HOLLOW-WEBRTC] RtcAnswer from {peer_str} conn={conn_id}");
+            // sdp is the raw SDP string (not JSON-wrapped).
+            let _ = event_tx.send(NetworkEvent::WebRtcSignal {
+                peer_id: peer_str.to_string(),
+                signal_type: "answer".to_string(),
+                payload: sdp,
+                conn_id,
+            }).await;
+        }
+        HavenMessage::RtcIceCandidate { candidate, sdp_mid, sdp_mline_index, conn_id } => {
+            hollow_log!("[HOLLOW-WEBRTC] RtcIceCandidate from {peer_str} conn={conn_id}");
+            let payload = serde_json::json!({
+                "candidate": candidate,
+                "sdpMid": sdp_mid,
+                "sdpMLineIndex": sdp_mline_index,
+            }).to_string();
+            let _ = event_tx.send(NetworkEvent::WebRtcSignal {
+                peer_id: peer_str.to_string(),
+                signal_type: "ice".to_string(),
+                payload,
+                conn_id,
+            }).await;
         }
 
         _ => {}

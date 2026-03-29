@@ -1077,6 +1077,13 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                             : null,
                         onDownload: msg.fileAttachment != null
                             ? () {
+                                // Don't trigger duplicate downloads during active transfer.
+                                final transfer = ref.read(fileTransferProvider)[msg.fileAttachment!.fileId];
+                                if (transfer != null && transfer.isDownloading) {
+                                  HollowToast.show(context, 'File is already downloading...', type: HollowToastType.info);
+                                  return;
+                                }
+
                                 if (msg.fileAttachment!.diskPath != null) {
                                   _saveFile(msg.fileAttachment!);
                                 } else {

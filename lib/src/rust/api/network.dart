@@ -275,6 +275,66 @@ Future<Uint8List> convertImageFormat({
 Future<String> getFilesDir() =>
     RustLib.instance.api.crateApiNetworkGetFilesDir();
 
+/// Log a message from Dart to hollow_debug.log (visible in release builds).
+Future<void> logFromDart({required String message}) =>
+    RustLib.instance.api.crateApiNetworkLogFromDart(message: message);
+
+/// Notify Rust that a WebRTC data channel is established with a peer.
+Future<void> webrtcPeerConnected({required String peerId}) =>
+    RustLib.instance.api.crateApiNetworkWebrtcPeerConnected(peerId: peerId);
+
+/// Notify Rust that a WebRTC data channel has been closed for a peer.
+Future<void> webrtcPeerDisconnected({required String peerId}) =>
+    RustLib.instance.api.crateApiNetworkWebrtcPeerDisconnected(peerId: peerId);
+
+/// Send a WebRTC signaling message (SDP offer/answer or ICE candidate) to a peer.
+/// Rust routes it through the WSS relay to the target peer.
+Future<void> webrtcSendSignal({
+  required String peerId,
+  required String signalType,
+  required String payload,
+  required String connId,
+}) => RustLib.instance.api.crateApiNetworkWebrtcSendSignal(
+  peerId: peerId,
+  signalType: signalType,
+  payload: payload,
+  connId: connId,
+);
+
+/// Notify Rust that a WebRTC file transfer completed (receiver side).
+/// Rust will decrypt and process the received file.
+Future<void> webrtcTransferComplete({
+  required String transferId,
+  required String tempPath,
+  required String senderPeerId,
+  required String kind,
+  required int shardIndex,
+}) => RustLib.instance.api.crateApiNetworkWebrtcTransferComplete(
+  transferId: transferId,
+  tempPath: tempPath,
+  senderPeerId: senderPeerId,
+  kind: kind,
+  shardIndex: shardIndex,
+);
+
+/// Notify Rust that a WebRTC file send completed (sender side).
+/// Rust cleans up the temp encrypted file.
+Future<void> webrtcSendComplete({required String transferId}) => RustLib
+    .instance
+    .api
+    .crateApiNetworkWebrtcSendComplete(transferId: transferId);
+
+/// Notify Rust that a WebRTC transfer failed. Triggers WSS relay fallback.
+Future<void> webrtcTransferFailed({
+  required String transferId,
+  required String peerId,
+  required String error,
+}) => RustLib.instance.api.crateApiNetworkWebrtcTransferFailed(
+  transferId: transferId,
+  peerId: peerId,
+  error: error,
+);
+
 /// A discovered peer on the local network.
 class DiscoveredPeer {
   final String peerId;
@@ -593,4 +653,22 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String peerId,
     required String stage,
   }) = NetworkEvent_KeyExchangeProgress;
+
+  /// Forward incoming WebRTC signaling message to Dart.
+  const factory NetworkEvent.webRtcSignal({
+    required String peerId,
+    required String signalType,
+    required String payload,
+    required String connId,
+  }) = NetworkEvent_WebRtcSignal;
+
+  /// Tell Dart to send a file over WebRTC data channel.
+  const factory NetworkEvent.webRtcSendFile({
+    required String peerId,
+    required String transferId,
+    required String filePath,
+    required BigInt totalSize,
+    required String kind,
+    required int shardIndex,
+  }) = NetworkEvent_WebRtcSendFile;
 }

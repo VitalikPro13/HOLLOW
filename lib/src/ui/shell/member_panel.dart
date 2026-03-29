@@ -6,6 +6,7 @@ import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
+import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -710,6 +711,18 @@ class _MemberTile extends ConsumerWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ),
+
+          // P2P direct connection indicator
+          if (ref.watch(webRtcProvider.select((s) =>
+              s.peers[peerId] == WebRtcPeerStatus.connected)))
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: Icon(
+                LucideIcons.radio,
+                size: 11,
+                color: hollow.accent,
+              ),
+            ),
 
           // Encryption badge or spinning icon
           isEncrypted

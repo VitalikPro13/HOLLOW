@@ -40,9 +40,12 @@ class FileAttachmentWidget extends ConsumerWidget {
     final progress = (transfer != null && transfer.progress > 0)
         ? transfer.progress
         : attachment.progress;
-    final bytesReceived = (transfer != null && transfer.totalChunks > 0)
-        ? transfer.chunksReceived * 1024 * 1024
-        : 0;
+    // Compute bytes received from progress ratio × total size.
+    // This works for both WSS (MB-based chunks) and WebRTC (64KB-based chunks).
+    final totalBytes = (transfer != null && transfer.sizeBytes > 0)
+        ? transfer.sizeBytes
+        : attachment.sizeBytes;
+    final bytesReceived = (progress * totalBytes).round();
 
     if (attachment.isImage) {
       return _buildImagePreview(context, hollow, isComplete, diskPath, isDownloading, progress, bytesReceived, vaultPhase);

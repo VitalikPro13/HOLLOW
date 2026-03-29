@@ -118,6 +118,11 @@ pub enum NetworkEvent {
     // -- Connection status events --
     KeyExchangeStarted { peer_id: String },
     KeyExchangeProgress { peer_id: String, stage: String },
+    // -- WebRTC events (Phase 5A) --
+    /// Forward incoming WebRTC signaling message to Dart.
+    WebRtcSignal { peer_id: String, signal_type: String, payload: String, conn_id: String },
+    /// Tell Dart to send a file over WebRTC data channel.
+    WebRtcSendFile { peer_id: String, transfer_id: String, file_path: String, total_size: u64, kind: String, shard_index: u16 },
 }
 
 /// Holds all mutable state for the running node.
@@ -282,6 +287,12 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::KeyExchangeProgress { peer_id, stage } => {
             hollow_log!("[HOLLOW] Key exchange: {peer_id} stage={stage}");
+        }
+        node::NetworkEvent::WebRtcSignal { peer_id, signal_type, .. } => {
+            hollow_log!("[HOLLOW-WEBRTC] Signal {signal_type} from {peer_id}");
+        }
+        node::NetworkEvent::WebRtcSendFile { peer_id, transfer_id, total_size, .. } => {
+            hollow_log!("[HOLLOW-WEBRTC] SendFile {transfer_id} to {peer_id} ({total_size} bytes)");
         }
         _ => {}
     }
@@ -478,6 +489,13 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::KeyExchangeProgress { peer_id, stage } => {
             NetworkEvent::KeyExchangeProgress { peer_id, stage }
+        }
+        // -- WebRTC events (Phase 5A) --
+        node::NetworkEvent::WebRtcSignal { peer_id, signal_type, payload, conn_id } => {
+            NetworkEvent::WebRtcSignal { peer_id, signal_type, payload, conn_id }
+        }
+        node::NetworkEvent::WebRtcSendFile { peer_id, transfer_id, file_path, total_size, kind, shard_index } => {
+            NetworkEvent::WebRtcSendFile { peer_id, transfer_id, file_path, total_size, kind, shard_index }
         }
     }
 }
@@ -1159,4 +1177,108 @@ pub fn get_files_dir() -> String {
     crate::node::file_transfer::files_dir()
         .to_string_lossy()
         .to_string()
+}
+
+/// Log a message from Dart to hollow_debug.log (visible in release builds).
+#[frb]
+pub fn log_from_dart(message: String) {
+    hollow_log!("{message}");
+}
+
+// -- WebRTC FFI functions (Phase 5A) --
+
+/// Notify Rust that a WebRTC data channel is established with a peer.
+#[frb]
+pub fn webrtc_peer_connected(peer_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::WebRtcPeerConnected { peer_id }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Notify Rust that a WebRTC data channel has been closed for a peer.
+#[frb]
+pub fn webrtc_peer_disconnected(peer_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::WebRtcPeerDisconnected { peer_id }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Send a WebRTC signaling message (SDP offer/answer or ICE candidate) to a peer.
+/// Rust routes it through the WSS relay to the target peer.
+#[frb]
+pub fn webrtc_send_signal(
+    peer_id: String,
+    signal_type: String,
+    payload: String,
+    conn_id: String,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::WebRtcSendSignal {
+        peer_id, signal_type, payload, conn_id,
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Notify Rust that a WebRTC file transfer completed (receiver side).
+/// Rust will decrypt and process the received file.
+#[frb]
+pub fn webrtc_transfer_complete(
+    transfer_id: String,
+    temp_path: String,
+    sender_peer_id: String,
+    kind: String,
+    shard_index: u16,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::WebRtcTransferComplete {
+        transfer_id, temp_path, sender_peer_id, kind, shard_index,
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Notify Rust that a WebRTC file send completed (sender side).
+/// Rust cleans up the temp encrypted file.
+#[frb]
+pub fn webrtc_send_complete(transfer_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::WebRtcSendComplete { transfer_id }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Notify Rust that a WebRTC transfer failed. Triggers WSS relay fallback.
+#[frb]
+pub fn webrtc_transfer_failed(
+    transfer_id: String,
+    peer_id: String,
+    error: String,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::WebRtcTransferFailed {
+        transfer_id, peer_id, error,
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
 }
