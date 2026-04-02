@@ -1572,7 +1572,7 @@ class _AudioDeviceSettings extends ConsumerStatefulWidget {
 }
 
 class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
-  List<rec.InputDevice> _audioInputs = [];
+  List<win32audio.AudioDevice> _audioInputs = [];
   List<win32audio.AudioDevice> _audioOutputs = [];
   bool _loading = true;
   rec.AudioRecorder? _recorder;
@@ -1594,21 +1594,19 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
 
   Future<void> _loadDevices() async {
     try {
-      final recorder = rec.AudioRecorder();
-
-      // Enumerate input devices via record package (no permission needed).
-      final inputs = await recorder.listInputDevices();
-      await recorder.dispose();
-
-      // Enumerate output devices via win32audio (reliable on Windows,
-      // unlike flutter_webrtc's enumerateDevices which returns empty).
+      // Enumerate both input and output devices via win32audio.
+      // This gives us the isActive flag to auto-select the right device.
+      List<win32audio.AudioDevice> inputs = [];
       List<win32audio.AudioDevice> outputs = [];
       try {
-        final devices = await win32audio.Audio.enumDevices(
+        final inDevices = await win32audio.Audio.enumDevices(
+            win32audio.AudioDeviceType.input);
+        inputs = inDevices ?? [];
+        final outDevices = await win32audio.Audio.enumDevices(
             win32audio.AudioDeviceType.output);
-        outputs = devices ?? [];
+        outputs = outDevices ?? [];
       } catch (e) {
-        debugPrint('[HOLLOW] Output device enumeration failed: $e');
+        debugPrint('[HOLLOW] Device enumeration failed: $e');
       }
 
       if (!mounted) return;
@@ -1617,6 +1615,22 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         _audioOutputs = outputs;
         _loading = false;
       });
+
+      // Auto-select the system active device if the user hasn't chosen one.
+      final savedInput = ref.read(audioInputDeviceProvider).valueOrNull;
+      if (savedInput == null && inputs.isNotEmpty) {
+        final active = inputs.firstWhere(
+            (d) => d.isActive,
+            orElse: () => inputs.first);
+        ref.read(audioInputDeviceProvider.notifier).setDevice(active.id);
+      }
+      final savedOutput = ref.read(audioOutputDeviceProvider).valueOrNull;
+      if (savedOutput == null && outputs.isNotEmpty) {
+        final active = outputs.firstWhere(
+            (d) => d.isActive,
+            orElse: () => outputs.first);
+        ref.read(audioOutputDeviceProvider.notifier).setDevice(active.id);
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() => _loading = false);
@@ -1704,54 +1718,43 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Microphone input (uses record package InputDevice)
+        // Microphone input (win32audio)
         _buildDeviceRow(
           hollow: hollow,
           icon: LucideIcons.mic,
           label: 'Microphone',
-          items: [
-            const DropdownMenuItem<String?>(
-              value: null,
-              child: Text('System Default'),
-            ),
-            ..._audioInputs.map((d) => DropdownMenuItem<String?>(
-                  value: d.id,
-                  child: Text(
-                    d.label.isNotEmpty ? d.label : 'Device ${d.id.substring(0, 8.clamp(0, d.id.length))}',
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                )),
-          ],
+          items: _audioInputs.map((d) => DropdownMenuItem<String?>(
+                value: d.id,
+                child: Text(
+                  d.name.isNotEmpty ? d.name : 'Device ${d.id.substring(0, 8.clamp(0, d.id.length))}',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              )).toList(),
           selectedValue: _resolveInputValue(selectedInput),
           onChanged: (deviceId) {
-            ref.read(audioInputDeviceProvider.notifier).setDevice(deviceId);
+            if (deviceId != null) {
+              ref.read(audioInputDeviceProvider.notifier).setDevice(deviceId);
+            }
           },
         ),
         const SizedBox(height: HollowSpacing.md),
 
-        // Speaker output (uses win32audio AudioDevice)
+        // Speaker output (win32audio)
         _buildDeviceRow(
           hollow: hollow,
           icon: LucideIcons.volume2,
           label: 'Speaker',
-          items: [
-            const DropdownMenuItem<String?>(
-              value: null,
-              child: Text('System Default'),
-            ),
-            ..._audioOutputs.map((d) => DropdownMenuItem<String?>(
-                  value: d.id,
-                  child: Text(
-                    d.name.isNotEmpty ? d.name : 'Device ${d.id.substring(0, 8.clamp(0, d.id.length))}',
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                )),
-          ],
+          items: _audioOutputs.map((d) => DropdownMenuItem<String?>(
+                value: d.id,
+                child: Text(
+                  d.name.isNotEmpty ? d.name : 'Device ${d.id.substring(0, 8.clamp(0, d.id.length))}',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              )).toList(),
           selectedValue: _resolveOutputValue(selectedOutput),
           onChanged: (deviceId) {
-            ref.read(audioOutputDeviceProvider.notifier).setDevice(deviceId);
             if (deviceId != null) {
-              debugPrint('[HOLLOW] Selected output device: $deviceId');
+              ref.read(audioOutputDeviceProvider.notifier).setDevice(deviceId);
               webrtc.Helper.selectAudioOutput(deviceId).catchError((e) {
                 debugPrint('[HOLLOW] selectAudioOutput failed: $e');
               });
@@ -1834,13 +1837,18 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
   }
 
   String? _resolveInputValue(String? savedId) {
-    if (savedId == null) return null;
-    return _audioInputs.any((d) => d.id == savedId) ? savedId : null;
+    if (savedId == null || _audioInputs.isEmpty) return null;
+    // If the saved device exists, use it. Otherwise fall back to active device.
+    if (_audioInputs.any((d) => d.id == savedId)) return savedId;
+    final active = _audioInputs.where((d) => d.isActive);
+    return active.isNotEmpty ? active.first.id : _audioInputs.first.id;
   }
 
   String? _resolveOutputValue(String? savedId) {
-    if (savedId == null) return null;
-    return _audioOutputs.any((d) => d.id == savedId) ? savedId : null;
+    if (savedId == null || _audioOutputs.isEmpty) return null;
+    if (_audioOutputs.any((d) => d.id == savedId)) return savedId;
+    final active = _audioOutputs.where((d) => d.isActive);
+    return active.isNotEmpty ? active.first.id : _audioOutputs.first.id;
   }
 
   Widget _buildDeviceRow({

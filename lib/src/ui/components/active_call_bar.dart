@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -63,7 +65,12 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
         call.status == CallStatus.active ||
         call.status == CallStatus.connecting;
 
-    if (!isVisible) {
+    // Hide the floating pill when the user is viewing the call peer's DM
+    // (the inline call panel handles it there).
+    final selectedPeer = ref.watch(selectedPeerProvider);
+    final isViewingCallDm = selectedPeer == call.peerId;
+
+    if (!isVisible || isViewingCallDm) {
       if (_durationTimer != null) _stopTimer();
       return const SizedBox.shrink();
     }
@@ -81,7 +88,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
     final displayName = displayNameFor(ref.watch(profileProvider), peerId);
 
     return Positioned(
-      top: 32, // below title bar
+      top: 80, // below title bar + friends bar
       left: 0,
       right: 0,
       child: Transform.translate(
@@ -186,7 +193,11 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                         ),
                       ),
                     ),
-                    if (call.isVideoEnabled) ...[
+                    // Switch camera — mobile only (desktop has one camera).
+                    if (call.isVideoEnabled &&
+                        !Platform.isWindows &&
+                        !Platform.isLinux &&
+                        !Platform.isMacOS) ...[
                       const SizedBox(width: HollowSpacing.xs),
                       HollowTooltip(
                         message: 'Switch camera',

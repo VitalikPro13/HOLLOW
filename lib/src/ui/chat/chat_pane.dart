@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -37,6 +38,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:lucide_icons/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
@@ -642,6 +644,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           ),
         ),
 
+        // Inline call panel (slides down when in call with this peer)
+        _InlineCallPanelSlider(peerId: widget.peerId),
+
         // Messages list + unread pill overlay
         Expanded(
           child: Stack(
@@ -1040,6 +1045,531 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 }
 
 /// Slide animation wrapper for the DM profile panel.
+// ---------------------------------------------------------------------------
+// Inline call panel — shown under the DM header during a call with this peer.
+// ---------------------------------------------------------------------------
+
+/// Animated slider for the inline call panel (slides down from header).
+class _InlineCallPanelSlider extends ConsumerStatefulWidget {
+  final String peerId;
+  const _InlineCallPanelSlider({required this.peerId});
+
+  @override
+  ConsumerState<_InlineCallPanelSlider> createState() =>
+      _InlineCallPanelSliderState();
+}
+
+class _InlineCallPanelSliderState extends ConsumerState<_InlineCallPanelSlider>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final CurvedAnimation _curved;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: HollowDurations.normal,
+      value: 0.0,
+    );
+    _curved = CurvedAnimation(
+      parent: _controller,
+      curve: HollowCurves.enter,
+      reverseCurve: HollowCurves.exit,
+    );
+  }
+
+  @override
+  void dispose() {
+    _curved.dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final call = ref.watch(callProvider);
+    final isCallWithThisPeer = call.peerId == widget.peerId &&
+        (call.status == CallStatus.active ||
+         call.status == CallStatus.connecting);
+
+    // Drive animation.
+    if (isCallWithThisPeer) {
+      _controller.forward();
+    } else {
+      _controller.reverse();
+    }
+
+    return AnimatedBuilder(
+      animation: _curved,
+      builder: (context, child) {
+        if (_curved.value == 0.0) return const SizedBox.shrink();
+        return ClipRect(
+          child: Align(
+            alignment: Alignment.topCenter,
+            heightFactor: _curved.value,
+            child: FadeTransition(
+              opacity: _curved,
+              child: child,
+            ),
+          ),
+        );
+      },
+      child: _InlineCallPanel(peerId: widget.peerId),
+    );
+  }
+}
+
+/// The actual call panel content — audio bar or video view + controls.
+class _InlineCallPanel extends ConsumerStatefulWidget {
+  final String peerId;
+  const _InlineCallPanel({required this.peerId});
+
+  @override
+  ConsumerState<_InlineCallPanel> createState() => _InlineCallPanelState();
+}
+
+class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
+  Timer? _durationTimer;
+  Duration _duration = Duration.zero;
+  double _videoHeight = 200; // Height of the video area (only when video active).
+  static const _minVideoHeight = 80.0;
+  static const _maxVideoHeight = 500.0;
+  String? _expandedRenderer; // null = side-by-side, 'local' or 'remote' = fullscreen
+
+  @override
+  void dispose() {
+    _durationTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startTimer(DateTime startedAt) {
+    _durationTimer?.cancel();
+    _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {
+        _duration = DateTime.now().difference(startedAt);
+      });
+    });
+  }
+
+  String _formatDuration(Duration d) {
+    final minutes = d.inMinutes.toString().padLeft(2, '0');
+    final seconds = (d.inSeconds % 60).toString().padLeft(2, '0');
+    return '$minutes:$seconds';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final call = ref.watch(callProvider);
+    final hollow = HollowTheme.of(context);
+    final profiles = ref.watch(profileProvider);
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final displayName = displayNameFor(profiles, widget.peerId);
+    final remoteAvatar = profiles[widget.peerId]?.avatarBytes;
+    final localAvatar = profiles[localPeerId]?.avatarBytes;
+
+    // Start timer.
+    if (call.status == CallStatus.active && call.startedAt != null) {
+      if (_durationTimer == null) {
+        _duration = DateTime.now().difference(call.startedAt!);
+        _startTimer(call.startedAt!);
+      }
+    } else {
+      _durationTimer?.cancel();
+      _durationTimer = null;
+    }
+
+    final hasRemoteVideo = call.remoteVideoEnabled;
+    final hasLocalVideo = call.isVideoEnabled;
+    final hasAnyVideo = hasRemoteVideo || hasLocalVideo;
+    final voiceService = ref.read(callProvider.notifier).voiceService;
+    final remoteRenderer = voiceService?.remoteRenderer;
+    final localRenderer = voiceService?.localRenderer;
+
+    // Reset expanded view when video turns off.
+    if (!hasAnyVideo && _expandedRenderer != null) {
+      _expandedRenderer = null;
+    }
+
+    // Max video height: leave room for controls + input bar.
+    final screenHeight = MediaQuery.of(context).size.height;
+    final maxH = (screenHeight * 0.5).clamp(_minVideoHeight, _maxVideoHeight);
+
+    return Container(
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        border: Border(
+          bottom: BorderSide(color: hollow.border),
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Video area (only when cameras active)
+          if (hasAnyVideo) ...[
+            SizedBox(
+              height: _videoHeight,
+              child: _expandedRenderer != null
+                  ? _buildFullscreenVideo(
+                      hollow, displayName, remoteAvatar, localAvatar,
+                      remoteRenderer, localRenderer,
+                      hasRemoteVideo, hasLocalVideo)
+                  : _buildSideBySideVideo(
+                      hollow, displayName, remoteAvatar, localAvatar,
+                      remoteRenderer, localRenderer,
+                      hasRemoteVideo, hasLocalVideo),
+            ),
+            // Resize handle for video
+            MouseRegion(
+              cursor: SystemMouseCursors.resizeRow,
+              child: GestureDetector(
+                onVerticalDragUpdate: (details) {
+                  setState(() {
+                    _videoHeight = (_videoHeight + details.delta.dy)
+                        .clamp(_minVideoHeight, maxH);
+                  });
+                },
+                child: Container(
+                  height: 8,
+                  color: Colors.transparent,
+                  child: Center(
+                    child: Container(
+                      width: 32,
+                      height: 3,
+                      decoration: BoxDecoration(
+                        color: hollow.border,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+
+          // Control bar: timer (left), avatars (center, audio-only), controls (right)
+          Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: HollowSpacing.lg,
+              vertical: hasAnyVideo ? HollowSpacing.sm : HollowSpacing.md,
+            ),
+            child: Row(
+              children: [
+                // Left: timer + status
+                StatusDot(color: hollow.success, size: 8, pulse: true),
+                const SizedBox(width: HollowSpacing.sm),
+                if (call.status == CallStatus.connecting)
+                  Text(
+                    'Connecting...',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                      fontSize: 12,
+                    ),
+                  )
+                else
+                  Text(
+                    _formatDuration(_duration),
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                      fontSize: 12,
+                      fontFeatures: [const FontFeature.tabularFigures()],
+                    ),
+                  ),
+
+                // Center: avatars (audio-only — when video is on, they're in the rectangles)
+                if (!hasAnyVideo) ...[
+                  const Spacer(),
+                  HollowAvatar(
+                    peerId: localPeerId,
+                    size: 60,
+                    imageBytes: localAvatar,
+                  ),
+                  const SizedBox(width: HollowSpacing.sm),
+                  HollowAvatar(
+                    peerId: widget.peerId,
+                    size: 60,
+                    imageBytes: remoteAvatar,
+                  ),
+                ],
+
+                const Spacer(),
+                // Right: controls
+                _buildControls(call, hollow),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Default: two equal video rectangles side by side. Click to expand.
+  Widget _buildSideBySideVideo(
+    HollowTheme hollow,
+    String displayName,
+    Uint8List? remoteAvatar,
+    Uint8List? localAvatar,
+    RTCVideoRenderer? remoteRenderer,
+    RTCVideoRenderer? localRenderer,
+    bool hasRemoteVideo,
+    bool hasLocalVideo,
+  ) {
+    return Row(
+      children: [
+        // Local camera
+        Expanded(
+          child: GestureDetector(
+            onTap: hasLocalVideo
+                ? () => setState(() => _expandedRenderer = 'local')
+                : null,
+            child: Container(
+              margin: const EdgeInsets.only(left: 4, top: 4, bottom: 4, right: 2),
+              decoration: BoxDecoration(
+                color: hollow.elevated,
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: hasLocalVideo && localRenderer != null
+                  ? RTCVideoView(
+                      localRenderer,
+                      mirror: true,
+                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                    )
+                  : Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          HollowAvatar(
+                            peerId: ref.read(identityProvider).peerId ?? '',
+                            size: 48,
+                            imageBytes: localAvatar,
+                          ),
+                          const SizedBox(height: HollowSpacing.xs),
+                          Text(
+                            'You',
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.textSecondary,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+            ),
+          ),
+        ),
+        // Remote camera
+        Expanded(
+          child: GestureDetector(
+            onTap: hasRemoteVideo
+                ? () => setState(() => _expandedRenderer = 'remote')
+                : null,
+            child: Container(
+              margin: const EdgeInsets.only(left: 2, top: 4, bottom: 4, right: 4),
+              decoration: BoxDecoration(
+                color: hollow.elevated,
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: hasRemoteVideo && remoteRenderer != null
+                  ? RTCVideoView(
+                      remoteRenderer,
+                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                    )
+                  : Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          HollowAvatar(
+                            peerId: widget.peerId,
+                            size: 48,
+                            imageBytes: remoteAvatar,
+                          ),
+                          const SizedBox(height: HollowSpacing.xs),
+                          Text(
+                            displayName,
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.textSecondary,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Fullscreen: one video fills the area, the other is PiP. Click to exit.
+  Widget _buildFullscreenVideo(
+    HollowTheme hollow,
+    String displayName,
+    Uint8List? remoteAvatar,
+    Uint8List? localAvatar,
+    RTCVideoRenderer? remoteRenderer,
+    RTCVideoRenderer? localRenderer,
+    bool hasRemoteVideo,
+    bool hasLocalVideo,
+  ) {
+    final isLocalExpanded = _expandedRenderer == 'local';
+    final mainRenderer = isLocalExpanded ? localRenderer : remoteRenderer;
+    final pipRenderer = isLocalExpanded ? remoteRenderer : localRenderer;
+    final hasPip = isLocalExpanded ? hasRemoteVideo : hasLocalVideo;
+
+    return GestureDetector(
+      onTap: () => setState(() {
+        _expandedRenderer = null;
+      }),
+      child: Stack(
+        clipBehavior: Clip.hardEdge,
+        children: [
+          // Main video (full area)
+          Positioned.fill(
+            child: mainRenderer != null
+                ? RTCVideoView(
+                    mainRenderer,
+                    mirror: isLocalExpanded,
+                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                  )
+                : Container(color: hollow.elevated),
+          ),
+
+          // PiP (bottom right)
+          if (hasPip && pipRenderer != null)
+            Positioned(
+              right: 8,
+              bottom: 8,
+              child: Container(
+                width: 120,
+                height: 90,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: hollow.border, width: 1),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.3),
+                      blurRadius: 8,
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(7),
+                  child: RTCVideoView(
+                    pipRenderer,
+                    mirror: !isLocalExpanded,
+                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                  ),
+                ),
+              ),
+            ),
+
+          // "Click to exit fullscreen" hint (top left)
+          Positioned(
+            left: 8,
+            top: 8,
+            child: AnimatedOpacity(
+              opacity: 0.7,
+              duration: const Duration(milliseconds: 200),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.sm,
+                  vertical: 3,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  'Click to exit',
+                  style: HollowTypography.caption.copyWith(
+                    color: Colors.white70,
+                    fontSize: 10,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Shared row of call controls: mute, camera, end call.
+  Widget _buildControls(CallState call, HollowTheme hollow) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        HollowTooltip(
+          message: call.isMuted ? 'Unmute' : 'Mute',
+          child: HollowPressable(
+            onTap: () => ref.read(callProvider.notifier).toggleMute(),
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            padding: const EdgeInsets.all(HollowSpacing.xs),
+            child: Icon(
+              call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
+              size: 16,
+              color: call.isMuted ? hollow.error : hollow.textSecondary,
+            ),
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.xs),
+        HollowTooltip(
+          message: call.isVideoEnabled
+              ? 'Turn off camera'
+              : 'Turn on camera',
+          child: HollowPressable(
+            onTap: call.status == CallStatus.active
+                ? () => ref.read(callProvider.notifier).toggleVideo()
+                : null,
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            padding: const EdgeInsets.all(HollowSpacing.xs),
+            child: Icon(
+              call.isVideoEnabled
+                  ? LucideIcons.video
+                  : LucideIcons.videoOff,
+              size: 16,
+              color: call.isVideoEnabled
+                  ? hollow.accent
+                  : hollow.textSecondary,
+            ),
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.sm),
+        HollowTooltip(
+          message: 'End call',
+          child: HollowPressable(
+            onTap: () => ref.read(callProvider.notifier).endCall(),
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            padding: const EdgeInsets.symmetric(
+              horizontal: HollowSpacing.sm,
+              vertical: HollowSpacing.xs,
+            ),
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: HollowSpacing.sm,
+                vertical: 4,
+              ),
+              decoration: BoxDecoration(
+                color: hollow.error.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+              ),
+              child: Icon(
+                LucideIcons.phoneOff,
+                size: 14,
+                color: hollow.error,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _DmProfilePanelSlider extends StatefulWidget {
   final bool visible;
   final String peerId;

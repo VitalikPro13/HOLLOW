@@ -37,7 +37,6 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/notification_overlay.dart';
 import 'package:hollow/src/ui/components/active_call_bar.dart';
-import 'package:hollow/src/ui/components/call_video_view.dart';
 import 'package:hollow/src/ui/dialogs/incoming_call_dialog.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
@@ -635,7 +634,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
               body,
               const NotificationOverlay(),
               const ActiveCallBar(),
-              const CallVideoView(),
               const IncomingCallOverlay(),
             ],
           ),

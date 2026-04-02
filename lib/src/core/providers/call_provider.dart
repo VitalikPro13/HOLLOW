@@ -111,9 +111,6 @@ class CallNotifier extends Notifier<CallState> {
         state = state.copyWith(
           status: CallStatus.active,
           startedAt: DateTime.now(),
-          // If this is a video call, assume remote video is on initially.
-          // The video_state signal will correct this if needed.
-          remoteVideoEnabled: state.isVideoCall,
         );
         _scheduleStatsDump(peerId);
       }
