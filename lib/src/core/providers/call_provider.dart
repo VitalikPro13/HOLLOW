@@ -163,6 +163,11 @@ class CallNotifier extends Notifier<CallState> {
       final output = await ref.read(audioOutputDeviceProvider.future);
       _voiceService?.preferredAudioInputDeviceId = input;
       _voiceService?.preferredAudioOutputDeviceId = output;
+
+      // Apply audio quality preset.
+      final quality = await ref.read(audioQualityProvider.future);
+      _voiceService?.opusBitrate = quality.bitrate;
+      _voiceService?.opusStereo = quality.stereo;
     } catch (_) {}
   }
 

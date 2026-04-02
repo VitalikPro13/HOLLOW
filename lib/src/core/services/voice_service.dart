@@ -62,6 +62,11 @@ class VoiceService {
   RTCVideoRenderer? get remoteRenderer => _remoteRenderer;
   RTCPeerConnection? get peerConnection => _pc;
 
+  /// Audio quality preset — set by CallNotifier before creating offer/answer.
+  /// Controls Opus bitrate and stereo via SDP munging.
+  int opusBitrate = 32000;     // default: 32 kbps (voice)
+  bool opusStereo = false;     // default: mono
+
   // ---------------------------------------------------------------------------
   // SDP: offer / answer / ICE
   // ---------------------------------------------------------------------------
@@ -98,11 +103,13 @@ class VoiceService {
     }
 
     final offer = await _pc!.createOffer();
-    await _pc!.setLocalDescription(offer);
+    final mungedOffer = _mungeOpusParams(offer.sdp!);
+    await _pc!.setLocalDescription(
+        RTCSessionDescription(mungedOffer, offer.type));
 
-    _log('[HOLLOW-VOICE] Offer created, SDP length=${offer.sdp?.length}');
-    _dumpSdp('OFFER-OUT', offer.sdp!);
-    return offer.sdp!;
+    _log('[HOLLOW-VOICE] Offer created, SDP length=${mungedOffer.length}');
+    _dumpSdp('OFFER-OUT', mungedOffer);
+    return mungedOffer;
   }
 
   /// Handle an incoming SDP offer (answerer side). Creates PC, starts mic + camera,
@@ -139,11 +146,13 @@ class VoiceService {
     await _flushPendingCandidates();
 
     final answer = await _pc!.createAnswer();
-    await _pc!.setLocalDescription(answer);
+    final mungedAnswer = _mungeOpusParams(answer.sdp!);
+    await _pc!.setLocalDescription(
+        RTCSessionDescription(mungedAnswer, answer.type));
 
-    _log('[HOLLOW-VOICE] Answer created, SDP length=${answer.sdp?.length}');
-    _dumpSdp('ANSWER-OUT', answer.sdp!);
-    return answer.sdp!;
+    _log('[HOLLOW-VOICE] Answer created, SDP length=${mungedAnswer.length}');
+    _dumpSdp('ANSWER-OUT', mungedAnswer);
+    return mungedAnswer;
   }
 
   /// Create a renegotiation offer on an existing voice PC (e.g., adding/removing video).
@@ -625,6 +634,61 @@ class VoiceService {
   }
 
   /// Dump key SDP lines for debugging.
+  /// Munge the Opus fmtp line in the SDP to set bitrate and stereo params.
+  /// This controls the actual audio quality sent over the wire.
+  String _mungeOpusParams(String sdp) {
+    // Find the Opus payload type from a=rtpmap lines.
+    String? opusPt;
+    for (final line in sdp.split('\r\n')) {
+      final match = RegExp(r'a=rtpmap:(\d+)\s+opus/48000', caseSensitive: false)
+          .firstMatch(line);
+      if (match != null) {
+        opusPt = match.group(1);
+        break;
+      }
+    }
+    if (opusPt == null) return sdp; // No Opus found, return as-is.
+
+    // Build the desired fmtp params.
+    final params = <String>[
+      'minptime=10',
+      'useinbandfec=1',
+      'maxaveragebitrate=$opusBitrate',
+      if (opusStereo) 'stereo=1',
+      if (opusStereo) 'sprop-stereo=1',
+    ];
+
+    _log('[HOLLOW-VOICE] Opus SDP munge: PT=$opusPt '
+        'bitrate=$opusBitrate stereo=$opusStereo');
+
+    // Replace existing fmtp line for Opus, or add one.
+    final fmtpPrefix = 'a=fmtp:$opusPt ';
+    final lines = sdp.split('\r\n');
+    final result = <String>[];
+    bool replaced = false;
+    for (final line in lines) {
+      if (line.startsWith(fmtpPrefix)) {
+        result.add('$fmtpPrefix${params.join(';')}');
+        replaced = true;
+      } else {
+        result.add(line);
+      }
+    }
+    // If no existing fmtp line, insert after rtpmap.
+    if (!replaced) {
+      final rtpmapLine = 'a=rtpmap:$opusPt ';
+      final insertResult = <String>[];
+      for (final line in result) {
+        insertResult.add(line);
+        if (line.startsWith(rtpmapLine)) {
+          insertResult.add('$fmtpPrefix${params.join(';')}');
+        }
+      }
+      return insertResult.join('\r\n');
+    }
+    return result.join('\r\n');
+  }
+
   void _dumpSdp(String label, String sdp) {
     _log('[HOLLOW-SDP-DUMP] === $label (${sdp.length} bytes) ===');
     for (final line in sdp.split('\r\n')) {

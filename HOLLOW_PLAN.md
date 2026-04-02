@@ -1430,16 +1430,24 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [X] Quality/FPS picker: Resolution — 360p, 480p, 720p, 1080p (default), 1440p, 4K. FPS — 5, 15, 30, 60 (default). Pill-style selector in picker dialog
   - [X] Both-sharing handled (stacked view: remote top, local banner bottom)
   - [X] Rust `CallScreenState` signal + 2s poll for shared window close detection
-  - [ ] Screen share layout redesign: fullscreen with overlay chat/controls on hover
+  - [X] Screen share layout redesign: fullscreen with overlay chat/controls on hover
 - [ ] **Voice channels (persistent, join/leave)**
   - [ ] Server-level voice channels in CRDT (like text channels but for voice)
   - [ ] Join/leave mechanics: add/remove audio track, update channel member list via CRDT
   - [ ] 🎞️ Animate: join/leave transitions, voice activity ring pulse around avatar
+- [X] **Custom ringtone for incoming calls**
+  - [X] User selects a local audio file (mp3/wav/ogg/flac/m4a) in User Settings → Voice & Audio
+  - [X] Stored as file path in SQLCipher (not the audio data — just the path)
+  - [X] Played in loop during incoming call ring (30s timeout), stops on accept/reject/timeout
+  - [X] `audioplayers` package for playback (not WebRTC — local UI audio)
+  - [X] Volume slider with live preview (hold slider = plays, release = stops)
+  - [X] 30s countdown timer on incoming call card (circular progress + number, turns red at 5s)
+  - [X] Cached display info during exit animation (no flash of missing avatar/name on decline)
 - [ ] **Audio/video device & quality settings**
   - [X] Device selection: mic via `record` package + `sourceId` constraint, speaker via `win32audio` + `Helper.selectAudioOutput()`. Persisted in SQLCipher. Loaded via `_ensureDevicePreferences()` before each call
   - [ ] Mic input gain (boost/reduce) — adjustable slider, useful for quiet microphones
   - [ ] Per-peer speaker volume — `setVolume()` on remote audio track, slider in call UI
-  - [ ] Audio quality preset: "Voice" (Opus 32 kbps mono, optimized for speech) vs "Music" (Opus 128 kbps stereo, for instruments/singing). Set via SDP munging (`maxaveragebitrate`, `stereo`, `cbr` Opus params)
+  - [X] Audio quality preset: Voice (32 kbps mono), Music (128 kbps stereo), Hi-Fi (256 kbps stereo). SDP munging on Opus fmtp line (`maxaveragebitrate`, `stereo`, `sprop-stereo`). Persisted in SQLCipher. Dropdown in User Settings → Voice & Audio
 - [ ] **Audio processing**
   - [X] Echo cancellation (built into WebRTC/libwebrtc — enabled via getUserMedia constraints)
   - [X] Noise suppression (built into WebRTC/libwebrtc — enabled via getUserMedia constraints)

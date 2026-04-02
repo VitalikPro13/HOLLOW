@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -1579,6 +1580,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
   StreamSubscription<rec.Amplitude>? _ampSub;
   bool _micTesting = false;
   double _micLevel = 0.0;
+  AudioPlayer? _ringtonePreview;
 
   @override
   void initState() {
@@ -1589,7 +1591,24 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
   @override
   void dispose() {
     _stopMicTest();
+    _stopRingtonePreview();
     super.dispose();
+  }
+
+  Future<void> _startRingtonePreview(double volume) async {
+    final path = ref.read(ringtonePathProvider).valueOrNull;
+    if (path == null || path.isEmpty || !File(path).existsSync()) return;
+
+    _ringtonePreview = AudioPlayer();
+    await _ringtonePreview!.setReleaseMode(ReleaseMode.loop);
+    await _ringtonePreview!.setVolume(volume);
+    await _ringtonePreview!.play(DeviceFileSource(path));
+  }
+
+  void _stopRingtonePreview() {
+    _ringtonePreview?.stop();
+    _ringtonePreview?.dispose();
+    _ringtonePreview = null;
   }
 
   Future<void> _loadDevices() async {
@@ -1763,6 +1782,33 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         ),
         const SizedBox(height: HollowSpacing.md),
 
+        // Audio quality preset
+        _buildDeviceRow(
+          hollow: hollow,
+          icon: LucideIcons.sliders,
+          label: 'Audio Quality',
+          items: AudioQualityPreset.values.map((p) => DropdownMenuItem<String?>(
+                value: p.name,
+                child: Text(
+                  '${p.label} — ${p.bitrate ~/ 1000} kbps${p.stereo ? ' stereo' : ' mono'}',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              )).toList(),
+          selectedValue:
+              ref.watch(audioQualityProvider).valueOrNull?.name ??
+                  AudioQualityPreset.voice.name,
+          onChanged: (value) {
+            if (value != null) {
+              final preset = AudioQualityPreset.values.firstWhere(
+                (p) => p.name == value,
+                orElse: () => AudioQualityPreset.voice,
+              );
+              ref.read(audioQualityProvider.notifier).setPreset(preset);
+            }
+          },
+        ),
+        const SizedBox(height: HollowSpacing.md),
+
         // Mic test button + volume meter
         Row(
           children: [
@@ -1831,6 +1877,145 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
               child: const Text('Refresh Devices'),
             ),
           ],
+        ),
+        const SizedBox(height: HollowSpacing.lg),
+
+        // Ringtone selector
+        Row(
+          children: [
+            Icon(LucideIcons.bellRing, size: 14, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.sm),
+            Text(
+              'Ringtone',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textPrimary,
+                fontWeight: FontWeight.w600,
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        Builder(builder: (_) {
+          final ringtonePath =
+              ref.watch(ringtonePathProvider).valueOrNull;
+          final fileName =
+              ringtonePath?.split(RegExp(r'[\\/]')).last;
+
+          return Row(
+            children: [
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: HollowSpacing.sm,
+                    vertical: HollowSpacing.xs + 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: hollow.surface,
+                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    border: Border.all(color: hollow.border),
+                  ),
+                  child: Text(
+                    fileName ?? 'No ringtone selected',
+                    style: HollowTypography.caption.copyWith(
+                      color: fileName != null
+                          ? hollow.textPrimary
+                          : hollow.textSecondary,
+                      fontSize: 12,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              HollowButton.ghost(
+                onPressed: () async {
+                  final result = await FilePicker.platform.pickFiles(
+                    type: FileType.custom,
+                    allowedExtensions: ['mp3', 'wav', 'ogg', 'flac', 'm4a'],
+                    dialogTitle: 'Select Ringtone',
+                  );
+                  if (result != null && result.files.single.path != null) {
+                    ref.read(ringtonePathProvider.notifier)
+                        .setPath(result.files.single.path);
+                  }
+                },
+                compact: true,
+                child: const Text('Browse'),
+              ),
+              if (ringtonePath != null) ...[
+                const SizedBox(width: HollowSpacing.xs),
+                HollowButton.ghost(
+                  onPressed: () {
+                    ref.read(ringtonePathProvider.notifier).setPath(null);
+                  },
+                  compact: true,
+                  child: Icon(LucideIcons.x,
+                      size: 14, color: hollow.textSecondary),
+                ),
+              ],
+            ],
+          );
+        }),
+        const SizedBox(height: HollowSpacing.sm),
+
+        // Ringtone volume slider
+        Row(
+          children: [
+            Icon(LucideIcons.volume2, size: 14, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.sm),
+            Text(
+              'Volume',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+                fontSize: 11,
+              ),
+            ),
+            const SizedBox(width: HollowSpacing.sm),
+            Expanded(
+              child: SliderTheme(
+                data: SliderThemeData(
+                  activeTrackColor: hollow.accent,
+                  inactiveTrackColor: hollow.border,
+                  thumbColor: hollow.accent,
+                  overlayColor: hollow.accent.withValues(alpha: 0.1),
+                  trackHeight: 3,
+                  thumbShape: const RoundSliderThumbShape(
+                      enabledThumbRadius: 6),
+                ),
+                child: Slider(
+                  value: ref.watch(ringtoneVolumeProvider).valueOrNull ?? 0.5,
+                  onChangeStart: (v) => _startRingtonePreview(v),
+                  onChanged: (v) {
+                    ref.read(ringtoneVolumeProvider.notifier).setVolume(v);
+                    _ringtonePreview?.setVolume(v);
+                  },
+                  onChangeEnd: (_) => _stopRingtonePreview(),
+                ),
+              ),
+            ),
+            SizedBox(
+              width: 32,
+              child: Text(
+                '${((ref.watch(ringtoneVolumeProvider).valueOrNull ?? 0.5) * 100).round()}%',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 11,
+                ),
+                textAlign: TextAlign.right,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+
+        // 30s info label
+        Text(
+          'Ringtone plays for up to 30 seconds during incoming calls.',
+          style: HollowTypography.caption.copyWith(
+            color: hollow.textSecondary.withValues(alpha: 0.6),
+            fontSize: 10,
+          ),
         ),
       ],
     );
