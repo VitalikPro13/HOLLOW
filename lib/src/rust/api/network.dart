@@ -346,6 +346,39 @@ Future<void> callSendSignal({
   payload: payload,
 );
 
+/// Join a voice channel in a server (Phase 5C).
+Future<void> voiceChannelJoin({
+  required String serverId,
+  required String channelId,
+}) => RustLib.instance.api.crateApiNetworkVoiceChannelJoin(
+  serverId: serverId,
+  channelId: channelId,
+);
+
+/// Leave a voice channel in a server (Phase 5C).
+Future<void> voiceChannelLeave({
+  required String serverId,
+  required String channelId,
+}) => RustLib.instance.api.crateApiNetworkVoiceChannelLeave(
+  serverId: serverId,
+  channelId: channelId,
+);
+
+/// Send a voice channel signaling message (SDP/ICE) to a specific peer (Phase 5C).
+Future<void> voiceChannelSendSignal({
+  required String serverId,
+  required String channelId,
+  required String peerId,
+  required String signalType,
+  required String payload,
+}) => RustLib.instance.api.crateApiNetworkVoiceChannelSendSignal(
+  serverId: serverId,
+  channelId: channelId,
+  peerId: peerId,
+  signalType: signalType,
+  payload: payload,
+);
+
 /// A discovered peer on the local network.
 class DiscoveredPeer {
   final String peerId;
@@ -414,6 +447,7 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String serverId,
     required String channelId,
     required String name,
+    required String channelType,
   }) = NetworkEvent_ChannelAdded;
   const factory NetworkEvent.channelRemoved({
     required String serverId,
@@ -689,4 +723,21 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String signalType,
     required String payload,
   }) = NetworkEvent_CallSignal;
+  const factory NetworkEvent.voiceChannelJoined({
+    required String serverId,
+    required String channelId,
+    required String peerId,
+  }) = NetworkEvent_VoiceChannelJoined;
+  const factory NetworkEvent.voiceChannelLeft({
+    required String serverId,
+    required String channelId,
+    required String peerId,
+  }) = NetworkEvent_VoiceChannelLeft;
+  const factory NetworkEvent.voiceChannelSignal({
+    required String serverId,
+    required String channelId,
+    required String peerId,
+    required String signalType,
+    required String payload,
+  }) = NetworkEvent_VoiceChannelSignal;
 }

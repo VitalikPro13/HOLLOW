@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -2038813382;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1794443976;
 
 // Section: executor
 
@@ -331,11 +331,16 @@ fn wire__crate__api__crdt__create_channel_impl(
             let api_server_id = <String>::sse_decode(&mut deserializer);
             let api_name = <String>::sse_decode(&mut deserializer);
             let api_category = <Option<String>>::sse_decode(&mut deserializer);
+            let api_channel_type = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
-                    let output_ok =
-                        crate::api::crdt::create_channel(api_server_id, api_name, api_category)?;
+                    let output_ok = crate::api::crdt::create_channel(
+                        api_server_id,
+                        api_name,
+                        api_category,
+                        api_channel_type,
+                    )?;
                     Ok(output_ok)
                 })())
             }
@@ -3258,6 +3263,119 @@ fn wire__crate__api__crdt__vault_upload_file_impl(
         },
     )
 }
+fn wire__crate__api__network__voice_channel_join_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "voice_channel_join",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_server_id = <String>::sse_decode(&mut deserializer);
+            let api_channel_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok =
+                        crate::api::network::voice_channel_join(api_server_id, api_channel_id)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__network__voice_channel_leave_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "voice_channel_leave",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_server_id = <String>::sse_decode(&mut deserializer);
+            let api_channel_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok =
+                        crate::api::network::voice_channel_leave(api_server_id, api_channel_id)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__network__voice_channel_send_signal_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "voice_channel_send_signal",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_server_id = <String>::sse_decode(&mut deserializer);
+            let api_channel_id = <String>::sse_decode(&mut deserializer);
+            let api_peer_id = <String>::sse_decode(&mut deserializer);
+            let api_signal_type = <String>::sse_decode(&mut deserializer);
+            let api_payload = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::network::voice_channel_send_signal(
+                        api_server_id,
+                        api_channel_id,
+                        api_peer_id,
+                        api_signal_type,
+                        api_payload,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__network__watch_network_events_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -3558,10 +3676,12 @@ impl SseDecode for crate::api::crdt::ChannelFfi {
         let mut var_channelId = <String>::sse_decode(deserializer);
         let mut var_name = <String>::sse_decode(deserializer);
         let mut var_category = <Option<String>>::sse_decode(deserializer);
+        let mut var_channelType = <String>::sse_decode(deserializer);
         return crate::api::crdt::ChannelFfi {
             channel_id: var_channelId,
             name: var_name,
             category: var_category,
+            channel_type: var_channelType,
         };
     }
 }
@@ -3903,10 +4023,12 @@ impl SseDecode for crate::api::network::NetworkEvent {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
                 let mut var_name = <String>::sse_decode(deserializer);
+                let mut var_channelType = <String>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::ChannelAdded {
                     server_id: var_serverId,
                     channel_id: var_channelId,
                     name: var_name,
+                    channel_type: var_channelType,
                 };
             }
             14 => {
@@ -4461,6 +4583,40 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     payload: var_payload,
                 };
             }
+            68 => {
+                let mut var_serverId = <String>::sse_decode(deserializer);
+                let mut var_channelId = <String>::sse_decode(deserializer);
+                let mut var_peerId = <String>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::VoiceChannelJoined {
+                    server_id: var_serverId,
+                    channel_id: var_channelId,
+                    peer_id: var_peerId,
+                };
+            }
+            69 => {
+                let mut var_serverId = <String>::sse_decode(deserializer);
+                let mut var_channelId = <String>::sse_decode(deserializer);
+                let mut var_peerId = <String>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::VoiceChannelLeft {
+                    server_id: var_serverId,
+                    channel_id: var_channelId,
+                    peer_id: var_peerId,
+                };
+            }
+            70 => {
+                let mut var_serverId = <String>::sse_decode(deserializer);
+                let mut var_channelId = <String>::sse_decode(deserializer);
+                let mut var_peerId = <String>::sse_decode(deserializer);
+                let mut var_signalType = <String>::sse_decode(deserializer);
+                let mut var_payload = <String>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::VoiceChannelSignal {
+                    server_id: var_serverId,
+                    channel_id: var_channelId,
+                    peer_id: var_peerId,
+                    signal_type: var_signalType,
+                    payload: var_payload,
+                };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -4949,29 +5105,39 @@ fn pde_ffi_dispatcher_primary_impl(
         89 => wire__crate__api__crdt__update_server_setting_impl(port, ptr, rust_vec_len, data_len),
         90 => wire__crate__api__crdt__vault_download_file_impl(port, ptr, rust_vec_len, data_len),
         91 => wire__crate__api__crdt__vault_upload_file_impl(port, ptr, rust_vec_len, data_len),
-        92 => {
-            wire__crate__api__network__watch_network_events_impl(port, ptr, rust_vec_len, data_len)
-        }
+        92 => wire__crate__api__network__voice_channel_join_impl(port, ptr, rust_vec_len, data_len),
         93 => {
-            wire__crate__api__network__webrtc_peer_connected_impl(port, ptr, rust_vec_len, data_len)
+            wire__crate__api__network__voice_channel_leave_impl(port, ptr, rust_vec_len, data_len)
         }
-        94 => wire__crate__api__network__webrtc_peer_disconnected_impl(
+        94 => wire__crate__api__network__voice_channel_send_signal_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
         95 => {
-            wire__crate__api__network__webrtc_send_complete_impl(port, ptr, rust_vec_len, data_len)
+            wire__crate__api__network__watch_network_events_impl(port, ptr, rust_vec_len, data_len)
         }
-        96 => wire__crate__api__network__webrtc_send_signal_impl(port, ptr, rust_vec_len, data_len),
-        97 => wire__crate__api__network__webrtc_transfer_complete_impl(
+        96 => {
+            wire__crate__api__network__webrtc_peer_connected_impl(port, ptr, rust_vec_len, data_len)
+        }
+        97 => wire__crate__api__network__webrtc_peer_disconnected_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        98 => wire__crate__api__network__webrtc_transfer_failed_impl(
+        98 => {
+            wire__crate__api__network__webrtc_send_complete_impl(port, ptr, rust_vec_len, data_len)
+        }
+        99 => wire__crate__api__network__webrtc_send_signal_impl(port, ptr, rust_vec_len, data_len),
+        100 => wire__crate__api__network__webrtc_transfer_complete_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        101 => wire__crate__api__network__webrtc_transfer_failed_impl(
             port,
             ptr,
             rust_vec_len,
@@ -5003,6 +5169,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::crdt::ChannelFfi {
             self.channel_id.into_into_dart().into_dart(),
             self.name.into_into_dart().into_dart(),
             self.category.into_into_dart().into_dart(),
+            self.channel_type.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -5180,11 +5347,13 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 server_id,
                 channel_id,
                 name,
+                channel_type,
             } => [
                 13.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
                 name.into_into_dart().into_dart(),
+                channel_type.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::ChannelRemoved {
@@ -5737,6 +5906,43 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 payload.into_into_dart().into_dart(),
             ]
             .into_dart(),
+            crate::api::network::NetworkEvent::VoiceChannelJoined {
+                server_id,
+                channel_id,
+                peer_id,
+            } => [
+                68.into_dart(),
+                server_id.into_into_dart().into_dart(),
+                channel_id.into_into_dart().into_dart(),
+                peer_id.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::network::NetworkEvent::VoiceChannelLeft {
+                server_id,
+                channel_id,
+                peer_id,
+            } => [
+                69.into_dart(),
+                server_id.into_into_dart().into_dart(),
+                channel_id.into_into_dart().into_dart(),
+                peer_id.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::network::NetworkEvent::VoiceChannelSignal {
+                server_id,
+                channel_id,
+                peer_id,
+                signal_type,
+                payload,
+            } => [
+                70.into_dart(),
+                server_id.into_into_dart().into_dart(),
+                channel_id.into_into_dart().into_dart(),
+                peer_id.into_into_dart().into_dart(),
+                signal_type.into_into_dart().into_dart(),
+                payload.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -5986,6 +6192,7 @@ impl SseEncode for crate::api::crdt::ChannelFfi {
         <String>::sse_encode(self.channel_id, serializer);
         <String>::sse_encode(self.name, serializer);
         <Option<String>>::sse_encode(self.category, serializer);
+        <String>::sse_encode(self.channel_type, serializer);
     }
 }
 
@@ -6252,11 +6459,13 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 server_id,
                 channel_id,
                 name,
+                channel_type,
             } => {
                 <i32>::sse_encode(13, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
                 <String>::sse_encode(name, serializer);
+                <String>::sse_encode(channel_type, serializer);
             }
             crate::api::network::NetworkEvent::ChannelRemoved {
                 server_id,
@@ -6766,6 +6975,40 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 payload,
             } => {
                 <i32>::sse_encode(67, serializer);
+                <String>::sse_encode(peer_id, serializer);
+                <String>::sse_encode(signal_type, serializer);
+                <String>::sse_encode(payload, serializer);
+            }
+            crate::api::network::NetworkEvent::VoiceChannelJoined {
+                server_id,
+                channel_id,
+                peer_id,
+            } => {
+                <i32>::sse_encode(68, serializer);
+                <String>::sse_encode(server_id, serializer);
+                <String>::sse_encode(channel_id, serializer);
+                <String>::sse_encode(peer_id, serializer);
+            }
+            crate::api::network::NetworkEvent::VoiceChannelLeft {
+                server_id,
+                channel_id,
+                peer_id,
+            } => {
+                <i32>::sse_encode(69, serializer);
+                <String>::sse_encode(server_id, serializer);
+                <String>::sse_encode(channel_id, serializer);
+                <String>::sse_encode(peer_id, serializer);
+            }
+            crate::api::network::NetworkEvent::VoiceChannelSignal {
+                server_id,
+                channel_id,
+                peer_id,
+                signal_type,
+                payload,
+            } => {
+                <i32>::sse_encode(70, serializer);
+                <String>::sse_encode(server_id, serializer);
+                <String>::sse_encode(channel_id, serializer);
                 <String>::sse_encode(peer_id, serializer);
                 <String>::sse_encode(signal_type, serializer);
                 <String>::sse_encode(payload, serializer);

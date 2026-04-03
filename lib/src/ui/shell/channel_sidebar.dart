@@ -18,7 +18,9 @@ import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
+import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
@@ -28,6 +30,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
 import 'package:hollow/src/ui/shell/user_bar.dart';
+import 'package:hollow/src/ui/shell/voice_channel_panel.dart';
 import 'package:hollow/src/ui/sidebar/peer_card.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
@@ -167,6 +170,9 @@ class ChannelSidebar extends StatelessWidget {
                     ),
             ),
           ),
+
+          // Voice channel controls (visible when in a voice channel)
+          const VoiceChannelPanel(),
 
           // User bar at bottom (hidden in dock mode)
           ?userBar,
@@ -323,29 +329,43 @@ class _ServerContentState extends State<_ServerContent> {
             placedChannels.add(channelId);
             final collapsed = currentCategory != null &&
                 (_categoryCollapsedState[currentCategory] ?? false);
-            widgets.add(_AnimatedChannelTile(
-              key: ValueKey('ach-$channelId'),
-              visible: !collapsed,
-              child: _ChannelTile(
+            final Widget tile;
+            if (channel.channelType == ChannelType.voice) {
+              tile = _VoiceChannelTile(
+                channel: channel,
+                serverId: w.serverId,
+              );
+            } else {
+              tile = _ChannelTile(
                 channel: channel,
                 serverId: w.serverId,
                 isSelected: channel.channelId == w.selectedChannelId,
                 onTap: () => w.onChannelSelected(channel.channelId),
-              ),
+              );
+            }
+            widgets.add(_AnimatedChannelTile(
+              key: ValueKey('ach-$channelId'),
+              visible: !collapsed,
+              child: tile,
             ));
           }
         }
       }
     } catch (_) {}
 
-    // Only show unplaced channels if no layout has been saved yet
-    // (empty layout = no admin organization). Once a layout exists,
-    // new channels only appear after the admin saves the layout.
-    final hasLayout = placedChannels.isNotEmpty;
-    if (!hasLayout) {
-      final unplaced = w.channels.values.toList()
-        ..sort((a, b) => a.name.compareTo(b.name));
-      for (final channel in unplaced) {
+    // Always show channels not yet placed in the layout.
+    // This ensures newly created channels appear immediately.
+    final unplaced = w.channels.values
+        .where((ch) => !placedChannels.contains(ch.channelId))
+        .toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
+    for (final channel in unplaced) {
+      if (channel.channelType == ChannelType.voice) {
+        widgets.add(_VoiceChannelTile(
+          channel: channel,
+          serverId: w.serverId,
+        ));
+      } else {
         widgets.add(_ChannelTile(
           channel: channel,
           serverId: w.serverId,
@@ -860,7 +880,9 @@ class _ChannelTile extends ConsumerWidget {
         child: Row(
           children: [
             Icon(
-              LucideIcons.hash,
+              channel.channelType == ChannelType.voice
+                  ? LucideIcons.volume2
+                  : LucideIcons.hash,
               size: 18,
               color: isSelected || hasUnread
                   ? hollow.textPrimary
@@ -902,6 +924,402 @@ class _ChannelTile extends ConsumerWidget {
         vertical: HollowSpacing.xxs,
       ),
       child: tile,
+    );
+  }
+}
+
+/// Voice channel tile — shows speaker icon, channel name, and participant list.
+/// Clicking joins the voice channel instead of selecting it for text.
+/// Tracks leaving peers to animate them out before removal.
+class _VoiceChannelTile extends ConsumerStatefulWidget {
+  final ChannelInfo channel;
+  final String serverId;
+
+  const _VoiceChannelTile({
+    required this.channel,
+    required this.serverId,
+  });
+
+  @override
+  ConsumerState<_VoiceChannelTile> createState() => _VoiceChannelTileState();
+}
+
+class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
+  /// Peers currently animating out (kept in tree until animation finishes).
+  final Set<String> _leavingPeers = {};
+
+  /// Previous frame's participant set for diffing.
+  Set<String> _prevParticipants = {};
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final vcState = ref.watch(voiceChannelProvider);
+    final isConnected = vcState.currentServerId == widget.serverId &&
+        vcState.currentChannelId == widget.channel.channelId;
+    final participants =
+        vcState.getParticipants(widget.serverId, widget.channel.channelId);
+
+    // Detect who just left.
+    final departed = _prevParticipants.difference(participants);
+    for (final peerId in departed) {
+      if (!_leavingPeers.contains(peerId)) {
+        _leavingPeers.add(peerId);
+      }
+    }
+    _prevParticipants = Set.of(participants);
+
+    // Visible = current participants + still-animating leavers.
+    final visible = [...participants, ..._leavingPeers];
+
+    final radius = BorderRadius.circular(hollow.radiusMd);
+
+    Widget channelRow = HollowPressable(
+      onTap: () {
+        if (isConnected) return;
+        ref.read(voiceChannelProvider.notifier)
+            .joinChannel(widget.serverId, widget.channel.channelId);
+      },
+      subtle: true,
+      borderRadius: radius,
+      backgroundColor: isConnected ? hollow.accentMuted : Colors.transparent,
+      hoverColor: hollow.elevated,
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.sm + 2,
+        vertical: HollowSpacing.sm,
+      ),
+      child: Row(
+        children: [
+          Icon(
+            LucideIcons.volume2,
+            size: 18,
+            color: isConnected ? hollow.accent : hollow.textSecondary,
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Text(
+              widget.channel.name,
+              overflow: TextOverflow.ellipsis,
+              style: HollowTypography.body.copyWith(
+                color: isConnected
+                    ? hollow.textPrimary
+                    : hollow.textSecondary,
+                fontWeight: isConnected ? FontWeight.w600 : FontWeight.w400,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (isConnected) {
+      channelRow = SelectionShimmer(
+        highlightColor: hollow.accent.withValues(alpha: 0.12),
+        borderRadius: radius,
+        vertical: true,
+        child: channelRow,
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.sm,
+        vertical: HollowSpacing.xxs,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          channelRow,
+          AnimatedSize(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: Padding(
+              padding: const EdgeInsets.only(
+                  left: HollowSpacing.sm + 2 + 18 + HollowSpacing.sm),
+              child: Column(
+                children: visible
+                    .map((peerId) => _AnimatedParticipantRow(
+                          key: ValueKey('vp-$peerId'),
+                          leaving: _leavingPeers.contains(peerId),
+                          onLeaveComplete: () {
+                            if (mounted) {
+                              setState(() => _leavingPeers.remove(peerId));
+                            }
+                          },
+                          child: _VoiceParticipantRow(
+                            peerId: peerId,
+                            serverId: widget.serverId,
+                            channelId: widget.channel.channelId,
+                          ),
+                        ))
+                    .toList(),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Animates a participant row in/out with a simple fade.
+class _AnimatedParticipantRow extends StatefulWidget {
+  final Widget child;
+  final bool leaving;
+  final VoidCallback? onLeaveComplete;
+
+  const _AnimatedParticipantRow({
+    super.key,
+    required this.child,
+    this.leaving = false,
+    this.onLeaveComplete,
+  });
+
+  @override
+  State<_AnimatedParticipantRow> createState() =>
+      _AnimatedParticipantRowState();
+}
+
+class _AnimatedParticipantRowState extends State<_AnimatedParticipantRow>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 180),
+    );
+    if (widget.leaving) {
+      _controller.value = 1.0;
+      _controller.reverse().then((_) => widget.onLeaveComplete?.call());
+    } else {
+      _controller.forward();
+    }
+  }
+
+  @override
+  void didUpdateWidget(_AnimatedParticipantRow old) {
+    super.didUpdateWidget(old);
+    if (widget.leaving && !old.leaving) {
+      _controller.reverse().then((_) => widget.onLeaveComplete?.call());
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _controller,
+      child: widget.child,
+    );
+  }
+}
+
+/// A single participant row in a voice channel tile.
+class _VoiceParticipantRow extends ConsumerWidget {
+  final String peerId;
+  final String serverId;
+  final String channelId;
+
+  const _VoiceParticipantRow({
+    required this.peerId,
+    required this.serverId,
+    required this.channelId,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final profiles = ref.watch(profileProvider);
+    final name = displayNameFor(profiles, peerId);
+    final hollow = HollowTheme.of(context);
+    final vcState = ref.watch(voiceChannelProvider);
+    final localPeerId = ref.watch(identityProvider).peerId ?? '';
+
+    final bool isMuted;
+    final bool isDeafened;
+    if (peerId == localPeerId) {
+      isMuted = vcState.isMuted;
+      isDeafened = vcState.isDeafened;
+    } else {
+      final peerState = vcState.getPeerAudioState(peerId);
+      isMuted = peerState.isMuted;
+      isDeafened = peerState.isDeafened;
+    }
+
+    final speaking = vcState.isSpeaking(peerId);
+    final isRemote = peerId != localPeerId;
+
+    return GestureDetector(
+      onSecondaryTapUp: isRemote
+          ? (details) =>
+              _showVolumePopup(context, ref, details.globalPosition)
+          : null,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 1),
+        child: Row(
+          children: [
+            HollowAvatar(
+                peerId: peerId,
+                size: 18,
+                imageBytes: profiles[peerId]?.avatarBytes),
+            const SizedBox(width: HollowSpacing.xs),
+            Expanded(
+              child: Text(
+                name,
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            // Speaking indicator — teal dot, fades in/out.
+            _SpeakingDot(visible: speaking),
+            if (isMuted)
+              Padding(
+                padding: const EdgeInsets.only(left: 2),
+                child:
+                    Icon(LucideIcons.micOff, size: 12, color: hollow.error),
+              ),
+            if (isDeafened)
+              Padding(
+                padding: const EdgeInsets.only(left: 2),
+                child: Icon(LucideIcons.headphones,
+                    size: 12, color: hollow.error),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showVolumePopup(
+      BuildContext context, WidgetRef ref, Offset position) {
+    final hollow = HollowTheme.of(context);
+    final overlay = Overlay.of(context);
+    final vcState = ref.read(voiceChannelProvider);
+    var volume = vcState.getPeerVolume(peerId);
+    OverlayEntry? entry;
+
+    void remove() {
+      entry?.remove();
+      entry = null;
+    }
+
+    entry = OverlayEntry(
+      builder: (ctx) {
+        return Stack(
+          children: [
+            // Tap-away barrier.
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: remove,
+                behavior: HitTestBehavior.opaque,
+                child: const SizedBox.expand(),
+              ),
+            ),
+            Positioned(
+              left: position.dx,
+              top: position.dy,
+              child: Material(
+                color: hollow.elevated,
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                elevation: 4,
+                child: StatefulBuilder(
+                  builder: (ctx, setPopupState) {
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(LucideIcons.volume2,
+                              size: 12, color: hollow.textSecondary),
+                          SizedBox(
+                            width: 110,
+                            height: 24,
+                            child: SliderTheme(
+                              data: SliderThemeData(
+                                activeTrackColor: hollow.accent,
+                                inactiveTrackColor: hollow.border,
+                                thumbColor: hollow.accent,
+                                overlayColor:
+                                    hollow.accent.withValues(alpha: 0.08),
+                                trackHeight: 2,
+                                thumbShape: const RoundSliderThumbShape(
+                                    enabledThumbRadius: 4),
+                                overlayShape: const RoundSliderOverlayShape(
+                                    overlayRadius: 8),
+                              ),
+                              child: Slider(
+                                value: volume,
+                                min: 0.0,
+                                max: 2.0,
+                                onChanged: (v) {
+                                  setPopupState(() => volume = v);
+                                  ref
+                                      .read(voiceChannelProvider.notifier)
+                                      .setPeerVolume(peerId, v);
+                                },
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            width: 28,
+                            child: Text(
+                              '${(volume * 100).round()}%',
+                              style: HollowTypography.caption.copyWith(
+                                color: hollow.textSecondary,
+                                fontSize: 10,
+                              ),
+                              textAlign: TextAlign.right,
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    overlay.insert(entry!);
+  }
+}
+
+/// Teal dot that fades in when [visible] and fades out when not.
+/// No pulsing — steady while shown.
+class _SpeakingDot extends StatelessWidget {
+  final bool visible;
+  const _SpeakingDot({required this.visible});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedOpacity(
+      opacity: visible ? 1.0 : 0.0,
+      duration: const Duration(milliseconds: 150),
+      child: Padding(
+        padding: const EdgeInsets.only(left: 2),
+        child: Container(
+          width: 7,
+          height: 7,
+          decoration: const BoxDecoration(
+            color: Colors.teal,
+            shape: BoxShape.circle,
+          ),
+        ),
+      ),
     );
   }
 }

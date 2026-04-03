@@ -84,6 +84,7 @@ mod tests {
             channel_id: "ch1".into(),
             name: "one".into(),
             category: None,
+            channel_type: "text".into(),
         });
         state.apply_op(&op1).unwrap();
 
@@ -91,6 +92,7 @@ mod tests {
             channel_id: "ch2".into(),
             name: "two".into(),
             category: None,
+            channel_type: "text".into(),
         });
         state.apply_op(&op2).unwrap();
 
@@ -110,6 +112,7 @@ mod tests {
             channel_id: "ch1".into(),
             name: "one".into(),
             category: None,
+            channel_type: "text".into(),
         });
         state_a.apply_op(&op_a1).unwrap();
 
@@ -117,6 +120,7 @@ mod tests {
             channel_id: "ch2".into(),
             name: "two".into(),
             category: None,
+            channel_type: "text".into(),
         });
         state_a.apply_op(&op_a2).unwrap();
 
@@ -145,6 +149,7 @@ mod tests {
             channel_id: "ch-a".into(),
             name: "from-a".into(),
             category: None,
+            channel_type: "text".into(),
         });
         state_a.apply_op(&op_a).unwrap();
 
@@ -183,6 +188,7 @@ mod tests {
             channel_id: "ch1".into(),
             name: "one".into(),
             category: None,
+            channel_type: "text".into(),
         });
         state.apply_op(&op).unwrap();
 

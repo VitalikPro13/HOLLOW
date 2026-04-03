@@ -46,7 +46,7 @@ pub(crate) enum NetworkEvent {
     // -- CRDT events (Phase 3) --
     ServerCreated { server_id: String, name: String },
     ServerUpdated { server_id: String },
-    ChannelAdded { server_id: String, channel_id: String, name: String },
+    ChannelAdded { server_id: String, channel_id: String, name: String, channel_type: String },
     ChannelRemoved { server_id: String, channel_id: String },
     ChannelRenamed { server_id: String, channel_id: String, new_name: String },
     ServerDeleted { server_id: String },
@@ -141,6 +141,10 @@ pub(crate) enum NetworkEvent {
     // -- Voice call events (Phase 5B) --
     /// Forward incoming voice call signaling message to Dart.
     CallSignal { peer_id: String, signal_type: String, payload: String },
+    // -- Voice channel events (Phase 5C) --
+    VoiceChannelJoined { server_id: String, channel_id: String, peer_id: String },
+    VoiceChannelLeft { server_id: String, channel_id: String, peer_id: String },
+    VoiceChannelSignal { server_id: String, channel_id: String, peer_id: String, signal_type: String, payload: String },
 }
 
 /// Commands the FFI layer can send into the swarm event loop.
@@ -150,7 +154,7 @@ pub(crate) enum NodeCommand {
     JoinRoom { room_code: String },
     // -- CRDT commands (Phase 3) --
     CreateServer { name: String },
-    CreateChannel { server_id: String, name: String, category: Option<String> },
+    CreateChannel { server_id: String, name: String, category: Option<String>, channel_type: String },
     RemoveChannel { server_id: String, channel_id: String },
     RenameServer { server_id: String, new_name: String },
     RenameChannel { server_id: String, channel_id: String, new_name: String },
@@ -234,6 +238,10 @@ pub(crate) enum NodeCommand {
     WebRtcTransferFailed { transfer_id: String, peer_id: String, error: String },
     // -- Voice call commands (Phase 5B) --
     CallSendSignal { peer_id: String, signal_type: String, payload: String },
+    // -- Voice channel commands (Phase 5C) --
+    VoiceChannelJoin { server_id: String, channel_id: String },
+    VoiceChannelLeave { server_id: String, channel_id: String },
+    VoiceChannelSendSignal { server_id: String, channel_id: String, peer_id: String, signal_type: String, payload: String },
     StoreShardOnPeer {
         server_id: String,
         content_id: String,
@@ -998,6 +1006,67 @@ enum MessageEnvelope {
     /// PreKey type 0 to Normal type 1) when they decrypt this message.
     #[serde(rename = "session_ack")]
     SessionAck,
+
+    // -- Voice channel signaling (Phase 5C) --
+
+    /// Broadcast: user joined a voice channel.
+    #[serde(rename = "vc_join")]
+    VoiceChannelJoin {
+        sid: String,
+        cid: String,
+    },
+
+    /// Broadcast: user left a voice channel.
+    #[serde(rename = "vc_leave")]
+    VoiceChannelLeave {
+        sid: String,
+        cid: String,
+    },
+
+    /// Targeted: SDP offer for voice channel WebRTC connection.
+    #[serde(rename = "vc_sdp_offer")]
+    VoiceChannelSdpOffer {
+        sid: String,
+        cid: String,
+        sdp: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+
+    /// Targeted: SDP answer for voice channel WebRTC connection.
+    #[serde(rename = "vc_sdp_answer")]
+    VoiceChannelSdpAnswer {
+        sid: String,
+        cid: String,
+        sdp: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+
+    /// Targeted: audio state (mute/deafen) for voice channel.
+    #[serde(rename = "vc_audio_state")]
+    VoiceChannelAudioState {
+        sid: String,
+        cid: String,
+        #[serde(default)]
+        muted: bool,
+        #[serde(default)]
+        deafened: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+
+    /// Targeted: ICE candidate for voice channel WebRTC connection.
+    #[serde(rename = "vc_ice")]
+    VoiceChannelIce {
+        sid: String,
+        cid: String,
+        candidate: String,
+        sdp_mid: String,
+        sdp_mline_index: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
 }
 
 impl MessageEnvelope {
@@ -1018,7 +1087,11 @@ impl MessageEnvelope {
             | Self::SyncResp { target, .. }
             | Self::ChannelSyncReq { target, .. }
             | Self::ChannelProbe { target, .. }
-            | Self::ChannelProbeResp { target, .. } => target.as_deref(),
+            | Self::ChannelProbeResp { target, .. }
+            | Self::VoiceChannelSdpOffer { target, .. }
+            | Self::VoiceChannelSdpAnswer { target, .. }
+            | Self::VoiceChannelIce { target, .. }
+            | Self::VoiceChannelAudioState { target, .. } => target.as_deref(),
             _ => None,
         }
     }
@@ -1933,7 +2006,7 @@ async fn run_event_loop(
                         // receive full state via SyncResponse when they join.
                     }
 
-                    NodeCommand::CreateChannel { server_id, name, category } => {
+                    NodeCommand::CreateChannel { server_id, name, category, channel_type } => {
                         if let Some(state) = server_states.get_mut(&server_id) {
                             let local_peer = local_peer_str.to_string();
                             if !state.has_permission(&local_peer, Permission::MANAGE_CHANNELS) {
@@ -1954,6 +2027,7 @@ async fn run_event_loop(
                                 channel_id: channel_id.clone(),
                                 name: name.clone(),
                                 category: category.clone(),
+                                channel_type: channel_type.clone(),
                             });
                             let _ = state.apply_op(&op);
 
@@ -1973,6 +2047,7 @@ async fn run_event_loop(
                                 server_id: server_id.clone(),
                                 channel_id,
                                 name,
+                                channel_type,
                             }).await;
 
                             // Broadcast to server members — MLS first, plaintext fallback.
@@ -4837,6 +4912,101 @@ async fn run_event_loop(
                         send_message_to_peer(&ws_cmd_tx, &ws_room_peers, &peer_id, msg);
                     }
 
+                    // -- Voice channel commands (Phase 5C) --
+                    NodeCommand::VoiceChannelJoin { server_id, channel_id } => {
+                        hollow_log!("[HOLLOW-VC] Join voice channel {channel_id} in server {server_id}");
+                        let envelope = MessageEnvelope::VoiceChannelJoin {
+                            sid: server_id.clone(),
+                            cid: channel_id.clone(),
+                        };
+                        let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+                        if mls_ok {
+                            if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &envelope, &bundle_keypair) {
+                                hollow_log!("[HOLLOW-VC] Join broadcast failed: {e}");
+                            }
+                        }
+                        // Emit locally so our own UI updates.
+                        let _ = event_tx.send(NetworkEvent::VoiceChannelJoined {
+                            server_id, channel_id, peer_id: local_peer_str.to_string(),
+                        }).await;
+                    }
+
+                    NodeCommand::VoiceChannelLeave { server_id, channel_id } => {
+                        hollow_log!("[HOLLOW-VC] Leave voice channel {channel_id} in server {server_id}");
+                        let envelope = MessageEnvelope::VoiceChannelLeave {
+                            sid: server_id.clone(),
+                            cid: channel_id.clone(),
+                        };
+                        let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+                        if mls_ok {
+                            if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &envelope, &bundle_keypair) {
+                                hollow_log!("[HOLLOW-VC] Leave broadcast failed: {e}");
+                            }
+                        }
+                        let _ = event_tx.send(NetworkEvent::VoiceChannelLeft {
+                            server_id, channel_id, peer_id: local_peer_str.to_string(),
+                        }).await;
+                    }
+
+                    NodeCommand::VoiceChannelSendSignal { server_id, channel_id, peer_id, signal_type, payload } => {
+                        hollow_log!("[HOLLOW-VC] Send signal {signal_type} to {peer_id} in vc {channel_id}");
+                        let envelope = match signal_type.as_str() {
+                            "sdp_offer" => {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                    MessageEnvelope::VoiceChannelSdpOffer {
+                                        sid: server_id.clone(),
+                                        cid: channel_id.clone(),
+                                        sdp: v["sdp"].as_str().unwrap_or("").to_string(),
+                                        target: None,
+                                    }
+                                } else { continue; }
+                            }
+                            "sdp_answer" => {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                    MessageEnvelope::VoiceChannelSdpAnswer {
+                                        sid: server_id.clone(),
+                                        cid: channel_id.clone(),
+                                        sdp: v["sdp"].as_str().unwrap_or("").to_string(),
+                                        target: None,
+                                    }
+                                } else { continue; }
+                            }
+                            "ice" => {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                    MessageEnvelope::VoiceChannelIce {
+                                        sid: server_id.clone(),
+                                        cid: channel_id.clone(),
+                                        candidate: v["candidate"].as_str().unwrap_or("").to_string(),
+                                        sdp_mid: v["sdpMid"].as_str().unwrap_or("").to_string(),
+                                        sdp_mline_index: v["sdpMLineIndex"].as_u64().unwrap_or(0) as u32,
+                                        target: None,
+                                    }
+                                } else { continue; }
+                            }
+                            "audio_state" => {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                    MessageEnvelope::VoiceChannelAudioState {
+                                        sid: server_id.clone(),
+                                        cid: channel_id.clone(),
+                                        muted: v["muted"].as_bool().unwrap_or(false),
+                                        deafened: v["deafened"].as_bool().unwrap_or(false),
+                                        target: None,
+                                    }
+                                } else { continue; }
+                            }
+                            _ => {
+                                hollow_log!("[HOLLOW-VC] Unknown signal type: {signal_type}");
+                                continue;
+                            }
+                        };
+                        let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+                        if mls_ok {
+                            if let Err(e) = send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &peer_id, &envelope, &bundle_keypair) {
+                                hollow_log!("[HOLLOW-VC] Signal send to {peer_id} failed: {e}");
+                            }
+                        }
+                    }
+
                     NodeCommand::NotifyShutdown => {
                         hollow_log!("[HOLLOW-SWARM] Notifying peers of shutdown");
 
@@ -7456,7 +7626,13 @@ async fn handle_incoming_request(
                 | Ok(MessageEnvelope::ProfileUpdate { .. })
                 | Ok(MessageEnvelope::ChannelSyncReq { .. })
                 | Ok(MessageEnvelope::ChannelProbe { .. })
-                | Ok(MessageEnvelope::ChannelProbeResp { .. }) => {
+                | Ok(MessageEnvelope::ChannelProbeResp { .. })
+                | Ok(MessageEnvelope::VoiceChannelJoin { .. })
+                | Ok(MessageEnvelope::VoiceChannelLeave { .. })
+                | Ok(MessageEnvelope::VoiceChannelSdpOffer { .. })
+                | Ok(MessageEnvelope::VoiceChannelSdpAnswer { .. })
+                | Ok(MessageEnvelope::VoiceChannelIce { .. })
+                | Ok(MessageEnvelope::VoiceChannelAudioState { .. }) => {
                     hollow_log!("[HOLLOW-MLS] Received MLS-only envelope via Olm from {peer_str} — ignoring");
                 }
 
@@ -7793,11 +7969,12 @@ async fn handle_incoming_request(
 
                     // Emit specific events based on op payload so Dart UI updates correctly.
                     match &op.payload {
-                        CrdtPayload::ChannelAdded { channel_id, name, .. } => {
+                        CrdtPayload::ChannelAdded { channel_id, name, channel_type, .. } => {
                             let _ = event_tx.send(NetworkEvent::ChannelAdded {
                                 server_id: server_id.clone(),
                                 channel_id: channel_id.clone(),
                                 name: name.clone(),
+                                channel_type: channel_type.clone(),
                             }).await;
                         }
                         CrdtPayload::ChannelRemoved { channel_id } => {
@@ -8765,9 +8942,9 @@ async fn handle_incoming_request(
                                         // Emit per-payload events (same as CrdtOpBroadcast handler).
                                         use crate::crdt::operations::CrdtPayload;
                                         match &op.payload {
-                                            CrdtPayload::ChannelAdded { channel_id, name, .. } => {
+                                            CrdtPayload::ChannelAdded { channel_id, name, channel_type, .. } => {
                                                 let _ = event_tx.send(NetworkEvent::ChannelAdded {
-                                                    server_id: sid.clone(), channel_id: channel_id.clone(), name: name.clone(),
+                                                    server_id: sid.clone(), channel_id: channel_id.clone(), name: name.clone(), channel_type: channel_type.clone(),
                                                 }).await;
                                             }
                                             CrdtPayload::ChannelRemoved { channel_id } => {
@@ -9359,6 +9536,63 @@ async fn handle_incoming_request(
                                         let _ = cs.store_shard(&sid, &cid, si, 0, 0, 0, tier, &shard_bytes);
                                     }
                                 }
+                            }
+
+                            // -- Voice channel signaling (Phase 5C) --
+                            MessageEnvelope::VoiceChannelJoin { sid, cid } => {
+                                // Skip self (we already emitted locally in the command handler).
+                                if sender_peer_id != local_peer_str {
+                                    hollow_log!("[HOLLOW-VC] {sender_peer_id} joined voice channel {cid} in {sid}");
+                                    let _ = event_tx.send(NetworkEvent::VoiceChannelJoined {
+                                        server_id: sid, channel_id: cid, peer_id: sender_peer_id.clone(),
+                                    }).await;
+                                }
+                            }
+                            MessageEnvelope::VoiceChannelLeave { sid, cid } => {
+                                if sender_peer_id != local_peer_str {
+                                    hollow_log!("[HOLLOW-VC] {sender_peer_id} left voice channel {cid} in {sid}");
+                                    let _ = event_tx.send(NetworkEvent::VoiceChannelLeft {
+                                        server_id: sid, channel_id: cid, peer_id: sender_peer_id.clone(),
+                                    }).await;
+                                }
+                            }
+                            MessageEnvelope::VoiceChannelSdpOffer { sid, cid, sdp, .. } => {
+                                hollow_log!("[HOLLOW-VC] SDP offer from {sender_peer_id} in vc {cid}");
+                                let payload = serde_json::json!({"sdp": sdp}).to_string();
+                                let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                                    server_id: sid, channel_id: cid, peer_id: sender_peer_id.clone(),
+                                    signal_type: "sdp_offer".to_string(), payload,
+                                }).await;
+                            }
+                            MessageEnvelope::VoiceChannelSdpAnswer { sid, cid, sdp, .. } => {
+                                hollow_log!("[HOLLOW-VC] SDP answer from {sender_peer_id} in vc {cid}");
+                                let payload = serde_json::json!({"sdp": sdp}).to_string();
+                                let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                                    server_id: sid, channel_id: cid, peer_id: sender_peer_id.clone(),
+                                    signal_type: "sdp_answer".to_string(), payload,
+                                }).await;
+                            }
+                            MessageEnvelope::VoiceChannelIce { sid, cid, candidate, sdp_mid, sdp_mline_index, .. } => {
+                                hollow_log!("[HOLLOW-VC] ICE candidate from {sender_peer_id} in vc {cid}");
+                                let payload = serde_json::json!({
+                                    "candidate": candidate,
+                                    "sdpMid": sdp_mid,
+                                    "sdpMLineIndex": sdp_mline_index,
+                                }).to_string();
+                                let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                                    server_id: sid, channel_id: cid, peer_id: sender_peer_id.clone(),
+                                    signal_type: "ice".to_string(), payload,
+                                }).await;
+                            }
+                            MessageEnvelope::VoiceChannelAudioState { sid, cid, muted, deafened, .. } => {
+                                let payload = serde_json::json!({
+                                    "muted": muted,
+                                    "deafened": deafened,
+                                }).to_string();
+                                let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                                    server_id: sid, channel_id: cid, peer_id: sender_peer_id.clone(),
+                                    signal_type: "audio_state".to_string(), payload,
+                                }).await;
                             }
 
                             // DM-only envelopes should never arrive via MLS.

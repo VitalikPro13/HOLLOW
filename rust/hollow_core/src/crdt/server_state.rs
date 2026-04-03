@@ -6,6 +6,21 @@ use super::admin_lww::AdminLwwReg;
 use super::hlc::Hlc;
 use super::operations::{CrdtOp, CrdtPayload, MemberRole, Permission};
 
+/// Type of channel within a server.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChannelType {
+    #[serde(rename = "text")]
+    Text,
+    #[serde(rename = "voice")]
+    Voice,
+}
+
+impl Default for ChannelType {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
 /// An item in the channel layout — category header, channel reference, or separator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -24,6 +39,8 @@ pub struct ChannelInfo {
     pub channel_id: String,
     pub name: String,
     pub category: Option<String>,
+    #[serde(default)]
+    pub channel_type: ChannelType,
 }
 
 /// Metadata for a member within a server.
@@ -73,6 +90,7 @@ impl ServerState {
                 channel_id: general_id,
                 name: "general".to_string(),
                 category: None,
+                channel_type: ChannelType::Text,
             },
         );
 
@@ -196,12 +214,18 @@ impl ServerState {
                 channel_id,
                 name,
                 category,
+                channel_type,
             } => {
+                let ct = match channel_type.as_str() {
+                    "voice" => ChannelType::Voice,
+                    _ => ChannelType::Text,
+                };
                 self.channels.entry(channel_id.clone()).or_insert_with(|| {
                     ChannelInfo {
                         channel_id: channel_id.clone(),
                         name: name.clone(),
                         category: category.clone(),
+                        channel_type: ct,
                     }
                 });
             }
@@ -490,6 +514,7 @@ mod tests {
             channel_id: "ch-dev".into(),
             name: "dev".into(),
             category: Some("Engineering".into()),
+            channel_type: "text".into(),
         });
         state.apply_op(&op1).unwrap();
 
@@ -516,6 +541,7 @@ mod tests {
             channel_id: "ch-1".into(),
             name: "channel-1".into(),
             category: None,
+            channel_type: "text".into(),
         });
 
         state.apply_op(&op).unwrap();
@@ -548,6 +574,7 @@ mod tests {
             channel_id: "ch-random".into(),
             name: "random".into(),
             category: None,
+            channel_type: "text".into(),
         });
 
         // Both apply both ops (in different order)

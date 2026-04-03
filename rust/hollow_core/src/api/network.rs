@@ -31,7 +31,7 @@ pub enum NetworkEvent {
     // -- CRDT events (Phase 3) --
     ServerCreated { server_id: String, name: String },
     ServerUpdated { server_id: String },
-    ChannelAdded { server_id: String, channel_id: String, name: String },
+    ChannelAdded { server_id: String, channel_id: String, name: String, channel_type: String },
     ChannelRemoved { server_id: String, channel_id: String },
     ChannelRenamed { server_id: String, channel_id: String, new_name: String },
     ServerDeleted { server_id: String },
@@ -126,6 +126,10 @@ pub enum NetworkEvent {
     // -- Voice call events (Phase 5B) --
     /// Forward incoming voice call signaling message to Dart.
     CallSignal { peer_id: String, signal_type: String, payload: String },
+    // -- Voice channel events (Phase 5C) --
+    VoiceChannelJoined { server_id: String, channel_id: String, peer_id: String },
+    VoiceChannelLeft { server_id: String, channel_id: String, peer_id: String },
+    VoiceChannelSignal { server_id: String, channel_id: String, peer_id: String, signal_type: String, payload: String },
 }
 
 /// Holds all mutable state for the running node.
@@ -195,7 +199,7 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::ServerUpdated { server_id } => {
             hollow_log!("[HOLLOW] Server updated: {server_id}");
         }
-        node::NetworkEvent::ChannelAdded { server_id, channel_id, name } => {
+        node::NetworkEvent::ChannelAdded { server_id, channel_id, name, .. } => {
             hollow_log!("[HOLLOW] Channel added: {name} ({channel_id}) in {server_id}");
         }
         node::NetworkEvent::ChannelRemoved { server_id, channel_id } => {
@@ -335,8 +339,8 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::ServerUpdated { server_id } => {
             NetworkEvent::ServerUpdated { server_id }
         }
-        node::NetworkEvent::ChannelAdded { server_id, channel_id, name } => {
-            NetworkEvent::ChannelAdded { server_id, channel_id, name }
+        node::NetworkEvent::ChannelAdded { server_id, channel_id, name, channel_type } => {
+            NetworkEvent::ChannelAdded { server_id, channel_id, name, channel_type }
         }
         node::NetworkEvent::ChannelRemoved { server_id, channel_id } => {
             NetworkEvent::ChannelRemoved { server_id, channel_id }
@@ -506,6 +510,16 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         // -- Voice call events (Phase 5B) --
         node::NetworkEvent::CallSignal { peer_id, signal_type, payload } => {
             NetworkEvent::CallSignal { peer_id, signal_type, payload }
+        }
+        // -- Voice channel events (Phase 5C) --
+        node::NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id } => {
+            NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id }
+        }
+        node::NetworkEvent::VoiceChannelLeft { server_id, channel_id, peer_id } => {
+            NetworkEvent::VoiceChannelLeft { server_id, channel_id, peer_id }
+        }
+        node::NetworkEvent::VoiceChannelSignal { server_id, channel_id, peer_id, signal_type, payload } => {
+            NetworkEvent::VoiceChannelSignal { server_id, channel_id, peer_id, signal_type, payload }
         }
     }
 }
@@ -1306,6 +1320,60 @@ pub fn call_send_signal(
     let rt = get_runtime();
     rt.block_on(state.cmd_tx.send(node::NodeCommand::CallSendSignal {
         peer_id, signal_type, payload,
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Join a voice channel in a server (Phase 5C).
+#[frb]
+pub fn voice_channel_join(
+    server_id: String,
+    channel_id: String,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::VoiceChannelJoin {
+        server_id, channel_id,
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Leave a voice channel in a server (Phase 5C).
+#[frb]
+pub fn voice_channel_leave(
+    server_id: String,
+    channel_id: String,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::VoiceChannelLeave {
+        server_id, channel_id,
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Send a voice channel signaling message (SDP/ICE) to a specific peer (Phase 5C).
+#[frb]
+pub fn voice_channel_send_signal(
+    server_id: String,
+    channel_id: String,
+    peer_id: String,
+    signal_type: String,
+    payload: String,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::VoiceChannelSendSignal {
+        server_id, channel_id, peer_id, signal_type, payload,
     }))
     .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())

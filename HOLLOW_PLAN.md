@@ -1413,11 +1413,12 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [X] Video mute (camera off via track.enabled, camera light turns off via _releaseCamera)
   - [X] CallVideoView: draggable floating panel with remote video + local PiP
   - [X] Video toggle + camera switch in ActiveCallBar
-- [ ] **Small group calls (2-5, mesh)**
-  - [ ] Multiple RTCPeerConnection with audio/video tracks (one per participant)
-  - [ ] Participant list synced via MLS-encrypted `CallState` messages
-  - [ ] Mesh topology: everyone sends to everyone
-- [ ] **Gossip-tree forwarding for larger groups (5+)**
+- [X] **Small group voice (2-5, mesh) — via voice channels**
+  - [X] Multiple RTCPeerConnection with audio tracks (one per participant) — `VoiceChannelService`
+  - [X] Participant list synced via MLS-encrypted `VoiceChannelJoin/Leave` broadcasts
+  - [X] Mesh topology: everyone sends to everyone, glare prevention (lower peer_id offers)
+  - [X] Per-peer audio state (mute/deafen) broadcast via MLS-targeted `VoiceChannelAudioState`
+- [ ] **Gossip-tree forwarding for larger voice channels (5+)**
   - [ ] Each peer forwards received audio to their connected WebRTC subset (minus source)
   - [ ] Audio deduplication via stream ID (same audio may arrive from multiple paths)
   - [ ] TTL/hop limit on forwarded audio (3-4 hops max)
@@ -1431,9 +1432,16 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [X] Both-sharing handled (stacked view: remote top, local banner bottom)
   - [X] Rust `CallScreenState` signal + 2s poll for shared window close detection
   - [X] Screen share layout redesign: fullscreen with overlay chat/controls on hover
-- [ ] **Voice channels (persistent, join/leave)**
-  - [ ] Server-level voice channels in CRDT (like text channels but for voice)
-  - [ ] Join/leave mechanics: add/remove audio track, update channel member list via CRDT
+- [X] **Voice channels (persistent, join/leave)** *(Apr 3, 2026)*
+  - [X] `ChannelType` enum (Text/Voice) in CRDT + FFI + Dart. `#[serde(default)]` for backward compat
+  - [X] Create channel dialog + server settings quick-add both support Text/Voice toggle
+  - [X] Voice channel sidebar tiles: speaker icon, click-to-join, participant avatars+names below
+  - [X] Vertical shimmer on connected voice channel (top-to-bottom vs text's left-to-right)
+  - [X] Voice control panel at bottom of sidebar (mute/deafen/disconnect)
+  - [X] Mute/deafen indicators on participant rows (stacked icons for both)
+  - [X] Audio state broadcast to peers via MLS-targeted `VoiceChannelAudioState` signal
+  - [X] Joining voice doesn't change chat pane (voice-only channels, no text)
+  - [X] Cross-feature guard: blocks join when in 1:1 call
   - [ ] 🎞️ Animate: join/leave transitions, voice activity ring pulse around avatar
 - [X] **Custom ringtone for incoming calls**
   - [X] User selects a local audio file (mp3/wav/ogg/flac/m4a) in User Settings → Voice & Audio
@@ -1443,19 +1451,23 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [X] Volume slider with live preview (hold slider = plays, release = stops)
   - [X] 30s countdown timer on incoming call card (circular progress + number, turns red at 5s)
   - [X] Cached display info during exit animation (no flash of missing avatar/name on decline)
-- [ ] **Audio/video device & quality settings**
+- [X] **Audio/video device & quality settings**
   - [X] Device selection: mic via `record` package + `sourceId` constraint, speaker via `win32audio` + `Helper.selectAudioOutput()`. Persisted in SQLCipher. Loaded via `_ensureDevicePreferences()` before each call
   - [X] Per-peer speaker volume — `Helper.setVolume()` on remote audio receiver track. Right-click popup on call panel with volume slider (0-200%). Per-call, resets on new call.
   - [X] Audio quality preset: Voice (32 kbps mono), Music (128 kbps stereo), Hi-Fi (256 kbps stereo). SDP munging on Opus fmtp line (`maxaveragebitrate`, `stereo`, `sprop-stereo`). Persisted in SQLCipher. Dropdown in User Settings → Voice & Audio
-- [ ] **Audio processing**
+- [X] **Audio processing**
   - [X] Echo cancellation (built into WebRTC/libwebrtc — enabled via getUserMedia constraints)
   - [X] Noise suppression (built into WebRTC/libwebrtc — enabled via getUserMedia constraints)
-  - [ ] Voice activity detection (VAD) — show speaking indicator, suppress silence
-- [ ] **Call UI**
+  - [X] Voice activity detection (VAD) — local via `record` package amplitude monitoring (same as Settings mic test), remote via getStats `totalAudioEnergy`/`audioLevel` delta. Teal dot indicator on participant rows, fades in/out
+- [ ] **Call UI (voice channel video/screen share)**
   - [ ] Grid view for video participants
-  - [ ] Controls bar: mute, camera, screen share, leave
-  - [ ] Speaking indicator (glow around avatar)
-  - [ ] 🎞️ Animate: participant grid rearrange, mute/unmute feedback, speaking indicator glow, call connect/disconnect transitions
+  - [ ] Screen sharing in voice channels (reuse DM screen share architecture)
+  - [ ] Video (camera) in voice channels
+  - [X] Speaking indicator (teal dot on participant row, fades in/out)
+  - [X] Per-peer volume (right-click compact overlay popup, 0-200%)
+  - [X] Mute/deafen indicators (stacked icons on participant rows, broadcast via MLS)
+  - [X] Join/leave animations (fade in/out on participant rows, AnimatedSize on container)
+  - [ ] 🎞️ Animate: participant grid rearrange, call connect/disconnect transitions
 
 **Deliverable:** Full voice/video/screen-share with E2EE. No central media server. Gossip-tree forwarding scales to 1000+ participants with zero VPS bandwidth for media.
 

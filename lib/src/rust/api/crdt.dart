@@ -15,10 +15,12 @@ Future<String> createChannel({
   required String serverId,
   required String name,
   String? category,
+  required String channelType,
 }) => RustLib.instance.api.crateApiCrdtCreateChannel(
   serverId: serverId,
   name: name,
   category: category,
+  channelType: channelType,
 );
 
 /// Remove a channel from a server.
@@ -248,15 +250,21 @@ class ChannelFfi {
   final String channelId;
   final String name;
   final String? category;
+  final String channelType;
 
   const ChannelFfi({
     required this.channelId,
     required this.name,
     this.category,
+    required this.channelType,
   });
 
   @override
-  int get hashCode => channelId.hashCode ^ name.hashCode ^ category.hashCode;
+  int get hashCode =>
+      channelId.hashCode ^
+      name.hashCode ^
+      category.hashCode ^
+      channelType.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -265,7 +273,8 @@ class ChannelFfi {
           runtimeType == other.runtimeType &&
           channelId == other.channelId &&
           name == other.name &&
-          category == other.category;
+          category == other.category &&
+          channelType == other.channelType;
 }
 
 /// Member info for FFI (Dart-visible).

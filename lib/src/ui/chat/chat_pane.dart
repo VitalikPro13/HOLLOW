@@ -1520,77 +1520,95 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
 
   void _showVolumePopup(BuildContext context, Offset position) {
     final hollow = HollowTheme.of(context);
+    final overlay = Overlay.of(context);
+    OverlayEntry? entry;
 
-    showMenu<void>(
-      context: context,
-      position: RelativeRect.fromLTRB(
-          position.dx, position.dy, position.dx, position.dy),
-      color: hollow.elevated,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-        side: BorderSide(color: hollow.border),
-      ),
-      items: [
-        PopupMenuItem<void>(
-          enabled: false,
-          height: 28,
-          padding: EdgeInsets.zero,
-          child: StatefulBuilder(
-            builder: (context, setMenuState) {
-              return Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.xs,
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(LucideIcons.volume2, size: 14,
-                        color: hollow.textSecondary),
-                    SizedBox(
-                      width: 140,
-                      child: SliderTheme(
-                        data: SliderThemeData(
-                          activeTrackColor: hollow.accent,
-                          inactiveTrackColor: hollow.border,
-                          thumbColor: hollow.accent,
-                          overlayColor:
-                              hollow.accent.withValues(alpha: 0.1),
-                          trackHeight: 2,
-                          thumbShape: const RoundSliderThumbShape(
-                              enabledThumbRadius: 5),
-                        ),
-                        child: Slider(
-                          value: _remoteVolume,
-                          min: 0.0,
-                          max: 2.0,
-                          onChanged: (v) {
-                            setMenuState(() {});
-                            setState(() => _remoteVolume = v);
-                            ref.read(callProvider.notifier)
-                                .setRemoteVolume(v);
-                          },
-                        ),
+    void remove() {
+      entry?.remove();
+      entry = null;
+    }
+
+    entry = OverlayEntry(
+      builder: (ctx) {
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: remove,
+                behavior: HitTestBehavior.opaque,
+                child: const SizedBox.expand(),
+              ),
+            ),
+            Positioned(
+              left: position.dx,
+              top: position.dy,
+              child: Material(
+                color: hollow.elevated,
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                elevation: 4,
+                child: StatefulBuilder(
+                  builder: (ctx, setPopupState) {
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(LucideIcons.volume2,
+                              size: 12, color: hollow.textSecondary),
+                          SizedBox(
+                            width: 110,
+                            height: 24,
+                            child: SliderTheme(
+                              data: SliderThemeData(
+                                activeTrackColor: hollow.accent,
+                                inactiveTrackColor: hollow.border,
+                                thumbColor: hollow.accent,
+                                overlayColor:
+                                    hollow.accent.withValues(alpha: 0.08),
+                                trackHeight: 2,
+                                thumbShape: const RoundSliderThumbShape(
+                                    enabledThumbRadius: 4),
+                                overlayShape: const RoundSliderOverlayShape(
+                                    overlayRadius: 8),
+                              ),
+                              child: Slider(
+                                value: _remoteVolume,
+                                min: 0.0,
+                                max: 2.0,
+                                onChanged: (v) {
+                                  setPopupState(() {});
+                                  setState(() => _remoteVolume = v);
+                                  ref.read(callProvider.notifier)
+                                      .setRemoteVolume(v);
+                                },
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            width: 28,
+                            child: Text(
+                              '${(_remoteVolume * 100).round()}%',
+                              style: HollowTypography.caption.copyWith(
+                                color: hollow.textSecondary,
+                                fontSize: 10,
+                              ),
+                              textAlign: TextAlign.right,
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                    SizedBox(
-                      width: 32,
-                      child: Text(
-                        '${(_remoteVolume * 100).round()}%',
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 10,
-                        ),
-                        textAlign: TextAlign.right,
-                      ),
-                    ),
-                  ],
+                    );
+                  },
                 ),
-              );
-            },
-          ),
-        ),
-      ],
+              ),
+            ),
+          ],
+        );
+      },
     );
+
+    overlay.insert(entry!);
   }
 
   /// Default: two equal video rectangles side by side. Click to expand.

@@ -16,6 +16,7 @@ pub struct ChannelFfi {
     pub channel_id: String,
     pub name: String,
     pub category: Option<String>,
+    pub channel_type: String,
 }
 
 /// Member info for FFI (Dart-visible).
@@ -60,6 +61,7 @@ pub fn create_channel(
     server_id: String,
     name: String,
     category: Option<String>,
+    channel_type: String,
 ) -> Result<String, String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -71,6 +73,7 @@ pub fn create_channel(
             server_id,
             name,
             category,
+            channel_type,
         }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
@@ -163,10 +166,17 @@ pub fn get_server_channels(server_id: String) -> Result<Vec<ChannelFfi>, String>
     let channels = state
         .channels_list()
         .into_iter()
-        .map(|ch| ChannelFfi {
-            channel_id: ch.channel_id.clone(),
-            name: ch.name.clone(),
-            category: ch.category.clone(),
+        .map(|ch| {
+            use crate::crdt::server_state::ChannelType;
+            ChannelFfi {
+                channel_id: ch.channel_id.clone(),
+                name: ch.name.clone(),
+                category: ch.category.clone(),
+                channel_type: match ch.channel_type {
+                    ChannelType::Voice => "voice".to_string(),
+                    _ => "text".to_string(),
+                },
+            }
         })
         .collect();
 

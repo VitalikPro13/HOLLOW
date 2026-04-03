@@ -5,11 +5,14 @@ import 'package:flutter/material.dart';
 /// A transparent-to-highlight-to-transparent gradient sweeps across
 /// the widget over [duration] (default 4s), repeating infinitely.
 /// Very subtle — just enough to catch the eye.
+///
+/// Set [vertical] to true for a top-to-bottom sweep (voice channels).
 class SelectionShimmer extends StatefulWidget {
   final Widget child;
   final Color highlightColor;
   final Duration duration;
   final BorderRadius? borderRadius;
+  final bool vertical;
 
   const SelectionShimmer({
     super.key,
@@ -17,6 +20,7 @@ class SelectionShimmer extends StatefulWidget {
     required this.highlightColor,
     this.duration = const Duration(milliseconds: 4000),
     this.borderRadius,
+    this.vertical = false,
   });
 
   @override
@@ -47,8 +51,17 @@ class _SelectionShimmerState extends State<SelectionShimmer>
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, child) {
-        // Sweep from left to right: -1.5 to 2.5 range.
+        // Sweep position: -1.5 to 2.5 range.
         final pos = _controller.value * 4.0 - 1.5;
+        final Alignment begin;
+        final Alignment end;
+        if (widget.vertical) {
+          begin = Alignment(0, pos - 0.5);
+          end = Alignment(0, pos + 0.5);
+        } else {
+          begin = Alignment(pos - 0.5, 0);
+          end = Alignment(pos + 0.5, 0);
+        }
         return Stack(
           children: [
             child!,
@@ -59,8 +72,8 @@ class _SelectionShimmerState extends State<SelectionShimmer>
                   child: DecoratedBox(
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
-                        begin: Alignment(pos - 0.5, 0),
-                        end: Alignment(pos + 0.5, 0),
+                        begin: begin,
+                        end: end,
                         colors: [
                           Colors.transparent,
                           widget.highlightColor,

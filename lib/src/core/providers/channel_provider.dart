@@ -19,6 +19,9 @@ class ChannelListNotifier extends Notifier<Map<String, ChannelInfo>> {
           channelId: ch.channelId,
           name: ch.name,
           category: ch.category,
+          channelType: ch.channelType == 'voice'
+              ? ChannelType.voice
+              : ChannelType.text,
         );
       }
       state = map;
@@ -28,12 +31,18 @@ class ChannelListNotifier extends Notifier<Map<String, ChannelInfo>> {
   }
 
   /// Called when a ChannelAdded event arrives.
-  void onChannelAdded(String serverId, String channelId, String name) {
+  void onChannelAdded(String serverId, String channelId, String name,
+      {String channelType = 'text'}) {
     final selectedServer = ref.read(selectedServerProvider);
     if (selectedServer != serverId) return;
 
     final updated = Map.of(state);
-    updated[channelId] = ChannelInfo(channelId: channelId, name: name);
+    updated[channelId] = ChannelInfo(
+      channelId: channelId,
+      name: name,
+      channelType:
+          channelType == 'voice' ? ChannelType.voice : ChannelType.text,
+    );
     state = updated;
   }
 

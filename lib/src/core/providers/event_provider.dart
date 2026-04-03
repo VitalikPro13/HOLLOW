@@ -28,6 +28,7 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -86,6 +87,7 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(connectionStatusProvider.notifier).onPeerDisconnected(peerId);
         ref.read(webRtcProvider.notifier).disconnectPeer(peerId);
         ref.read(callProvider.notifier).handlePeerDisconnected(peerId);
+        ref.read(voiceChannelProvider.notifier).onPeerDisconnected(peerId);
         // Don't deselect — friends stay visible when offline.
 
       case NetworkEvent_RoomCleared():
@@ -187,11 +189,11 @@ class EventStreamNotifier extends Notifier<bool> {
         }
 
       case NetworkEvent_ChannelAdded(
-            :final serverId, :final channelId, :final name):
-        debugPrint('[HOLLOW] Channel added: $name ($channelId) in $serverId');
+            :final serverId, :final channelId, :final name, :final channelType):
+        debugPrint('[HOLLOW] Channel added: $name ($channelId) type=$channelType in $serverId');
         ref
             .read(channelListProvider.notifier)
-            .onChannelAdded(serverId, channelId, name);
+            .onChannelAdded(serverId, channelId, name, channelType: channelType);
 
       case NetworkEvent_ChannelRemoved(:final serverId, :final channelId):
         debugPrint('[HOLLOW] Channel removed: $channelId in $serverId');
@@ -620,6 +622,40 @@ class EventStreamNotifier extends Notifier<bool> {
             :final peerId, :final signalType, :final payload):
         ref.read(callProvider.notifier).handleCallSignal(
               peerId, signalType, payload);
+
+      // -- Voice channel events (Phase 5C) --
+      case NetworkEvent_VoiceChannelJoined(
+            :final serverId, :final channelId, :final peerId):
+        final vcNotifier = ref.read(voiceChannelProvider.notifier);
+        vcNotifier.onPeerJoined(serverId, channelId, peerId);
+        final localPeerId = ref.read(identityProvider).peerId ?? '';
+        if (peerId == localPeerId) {
+          vcNotifier.onLocalJoined(serverId, channelId);
+        } else {
+          // Remote peer joined — initiate WebRTC if we're in the same channel.
+          final vcState = ref.read(voiceChannelProvider);
+          if (vcState.currentServerId == serverId &&
+              vcState.currentChannelId == channelId) {
+            vcNotifier.onRemotePeerJoined(peerId);
+          }
+        }
+
+      case NetworkEvent_VoiceChannelLeft(
+            :final serverId, :final channelId, :final peerId):
+        final vcNotifier = ref.read(voiceChannelProvider.notifier);
+        vcNotifier.onPeerLeft(serverId, channelId, peerId);
+        final localPeerId = ref.read(identityProvider).peerId ?? '';
+        if (peerId == localPeerId) {
+          vcNotifier.onLocalLeft();
+        } else {
+          vcNotifier.onRemotePeerLeft(peerId);
+        }
+
+      case NetworkEvent_VoiceChannelSignal(
+            :final serverId, :final channelId, :final peerId,
+            :final signalType, :final payload):
+        ref.read(voiceChannelProvider.notifier).handleSignal(
+              peerId, signalType, payload, serverId, channelId);
 
     }
     } catch (e, st) {

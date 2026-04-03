@@ -7,6 +7,7 @@ import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -151,51 +152,71 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
 
   void _addChannel() {
     final controller = TextEditingController();
+    var isVoice = false;
     showHollowDialog(
       context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'New Channel',
-        content: HollowTextField(
-          controller: controller,
-          hintText: 'Channel name',
-          autofocus: true,
-          maxLength: 32,
-          onSubmitted: (_) {
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          void submit() {
             final name = controller.text.trim();
             if (name.isNotEmpty) {
               crdt_api.createChannel(
                 serverId: widget.serverId,
                 name: name,
                 category: null,
+                channelType: isVoice ? 'voice' : 'text',
               );
-              // Channel will appear in _layout via _effectiveLayout
-              // on next build. Mark dirty so Save is required.
               setState(() {});
             }
             Navigator.pop(ctx);
-          },
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: () {
-              final name = controller.text.trim();
-              if (name.isNotEmpty) {
-                crdt_api.createChannel(
-                  serverId: widget.serverId,
-                  name: name,
-                  category: null,
-                );
-                setState(() {});
-              }
-              Navigator.pop(ctx);
-            },
-            child: const Text('Create'),
-          ),
-        ],
+          }
+
+          return HollowDialog(
+            title: 'New Channel',
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Channel type toggle
+                Row(
+                  children: [
+                    _ChannelTypeChip(
+                      icon: LucideIcons.hash,
+                      label: 'Text',
+                      isSelected: !isVoice,
+                      onTap: () => setDialogState(() => isVoice = false),
+                    ),
+                    const SizedBox(width: HollowSpacing.sm),
+                    _ChannelTypeChip(
+                      icon: LucideIcons.volume2,
+                      label: 'Voice',
+                      isSelected: isVoice,
+                      onTap: () => setDialogState(() => isVoice = true),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: HollowSpacing.md),
+                HollowTextField(
+                  controller: controller,
+                  hintText: 'Channel name',
+                  autofocus: true,
+                  maxLength: 32,
+                  prefixIcon: Icon(isVoice ? LucideIcons.volume2 : LucideIcons.hash),
+                  onSubmitted: (_) => submit(),
+                ),
+              ],
+            ),
+            actions: [
+              HollowButton.ghost(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              HollowButton.filled(
+                onPressed: submit,
+                child: const Text('Create'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -543,6 +564,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
                         key: ValueKey('ch-${item.channelId}'),
                         index: index,
                         name: name,
+                        isVoice: info?.channelType == ChannelType.voice,
                         indented: isUnderCategory,
                         isLast: isLastInCategory,
                         onRename: () =>
@@ -673,6 +695,7 @@ class _CategoryRow extends StatelessWidget {
 class _ChannelRow extends StatelessWidget {
   final int index;
   final String name;
+  final bool isVoice;
   final bool indented;
   final bool isLast;
   final VoidCallback onRename;
@@ -682,6 +705,7 @@ class _ChannelRow extends StatelessWidget {
     super.key,
     required this.index,
     required this.name,
+    this.isVoice = false,
     this.indented = false,
     this.isLast = false,
     required this.onRename,
@@ -728,7 +752,8 @@ class _ChannelRow extends StatelessWidget {
                         size: 16, color: hollow.textSecondary),
                   ),
                   const SizedBox(width: HollowSpacing.sm),
-                  Icon(LucideIcons.hash, size: 16, color: hollow.textSecondary),
+                  Icon(isVoice ? LucideIcons.volume2 : LucideIcons.hash,
+                      size: 16, color: hollow.textSecondary),
                   const SizedBox(width: HollowSpacing.sm),
                   Expanded(
                     child: Text(
@@ -840,4 +865,55 @@ class _TreeConnectorPainter extends CustomPainter {
   @override
   bool shouldRepaint(_TreeConnectorPainter oldDelegate) =>
       color != oldDelegate.color || isLast != oldDelegate.isLast;
+}
+
+class _ChannelTypeChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _ChannelTypeChip({
+    required this.icon,
+    required this.label,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: HollowDurations.fast,
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.md,
+          vertical: HollowSpacing.xs,
+        ),
+        decoration: BoxDecoration(
+          color: isSelected ? hollow.accentMuted : hollow.surface,
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          border: Border.all(
+            color: isSelected ? hollow.accent : hollow.border,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14,
+                color: isSelected ? hollow.accent : hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.xs),
+            Text(
+              label,
+              style: HollowTypography.caption.copyWith(
+                color: isSelected ? hollow.accent : hollow.textSecondary,
+                fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

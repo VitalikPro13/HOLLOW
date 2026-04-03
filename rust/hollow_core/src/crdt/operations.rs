@@ -36,6 +36,8 @@ pub enum CrdtPayload {
         channel_id: String,
         name: String,
         category: Option<String>,
+        #[serde(default)]
+        channel_type: String,
     },
     ChannelRemoved {
         channel_id: String,

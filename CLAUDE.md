@@ -63,7 +63,7 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 ```
 
 ## Current Phase
-**Phase 5B: Voice & Video — IN PROGRESS (Apr 2, 2026).**
+**Phase 5B: Voice & Video — IN PROGRESS (Apr 3, 2026).**
 - **1:1 voice calls: DONE.** Separate RTCPeerConnection for voice. Full call flow + signaling. Tested cross-internet.
 - **Device selection: DONE.** Input: `sourceId` constraint. Output: `win32audio` + `Helper.selectAudioOutput()`.
 - **1:1 video calls: DONE.** Side-by-side + fullscreen. Tested cross-internet.
@@ -71,7 +71,11 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 - **Screen share layout: DONE.** Full-bleed screen fills entire chat pane. Chat overlay (360px right, toggleable) + controls pill (bottom center) auto-fade after 1s inactivity. Pinned while hovering/typing.
 - **TURN server: DEPLOYED.** Coturn on VPS. HMAC-SHA1 credentials via relay `/turn-credentials`. IceConfigProvider refreshes every 50 min.
 - **ICE config:** Own coturn STUN + Cloudflare + Google STUN + TURN (UDP/TCP/TLS).
-- **Next:** Voice channels, group calls, audio quality presets.
+- **Custom ringtone: DONE.** `audioplayers`, file path in SQLCipher, volume slider, trim editor.
+- **Audio quality presets: DONE.** Voice (32k mono), Music (128k stereo), Hi-Fi (256k stereo). SDP Opus fmtp munging.
+- **Per-peer volume: DONE.** `Helper.setVolume()` on remote receiver track. Right-click popup (0-200%).
+- **Voice channels: DONE.** Channel type system (text/voice). Full-mesh WebRTC (2-5 users). MLS-encrypted join/leave broadcast + targeted SDP/ICE. Sidebar tiles with participant list + mute/deafen indicators (stacked). Vertical shimmer for connected channels. Voice control panel (mute/deafen/disconnect). Audio state broadcast to peers. VAD speaking indicator (local via `record` package, remote via getStats). Join/leave fade animations. Per-peer volume (right-click compact overlay). Compact overlay popup also replaces old DM volume popup.
+- **Next:** Gossip-tree forwarding (5+), screen sharing + video in voice channels, DataPacketCryptor E2EE.
 
 **Phase 5A: WebRTC Data Channels — COMPLETE (Mar 29, 2026).** P2P file/shard streaming via WebRTC data channels. flutter_webrtc 1.4.1 (libwebrtc m144). ~9 MB/s throughput, tested up to 131MB. 85-90% of heavy transfers bypass relay. STUN only (no TURN yet). WSS relay fallback for symmetric NAT. Keepalive pings (30s), auto-reconnect, early-arrival handling, `getBufferedAmount()` backpressure.
 
