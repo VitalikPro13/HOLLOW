@@ -1,5 +1,7 @@
 import 'dart:io';
+import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -86,6 +88,50 @@ void _releaseLock() {
   } catch (_) {}
 }
 
+/// Crash log file for Flutter errors.
+IOSink? _crashLogSink;
+
+/// Initialize crash logging — captures Flutter framework errors and
+/// platform/async errors to hollow_crash.log alongside hollow_debug.log.
+void _initCrashLogging() {
+  try {
+    final dataDir = Platform.environment['HOLLOW_DATA_DIR'] ??
+        '${Platform.environment['APPDATA'] ?? Platform.environment['HOME'] ?? '.'}${Platform.pathSeparator}Hollow';
+    final logFile = File('$dataDir${Platform.pathSeparator}hollow_crash.log');
+
+    // Rotate if over 5MB.
+    if (logFile.existsSync() && logFile.lengthSync() > 5 * 1024 * 1024) {
+      final backup = File('${logFile.path}.old');
+      if (backup.existsSync()) backup.deleteSync();
+      logFile.renameSync(backup.path);
+    }
+
+    _crashLogSink = logFile.openWrite(mode: FileMode.append);
+    _crashLogSink!.writeln('\n=== Hollow started at ${DateTime.now().toIso8601String()} ===');
+
+    // Flutter framework errors (widget build, rendering, etc.).
+    FlutterError.onError = (details) {
+      FlutterError.presentError(details); // still print to console
+      _crashLogSink?.writeln(
+        '[${DateTime.now().toIso8601String()}] [FLUTTER-ERROR] ${details.exceptionAsString()}\n${details.stack}',
+      );
+      _crashLogSink?.flush();
+    };
+
+    // Async/platform errors not caught by Flutter framework.
+    PlatformDispatcher.instance.onError = (error, stack) {
+      debugPrint('[HOLLOW-CRASH] $error\n$stack');
+      _crashLogSink?.writeln(
+        '[${DateTime.now().toIso8601String()}] [PLATFORM-ERROR] $error\n$stack',
+      );
+      _crashLogSink?.flush();
+      return true; // handled
+    };
+  } catch (e) {
+    debugPrint('[HOLLOW] Failed to init crash logging: $e');
+  }
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -128,6 +174,9 @@ Future<void> main() async {
     // Set up tray listener (icon is only created when minimizing).
     trayManager.addListener(_HollowTrayListener());
   }
+
+  // Set up crash dump logging to hollow_crash.log.
+  _initCrashLogging();
 
   runApp(UncontrolledProviderScope(
     container: container,

@@ -1472,11 +1472,21 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [X] Per-peer volume (right-click compact overlay popup, 0-200%)
   - [X] Mute/deafen indicators (stacked icons on participant rows, broadcast via MLS)
   - [X] Join/leave animations (fade in/out on participant rows, AnimatedSize on container)
-  - [ ] 🎞️ Animate: participant grid rearrange, call connect/disconnect transitions
+  - [X] 🎞️ Animate: participant grid rearrange, call connect/disconnect transitions
 
 **Deliverable:** Full voice/video/screen-share with E2EE. No central media server. Gossip-tree forwarding scales to 1000+ participants with zero VPS bandwidth for media.
 
-### Phase 6: Polish & Launch Prep
+### Phase 6.25: Security & Optimization Audit
+
+**Goal:** Comprehensive security audit + performance/memory optimization pass. Last security audit was Phase 3.75 (Mar 16) — significant new attack surface since then (WebRTC, voice channels, screen sharing, camera video, gossip relay, SFrame E2EE).
+
+- [ ] **Security audit** — scan all code for vulnerabilities (OWASP top 10, WebRTC-specific: OSDP injection, ICE candidate manipulation, MLS group key leaks, SFrame key exposure, relay message forgery, CRDT conflict exploitation)
+- [ ] **Memory/resource optimization** — audit RTCVideoRenderer + MediaStream lifecycle for leaks during camera/screen share toggling, renderer pool or explicit disposal tracking, Flutter GPU memory profiling on 8GB machines
+- [X] Enable Flutter crash dump logging to `hollow_crash.log` (FlutterError.onError + PlatformDispatcher.onError → file sink)
+
+**Deliverable:** Hardened, leak-free app with documented security posture.
+
+### Phase 6.75: Polish & Launch Prep
 
 **Goal:** Final features, platform testing, and polish pass before distribution.
 
