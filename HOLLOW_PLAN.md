@@ -1443,7 +1443,7 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [X] Audio state broadcast to peers via MLS-targeted `VoiceChannelAudioState` signal
   - [X] Joining voice doesn't change chat pane (voice-only channels, no text)
   - [X] Cross-feature guard: blocks join when in 1:1 call
-  - [ ] 🎞️ Animate: join/leave transitions, voice activity ring pulse around avatar
+  - [X] 🎞️ Animate: join/leave transitions, voice activity ring pulse around avatar
 - [X] **Custom ringtone for incoming calls**
   - [X] User selects a local audio file (mp3/wav/ogg/flac/m4a) in User Settings → Voice & Audio
   - [X] Stored as file path in SQLCipher (not the audio data — just the path)
@@ -1460,9 +1460,13 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
   - [X] Echo cancellation (built into WebRTC/libwebrtc — enabled via getUserMedia constraints)
   - [X] Noise suppression (built into WebRTC/libwebrtc — enabled via getUserMedia constraints)
   - [X] Voice activity detection (VAD) — local via `record` package amplitude monitoring (same as Settings mic test), remote via getStats `totalAudioEnergy`/`audioLevel` delta. Teal dot indicator on participant rows, fades in/out
-- [ ] **Call UI (voice channel video/screen share)**
+- [X] **Call UI (voice channel video/screen share)**
+  - [X] Screen sharing in voice channels — separate ScreenShareService (RTCPeerConnection) per direction per peer, `createOfferFromStream()` for shared capture. 4 new Rust MessageEnvelope variants (vc_screen_offer/answer/ice/state) via MLS. Full-bleed layout with chat overlay (360px right, toggleable) + floating controls pill (auto-fade 1s). Bidirectional sharing works. Role field in ICE routing critical for correct PC targeting.
+  - [X] Voice channel selectable in sidebar — clicking joined VC sets selectedChannelProvider, auto-select on join, auto-revert to first text channel on leave
+  - [X] Voice channel text chat — ChannelChatPane embedded for VC channelId, messages flow through existing channel messaging infrastructure
+  - [X] Screen share button in sidebar voice control panel (VoiceChannelPanel)
+  - [X] Late joiner screen share — sharer sends screen_state + screen_offer on onRemotePeerJoined, early ICE queue for candidates arriving before service creation
   - [ ] Grid view for video participants
-  - [ ] Screen sharing in voice channels (reuse DM screen share architecture)
   - [ ] Video (camera) in voice channels
   - [X] Speaking indicator (teal dot on participant row, fades in/out)
   - [X] Per-peer volume (right-click compact overlay popup, 0-200%)

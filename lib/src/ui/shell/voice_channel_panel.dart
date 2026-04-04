@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -7,12 +9,34 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
 /// Voice channel controls panel.
 /// Sits at the bottom of the channel sidebar when the user is in a voice channel.
 class VoiceChannelPanel extends ConsumerWidget {
   const VoiceChannelPanel({super.key});
+
+  Future<void> _handleScreenShareToggle(
+    BuildContext context,
+    WidgetRef ref,
+    VoiceChannelState vcState,
+  ) async {
+    if (vcState.isScreenSharing) {
+      ref.read(voiceChannelProvider.notifier).stopScreenShare();
+    } else {
+      final selection = await showScreenShareDialog(context);
+      if (selection != null && context.mounted) {
+        ref.read(voiceChannelProvider.notifier).startScreenShare(
+              selection.sourceId,
+              selection.width,
+              selection.height,
+              selection.fps,
+              shareAudio: selection.shareAudio,
+            );
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -111,6 +135,27 @@ class VoiceChannelPanel extends ConsumerWidget {
                   ),
                 ),
               ),
+              // Screen share (desktop only)
+              if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) ...[
+                const SizedBox(width: HollowSpacing.sm),
+                HollowTooltip(
+                  message: vcState.isScreenSharing
+                      ? 'Stop sharing'
+                      : 'Share screen',
+                  child: HollowPressable(
+                    onTap: () => _handleScreenShareToggle(context, ref, vcState),
+                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    padding: const EdgeInsets.all(HollowSpacing.sm),
+                    child: Icon(
+                      LucideIcons.monitor,
+                      size: 18,
+                      color: vcState.isScreenSharing
+                          ? hollow.accent
+                          : hollow.textPrimary,
+                    ),
+                  ),
+                ),
+              ],
               const SizedBox(width: HollowSpacing.sm),
               // Disconnect
               HollowTooltip(

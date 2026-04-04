@@ -334,6 +334,7 @@ class _ServerContentState extends State<_ServerContent> {
               tile = _VoiceChannelTile(
                 channel: channel,
                 serverId: w.serverId,
+                onChannelSelected: w.onChannelSelected,
               );
             } else {
               tile = _ChannelTile(
@@ -364,6 +365,7 @@ class _ServerContentState extends State<_ServerContent> {
         widgets.add(_VoiceChannelTile(
           channel: channel,
           serverId: w.serverId,
+          onChannelSelected: w.onChannelSelected,
         ));
       } else {
         widgets.add(_ChannelTile(
@@ -934,10 +936,12 @@ class _ChannelTile extends ConsumerWidget {
 class _VoiceChannelTile extends ConsumerStatefulWidget {
   final ChannelInfo channel;
   final String serverId;
+  final ValueChanged<String> onChannelSelected;
 
   const _VoiceChannelTile({
     required this.channel,
     required this.serverId,
+    required this.onChannelSelected,
   });
 
   @override
@@ -976,7 +980,11 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
 
     Widget channelRow = HollowPressable(
       onTap: () {
-        if (isConnected) return;
+        if (isConnected) {
+          // Already in this channel — select it for the main pane.
+          widget.onChannelSelected(widget.channel.channelId);
+          return;
+        }
         ref.read(voiceChannelProvider.notifier)
             .joinChannel(widget.serverId, widget.channel.channelId);
       },
@@ -1156,6 +1164,9 @@ class _VoiceParticipantRow extends ConsumerWidget {
 
     final speaking = vcState.isSpeaking(peerId);
     final isRemote = peerId != localPeerId;
+    final isScreenSharing = peerId == localPeerId
+        ? vcState.isScreenSharing
+        : (vcState.peerScreenSharing[peerId] ?? false);
 
     return GestureDetector(
       onSecondaryTapUp: isRemote
@@ -1182,6 +1193,13 @@ class _VoiceParticipantRow extends ConsumerWidget {
             ),
             // Speaking indicator — teal dot, fades in/out.
             _SpeakingDot(visible: speaking),
+            // Screen sharing indicator — green monitor icon.
+            if (isScreenSharing)
+              Padding(
+                padding: const EdgeInsets.only(left: 2),
+                child: Icon(LucideIcons.monitor,
+                    size: 12, color: Colors.green),
+              ),
             if (isMuted)
               Padding(
                 padding: const EdgeInsets.only(left: 2),

@@ -1,12 +1,15 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/voice_channel_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 
@@ -48,6 +51,18 @@ class VoiceChannelState {
   /// Gossip neighbors for the current voice channel (gossip mode only).
   final Set<String> gossipNeighbors;
 
+  /// When the local user joined the current voice channel.
+  final DateTime? joinedAt;
+
+  /// Whether the local user is sharing their screen.
+  final bool isScreenSharing;
+
+  /// Remote peers currently sharing their screen (peer_id -> true).
+  final Map<String, bool> peerScreenSharing;
+
+  /// Which sharer is displayed full-bleed (null = none).
+  final String? focusedScreenSharePeerId;
+
   const VoiceChannelState({
     this.participants = const {},
     this.currentServerId,
@@ -59,6 +74,10 @@ class VoiceChannelState {
     this.peerVolumes = const {},
     this.voiceMode = 'mesh',
     this.gossipNeighbors = const {},
+    this.joinedAt,
+    this.isScreenSharing = false,
+    this.peerScreenSharing = const {},
+    this.focusedScreenSharePeerId,
   });
 
   /// Get participants for a specific voice channel.
@@ -80,6 +99,11 @@ class VoiceChannelState {
   /// Get saved volume for a peer (default 1.0).
   double getPeerVolume(String peerId) => peerVolumes[peerId] ?? 1.0;
 
+  /// Whether any screen share is active (local or remote).
+  bool get isScreenShareActive =>
+      isScreenSharing ||
+      peerScreenSharing.values.any((v) => v);
+
   VoiceChannelState copyWith({
     Map<String, Map<String, Set<String>>>? participants,
     String? currentServerId,
@@ -91,6 +115,11 @@ class VoiceChannelState {
     Map<String, double>? peerVolumes,
     String? voiceMode,
     Set<String>? gossipNeighbors,
+    DateTime? joinedAt,
+    bool? isScreenSharing,
+    Map<String, bool>? peerScreenSharing,
+    String? focusedScreenSharePeerId,
+    bool clearFocusedSharer = false,
     bool clearCurrent = false,
   }) {
     return VoiceChannelState(
@@ -116,6 +145,18 @@ class VoiceChannelState {
       gossipNeighbors: clearCurrent
           ? const {}
           : (gossipNeighbors ?? this.gossipNeighbors),
+      joinedAt: clearCurrent
+          ? null
+          : (joinedAt ?? this.joinedAt),
+      isScreenSharing: clearCurrent
+          ? false
+          : (isScreenSharing ?? this.isScreenSharing),
+      peerScreenSharing: clearCurrent
+          ? const {}
+          : (peerScreenSharing ?? this.peerScreenSharing),
+      focusedScreenSharePeerId: clearCurrent || clearFocusedSharer
+          ? null
+          : (focusedScreenSharePeerId ?? this.focusedScreenSharePeerId),
     );
   }
 }
@@ -123,10 +164,30 @@ class VoiceChannelState {
 class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   VoiceChannelService? _service;
 
+  /// Outgoing screen share services (one per peer we're sending to).
+  final Map<String, ScreenShareService> _outgoingScreenShares = {};
+
+  /// Incoming screen share services (one per peer sharing their screen to us).
+  final Map<String, ScreenShareService> _incomingScreenShares = {};
+
+  /// Early ICE candidates that arrived before the service was created.
+  /// Key: "incoming:peerId" or "outgoing:peerId"
+  final Map<String, List<Map<String, dynamic>>> _earlyScreenIce = {};
+
+  /// Shared screen capture stream (captured once, shared across outgoing PCs).
+  MediaStream? _screenCaptureStream;
+
+  /// Timer that polls for screen track ending (window closed).
+  Timer? _screenTrackPoller;
+
   @override
   VoiceChannelState build() => const VoiceChannelState();
 
   VoiceChannelService? get service => _service;
+
+  /// Get the renderer for an incoming screen share from a specific peer.
+  RTCVideoRenderer? getScreenShareRenderer(String peerId) =>
+      _incomingScreenShares[peerId]?.remoteRenderer;
 
   /// Handle a peer joining a voice channel (from event).
   void onPeerJoined(String serverId, String channelId, String peerId) {
@@ -182,6 +243,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       isMuted: false,
       isDeafened: false,
       peerAudioStates: {},
+      joinedAt: DateTime.now(),
     );
 
     // Initialize the WebRTC service.
@@ -223,12 +285,27 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   Future<void> onRemotePeerJoined(String peerId) async {
     if (_service == null || !state.isInVoiceChannel) return;
     await _service!.onPeerJoinedMyChannel(peerId);
+
+    // If we're sharing our screen, send state + offer to the late joiner.
+    if (state.isScreenSharing && _screenCaptureStream != null) {
+      // Send screen_state first so the joiner knows we're sharing.
+      network_api.voiceChannelSendSignal(
+        serverId: state.currentServerId!,
+        channelId: state.currentChannelId!,
+        peerId: peerId,
+        signalType: 'screen_state',
+        payload: jsonEncode({'enabled': true}),
+      );
+      await _sendScreenShareToPeer(peerId);
+    }
   }
 
   /// Called when a remote peer leaves our current voice channel.
   Future<void> onRemotePeerLeft(String peerId) async {
     if (_service == null) return;
     await _service!.onPeerLeftMyChannel(peerId);
+    // Clean up screen sharing for this peer.
+    await _cleanupPeerScreenShare(peerId);
   }
 
   /// Handle incoming WebRTC signal for voice channel.
@@ -244,6 +321,23 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _onRemoteAudioState(peerId, payload);
       return;
     }
+    // Handle screen share signals.
+    if (signalType == 'screen_offer') {
+      await _handleScreenOffer(peerId, payload, serverId, channelId);
+      return;
+    }
+    if (signalType == 'screen_answer') {
+      await _handleScreenAnswer(peerId, payload);
+      return;
+    }
+    if (signalType == 'screen_ice') {
+      await _handleScreenIce(peerId, payload);
+      return;
+    }
+    if (signalType == 'screen_state') {
+      _handleScreenState(peerId, payload);
+      return;
+    }
     if (_service == null) return;
     await _service!.handleSignal(
         peerId, signalType, payload, serverId, channelId);
@@ -252,6 +346,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Leave the current voice channel.
   Future<void> leaveChannel() async {
     if (!state.isInVoiceChannel) return;
+
+    // Clean up screen sharing first.
+    await _cleanupAllScreenShares();
 
     // Clean up WebRTC.
     if (_service != null) {
@@ -314,6 +411,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     // Tear down WebRTC connection if they were in our channel.
     _service?.closePeer(peerId);
+    // Clean up screen sharing for this peer.
+    _cleanupPeerScreenShare(peerId);
   }
 
   // ---------------------------------------------------------------
@@ -353,6 +452,449 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           PeerAudioState(isMuted: muted, isDeafened: deafened);
       state = state.copyWith(peerAudioStates: audioStates);
     } catch (_) {}
+  }
+
+  // ---------------------------------------------------------------
+  //  Screen sharing
+  // ---------------------------------------------------------------
+
+  /// Start sharing our screen to all peers in the current voice channel.
+  Future<void> startScreenShare(
+    String sourceId,
+    int width,
+    int height,
+    int fps, {
+    bool shareAudio = false,
+  }) async {
+    if (!state.isInVoiceChannel) return;
+    if (state.isScreenSharing) return;
+
+    // Block if already sharing in a DM call.
+    final callState = ref.read(callProvider);
+    if (callState.isScreenSharing) {
+      debugPrint('[HOLLOW-VC] Cannot share screen — already sharing in DM call');
+      return;
+    }
+
+    debugPrint('[HOLLOW-VC] Starting screen share: $sourceId ${width}x$height @${fps}fps');
+
+    // Capture screen ONCE.
+    await desktopCapturer.getSources(
+        types: [SourceType.Screen, SourceType.Window]);
+    _screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
+      'video': {
+        'deviceId': {'exact': sourceId},
+        'mandatory': {'frameRate': fps.toDouble()},
+      },
+      'audio': shareAudio,
+    });
+
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    state = state.copyWith(
+      isScreenSharing: true,
+      focusedScreenSharePeerId: localPeerId,
+    );
+
+    // Send screen share to each peer in the channel.
+    final peers = state.getParticipants(
+        state.currentServerId!, state.currentChannelId!);
+    for (final peerId in peers) {
+      if (peerId == localPeerId) continue;
+      await _sendScreenShareToPeer(peerId);
+    }
+
+    // Broadcast screen_state(enabled: true) to all peers.
+    _broadcastScreenState(true);
+
+    // Start track poller (detect window close).
+    _startScreenTrackPoller();
+  }
+
+  bool _stoppingScreenShare = false;
+
+  /// Stop sharing our screen.
+  Future<void> stopScreenShare() async {
+    if (!state.isScreenSharing || _stoppingScreenShare) return;
+    _stoppingScreenShare = true;
+    debugPrint('[HOLLOW-VC] Stopping screen share');
+
+    _screenTrackPoller?.cancel();
+    _screenTrackPoller = null;
+
+    // Close all outgoing screen share PCs.
+    for (final service in _outgoingScreenShares.values) {
+      await service.close();
+    }
+    _outgoingScreenShares.clear();
+
+    // Stop capture stream.
+    _screenCaptureStream?.getTracks().forEach((t) => t.stop());
+    _screenCaptureStream?.dispose();
+    _screenCaptureStream = null;
+
+    // Broadcast screen_state(enabled: false).
+    _broadcastScreenState(false);
+
+    // Update local state — if we were the focused sharer, clear focus
+    // and pick the next remote sharer if any.
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    String? newFocus = state.focusedScreenSharePeerId;
+    bool clearFocus = false;
+    if (newFocus == localPeerId) {
+      final remoteSharerId = state.peerScreenSharing.entries
+          .where((e) => e.value)
+          .map((e) => e.key)
+          .firstOrNull;
+      newFocus = remoteSharerId;
+      clearFocus = remoteSharerId == null;
+    }
+    state = state.copyWith(
+      isScreenSharing: false,
+      focusedScreenSharePeerId: clearFocus ? null : newFocus,
+      clearFocusedSharer: clearFocus,
+    );
+    _stoppingScreenShare = false;
+  }
+
+  /// Set which sharer is displayed full-bleed.
+  void setFocusedScreenShare(String peerId) {
+    state = state.copyWith(focusedScreenSharePeerId: peerId);
+  }
+
+  /// Send our screen share to a specific peer (creates outgoing ScreenShareService).
+  Future<void> _sendScreenShareToPeer(String peerId) async {
+    if (_screenCaptureStream == null) return;
+
+    final iceConfig = ref.read(iceConfigProvider);
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+
+    final service = ScreenShareService(
+      localPeerId: localPeerId,
+      iceServers: iceConfig,
+    );
+
+    service.onIceCandidate = (candidate) {
+      if (!state.isInVoiceChannel) return;
+      network_api.voiceChannelSendSignal(
+        serverId: state.currentServerId!,
+        channelId: state.currentChannelId!,
+        peerId: peerId,
+        signalType: 'screen_ice',
+        payload: jsonEncode({
+          'candidate': candidate.candidate,
+          'sdpMid': candidate.sdpMid,
+          'sdpMLineIndex': candidate.sdpMLineIndex,
+          'role': 'outgoing',
+        }),
+      );
+    };
+
+    _outgoingScreenShares[peerId] = service;
+
+    final sdp = await service.createOfferFromStream(_screenCaptureStream!);
+
+    // Flush any ICE candidates that arrived before this service was created.
+    final earlyKey = 'outgoing:$peerId';
+    final early = _earlyScreenIce.remove(earlyKey);
+    if (early != null && early.isNotEmpty) {
+      debugPrint('[HOLLOW-VC] Flushing ${early.length} early screen ICE for outgoing:$peerId');
+      for (final ice in early) {
+        await service.handleIceCandidate(
+          ice['candidate'] as String,
+          ice['sdpMid'] as String?,
+          ice['sdpMLineIndex'] as int?,
+        );
+      }
+    }
+
+    if (!state.isInVoiceChannel) return;
+
+    network_api.voiceChannelSendSignal(
+      serverId: state.currentServerId!,
+      channelId: state.currentChannelId!,
+      peerId: peerId,
+      signalType: 'screen_offer',
+      payload: jsonEncode({'sdp': sdp}),
+    );
+  }
+
+  /// Handle incoming screen share offer from a peer.
+  /// Uses the serverId/channelId from the signal dispatch (not from state)
+  /// because the signal may arrive before onLocalJoined sets the state.
+  Future<void> _handleScreenOffer(
+    String peerId,
+    String payload,
+    String serverId,
+    String channelId,
+  ) async {
+    final v = jsonDecode(payload);
+    final sdp = v['sdp'] as String? ?? '';
+    if (sdp.isEmpty) return;
+
+    debugPrint('[HOLLOW-VC] Received screen offer from $peerId');
+
+    // Mark this peer as sharing and auto-focus (screen_offer may arrive before screen_state).
+    final sharing = Map.of(state.peerScreenSharing);
+    sharing[peerId] = true;
+    state = state.copyWith(
+      peerScreenSharing: sharing,
+      focusedScreenSharePeerId:
+          state.focusedScreenSharePeerId ?? peerId,
+    );
+
+    final iceConfig = ref.read(iceConfigProvider);
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+
+    // Close existing incoming service for this peer if any.
+    await _incomingScreenShares[peerId]?.close();
+
+    final service = ScreenShareService(
+      localPeerId: localPeerId,
+      iceServers: iceConfig,
+    );
+
+    // Set preferred audio output.
+    service.preferredAudioOutputDeviceId =
+        await ref.read(audioOutputDeviceProvider.future);
+
+    service.onIceCandidate = (candidate) {
+      network_api.voiceChannelSendSignal(
+        serverId: serverId,
+        channelId: channelId,
+        peerId: peerId,
+        signalType: 'screen_ice',
+        payload: jsonEncode({
+          'candidate': candidate.candidate,
+          'sdpMid': candidate.sdpMid,
+          'sdpMLineIndex': candidate.sdpMLineIndex,
+          'role': 'incoming',
+        }),
+      );
+    };
+
+    service.onRemoteTrackReady = () {
+      debugPrint('[HOLLOW-VC] Screen share track ready from $peerId');
+      // Force a state rebuild so the UI picks up the renderer.
+      // Also auto-focus if no one is focused yet.
+      state = state.copyWith(
+        focusedScreenSharePeerId:
+            state.focusedScreenSharePeerId ?? peerId,
+      );
+    };
+
+    _incomingScreenShares[peerId] = service;
+
+    final answerSdp = await service.handleOffer(sdp);
+
+    // Flush any ICE candidates that arrived before this service was created.
+    final earlyKey = 'incoming:$peerId';
+    final early = _earlyScreenIce.remove(earlyKey);
+    if (early != null && early.isNotEmpty) {
+      debugPrint('[HOLLOW-VC] Flushing ${early.length} early screen ICE for incoming:$peerId');
+      for (final ice in early) {
+        await service.handleIceCandidate(
+          ice['candidate'] as String,
+          ice['sdpMid'] as String?,
+          ice['sdpMLineIndex'] as int?,
+        );
+      }
+    }
+
+    network_api.voiceChannelSendSignal(
+      serverId: serverId,
+      channelId: channelId,
+      peerId: peerId,
+      signalType: 'screen_answer',
+      payload: jsonEncode({'sdp': answerSdp}),
+    );
+  }
+
+  /// Handle incoming screen share answer.
+  Future<void> _handleScreenAnswer(String peerId, String payload) async {
+    final v = jsonDecode(payload);
+    final sdp = v['sdp'] as String? ?? '';
+    if (sdp.isEmpty) return;
+
+    debugPrint('[HOLLOW-VC] Received screen answer from $peerId');
+    final service = _outgoingScreenShares[peerId];
+    if (service != null) {
+      await service.handleAnswer(sdp);
+    }
+  }
+
+  /// Handle incoming screen share ICE candidate.
+  Future<void> _handleScreenIce(String peerId, String payload) async {
+    final v = jsonDecode(payload);
+    final candidate = v['candidate'] as String? ?? '';
+    final sdpMid = v['sdpMid'] as String?;
+    final sdpMLineIndex = v['sdpMLineIndex'] as int?;
+    final role = v['role'] as String? ?? '';
+
+    // Route to the correct service based on role.
+    final ScreenShareService? service;
+    final String queueKey;
+    if (role == 'incoming') {
+      // Their incoming = our outgoing.
+      service = _outgoingScreenShares[peerId];
+      queueKey = 'outgoing:$peerId';
+    } else {
+      // Their outgoing = our incoming.
+      service = _incomingScreenShares[peerId];
+      queueKey = 'incoming:$peerId';
+    }
+    if (service != null) {
+      await service.handleIceCandidate(candidate, sdpMid, sdpMLineIndex);
+    } else {
+      // Service not created yet — queue for later flush.
+      _earlyScreenIce.putIfAbsent(queueKey, () => []).add({
+        'candidate': candidate,
+        'sdpMid': sdpMid,
+        'sdpMLineIndex': sdpMLineIndex,
+      });
+    }
+  }
+
+  /// Handle screen share state change from a peer.
+  void _handleScreenState(String peerId, String payload) {
+    final v = jsonDecode(payload);
+    final enabled = v['enabled'] as bool? ?? false;
+
+    debugPrint('[HOLLOW-VC] Screen state from $peerId: enabled=$enabled');
+
+    final sharing = Map.of(state.peerScreenSharing);
+    if (enabled) {
+      sharing[peerId] = true;
+      // Auto-focus if no one is focused.
+      if (state.focusedScreenSharePeerId == null) {
+        state = state.copyWith(
+          peerScreenSharing: sharing,
+          focusedScreenSharePeerId: peerId,
+        );
+        return;
+      }
+    } else {
+      sharing.remove(peerId);
+      // Clean up incoming service.
+      _cleanupPeerScreenShare(peerId);
+      // If the leaving sharer was focused, switch to another.
+      if (state.focusedScreenSharePeerId == peerId) {
+        final localPeerId = ref.read(identityProvider).peerId ?? '';
+        final nextFocus = state.isScreenSharing
+            ? localPeerId
+            : sharing.entries
+                .where((e) => e.value)
+                .map((e) => e.key)
+                .firstOrNull;
+        state = state.copyWith(
+          peerScreenSharing: sharing,
+          focusedScreenSharePeerId: nextFocus,
+          clearFocusedSharer: nextFocus == null,
+        );
+        return;
+      }
+    }
+    state = state.copyWith(peerScreenSharing: sharing);
+  }
+
+  /// Broadcast our screen share state to all peers.
+  void _broadcastScreenState(bool enabled) {
+    if (!state.isInVoiceChannel) return;
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final peers = state.getParticipants(
+        state.currentServerId!, state.currentChannelId!);
+    final payload = jsonEncode({'enabled': enabled});
+    for (final peerId in peers) {
+      if (peerId == localPeerId) continue;
+      network_api.voiceChannelSendSignal(
+        serverId: state.currentServerId!,
+        channelId: state.currentChannelId!,
+        peerId: peerId,
+        signalType: 'screen_state',
+        payload: payload,
+      );
+    }
+  }
+
+  /// Clean up screen share services for a specific peer.
+  Future<void> _cleanupPeerScreenShare(String peerId) async {
+    // Close incoming screen share from this peer.
+    final incoming = _incomingScreenShares.remove(peerId);
+    if (incoming != null) {
+      await incoming.close();
+    }
+    // Close outgoing screen share to this peer.
+    final outgoing = _outgoingScreenShares.remove(peerId);
+    if (outgoing != null) {
+      await outgoing.close();
+    }
+    // Update peerScreenSharing map.
+    if (state.peerScreenSharing.containsKey(peerId)) {
+      final sharing = Map.of(state.peerScreenSharing)..remove(peerId);
+      // If the removed peer was focused, switch to another sharer.
+      if (state.focusedScreenSharePeerId == peerId) {
+        final localPeerId = ref.read(identityProvider).peerId ?? '';
+        final nextFocus = state.isScreenSharing
+            ? localPeerId
+            : sharing.entries
+                .where((e) => e.value)
+                .map((e) => e.key)
+                .firstOrNull;
+        state = state.copyWith(
+          peerScreenSharing: sharing,
+          focusedScreenSharePeerId: nextFocus,
+          clearFocusedSharer: nextFocus == null,
+        );
+      } else {
+        state = state.copyWith(peerScreenSharing: sharing);
+      }
+    }
+  }
+
+  /// Clean up all screen share services.
+  Future<void> _cleanupAllScreenShares() async {
+    _screenTrackPoller?.cancel();
+    _screenTrackPoller = null;
+
+    for (final service in _outgoingScreenShares.values) {
+      await service.close();
+    }
+    _outgoingScreenShares.clear();
+
+    for (final service in _incomingScreenShares.values) {
+      await service.close();
+    }
+    _incomingScreenShares.clear();
+
+    _screenCaptureStream?.getTracks().forEach((t) => t.stop());
+    _screenCaptureStream?.dispose();
+    _screenCaptureStream = null;
+    _earlyScreenIce.clear();
+
+    state = state.copyWith(
+      isScreenSharing: false,
+      peerScreenSharing: const {},
+      clearFocusedSharer: true,
+    );
+  }
+
+  /// Poll the screen capture track to detect window close (every 2s).
+  void _startScreenTrackPoller() {
+    _screenTrackPoller?.cancel();
+    bool stopping = false;
+    _screenTrackPoller = Timer.periodic(const Duration(seconds: 2), (_) async {
+      if (stopping) return;
+      if (_screenCaptureStream == null) {
+        _screenTrackPoller?.cancel();
+        return;
+      }
+      final tracks = _screenCaptureStream!.getVideoTracks();
+      if (tracks.isEmpty || tracks.first.muted == true) {
+        stopping = true;
+        debugPrint('[HOLLOW-VC] Screen track ended — stopping share');
+        _screenTrackPoller?.cancel();
+        await stopScreenShare();
+      }
+    });
   }
 
   /// Handle MLS epoch change — rotate SFrame key for voice E2EE.

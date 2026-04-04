@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
@@ -632,6 +633,8 @@ class EventStreamNotifier extends Notifier<bool> {
         final localPeerId = ref.read(identityProvider).peerId ?? '';
         if (peerId == localPeerId) {
           vcNotifier.onLocalJoined(serverId, channelId);
+          // Auto-select the voice channel for the main pane.
+          ref.read(selectedChannelProvider.notifier).state = channelId;
         } else {
           // Remote peer joined — initiate WebRTC if we're in the same channel.
           final vcState = ref.read(voiceChannelProvider);
@@ -648,6 +651,15 @@ class EventStreamNotifier extends Notifier<bool> {
         final localPeerId = ref.read(identityProvider).peerId ?? '';
         if (peerId == localPeerId) {
           vcNotifier.onLocalLeft();
+          // Switch away from voice channel to first text channel.
+          if (ref.read(selectedChannelProvider) == channelId) {
+            final channels = ref.read(channelListProvider);
+            final firstTextChannel = channels.values
+                .where((ch) => ch.channelType == ChannelType.text)
+                .firstOrNull;
+            ref.read(selectedChannelProvider.notifier).state =
+                firstTextChannel?.channelId;
+          }
         } else {
           vcNotifier.onRemotePeerLeft(peerId);
         }

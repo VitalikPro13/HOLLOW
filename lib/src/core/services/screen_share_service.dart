@@ -119,6 +119,43 @@ class ScreenShareService {
     return offer.sdp!;
   }
 
+  /// Create an offer using a pre-captured screen stream (for voice channels
+  /// where one capture is shared across multiple peer connections).
+  /// The caller manages the track poller centrally.
+  Future<String> createOfferFromStream(MediaStream stream) async {
+    _log('[HOLLOW-SCREEN] Creating offer from shared stream');
+
+    _screenStream = stream;
+    final screenTrack = _screenStream!.getVideoTracks().first;
+    _log('[HOLLOW-SCREEN] Using shared screen track: ${screenTrack.id}');
+
+    // Create PC.
+    _pc = await createPeerConnection(iceServers);
+    _setupCallbacks();
+
+    // Add screen video track.
+    await _pc!.addTrack(screenTrack, _screenStream!);
+    _log('[HOLLOW-SCREEN] Added screen video track to PC');
+
+    // Add audio tracks if available.
+    final audioTracks = _screenStream!.getAudioTracks();
+    if (audioTracks.isNotEmpty) {
+      for (final track in audioTracks) {
+        await _pc!.addTrack(track, _screenStream!);
+      }
+      _log('[HOLLOW-SCREEN] Added ${audioTracks.length} audio track(s)');
+    }
+
+    // Generate offer.
+    final offer = await _pc!.createOffer();
+    await _pc!.setLocalDescription(offer);
+
+    _log('[HOLLOW-SCREEN] Offer created, SDP length=${offer.sdp?.length}');
+
+    // Note: no track poller here — caller manages centrally for shared stream.
+    return offer.sdp!;
+  }
+
   /// Handle the remote peer's SDP answer on our outgoing PC.
   Future<void> handleAnswer(String sdp) async {
     if (_pc == null) {

@@ -1127,6 +1127,53 @@ enum MessageEnvelope {
         target: Option<String>,
     },
 
+    // -- Voice channel screen sharing (Phase 5B) --
+
+    /// Targeted: SDP offer for voice channel screen share (separate PC per direction).
+    #[serde(rename = "vc_screen_offer")]
+    VoiceChannelScreenOffer {
+        sid: String,
+        cid: String,
+        sdp: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+
+    /// Targeted: SDP answer for voice channel screen share.
+    #[serde(rename = "vc_screen_answer")]
+    VoiceChannelScreenAnswer {
+        sid: String,
+        cid: String,
+        sdp: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+
+    /// Targeted: ICE candidate for voice channel screen share.
+    #[serde(rename = "vc_screen_ice")]
+    VoiceChannelScreenIce {
+        sid: String,
+        cid: String,
+        candidate: String,
+        sdp_mid: String,
+        sdp_mline_index: u32,
+        #[serde(default)]
+        role: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+
+    /// Broadcast: screen share state (on/off) in a voice channel.
+    #[serde(rename = "vc_screen_state")]
+    VoiceChannelScreenState {
+        sid: String,
+        cid: String,
+        #[serde(default)]
+        enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+
     // -- Gossip relay tree (Phase 5D) --
 
     /// Broadcast metadata: notifies server members that a gossip file broadcast is in flight.
@@ -1162,7 +1209,11 @@ impl MessageEnvelope {
             | Self::VoiceChannelSdpOffer { target, .. }
             | Self::VoiceChannelSdpAnswer { target, .. }
             | Self::VoiceChannelIce { target, .. }
-            | Self::VoiceChannelAudioState { target, .. } => target.as_deref(),
+            | Self::VoiceChannelAudioState { target, .. }
+            | Self::VoiceChannelScreenOffer { target, .. }
+            | Self::VoiceChannelScreenAnswer { target, .. }
+            | Self::VoiceChannelScreenIce { target, .. }
+            | Self::VoiceChannelScreenState { target, .. } => target.as_deref(),
             _ => None,
         }
     }
@@ -5215,6 +5266,49 @@ async fn run_event_loop(
                                     }
                                 } else { continue; }
                             }
+                            "screen_offer" => {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                    MessageEnvelope::VoiceChannelScreenOffer {
+                                        sid: server_id.clone(),
+                                        cid: channel_id.clone(),
+                                        sdp: v["sdp"].as_str().unwrap_or("").to_string(),
+                                        target: None,
+                                    }
+                                } else { continue; }
+                            }
+                            "screen_answer" => {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                    MessageEnvelope::VoiceChannelScreenAnswer {
+                                        sid: server_id.clone(),
+                                        cid: channel_id.clone(),
+                                        sdp: v["sdp"].as_str().unwrap_or("").to_string(),
+                                        target: None,
+                                    }
+                                } else { continue; }
+                            }
+                            "screen_ice" => {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                    MessageEnvelope::VoiceChannelScreenIce {
+                                        sid: server_id.clone(),
+                                        cid: channel_id.clone(),
+                                        candidate: v["candidate"].as_str().unwrap_or("").to_string(),
+                                        sdp_mid: v["sdpMid"].as_str().unwrap_or("").to_string(),
+                                        sdp_mline_index: v["sdpMLineIndex"].as_u64().unwrap_or(0) as u32,
+                                        role: v["role"].as_str().unwrap_or("").to_string(),
+                                        target: None,
+                                    }
+                                } else { continue; }
+                            }
+                            "screen_state" => {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                    MessageEnvelope::VoiceChannelScreenState {
+                                        sid: server_id.clone(),
+                                        cid: channel_id.clone(),
+                                        enabled: v["enabled"].as_bool().unwrap_or(false),
+                                        target: None,
+                                    }
+                                } else { continue; }
+                            }
                             _ => {
                                 hollow_log!("[HOLLOW-VC] Unknown signal type: {signal_type}");
                                 continue;
@@ -5536,6 +5630,29 @@ async fn run_event_loop(
                                                                     server_id: sid.clone(),
                                                                 },
                                                             );
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // Voice channel: re-broadcast our join to the reconnecting peer
+                                            // so they know we're in a voice channel.
+                                            for (vc_key, vc_peers) in voice_channel_participants.iter() {
+                                                if vc_peers.contains(&local_peer_str.to_string()) {
+                                                    // vc_key = "server_id:channel_id"
+                                                    if let Some(colon) = vc_key.find(':') {
+                                                        let vc_sid = &vc_key[..colon];
+                                                        let vc_cid = &vc_key[colon+1..];
+                                                        if vc_sid == sid {
+                                                            hollow_log!("[HOLLOW-VC] Re-broadcasting VC join to reconnected peer {peer_id} for {vc_cid}");
+                                                            let envelope = MessageEnvelope::VoiceChannelJoin {
+                                                                sid: vc_sid.to_string(),
+                                                                cid: vc_cid.to_string(),
+                                                            };
+                                                            let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(vc_sid));
+                                                            if mls_ok {
+                                                                let _ = send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, vc_sid, &peer_id, &envelope, &bundle_keypair);
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -8218,6 +8335,10 @@ async fn handle_incoming_request(
                 | Ok(MessageEnvelope::VoiceChannelSdpAnswer { .. })
                 | Ok(MessageEnvelope::VoiceChannelIce { .. })
                 | Ok(MessageEnvelope::VoiceChannelAudioState { .. })
+                | Ok(MessageEnvelope::VoiceChannelScreenOffer { .. })
+                | Ok(MessageEnvelope::VoiceChannelScreenAnswer { .. })
+                | Ok(MessageEnvelope::VoiceChannelScreenIce { .. })
+                | Ok(MessageEnvelope::VoiceChannelScreenState { .. })
                 | Ok(MessageEnvelope::BroadcastMeta { .. }) => {
                     hollow_log!("[HOLLOW-MLS] Received MLS-only envelope via Olm from {peer_str} — ignoring");
                 }
@@ -10219,6 +10340,45 @@ async fn handle_incoming_request(
                                 let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
                                     server_id: sid, channel_id: cid, peer_id: sender_peer_id.clone(),
                                     signal_type: "audio_state".to_string(), payload,
+                                }).await;
+                            }
+
+                            // -- Voice channel screen sharing (Phase 5B) --
+                            MessageEnvelope::VoiceChannelScreenOffer { sid, cid, sdp, .. } => {
+                                hollow_log!("[HOLLOW-VC] Screen offer from {sender_peer_id} in vc {cid}");
+                                let payload = serde_json::json!({"sdp": sdp}).to_string();
+                                let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                                    server_id: sid, channel_id: cid, peer_id: sender_peer_id.clone(),
+                                    signal_type: "screen_offer".to_string(), payload,
+                                }).await;
+                            }
+                            MessageEnvelope::VoiceChannelScreenAnswer { sid, cid, sdp, .. } => {
+                                hollow_log!("[HOLLOW-VC] Screen answer from {sender_peer_id} in vc {cid}");
+                                let payload = serde_json::json!({"sdp": sdp}).to_string();
+                                let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                                    server_id: sid, channel_id: cid, peer_id: sender_peer_id.clone(),
+                                    signal_type: "screen_answer".to_string(), payload,
+                                }).await;
+                            }
+                            MessageEnvelope::VoiceChannelScreenIce { sid, cid, candidate, sdp_mid, sdp_mline_index, role, .. } => {
+                                hollow_log!("[HOLLOW-VC] Screen ICE from {sender_peer_id} in vc {cid} role={role}");
+                                let payload = serde_json::json!({
+                                    "candidate": candidate,
+                                    "sdpMid": sdp_mid,
+                                    "sdpMLineIndex": sdp_mline_index,
+                                    "role": role,
+                                }).to_string();
+                                let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                                    server_id: sid, channel_id: cid, peer_id: sender_peer_id.clone(),
+                                    signal_type: "screen_ice".to_string(), payload,
+                                }).await;
+                            }
+                            MessageEnvelope::VoiceChannelScreenState { sid, cid, enabled, .. } => {
+                                hollow_log!("[HOLLOW-VC] Screen state from {sender_peer_id}: enabled={enabled}");
+                                let payload = serde_json::json!({"enabled": enabled}).to_string();
+                                let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                                    server_id: sid, channel_id: cid, peer_id: sender_peer_id.clone(),
+                                    signal_type: "screen_state".to_string(), payload,
                                 }).await;
                             }
 

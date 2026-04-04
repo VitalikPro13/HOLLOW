@@ -31,8 +31,10 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/animations/ambient_background.dart';
 import 'package:hollow/src/ui/animations/startup_reveal.dart';
+import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/ui/chat/channel_chat_pane.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart';
+import 'package:hollow/src/ui/chat/voice_channel_pane.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/notification_overlay.dart';
@@ -471,6 +473,15 @@ class _HollowShellState extends ConsumerState<HollowShell>
       final channel = channels[selectedChannelId];
       final serverId = ref.read(selectedServerProvider);
       if (serverId != null && channel != null) {
+        // Voice channels get a dedicated pane with lounge + screen sharing.
+        if (channel.channelType == ChannelType.voice) {
+          return VoiceChannelPane(
+            key: ValueKey('vc:$selectedChannelId'),
+            serverId: serverId,
+            channelId: selectedChannelId,
+            channelName: channel.name,
+          );
+        }
         return ChannelChatPane(
           key: ValueKey('ch:$selectedChannelId'),
           serverId: serverId,
@@ -682,6 +693,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
     required bool settingsOpen,
     required bool memberPanelOpen,
   }) {
+    // Check if viewing a voice channel with active screen share (full-bleed mode).
+    final vcState = ref.watch(voiceChannelProvider);
+    final selectedChannel = selectedChannelId != null ? channels[selectedChannelId] : null;
+    final vcScreenShareFullBleed = selectedChannel?.channelType == ChannelType.voice
+        && vcState.isInVoiceChannel
+        && vcState.currentChannelId == selectedChannelId
+        && vcState.isScreenShareActive;
+
     return StartupRevealScope(
       controller: _revealController,
       isComplete: _revealComplete,
@@ -744,7 +763,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                 ),
                 if (isDesktop || !isMobile)
                   _MemberPanelSlider(
-                    visible: selectedServerId != null && memberPanelOpen,
+                    visible: selectedServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
                     serverId: selectedServerId,
                   ),
               ],
@@ -773,6 +792,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
     required bool memberPanelOpen,
   }) {
     final splitState = ref.watch(splitViewProvider);
+
+    // Check if viewing a voice channel with active screen share (full-bleed mode).
+    final vcState = ref.watch(voiceChannelProvider);
+    final selectedChannel = selectedChannelId != null ? channels[selectedChannelId] : null;
+    final vcScreenShareFullBleed = selectedChannel?.channelType == ChannelType.voice
+        && vcState.isInVoiceChannel
+        && vcState.currentChannelId == selectedChannelId
+        && vcState.isScreenShareActive;
 
     // Handle pending migration: when the left pane was closed in split mode,
     // the right pane's context needs to be applied to global providers.
@@ -927,12 +954,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
                   ),
                 ),
 
-                // Member panel
-                // Member panel — hidden during split view
+                // Member panel — hidden during split view and VC screen share
                 if (isDesktop && !splitState.isSplit)
                   _MemberPanelSlider(
                     visible:
-                        effectiveServerId != null && memberPanelOpen,
+                        effectiveServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
                     serverId: effectiveServerId,
                   ),
               ],
