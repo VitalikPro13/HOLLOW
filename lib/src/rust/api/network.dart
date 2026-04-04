@@ -379,21 +379,6 @@ Future<void> voiceChannelSendSignal({
   payload: payload,
 );
 
-/// Broadcast voice channel status (mute/deafen/screen share) to all server members.
-Future<void> voiceChannelBroadcastStatus({
-  required String serverId,
-  required String channelId,
-  required bool muted,
-  required bool deafened,
-  required bool screenSharing,
-}) => RustLib.instance.api.crateApiNetworkVoiceChannelBroadcastStatus(
-  serverId: serverId,
-  channelId: channelId,
-  muted: muted,
-  deafened: deafened,
-  screenSharing: screenSharing,
-);
-
 /// Report data channel keepalive RTT for gossip peer scoring.
 Future<void> webrtcPingReport({required String peerId, required int rttMs}) =>
     RustLib.instance.api.crateApiNetworkWebrtcPingReport(
