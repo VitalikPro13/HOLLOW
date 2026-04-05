@@ -56,6 +56,45 @@ Future<void> saveSetting({required String key, required String value}) =>
 Future<String?> loadSetting({required String key}) =>
     RustLib.instance.api.crateApiStorageLoadSetting(key: key);
 
+/// Count unread DM messages newer than the given last-seen message ID.
+/// Only counts non-hidden messages from the other peer (is_mine = 0).
+Future<int> countUnreadDm({
+  required String peerId,
+  required String lastSeenMessageId,
+}) => RustLib.instance.api.crateApiStorageCountUnreadDm(
+  peerId: peerId,
+  lastSeenMessageId: lastSeenMessageId,
+);
+
+/// Count unread channel messages newer than the given last-seen message ID.
+/// Only counts non-hidden messages from other members (is_mine = 0).
+Future<int> countUnreadChannel({
+  required String serverId,
+  required String channelId,
+  required String lastSeenMessageId,
+}) => RustLib.instance.api.crateApiStorageCountUnreadChannel(
+  serverId: serverId,
+  channelId: channelId,
+  lastSeenMessageId: lastSeenMessageId,
+);
+
+/// Count ALL non-hidden messages from others in a DM (for never-opened DMs).
+Future<int> countAllUnreadDm({required String peerId}) =>
+    RustLib.instance.api.crateApiStorageCountAllUnreadDm(peerId: peerId);
+
+/// Count ALL non-hidden messages from others in a channel (for never-opened channels).
+Future<int> countAllUnreadChannel({
+  required String serverId,
+  required String channelId,
+}) => RustLib.instance.api.crateApiStorageCountAllUnreadChannel(
+  serverId: serverId,
+  channelId: channelId,
+);
+
+/// Get all distinct peer IDs that have DM messages in the local database.
+Future<List<String>> getDmPeerIds() =>
+    RustLib.instance.api.crateApiStorageGetDmPeerIds();
+
 /// Load all friends, optionally filtered by status.
 Future<List<FriendFfi>> loadFriends({String? status}) =>
     RustLib.instance.api.crateApiStorageLoadFriends(status: status);

@@ -335,6 +335,17 @@ class EventStreamNotifier extends Notifier<bool> {
         // interfering with the sync pipeline).
         if (newMessageCount > 0) {
           _requestMissingFiles(serverId);
+
+          // Recompute unread counts from DB for non-viewed servers.
+          // When viewing the server, live onChannelMessage events already
+          // handle counts correctly — recomputing would race with markChannelSeen.
+          if (selectedServer != serverId) {
+            crdt_api.getServerChannels(serverId: serverId).then((channels) {
+              final channelIds = channels.map((c) => c.channelId).toList();
+              ref.read(unreadProvider.notifier).recomputeServerUnread(
+                  serverId, channelIds);
+            }).catchError((_) {});
+          }
         }
 
       case NetworkEvent_MessageSyncFailed(:final serverId, :final error):
@@ -380,21 +391,21 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.invalidate(myPermissionsProvider(serverId));
 
       case NetworkEvent_DmSyncCompleted(:final peerId, :final newMessageCount):
-        debugPrint('[HOLLOW] DM sync: $newMessageCount new messages from $peerId');
-        // Always reload DM history from DB after sync completes — even if
-        // newMessageCount == 0. Dart may have cleared its in-memory cache on
-        // disconnect, and the messages are all in DB already (duplicates).
+        debugPrint('[HOLLOW] DM sync completed for $peerId: $newMessageCount new messages');
         final chatNotifier = ref.read(chatProvider.notifier);
-        chatNotifier.clearPeerCache(peerId);
-        final selectedPeer = ref.read(selectedPeerProvider);
-        if (selectedPeer == peerId) {
-          chatNotifier.loadHistory(peerId);
-        }
-
-        // Request missing DM files after sync.
         if (newMessageCount > 0) {
+          // New messages arrived via sync — reload from DB to pick them up.
+          // loadHistory does an atomic state replace (no separate clear step),
+          // so live-delivered messages are never briefly wiped.
+          chatNotifier.loadHistory(peerId).catchError((e) {
+            debugPrint('[HOLLOW] Failed to load DM history after sync for $peerId: $e');
+          });
+          ref.read(unreadProvider.notifier).recomputeDmUnread(peerId);
           _requestMissingFilesForDm(peerId);
         }
+        // When newMessageCount == 0: do nothing. Live-delivered messages
+        // (from pending_messages queue) are already in memory via
+        // MessageReceived events. Clearing the cache would destroy them.
 
       case NetworkEvent_ProfileUpdated(:final peerId):
         debugPrint('[HOLLOW] Profile updated: $peerId');

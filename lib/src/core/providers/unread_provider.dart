@@ -14,34 +14,121 @@ class UnreadNotifier extends Notifier<UnreadState> {
   @override
   UnreadState build() => const UnreadState();
 
-  /// Load last-seen state from DB on startup.
+  /// Load last-seen state from DB on startup and compute actual unread counts.
   Future<void> loadAll(
       Map<String, List<String>> serverChannels,
       List<String> dmPeerIds) async {
     final channelSeen = <String, String>{};
     final dmSeen = <String, String>{};
+    final channelCounts = <String, int>{};
+    final dmCounts = <String, int>{};
 
     for (final entry in serverChannels.entries) {
       for (final cid in entry.value) {
-        final key = 'seen:ch:${entry.key}:$cid';
-        final val = await storage_api.loadSetting(key: key);
-        if (val != null) {
-          channelSeen['${entry.key}:$cid'] = val;
-        }
+        final stateKey = '${entry.key}:$cid';
+        final val = await storage_api.loadSetting(key: 'seen:ch:$stateKey');
+        try {
+          final int count;
+          if (val != null) {
+            channelSeen[stateKey] = val;
+            count = await storage_api.countUnreadChannel(
+              serverId: entry.key,
+              channelId: cid,
+              lastSeenMessageId: val,
+            );
+          } else {
+            // Never opened — count all messages from others.
+            count = await storage_api.countAllUnreadChannel(
+              serverId: entry.key,
+              channelId: cid,
+            );
+          }
+          if (count > 0) channelCounts[stateKey] = count;
+        } catch (_) {}
       }
     }
 
     for (final peerId in dmPeerIds) {
       final val = await storage_api.loadSetting(key: 'seen:dm:$peerId');
-      if (val != null) {
-        dmSeen[peerId] = val;
-      }
+      try {
+        final int count;
+        if (val != null) {
+          dmSeen[peerId] = val;
+          count = await storage_api.countUnreadDm(
+            peerId: peerId,
+            lastSeenMessageId: val,
+          );
+        } else {
+          // Never opened — count all messages from peer.
+          count = await storage_api.countAllUnreadDm(peerId: peerId);
+        }
+        if (count > 0) dmCounts[peerId] = count;
+      } catch (_) {}
     }
 
     state = UnreadState(
       channelLastSeen: channelSeen,
       dmLastSeen: dmSeen,
+      channelUnreadCounts: channelCounts,
+      dmUnreadCounts: dmCounts,
     );
+  }
+
+  /// Recompute unread counts from DB for all channels of a server.
+  /// Called after message sync completes to pick up messages that arrived while offline.
+  Future<void> recomputeServerUnread(
+      String serverId, List<String> channelIds) async {
+    final updatedCounts = Map<String, int>.from(state.channelUnreadCounts);
+    for (final cid in channelIds) {
+      final key = '$serverId:$cid';
+      try {
+        final lastSeen = state.channelLastSeen[key];
+        final int count;
+        if (lastSeen != null) {
+          count = await storage_api.countUnreadChannel(
+            serverId: serverId,
+            channelId: cid,
+            lastSeenMessageId: lastSeen,
+          );
+        } else {
+          // Never opened — count all messages from others.
+          count = await storage_api.countAllUnreadChannel(
+            serverId: serverId,
+            channelId: cid,
+          );
+        }
+        if (count > 0) {
+          updatedCounts[key] = count;
+        } else {
+          updatedCounts.remove(key);
+        }
+      } catch (_) {}
+    }
+    state = state.copyWith(channelUnreadCounts: updatedCounts);
+  }
+
+  /// Recompute unread count for a single DM peer from DB.
+  /// Called after DM sync completes.
+  Future<void> recomputeDmUnread(String peerId) async {
+    final updatedCounts = Map<String, int>.from(state.dmUnreadCounts);
+    try {
+      final lastSeen = state.dmLastSeen[peerId];
+      final int count;
+      if (lastSeen != null) {
+        count = await storage_api.countUnreadDm(
+          peerId: peerId,
+          lastSeenMessageId: lastSeen,
+        );
+      } else {
+        count = await storage_api.countAllUnreadDm(peerId: peerId);
+      }
+      if (count > 0) {
+        updatedCounts[peerId] = count;
+      } else {
+        updatedCounts.remove(peerId);
+      }
+    } catch (_) {}
+    state = state.copyWith(dmUnreadCounts: updatedCounts);
   }
 
   /// Mark a channel as seen (user is viewing it).

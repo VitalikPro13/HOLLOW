@@ -185,6 +185,57 @@ pub fn load_setting(key: String) -> Result<Option<String>, String> {
     ms.load_setting(&key)
 }
 
+/// Count unread DM messages newer than the given last-seen message ID.
+/// Only counts non-hidden messages from the other peer (is_mine = 0).
+#[frb]
+pub fn count_unread_dm(peer_id: String, last_seen_message_id: String) -> Result<u32, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    Ok(ms.count_unread_dm(&peer_id, &last_seen_message_id))
+}
+
+/// Count unread channel messages newer than the given last-seen message ID.
+/// Only counts non-hidden messages from other members (is_mine = 0).
+#[frb]
+pub fn count_unread_channel(
+    server_id: String,
+    channel_id: String,
+    last_seen_message_id: String,
+) -> Result<u32, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    Ok(ms.count_unread_channel(&server_id, &channel_id, &last_seen_message_id))
+}
+
+/// Count ALL non-hidden messages from others in a DM (for never-opened DMs).
+#[frb]
+pub fn count_all_unread_dm(peer_id: String) -> Result<u32, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    Ok(ms.count_all_unread_dm(&peer_id))
+}
+
+/// Count ALL non-hidden messages from others in a channel (for never-opened channels).
+#[frb]
+pub fn count_all_unread_channel(server_id: String, channel_id: String) -> Result<u32, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    Ok(ms.count_all_unread_channel(&server_id, &channel_id))
+}
+
+/// Get all distinct peer IDs that have DM messages in the local database.
+#[frb]
+pub fn get_dm_peer_ids() -> Result<Vec<String>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    Ok(ms.get_dm_peer_ids())
+}
+
 /// A friend entry returned to Dart.
 pub struct FriendFfi {
     pub peer_id: String,

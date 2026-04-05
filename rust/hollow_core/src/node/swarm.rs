@@ -2010,8 +2010,8 @@ async fn run_event_loop(
                             }
                         }
 
-                        if olm.has_session(&peer_id_str) {
-                            // Session exists — encrypt and send.
+                        if olm.has_session(&peer_id_str) && peer_is_reachable(&ws_room_peers, &peer_id_str) {
+                            // Session exists and peer is online — encrypt and send.
                             send_encrypted_message(
                                 &mut olm,
                                 &crypto_store,
@@ -2021,13 +2021,14 @@ async fn run_event_loop(
                                 &ws_cmd_tx, &ws_room_peers,
                             ).await;
                         } else {
-                            // No session — queue the signed envelope and send KeyRequest.
+                            // No session or peer offline — queue the signed envelope.
+                            // Messages will be drained when the peer reconnects (PeerJoined/RoomMembers).
                             pending_messages
                                 .entry(peer_id_str.clone())
                                 .or_default()
                                 .push(envelope_json);
 
-                            if !key_request_in_flight.contains(&peer_id_str) {
+                            if !olm.has_session(&peer_id_str) && !key_request_in_flight.contains(&peer_id_str) {
                                 hollow_log!("[HOLLOW-SWARM] No session for {peer_id_str}, sending KeyRequest");
                                 if peer_is_reachable(&ws_room_peers, &peer_id_str) {
                                     send_message_to_peer(
@@ -5638,6 +5639,16 @@ async fn run_event_loop(
                                         let _ = event_tx.send(NetworkEvent::SessionEstablished {
                                             peer_id: peer_id.clone(),
                                         }).await;
+                                        // Drain any pending messages queued while peer was offline.
+                                        if let Some(queued) = pending_messages.remove(&peer_id) {
+                                            hollow_log!("[HOLLOW-CRYPTO] PeerJoined: draining {} pending messages for {peer_id}", queued.len());
+                                            for text in queued {
+                                                send_encrypted_message(
+                                                    &mut olm, &crypto_store, &peer_id, &text, &event_tx,
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                ).await;
+                                            }
+                                        }
                                         flush_pending_sync_requests(
                                             &mut pending_sync_requests, &peer_id,
                                             &mut olm, &crypto_store,
@@ -5923,6 +5934,60 @@ async fn run_event_loop(
                                             &ws_cmd_tx, &ws_room_peers,
                                             pid_str, HavenMessage::FriendRequest { requested_at },
                                         );
+                                    }
+
+                                    // Olm key exchange + pending_messages drain + DM sync.
+                                    // RoomMembers fires on the JOINING peer (us) while PeerJoined
+                                    // fires on the EXISTING peer (them). Without this, DM sync is
+                                    // one-directional: they ask us, but we never ask them.
+                                    if olm.has_session(pid_str) {
+                                        let _ = event_tx.send(NetworkEvent::SessionEstablished {
+                                            peer_id: pid_str.clone(),
+                                        }).await;
+                                        // Drain any pending messages queued while peer was offline.
+                                        if let Some(queued) = pending_messages.remove(pid_str) {
+                                            hollow_log!("[HOLLOW-CRYPTO] RoomMembers: draining {} pending messages for {pid_str}", queued.len());
+                                            for text in queued {
+                                                send_encrypted_message(
+                                                    &mut olm, &crypto_store, pid_str, &text, &event_tx,
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                ).await;
+                                            }
+                                        }
+                                        flush_pending_sync_requests(
+                                            &mut pending_sync_requests, pid_str,
+                                            &mut olm, &crypto_store,
+                                            &bundle_keypair, &event_tx,
+                                            &ws_cmd_tx, &ws_room_peers,
+                                        ).await;
+                                    } else if !key_request_in_flight.contains(pid_str) {
+                                        hollow_log!("[HOLLOW-WS] RoomMembers: proactive key exchange for {pid_str}");
+                                        send_message_to_peer(
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            pid_str, HavenMessage::KeyRequest,
+                                        );
+                                        key_request_in_flight.insert(pid_str.clone());
+                                    }
+
+                                    // DM sync: ask this peer for messages we missed.
+                                    {
+                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
+                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                        if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
+                                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                                let since = store
+                                                    .get_latest_dm_timestamp(pid_str)
+                                                    .unwrap_or(None)
+                                                    .unwrap_or(0);
+                                                send_message_to_peer(
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    pid_str, HavenMessage::DmSyncRequest {
+                                                        since_timestamp: since,
+                                                    },
+                                                );
+                                            }
+                                        }
                                     }
 
                                     // Send join request if this room matches a pending server join.
@@ -6887,8 +6952,11 @@ async fn send_encrypted_message(
                     target_peer: peer_id_str.to_string(),
                     data: json.into_bytes(),
                 });
+                true
+            } else {
+                hollow_log!("[HOLLOW-CRYPTO] Encrypted message for {peer_id_str} but peer unreachable — not delivered");
+                false
             }
-            true
         }
         Err(e) => {
             let _ = event_tx

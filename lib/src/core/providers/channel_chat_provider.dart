@@ -233,7 +233,7 @@ class ChannelChatNotifier
           await ref.read(storageServiceProvider).loadChannelMessages(
                 serverId: serverId,
                 channelId: channelId,
-                limit: 200,
+                limit: 500,
               );
       if (stored.isNotEmpty) {
         // Collect message IDs for bulk reaction loading.
@@ -396,12 +396,20 @@ class ChannelChatNotifier
     );
   }
 
+  /// Max messages kept in memory per channel.
+  static const _maxMessages = 500;
+
   void _addMessage(
       String serverId, String channelId, ChannelChatMessage message) {
     final key = _key(serverId, channelId);
-    final current = state[key] ?? [];
+    final current = state[key] ?? <ChannelChatMessage>[];
+    var list = <ChannelChatMessage>[...current, message];
+    // Trim oldest messages to prevent unbounded memory growth.
+    if (list.length > _maxMessages) {
+      list = list.sublist(list.length - _maxMessages);
+    }
     final updated = Map.of(state);
-    updated[key] = [...current, message];
+    updated[key] = list;
     state = updated;
   }
 }

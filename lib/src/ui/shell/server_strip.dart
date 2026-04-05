@@ -266,7 +266,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
             duration: const Duration(milliseconds: 150),
             child: _ServerIconWithIndicator(
               isSelected: isSelected,
-              unreadCount: isSelected ? 0 : serverUnreads,
+              unreadCount: serverUnreads,
               child: _ServerIcon(
                 isSelected: isSelected,
                 backgroundColor: _colorFromId(serverId),

@@ -1560,7 +1560,17 @@ Full scan of all code added since Phase 3.75 (WebRTC, voice channels, screen sha
 - [ ] Fix server join double-click bug (first JoinServer command joins WS room but doesn't send ServerJoinRequest — second click needed)
 - [ ] Export/import friend profile data (avatars, statuses, about) — either export to .hollow backup or trigger sync on import to pull from friends
 - [ ] Read/unread messages tick if possible
+- [ ] Fix the camera turning on when calling with video call
+- [ ] Add pill for camera/screen switching in DMs, just like it is in voice channels
 - [ ] Copying messages / Paste + drag-and-drop images into the input bar
+- [X] **Chat list rework — reversed ListView.builder** — Replaced `ScrollablePositionedList` with reversed `ListView.builder` in both `channel_chat_pane.dart` and `chat_pane.dart`. Fixes: auto-scroll to bottom on new messages, edit-causes-scroll-to-top, unread pill unreliability after sync. (Apr 5, 2026)
+  - [X] Reversed `ListView.builder(reverse: true)` — scroll position 0 = bottom, new messages at index 0 stay anchored, no jumpTo/scrollTo hacks
+  - [X] Message data order: newest-first in the builder (read list backwards or reverse before building)
+  - [X] Auto-scroll: natural — reversed list stays at bottom when new messages prepend. If user scrolled up (`controller.offset > threshold`), don't force scroll, show unread pill instead
+  - [X] Unread pill: `controller.offset > threshold` → show pill, tap → `controller.animateTo(0)`. Simple and reliable
+  - [X] Reply-tap-scroll: `GlobalKey` per message + `Scrollable.ensureVisible()` — replaces `ScrollablePositionedList.scrollTo(index)`
+  - [X] Preserve all existing UI: hover wrapper with message action bar, teal indicator line on right for own messages, message grouping, date separators, reactions, file attachments, edit/delete inline, reply references
+  - [X] Remove `scrollable_positioned_list` dependency after migration
 - [ ] Different fonts/elements like hearts or sparkles on Profile and maybe nicknames
 - [ ] **Scaling:**
   - [X] Connection subset management + gossip relay tree — DONE (Phase 5D, Apr 3). See Phase 4 section (~line 1229) and Phase 5B voice channels section

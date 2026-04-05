@@ -487,8 +487,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                     : null,
                 child: _BottomServerIcon(
                   isSelected: isSelected || isRightPaneServer,
-                  unreadCount:
-                      (isSelected || isRightPaneServer) ? 0 : serverUnreads,
+                  unreadCount: serverUnreads,
                   tooltip: _isDragging ? null : name,
                   backgroundColor: _colorFromId(serverId),
                   onTap: () => _selectServer(ref, serverId),

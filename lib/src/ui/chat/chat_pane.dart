@@ -42,7 +42,6 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:lucide_icons/lucide_icons.dart';
-import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 /// Whether the DM profile panel is visible.
 final dmProfilePanelProvider = StateProvider<bool>((ref) => true);
@@ -166,33 +165,32 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   }
 
   final _controller = TextEditingController();
-  final _itemScrollController = ItemScrollController();
-  final _itemPositionsListener = ItemPositionsListener.create();
-  final _scrollOffsetController = ScrollOffsetController();
+  final _scrollController = ScrollController();
   final _focusNode = FocusNode();
   bool _historyLoaded = false;
   bool _isPicking = false;
-  int _previousMessageCount = 0;
   String? _editingMessageId;
   String? _replyToMessageId;
   String? _replyToText;
   String? _replyToSenderName;
   String? _replyToImagePath;
   DateTime? _lastTypingSent;
-  int? _highlightIndex;
+  String? _highlightMessageId;
   bool _showScrollPill = false;
   Timer? _overlayHideTimer;
   bool _overlaysVisible = true;
   bool _chatOverlayPinned = false; // User explicitly toggled chat open
+  /// GlobalKeys for reply-tap-scroll (keyed by messageId).
+  final Map<String, GlobalKey> _messageKeys = {};
 
   @override
   void initState() {
     super.initState();
     _loadHistory();
-    _itemPositionsListener.itemPositions.addListener(_onScrollPositionChanged);
+    _scrollController.addListener(_onScrollChanged);
   }
 
-  void _onScrollPositionChanged() {
+  void _onScrollChanged() {
     final nearBottom = _isNearBottom;
     if (_showScrollPill == nearBottom) {
       setState(() => _showScrollPill = !nearBottom);
@@ -243,54 +241,49 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   @override
   void dispose() {
     _overlayHideTimer?.cancel();
-    _itemPositionsListener.itemPositions.removeListener(_onScrollPositionChanged);
+    _scrollController.removeListener(_onScrollChanged);
+    _scrollController.dispose();
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();
   }
 
+  /// In a reversed ListView, offset 0 = bottom. Near-bottom = small offset.
   bool get _isNearBottom {
-    final positions = _itemPositionsListener.itemPositions.value;
-    if (positions.isEmpty) return true;
-    final messages = ref.read(chatProvider)[widget.peerId] ?? [];
-    if (messages.isEmpty) return true;
-    // Check if sentinel (last real message index or beyond) is visible.
-    return positions.any((p) => p.index >= messages.length - 1);
+    if (!_scrollController.hasClients) return true;
+    return _scrollController.offset < 50;
   }
 
   void _jumpToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_itemScrollController.isAttached) return;
-      final messages = ref.read(chatProvider)[widget.peerId] ?? [];
-      if (messages.isEmpty) return;
-      // Jump to sentinel item (index == messages.length) at bottom of viewport.
-      _itemScrollController.jumpTo(index: messages.length, alignment: 1.0);
+      if (!mounted || !_scrollController.hasClients) return;
+      _scrollController.jumpTo(0);
     });
   }
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_itemScrollController.isAttached) return;
-      // Pixel-level nudge — no crossfade animation.
-      _scrollOffsetController.animateScroll(
-        offset: 100000,
+      if (!mounted || !_scrollController.hasClients) return;
+      _scrollController.animateTo(
+        0,
         duration: const Duration(milliseconds: 150),
         curve: Curves.easeOut,
       );
     });
   }
 
-  void _scrollToMessage(int index) {
-    if (!_itemScrollController.isAttached) return;
-    setState(() => _highlightIndex = index);
-    _itemScrollController.scrollTo(
-      index: index,
+  void _scrollToMessage(String messageId) {
+    final key = _messageKeys[messageId];
+    if (key == null || key.currentContext == null) return;
+    setState(() => _highlightMessageId = messageId);
+    Scrollable.ensureVisible(
+      key.currentContext!,
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOutCubic,
       alignment: 0.3,
     );
     Future.delayed(const Duration(milliseconds: 1500), () {
-      if (mounted) setState(() => _highlightIndex = null);
+      if (mounted) setState(() => _highlightMessageId = null);
     });
   }
 
@@ -441,14 +434,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final chatHistory = ref.watch(chatProvider);
     final messages = chatHistory[widget.peerId] ?? [];
 
-    // Auto-scroll when new messages arrive and user is near the bottom.
-    // Skip on initial load (handled by _jumpToBottom in _loadHistory).
-    if (_previousMessageCount > 0 &&
-        messages.length > _previousMessageCount &&
-        _isNearBottom) {
-      _scrollToBottom();
-    }
-    _previousMessageCount = messages.length;
+    // Reversed ListView stays at bottom naturally when new messages arrive.
+    // No manual auto-scroll needed.
 
     final typingPeers = ref.watch(typingProvider)[widget.peerId] ?? {};
     final showProfilePanel = ref.watch(dmProfilePanelProvider);
@@ -848,29 +835,30 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                         : ScrollConfiguration(
                             behavior: ScrollConfiguration.of(context)
                                 .copyWith(scrollbars: false),
-                            child: ScrollablePositionedList.builder(
+                            child: ListView.builder(
                               key: ValueKey('dm-list-${widget.peerId}'),
-                              itemScrollController: _itemScrollController,
-                              itemPositionsListener: _itemPositionsListener,
-                              scrollOffsetController: _scrollOffsetController,
-                              initialScrollIndex: messages.length,
-                              initialAlignment: 1.0,
+                              controller: _scrollController,
+                              reverse: true,
                               padding: const EdgeInsets.symmetric(
                                 vertical: HollowSpacing.sm,
                               ),
-                              itemCount: messages.length + 1,
+                              itemCount: messages.length,
                               itemBuilder: (context, index) {
-                                if (index >= messages.length) {
-                                  return const SizedBox.shrink();
+                                // Reversed list: index 0 = newest (bottom), last index = oldest (top).
+                                final msgIndex = messages.length - 1 - index;
+                                final msg = messages[msgIndex];
+                                // Register GlobalKey for reply-tap-scroll.
+                                if (msg.messageId != null) {
+                                  _messageKeys.putIfAbsent(msg.messageId!, () => GlobalKey());
                                 }
-                                final msg = messages[index];
-                                final showHeader = index == 0 ||
+                                // Grouping: compare with the previous message in chronological order.
+                                final showHeader = msgIndex == 0 ||
                                     !shouldGroup(
                                       currentIsMe: msg.isMe,
-                                      previousIsMe: messages[index - 1].isMe,
+                                      previousIsMe: messages[msgIndex - 1].isMe,
                                       currentTime: msg.timestamp,
                                       previousTime:
-                                          messages[index - 1].timestamp,
+                                          messages[msgIndex - 1].timestamp,
                                     );
                                 final profiles = ref.watch(profileProvider);
                                 final localPeerId =
@@ -959,14 +947,13 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                                     String? replySender;
                                     String? replyText;
                                     String? replyImagePath;
-                                    int? replyIndex;
+                                    String? replyMessageId;
                                     if (msg.replyToMid != null) {
-                                      final idx = messages.indexWhere(
+                                      final original = messages.where(
                                           (m) =>
-                                              m.messageId == msg.replyToMid);
-                                      if (idx != -1) {
-                                        replyIndex = idx;
-                                        final original = messages[idx];
+                                              m.messageId == msg.replyToMid).firstOrNull;
+                                      if (original != null) {
+                                        replyMessageId = original.messageId;
                                         replyText =
                                             original.fileAttachment != null
                                                 ? (original.fileAttachment!
@@ -995,10 +982,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                                       replyToText: replyText,
                                       replyToImagePath: replyImagePath,
                                       isHighlighted:
-                                          _highlightIndex == index,
-                                      onReplyTap: replyIndex != null
+                                          _highlightMessageId == msg.messageId,
+                                      onReplyTap: replyMessageId != null
                                           ? () =>
-                                              _scrollToMessage(replyIndex!)
+                                              _scrollToMessage(replyMessageId!)
                                           : null,
                                       onToggleReaction:
                                           msg.messageId != null
@@ -1026,19 +1013,23 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                                     );
                                   }),
                                 );
+                                // Date separator in chronological order.
                                 final showDate = shouldShowDateSeparator(
                                   msg.timestamp,
-                                  index > 0
-                                      ? messages[index - 1].timestamp
+                                  msgIndex > 0
+                                      ? messages[msgIndex - 1].timestamp
                                       : null,
                                 );
-                                final messageWidget = showHeader
-                                    ? Padding(
-                                        padding: const EdgeInsets.only(
-                                            top: HollowSpacing.sm + 2),
-                                        child: wrapper,
-                                      )
-                                    : wrapper;
+                                final messageWidget = KeyedSubtree(
+                                  key: msg.messageId != null ? _messageKeys[msg.messageId!] : null,
+                                  child: showHeader
+                                      ? Padding(
+                                          padding: const EdgeInsets.only(
+                                              top: HollowSpacing.sm + 2),
+                                          child: wrapper,
+                                        )
+                                      : wrapper,
+                                );
                                 if (showDate) {
                                   return Column(
                                     mainAxisSize: MainAxisSize.min,

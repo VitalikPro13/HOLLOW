@@ -66,6 +66,11 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 **Phase 6.25: Security & Optimization Audit — COMPLETE (Apr 5, 2026).** 21 findings all fixed. VPS hardened. TURN ICE config bug fixed (split URIs into separate entries). Voice calls confirmed working cross-internet via STUN P2P.
 
 **Phase 6.75: Polish & Launch Prep — IN PROGRESS.**
+- **Chat list rework: DONE (Apr 5).** Replaced `ScrollablePositionedList` with reversed `ListView.builder` in both `channel_chat_pane.dart` and `chat_pane.dart`. `scrollable_positioned_list` dependency removed. Reply-tap-scroll uses `GlobalKey` + `Scrollable.ensureVisible()`. In-memory message cap: 500 per conversation. DB load limit: 500.
+- **Unread count persistence: DONE (Apr 5).** Rust FFI functions for counting unread. `loadAll` at startup. Server badge shows count. DM unread working now that DM sync is fixed.
+- **DM sync fix: DONE (Apr 5).** 3 critical bugs in offline DM delivery, all in `swarm.rs`: (1) `send_encrypted_message` silently dropped messages when peer offline — now queues to `pending_messages`; (2) `RoomMembers` handler had no Olm key exchange or DM sync — sync was one-directional; (3) `PeerJoined` didn't drain `pending_messages` when Olm session existed. Dart-side: `DmSyncCompleted` no longer wipes in-memory messages when `newMessageCount == 0`. Tested and confirmed working cross-internet.
+- Next up: Read receipts (message ticks), then remaining Phase 6.75 items.
+- flutter_chat_ui package evaluated and rejected (too opinionated for Hollow's custom UI).
 
 **Phase 5B: Voice & Video — COMPLETE (Apr 4, 2026).**
 - **1:1 voice calls: DONE.** Separate RTCPeerConnection for voice. Full call flow + signaling. Tested cross-internet.

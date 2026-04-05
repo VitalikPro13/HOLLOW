@@ -998,6 +998,98 @@ impl MessageStore {
         Ok(count as u32)
     }
 
+    /// Count unread DM messages: messages with autoincrement id greater than
+    /// the row matching `last_seen_message_id`. Returns 0 if not found.
+    pub fn count_unread_dm(&self, peer_id: &str, last_seen_message_id: &str) -> u32 {
+        // Find the autoincrement id of the last-seen message.
+        let seen_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM messages WHERE peer_id = ?1 AND message_id = ?2",
+                params![peer_id, last_seen_message_id],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let threshold = seen_id.unwrap_or(0);
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE peer_id = ?1 AND id > ?2 AND hidden_at IS NULL AND is_mine = 0",
+                params![peer_id, threshold],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as u32
+    }
+
+    /// Count unread channel messages: messages with autoincrement id greater than
+    /// the row matching `last_seen_message_id`. Returns 0 if not found.
+    pub fn count_unread_channel(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        last_seen_message_id: &str,
+    ) -> u32 {
+        // Find the autoincrement id of the last-seen message.
+        let seen_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM channel_messages
+                 WHERE server_id = ?1 AND channel_id = ?2 AND message_id = ?3",
+                params![server_id, channel_id, last_seen_message_id],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let threshold = seen_id.unwrap_or(0);
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM channel_messages
+                 WHERE server_id = ?1 AND channel_id = ?2 AND id > ?3
+                   AND hidden_at IS NULL AND is_mine = 0",
+                params![server_id, channel_id, threshold],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as u32
+    }
+
+    /// Count ALL non-hidden messages from others in a DM (for never-opened DMs).
+    pub fn count_all_unread_dm(&self, peer_id: &str) -> u32 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE peer_id = ?1 AND hidden_at IS NULL AND is_mine = 0",
+                params![peer_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as u32
+    }
+
+    /// Count ALL non-hidden messages from others in a channel (for never-opened channels).
+    pub fn count_all_unread_channel(&self, server_id: &str, channel_id: &str) -> u32 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM channel_messages
+                 WHERE server_id = ?1 AND channel_id = ?2
+                   AND hidden_at IS NULL AND is_mine = 0",
+                params![server_id, channel_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as u32
+    }
+
+    /// Get all distinct peer IDs that have DM messages.
+    pub fn get_dm_peer_ids(&self) -> Vec<String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT peer_id FROM messages")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap();
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
     /// Get the latest timestamp per sender for a channel (for per-sender sync).
     /// Returns a map of `{ sender_id → max_timestamp }`.
     pub fn get_per_sender_timestamps(

@@ -166,10 +166,25 @@ class _HollowShellState extends ConsumerState<HollowShell>
       showMnemonicDialog(context, identity.mnemonic!);
     }
 
-    await ref.read(nodeProvider.notifier).start();
-
-    // Load servers from local DB after node starts.
+    // Load servers from local DB (needed for unread computation).
     await ref.read(serverListProvider.notifier).loadFromDb();
+
+    // Load unread state from DB BEFORE starting the node,
+    // so sync events don't race with loadAll.
+    try {
+      final servers = ref.read(serverListProvider);
+      final serverChannels = <String, List<String>>{};
+      for (final sid in servers.keys) {
+        final channels = await crdt_api.getServerChannels(serverId: sid);
+        serverChannels[sid] = channels.map((c) => c.channelId).toList();
+      }
+      final dmPeerIds = await storage_api.getDmPeerIds();
+      await ref.read(unreadProvider.notifier).loadAll(serverChannels, dmPeerIds);
+    } catch (e) {
+      debugPrint('[HOLLOW] Failed to load unread state: $e');
+    }
+
+    await ref.read(nodeProvider.notifier).start();
 
     // Load server strip layout (folders + ordering).
     await ref.read(serverStripLayoutProvider.notifier).loadLayout();
