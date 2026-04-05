@@ -5901,7 +5901,7 @@ async fn run_event_loop(
                                         }
                                     }
 
-                                    // Send CRDT SyncReq for servers shared with this peer.
+                                    // Send CRDT SyncReq + channel message sync for servers shared with this peer.
                                     for (sid, state) in server_states.iter() {
                                         if state.members.contains_key(pid_str) {
                                             let our_vector = StateVector::from_server_state(state);
@@ -5922,6 +5922,29 @@ async fn run_event_loop(
                                                             state_vector_json: sv_json,
                                                         },
                                                     );
+                                                }
+                                            }
+
+                                            // Channel message sync via coordinator (same as PeerJoined).
+                                            // Without this, the joining peer never probes for missed
+                                            // channel messages and never gets MessageSyncCompleted.
+                                            {
+                                                let data_dir = crate::identity::data_dir().unwrap_or_default();
+                                                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                                if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
+                                                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                                    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                                        let channels_ts: Vec<(String, i64)> = state.channels.keys()
+                                                            .map(|cid| {
+                                                                let ts = store
+                                                                    .get_latest_channel_timestamp(sid, cid)
+                                                                    .unwrap_or(None)
+                                                                    .unwrap_or(0);
+                                                                (cid.clone(), ts)
+                                                            })
+                                                            .collect();
+                                                        sync_coordinator.register_peer(sid, pid_str, channels_ts);
+                                                    }
                                                 }
                                             }
                                         }
@@ -10202,7 +10225,9 @@ async fn handle_incoming_request(
                                             }
                                         }
                                     }
-                                    if has_more != Some(true) && new_count > 0 {
+                                    // Always emit completion (matches non-MLS path) so Dart
+                                    // can recompute unread counts even when new_count == 0.
+                                    if has_more != Some(true) {
                                         let _ = event_tx.send(NetworkEvent::MessageSyncCompleted {
                                             server_id: sid,
                                             new_message_count: new_count,
@@ -10810,11 +10835,64 @@ async fn handle_incoming_request(
                     }
                 }
 
-                // Duplicate check: skip if peer is already in the MLS group.
-                let already_member = mls_mgr.group_members(&server_id).contains(&peer_str.to_string());
-                if already_member {
-                    hollow_log!("[HOLLOW-MLS] Peer {peer_str} already in MLS group for {server_id}, skipping");
-                    return;
+                // Step 1: Clean stale MLS members not in CRDT member list.
+                // Handles identity resets (old peer_id ghost) and failed removals.
+                if let Some(state) = server_states.get(&server_id) {
+                    let crdt_members: std::collections::HashSet<&String> = state.members.keys().collect();
+                    let mls_members = mls_mgr.group_members(&server_id);
+                    for stale_peer in &mls_members {
+                        if stale_peer == local_peer_str { continue; } // Don't remove ourselves
+                        if !crdt_members.contains(stale_peer) {
+                            hollow_log!("[HOLLOW-MLS] Removing stale MLS member {stale_peer} from {server_id} (not in CRDT)");
+                            match mls_mgr.remove_member(&server_id, stale_peer) {
+                                Ok(commit_bytes) => {
+                                    if let Err(e) = mls_mgr.merge_pending_commit(&server_id) {
+                                        hollow_log!("[HOLLOW-MLS] Failed to merge stale removal commit: {e}");
+                                        continue;
+                                    }
+                                    persist_mls_state(mls_mgr, bundle_keypair);
+                                    let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
+                                    for member_peer in state.members.keys() {
+                                        if member_peer == local_peer_str || member_peer == stale_peer { continue; }
+                                        if peer_is_reachable(ws_room_peers, member_peer) {
+                                            send_message_to_peer(ws_cmd_tx, ws_room_peers, member_peer,
+                                                HavenMessage::MlsCommit { server_id: server_id.clone(), commit: commit_b64.clone() });
+                                        }
+                                    }
+                                }
+                                Err(e) => hollow_log!("[HOLLOW-MLS] Failed to remove stale member {stale_peer}: {e}"),
+                            }
+                        }
+                    }
+                }
+
+                // Step 2: If sender is already in MLS group, remove them first (recovery re-add).
+                // Peer dropped their local MLS state and sent a fresh KeyPackage — cycle them.
+                if mls_mgr.group_members(&server_id).contains(&peer_str.to_string()) {
+                    hollow_log!("[HOLLOW-MLS] Peer {peer_str} already in MLS group for {server_id} — removing for re-add (recovery)");
+                    if let Some(state) = server_states.get(&server_id) {
+                        match mls_mgr.remove_member(&server_id, peer_str) {
+                            Ok(commit_bytes) => {
+                                if let Err(e) = mls_mgr.merge_pending_commit(&server_id) {
+                                    hollow_log!("[HOLLOW-MLS] Failed to merge recovery removal commit: {e}");
+                                    return;
+                                }
+                                persist_mls_state(mls_mgr, bundle_keypair);
+                                let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
+                                for member_peer in state.members.keys() {
+                                    if member_peer == local_peer_str || member_peer == peer_str { continue; }
+                                    if peer_is_reachable(ws_room_peers, member_peer) {
+                                        send_message_to_peer(ws_cmd_tx, ws_room_peers, member_peer,
+                                            HavenMessage::MlsCommit { server_id: server_id.clone(), commit: commit_b64.clone() });
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                hollow_log!("[HOLLOW-MLS] Failed to remove {peer_str} for re-add: {e}");
+                                return;
+                            }
+                        }
+                    }
                 }
 
                 let kp_bytes = match base64::engine::general_purpose::STANDARD.decode(&key_package) {
@@ -10840,6 +10918,12 @@ async fn handle_incoming_request(
                     Ok(b) => b,
                     Err(e) => { hollow_log!("[HOLLOW-MLS] Base64 decode Welcome failed: {e}"); return; }
                 };
+
+                // If group already exists locally (stale from failed recovery), remove it first.
+                if mls_mgr.has_group(&server_id) {
+                    hollow_log!("[HOLLOW-MLS] Removing stale local group for {server_id} before Welcome");
+                    mls_mgr.remove_group(&server_id);
+                }
 
                 match mls_mgr.join_from_welcome(&server_id, &welcome_bytes) {
                     Ok(()) => {

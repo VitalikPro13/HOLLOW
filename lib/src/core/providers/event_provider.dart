@@ -253,6 +253,16 @@ class EventStreamNotifier extends Notifier<bool> {
           ref.read(channelListProvider.notifier).loadForServer(serverId);
           ref.read(channelLayoutProvider.notifier).loadForServer(serverId);
         }
+        // Recompute server unread counts after CRDT sync. This ensures
+        // badges show on startup even if channel message sync hasn't
+        // completed yet (loadAll ran before the node connected).
+        if (ref.read(selectedServerProvider) != serverId) {
+          crdt_api.getServerChannels(serverId: serverId).then((channels) {
+            final channelIds = channels.map((c) => c.channelId).toList();
+            ref.read(unreadProvider.notifier).recomputeServerUnread(
+                serverId, channelIds);
+          }).catchError((_) {});
+        }
 
       case NetworkEvent_ServerJoined(:final serverId, :final name):
         debugPrint('[HOLLOW] Server joined: $name ($serverId)');
@@ -331,21 +341,21 @@ class EventStreamNotifier extends Notifier<bool> {
               .loadPins(serverId, selectedChannel);
         }
 
-        // After message sync, request any missing files (delayed to avoid
-        // interfering with the sync pipeline).
+        // After message sync, request any missing files.
         if (newMessageCount > 0) {
           _requestMissingFiles(serverId);
+        }
 
-          // Recompute unread counts from DB for non-viewed servers.
-          // When viewing the server, live onChannelMessage events already
-          // handle counts correctly — recomputing would race with markChannelSeen.
-          if (selectedServer != serverId) {
-            crdt_api.getServerChannels(serverId: serverId).then((channels) {
-              final channelIds = channels.map((c) => c.channelId).toList();
-              ref.read(unreadProvider.notifier).recomputeServerUnread(
-                  serverId, channelIds);
-            }).catchError((_) {});
-          }
+        // Always recompute unread counts from DB after sync completes for
+        // non-viewed servers. loadAll() runs before the node starts, so its
+        // snapshot is stale once sync finishes. Even with newMessageCount == 0,
+        // live events during sync may have added messages to DB.
+        if (selectedServer != serverId) {
+          crdt_api.getServerChannels(serverId: serverId).then((channels) {
+            final channelIds = channels.map((c) => c.channelId).toList();
+            ref.read(unreadProvider.notifier).recomputeServerUnread(
+                serverId, channelIds);
+          }).catchError((_) {});
         }
 
       case NetworkEvent_MessageSyncFailed(:final serverId, :final error):

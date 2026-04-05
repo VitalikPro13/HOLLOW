@@ -67,9 +67,12 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 
 **Phase 6.75: Polish & Launch Prep — IN PROGRESS.**
 - **Chat list rework: DONE (Apr 5).** Replaced `ScrollablePositionedList` with reversed `ListView.builder` in both `channel_chat_pane.dart` and `chat_pane.dart`. `scrollable_positioned_list` dependency removed. Reply-tap-scroll uses `GlobalKey` + `Scrollable.ensureVisible()`. In-memory message cap: 500 per conversation. DB load limit: 500.
-- **Unread count persistence: DONE (Apr 5).** Rust FFI functions for counting unread. `loadAll` at startup. Server badge shows count. DM unread working now that DM sync is fixed.
+- **Unread count persistence: DONE (Apr 5).** Rust FFI functions for counting unread. `loadAll` at startup. DM unread badges (red, numbered) working on friends bar + home dashboard. Server unread badges work for real-time messages; startup count still inconsistent (TODO).
 - **DM sync fix: DONE (Apr 5).** 3 critical bugs in offline DM delivery, all in `swarm.rs`: (1) `send_encrypted_message` silently dropped messages when peer offline — now queues to `pending_messages`; (2) `RoomMembers` handler had no Olm key exchange or DM sync — sync was one-directional; (3) `PeerJoined` didn't drain `pending_messages` when Olm session existed. Dart-side: `DmSyncCompleted` no longer wipes in-memory messages when `newMessageCount == 0`. Tested and confirmed working cross-internet.
-- Next up: Read receipts (message ticks), then remaining Phase 6.75 items.
+- **MLS recovery: DONE (Apr 5).** Owner auto-cleans stale MLS members not in CRDT. Owner removes+re-adds peers for recovery (same peer_id, corrupted state). `remove_group` now properly clears OpenMLS provider storage (`group.delete`). Welcome handler removes stale local group before joining. Fixes identity reset + leave/rejoin MLS desync.
+- **Unread UI: DONE (Apr 5).** Friends bar: teal dot → red numbered pill badge. Home dashboard: teal → red badge, repositioned next to time (vertically centered). Server badges already red.
+- **Server unread on startup: TODO.** Infrastructure in place (`RoomMembers` now registers channel sync, `SyncCompleted` recomputes unreads, MLS batch handler always emits `MessageSyncCompleted`), but startup badge display still inconsistent. Real-time server unreads work fine.
+- Next up: Read receipts (message ticks), server unread startup reliability, then remaining Phase 6.75 items.
 - flutter_chat_ui package evaluated and rejected (too opinionated for Hollow's custom UI).
 
 **Phase 5B: Voice & Video — COMPLETE (Apr 4, 2026).**

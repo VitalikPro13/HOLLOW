@@ -474,7 +474,10 @@ impl MlsManager {
 
     /// Remove MLS group for a server (on server delete/leave).
     pub fn remove_group(&mut self, server_id: &str) {
-        self.groups.remove(server_id);
+        if let Some(mut group) = self.groups.remove(server_id) {
+            // Delete from OpenMLS provider storage so join_from_welcome doesn't hit GroupAlreadyExists.
+            let _ = group.delete(self.provider.storage());
+        }
     }
 
     /// Get the list of peer IDs in the MLS group (from their credentials).

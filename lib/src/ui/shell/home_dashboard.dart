@@ -541,33 +541,18 @@ class _RecentConversationsColumn extends ConsumerWidget {
                             crossAxisAlignment:
                                 CrossAxisAlignment.start,
                             children: [
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: Text(
-                                      name,
-                                      style: HollowTypography.body
-                                          .copyWith(
-                                        color: hollow.textPrimary,
-                                        fontWeight: conv.unreadCount > 0
-                                            ? FontWeight.w600
-                                            : FontWeight.w400,
-                                        fontSize: 13,
-                                      ),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                                  if (conv.lastMessage != null)
-                                    Text(
-                                      _formatTime(conv.timestamp),
-                                      style: HollowTypography.caption
-                                          .copyWith(
-                                        color: hollow.textSecondary,
-                                        fontSize: 10,
-                                      ),
-                                    ),
-                                ],
+                              Text(
+                                name,
+                                style: HollowTypography.body
+                                    .copyWith(
+                                  color: hollow.textPrimary,
+                                  fontWeight: conv.unreadCount > 0
+                                      ? FontWeight.w600
+                                      : FontWeight.w400,
+                                  fontSize: 13,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                               ),
                               if (conv.lastMessage != null) ...[
                                 const SizedBox(height: 2),
@@ -586,9 +571,19 @@ class _RecentConversationsColumn extends ConsumerWidget {
                           ),
                         ),
 
-                        // Unread badge
-                        if (conv.unreadCount > 0) ...[
+                        // Time + unread badge (vertically centered)
+                        if (conv.lastMessage != null) ...[
                           const SizedBox(width: HollowSpacing.sm),
+                          Text(
+                            _formatTime(conv.timestamp),
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.textSecondary,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ],
+                        if (conv.unreadCount > 0) ...[
+                          const SizedBox(width: 6),
                           Container(
                             constraints:
                                 const BoxConstraints(minWidth: 18),
@@ -596,7 +591,7 @@ class _RecentConversationsColumn extends ConsumerWidget {
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 5),
                             decoration: BoxDecoration(
-                              color: hollow.accent,
+                              color: hollow.error,
                               borderRadius: BorderRadius.circular(9),
                             ),
                             alignment: Alignment.center,
@@ -604,8 +599,8 @@ class _RecentConversationsColumn extends ConsumerWidget {
                               conv.unreadCount > 99
                                   ? '99+'
                                   : '${conv.unreadCount}',
-                              style: TextStyle(
-                                color: hollow.textOnAccent,
+                              style: const TextStyle(
+                                color: Colors.white,
                                 fontSize: 10,
                                 fontWeight: FontWeight.w700,
                               ),

@@ -149,16 +149,17 @@ class FriendsBar extends ConsumerWidget {
                       final name = displayNameFor(profiles, friend.peerId);
 
                       // Check unread
-                      final hasUnread =
-                          notifSettings.isDmEnabled(friend.peerId) &&
-                          (unreadState.dmUnreadCounts[friend.peerId] ?? 0) > 0;
+                      final unreadCount =
+                          notifSettings.isDmEnabled(friend.peerId)
+                          ? (unreadState.dmUnreadCounts[friend.peerId] ?? 0)
+                          : 0;
 
                       return _FriendChip(
                         peerId: friend.peerId,
                         name: name,
                         isOnline: isOnline,
                         isSelected: isSelected,
-                        hasUnread: hasUnread,
+                        unreadCount: unreadCount,
                         avatarBytes: profiles[friend.peerId]?.avatarBytes,
                         onTap: () => _selectFriend(ref, friend.peerId),
                       );
@@ -810,7 +811,7 @@ class _FriendChip extends StatelessWidget {
   final String name;
   final bool isOnline;
   final bool isSelected;
-  final bool hasUnread;
+  final int unreadCount;
   final Uint8List? avatarBytes;
   final VoidCallback onTap;
 
@@ -819,7 +820,7 @@ class _FriendChip extends StatelessWidget {
     required this.name,
     required this.isOnline,
     required this.isSelected,
-    required this.hasUnread,
+    required this.unreadCount,
     this.avatarBytes,
     required this.onTap,
   });
@@ -869,18 +870,29 @@ class _FriendChip extends StatelessWidget {
                     ),
                   ),
                   // Unread indicator
-                  if (hasUnread)
+                  if (unreadCount > 0)
                     Positioned(
-                      left: -3,
-                      top: -3,
+                      left: -4,
+                      top: -4,
                       child: Container(
-                        width: 8,
-                        height: 8,
+                        constraints: const BoxConstraints(minWidth: 16),
+                        height: 16,
+                        padding: const EdgeInsets.symmetric(horizontal: 3),
                         decoration: BoxDecoration(
-                          color: hollow.accent,
-                          shape: BoxShape.circle,
+                          color: hollow.error,
+                          borderRadius: BorderRadius.circular(8),
                           border:
                               Border.all(color: hollow.surface, width: 1.5),
+                        ),
+                        alignment: Alignment.center,
+                        child: Text(
+                          unreadCount > 99 ? '99+' : '$unreadCount',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w700,
+                            height: 1,
+                          ),
                         ),
                       ),
                     ),
@@ -897,7 +909,7 @@ class _FriendChip extends StatelessWidget {
                         ? hollow.textPrimary
                         : hollow.textSecondary,
                     fontWeight:
-                        hasUnread ? FontWeight.w600 : FontWeight.w400,
+                        unreadCount > 0 ? FontWeight.w600 : FontWeight.w400,
                     fontSize: 11,
                   ),
                   maxLines: 1,
