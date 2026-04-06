@@ -30,6 +30,8 @@ import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -281,6 +283,20 @@ class EventStreamNotifier extends Notifier<bool> {
                 joinedChannels.keys.first;
           }
         });
+        // Toast feedback
+        final joinCtx = hollowNavigatorKey.currentContext;
+        if (joinCtx != null) {
+          HollowToast.show(joinCtx, 'Joined $name',
+              type: HollowToastType.success);
+        }
+
+      case NetworkEvent_ServerJoinFailed(:final serverId, :final reason):
+        debugPrint('[HOLLOW] Server join failed: $serverId — $reason');
+        final failCtx = hollowNavigatorKey.currentContext;
+        if (failCtx != null) {
+          HollowToast.show(failCtx, 'Failed to join server: $reason',
+              type: HollowToastType.error);
+        }
 
       case NetworkEvent_MessageSyncStarted(:final serverId, :final peerId):
         debugPrint('[HOLLOW] Message sync started for $serverId with $peerId');
@@ -318,14 +334,16 @@ class EventStreamNotifier extends Notifier<bool> {
         final selectedServer = ref.read(selectedServerProvider);
         final selectedChannel = ref.read(selectedChannelProvider);
         if (newMessageCount > 0) {
-          // New messages arrived — clear cache and reload (includes reactions).
+          // New messages arrived — clear cache so next channel view loads fresh from DB.
+          // Like DM sync: unconditional, no viewing-state dependency.
           ref
               .read(channelChatProvider.notifier)
               .clearServerCache(serverId);
+          // If currently viewing this server, merge immediately for the selected channel.
           if (selectedServer == serverId && selectedChannel != null) {
             ref
                 .read(channelChatProvider.notifier)
-                .loadHistory(serverId, selectedChannel);
+                .mergeFromDb(serverId, selectedChannel);
           }
         } else if (selectedServer == serverId && selectedChannel != null) {
           // No new messages but reactions may have synced — just refresh
@@ -813,6 +831,8 @@ class EventStreamNotifier extends Notifier<bool> {
       debugPrint('[HOLLOW] Failed to request missing DM files: $e');
     }
   }
+
+
 
   /// When a file transfer completes, reload the chat that contains
   /// the file message so the image preview renders.

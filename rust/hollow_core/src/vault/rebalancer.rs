@@ -428,4 +428,44 @@ mod tests {
         let migrations = compute_migration_plan("cid1", &old_placements, &new_placements);
         assert!(migrations.is_empty());
     }
+
+    #[test]
+    fn migration_plan_rebalance_with_new_members() {
+        // 6 original peers hold 5 shards (k=3, m=2).
+        let old_members: Vec<String> = (0..6).map(|i| format!("peer_{i}")).collect();
+        let mut old_pledges: HashMap<String, u64> = old_members.iter()
+            .map(|m| (m.clone(), 1000)).collect();
+
+        let old_shard_placements = compute_shard_placements("cid1", 5, &old_members, &old_pledges);
+        let old_placements: Vec<PlacementRecord> = old_shard_placements.iter()
+            .map(|sp| PlacementRecord {
+                content_id: "cid1".to_string(),
+                shard_index: sp.shard_index,
+                target_peer: sp.target_peer.clone(),
+                server_id: "srv1".to_string(),
+                shard_key: sp.shard_key.clone(),
+                stored_at: 1000,
+                confirmed: true,
+            })
+            .collect();
+
+        // 4 new peers join (total 10), equal pledges.
+        let new_members: Vec<String> = (0..10).map(|i| format!("peer_{i}")).collect();
+        for i in 6..10 {
+            old_pledges.insert(format!("peer_{i}"), 1000);
+        }
+
+        let new_shard_placements = compute_shard_placements("cid1", 5, &new_members, &old_pledges);
+        let migrations = compute_migration_plan("cid1", &old_placements, &new_shard_placements);
+
+        // With more peers in the pool, XOR distance changes — some shards should migrate.
+        // The exact count depends on the hash-based placement, but with 4 new peers
+        // added to a 6-peer pool, at least some shards should shift.
+        assert!(!migrations.is_empty(), "Expected at least one migration when 4 new peers join");
+
+        // All migrations should move TO new peers (peer_6..peer_9) or between existing ones.
+        for m in &migrations {
+            assert_ne!(m.from_peer, m.to_peer, "Migration shouldn't be from/to same peer");
+        }
+    }
 }

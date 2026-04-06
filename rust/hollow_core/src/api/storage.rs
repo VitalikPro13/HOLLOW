@@ -531,6 +531,16 @@ pub fn get_missing_file_ids() -> Result<Vec<String>, String> {
     ms.get_missing_file_ids()
 }
 
+/// Reset completed files whose disk_path no longer exists on disk.
+/// Returns the count of reset entries. They'll be re-requested from peers.
+#[frb]
+pub fn reset_stale_files() -> Result<u32, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    ms.reset_stale_file_paths()
+}
+
 /// Get file IDs for missing images in a specific server.
 /// Used for late-joiner image sync in 6+ member servers.
 #[frb]

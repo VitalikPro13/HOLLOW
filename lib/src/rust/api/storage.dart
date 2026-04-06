@@ -187,6 +187,11 @@ Future<List<StoredFileInfo>> getIncompleteFiles() =>
 Future<List<String>> getMissingFileIds() =>
     RustLib.instance.api.crateApiStorageGetMissingFileIds();
 
+/// Reset completed files whose disk_path no longer exists on disk.
+/// Returns the count of reset entries. They'll be re-requested from peers.
+Future<int> resetStaleFiles() =>
+    RustLib.instance.api.crateApiStorageResetStaleFiles();
+
 /// Get file IDs for missing images in a specific server.
 /// Used for late-joiner image sync in 6+ member servers.
 Future<List<String>> getMissingImageFileIdsForServer({

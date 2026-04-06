@@ -73,6 +73,7 @@ pub(crate) enum NetworkEvent {
     MemberLeft { server_id: String, peer_id: String },
     SyncCompleted { server_id: String, ops_applied: u32 },
     ServerJoined { server_id: String, name: String },
+    ServerJoinFailed { server_id: String, reason: String },
     MessageSyncStarted { server_id: String, peer_id: String },
     MessageSyncCompleted { server_id: String, new_message_count: u32 },
     MessageSyncFailed { server_id: String, error: String },
@@ -305,6 +306,8 @@ pub(crate) enum NodeCommand {
         target_peer: String,
     },
     // -- Gossip relay tree commands (Phase 5D) --
+    /// Internal: check if a pending server join timed out.
+    CheckPendingJoinTimeout { server_id: String },
     /// Dart reports data channel keepalive RTT for peer scoring.
     WebRtcPingReport { peer_id: String, rtt_ms: u32 },
     /// Dart reports a completed broadcast file transfer for relay decision.
@@ -1651,6 +1654,7 @@ pub(crate) async fn spawn_node(
     native_keypair: crate::identity::native_identity::NativeKeypair,
     event_tx: mpsc::Sender<NetworkEvent>,
     cmd_rx: mpsc::Receiver<NodeCommand>,
+    cmd_tx: mpsc::Sender<NodeCommand>,
     olm: OlmManager,
     crypto_store: CryptoStore,
 ) -> Result<(String, tokio::task::JoinHandle<()>), String> {
@@ -1679,7 +1683,7 @@ pub(crate) async fn spawn_node(
     );
 
     let handle = tokio::spawn(run_event_loop(
-        event_tx, cmd_rx, olm, crypto_store, sig_cmd_tx, sig_event_rx,
+        event_tx, cmd_rx, cmd_tx, olm, crypto_store, sig_cmd_tx, sig_event_rx,
         bundle_keypair, ws_cmd_tx, ws_event_rx, peer_id_str.clone(),
     ));
 
@@ -1690,6 +1694,7 @@ pub(crate) async fn spawn_node(
 async fn run_event_loop(
     event_tx: mpsc::Sender<NetworkEvent>,
     mut cmd_rx: mpsc::Receiver<NodeCommand>,
+    cmd_tx: mpsc::Sender<NodeCommand>,
     mut olm: OlmManager,
     crypto_store: CryptoStore,
     sig_cmd_tx: mpsc::Sender<SignalingCmd>,
@@ -1918,9 +1923,14 @@ async fn run_event_loop(
     let mut rebootstrap_timer = tokio::time::interval(Duration::from_secs(30));
     rebootstrap_timer.tick().await; // consume immediate first tick
 
-    // Vault rebalance + retention enforcement timer (30 min).
+    // Vault rebalance + retention enforcement timer (30 min safety net).
     let mut rebalance_timer = tokio::time::interval(Duration::from_secs(1800));
     rebalance_timer.tick().await; // consume immediate first tick
+
+    // Event-driven rebalance: debounced 10s timer + pending server set.
+    let mut rebalance_debounce = tokio::time::interval(Duration::from_secs(10));
+    rebalance_debounce.tick().await; // consume immediate first tick
+    let mut rebalance_pending: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Stream transfer progress poll timer (500ms) — emits FileProgress events
     // to Dart based on bytes received by the FileStreamCodec.
@@ -2636,6 +2646,16 @@ async fn run_event_loop(
                         }
                         // If no peers found yet, the PeerJoined/RoomMembers handler
                         // will pick up pending_server_joins and send the request then.
+
+                        // Spawn 15s timeout — if still pending, emit ServerJoinFailed.
+                        let timeout_cmd_tx = cmd_tx.clone();
+                        let timeout_sid = server_id.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                            let _ = timeout_cmd_tx.send(NodeCommand::CheckPendingJoinTimeout {
+                                server_id: timeout_sid,
+                            }).await;
+                        });
                     }
 
                     NodeCommand::ChangeRole { server_id, peer_id, new_role } => {
@@ -5416,6 +5436,22 @@ async fn run_event_loop(
                         }
                     }
 
+                    // -- Server join timeout --
+                    NodeCommand::CheckPendingJoinTimeout { server_id } => {
+                        if pending_server_joins.remove(&server_id) {
+                            hollow_log!("[HOLLOW-CRDT] Server join timed out for {server_id}");
+                            let _ = event_tx.send(NetworkEvent::ServerJoinFailed {
+                                server_id: server_id.clone(),
+                                reason: "No members responded within 15 seconds".to_string(),
+                            }).await;
+                            // Leave the WS room since join failed.
+                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+                                room_code: server_id,
+                            });
+                        }
+                        // If already removed (join succeeded), this is a no-op.
+                    }
+
                     // -- Gossip relay tree commands (Phase 5D) --
                     NodeCommand::WebRtcPingReport { peer_id, rtt_ms } => {
                         // Update peer score with latest RTT measurement.
@@ -5595,6 +5631,11 @@ async fn run_event_loop(
                         hollow_log!("[HOLLOW-WS] Peer {peer_id} joined room {room}");
                         ws_room_peers.entry(room.clone()).or_default().insert(peer_id.clone());
 
+                        // Trigger event-driven vault rebalance for this server room.
+                        if server_states.contains_key(&room) {
+                            rebalance_pending.insert(room.clone());
+                        }
+
                             // Update gossip overlay: add this peer and maybe connect.
                             if peer_id != local_peer_str {
                                 if let Some(overlay) = gossip_overlays.get_mut(&room) {
@@ -5718,16 +5759,12 @@ async fn run_event_loop(
                                                 }
                                             }
 
-                                            // MLS: request KeyPackage if we're owner.
+                                            // MLS: request KeyPackage if we're the coordinator.
                                             if let Some(ref mls_mgr) = mls {
                                                 if mls_mgr.has_group(sid) {
                                                     let mls_members = mls_mgr.group_members(sid);
                                                     if !mls_members.contains(&peer_id) {
-                                                        let local_peer = local_peer_str.to_string();
-                                                        let is_owner = state.roles.get(&local_peer)
-                                                            .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
-                                                            .unwrap_or(false);
-                                                        if is_owner {
+                                                        if is_mls_coordinator(mls_mgr, sid, &local_peer_str, &ws_room_peers) {
                                                             send_message_to_peer(
                                                                 &ws_cmd_tx, &ws_room_peers,
                                                                 &peer_id, HavenMessage::MlsKeyPackageRequest {
@@ -5786,6 +5823,18 @@ async fn run_event_loop(
                                     }
 
                                 }
+
+                                // Send join request if this room matches a pending server join.
+                                // Outside is_new guard — peer may already be synced from another room.
+                                if pending_server_joins.contains(&room) {
+                                    send_message_to_peer(
+                                        &ws_cmd_tx, &ws_room_peers,
+                                        &peer_id, HavenMessage::ServerJoinRequest {
+                                            server_id: room.clone(),
+                                        },
+                                    );
+                                    hollow_log!("[HOLLOW-CRDT] Sent pending join request to {peer_id} for {room}");
+                                }
                             }
                     }
                     WsEvent::PeerLeft { room, peer_id } => {
@@ -5796,6 +5845,12 @@ async fn run_event_loop(
                                 ws_room_peers.remove(&room);
                             }
                         }
+
+                        // Trigger event-driven vault rebalance — peer leaving may cause under-replication.
+                        if server_states.contains_key(&room) {
+                            rebalance_pending.insert(room.clone());
+                        }
+
                         // Update gossip overlay: remove peer and pick replacement if needed.
                         if let Some(overlay) = gossip_overlays.get_mut(&room) {
                             let (was_neighbor, replacement) = overlay.remove_known_peer(&peer_id);
@@ -6013,16 +6068,19 @@ async fn run_event_loop(
                                         }
                                     }
 
-                                    // Send join request if this room matches a pending server join.
-                                    if pending_server_joins.contains(&room) {
-                                        send_message_to_peer(
-                                            &ws_cmd_tx, &ws_room_peers,
-                                            pid_str, HavenMessage::ServerJoinRequest {
-                                                server_id: room.clone(),
-                                            },
-                                        );
-                                        hollow_log!("[HOLLOW-CRDT] Sent pending join request to {pid_str} for {room}");
-                                    }
+                                }
+
+                                // Send join request if this room matches a pending server join.
+                                // Outside is_new guard — peer may already be in synced_peers
+                                // from a DM room but we still need to send the join request.
+                                if pending_server_joins.contains(&room) {
+                                    send_message_to_peer(
+                                        &ws_cmd_tx, &ws_room_peers,
+                                        pid_str, HavenMessage::ServerJoinRequest {
+                                            server_id: room.clone(),
+                                        },
+                                    );
+                                    hollow_log!("[HOLLOW-CRDT] Sent pending join request to {pid_str} for {room}");
                                 }
                             }
                         }
@@ -6224,29 +6282,23 @@ async fn run_event_loop(
                             }
                             channel_sync_sent.insert(dedup_key, std::time::Instant::now());
 
-                            let msg_count = sync_store.as_ref()
-                                .map(|s| s.count_channel_messages(server_id, channel_id))
-                                .unwrap_or(0);
-                            let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(server_id));
-                            if mls_ok {
-                                let envelope = MessageEnvelope::ChannelProbe {
-                                    sid: server_id.clone(), cid: channel_id.clone(),
-                                    our_latest: *our_latest, msg_count, target: None,
-                                };
-                                if let Err(e) = send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, server_id, &peer_str, &envelope, &bundle_keypair) {
-                                    hollow_log!("[HOLLOW-MLS] ChannelProbe targeted send failed: {e}");
-                                }
-                            } else {
-                                send_message_to_peer(
-                                    &ws_cmd_tx, &ws_room_peers,
-                                    &peer_str, HavenMessage::ChannelSyncProbe {
-                                        server_id: server_id.clone(),
-                                        channel_id: channel_id.clone(),
-                                        our_latest: *our_latest,
-                                        msg_count,
-                                    },
-                                );
-                            }
+                            // Send direct ChannelSyncRequest (plaintext) instead of MLS ChannelProbe.
+                            // MLS probes silently fail when the MLS epoch is stale after reconnection
+                            // (peer can't decrypt → no response → sync never completes).
+                            // ChannelSyncRequest works reliably because it's plaintext, and the
+                            // response handler uses MLS if available, Olm fallback otherwise.
+                            let sender_ts = sync_store.as_ref()
+                                .map(|s| s.get_per_sender_timestamps(server_id, channel_id).unwrap_or_default())
+                                .unwrap_or_default();
+                            send_message_to_peer(
+                                &ws_cmd_tx, &ws_room_peers,
+                                &peer_str, HavenMessage::ChannelSyncRequest {
+                                    server_id: server_id.clone(),
+                                    channel_id: channel_id.clone(),
+                                    since_timestamp: *our_latest,
+                                    sender_timestamps: sender_ts,
+                                },
+                            );
                         }
                     }
 
@@ -6333,6 +6385,15 @@ async fn run_event_loop(
                     for (server_id, state) in &server_states {
                         if state.members.len() < 6 { continue; } // Only erasure-coded servers
 
+                        // Only the coordinator runs repair to avoid duplicate requests.
+                        if let Some(ref mls_mgr) = mls {
+                            if mls_mgr.has_group(server_id) {
+                                if !is_mls_coordinator(mls_mgr, server_id, &local_peer_str, &ws_room_peers) {
+                                    continue;
+                                }
+                            }
+                        }
+
                         let manifests = cs.list_manifests(server_id).unwrap_or_default();
                         if manifests.is_empty() { continue; }
 
@@ -6363,25 +6424,24 @@ async fn run_event_loop(
                                 if let Some(plan) = crate::vault::rebalancer::compute_repair_plan(
                                     manifest, placements, &online_peers, &members, &pledges,
                                 ) {
-                                    // Request missing shards from available holders via MLS.
+                                    // Request available shards from their online holders for reconstruction.
+                                    // We need k shards to reconstruct — request all available ones.
                                     for (shard_idx, source_peer) in &plan.available_shards {
-                                        if plan.missing_indices.contains(shard_idx) {
-                                            let shard_key = placements.iter()
-                                                .find(|p| p.shard_index as u16 == *shard_idx)
-                                                .map(|p| p.shard_key.clone())
-                                                .unwrap_or_default();
-                                            let envelope = MessageEnvelope::ShardRequest {
-                                                sid: server_id.clone(),
-                                                cid: item.content_id.clone(),
-                                                si: *shard_idx,
-                                                sk: shard_key,
-                                                target: None,
-                                            };
-                                            if let Some(ref mut mls_mgr) = mls {
-                                                if mls_mgr.has_group(server_id) {
-                                                    let _ = send_mls_to_peer(mls_mgr, &ws_cmd_tx, server_id, source_peer, &envelope, &bundle_keypair);
-                                                    total_requested += 1;
-                                                }
+                                        let shard_key = placements.iter()
+                                            .find(|p| p.shard_index as u16 == *shard_idx)
+                                            .map(|p| p.shard_key.clone())
+                                            .unwrap_or_default();
+                                        let envelope = MessageEnvelope::ShardRequest {
+                                            sid: server_id.clone(),
+                                            cid: item.content_id.clone(),
+                                            si: *shard_idx,
+                                            sk: shard_key,
+                                            target: None,
+                                        };
+                                        if let Some(ref mut mls_mgr) = mls {
+                                            if mls_mgr.has_group(server_id) {
+                                                let _ = send_mls_to_peer(mls_mgr, &ws_cmd_tx, server_id, source_peer, &envelope, &bundle_keypair);
+                                                total_requested += 1;
                                             }
                                         }
                                     }
@@ -6402,6 +6462,144 @@ async fn run_event_loop(
                     if let Ok(freed) = crate::vault::pipeline::evict_cache_if_needed(1024 * 1024 * 1024) {
                         if freed > 0 {
                             hollow_log!("[HOLLOW-VAULT] Cache eviction freed {} bytes", freed);
+                        }
+                    }
+                }
+            }
+
+            // -- Event-driven vault rebalance (debounced 10s) --
+            _ = rebalance_debounce.tick() => {
+                if !rebalance_pending.is_empty() {
+                    let servers_to_check: Vec<String> = rebalance_pending.drain().collect();
+                    hollow_log!("[HOLLOW-VAULT] Event-driven rebalance for {} servers", servers_to_check.len());
+
+                    let data_dir = crate::identity::data_dir().unwrap_or_default();
+                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                    let vault_dir = data_dir.join("vault");
+                    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+
+                    if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                        let online_peers: std::collections::HashSet<String> = ws_room_peers.values()
+                            .flat_map(|peers| peers.iter().cloned())
+                            .collect();
+
+                        for server_id in &servers_to_check {
+                            let state = match server_states.get(server_id) {
+                                Some(s) => s,
+                                None => continue,
+                            };
+                            if state.members.len() < 6 { continue; }
+
+                            // Only the coordinator runs rebalance.
+                            if let Some(ref mls_mgr) = mls {
+                                if mls_mgr.has_group(server_id) {
+                                    if !is_mls_coordinator(mls_mgr, server_id, &local_peer_str, &ws_room_peers) {
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            let manifests = cs.list_manifests(server_id).unwrap_or_default();
+                            if manifests.is_empty() { continue; }
+
+                            let mut placements_map: HashMap<String, Vec<crate::vault::content_store::PlacementRecord>> = HashMap::new();
+                            for manifest in &manifests {
+                                if let Ok(p) = cs.load_placements(&manifest.content_id) {
+                                    placements_map.insert(manifest.content_id.clone(), p);
+                                }
+                            }
+
+                            let members: Vec<String> = state.members.keys().cloned().collect();
+                            let pledges: HashMap<String, u64> = state.storage_pledges.iter()
+                                .map(|(k, v)| (k.clone(), *v.read()))
+                                .collect();
+
+                            let mut total_requested = 0u32;
+
+                            // Repair: fix under-replicated content.
+                            let under_rep = crate::vault::rebalancer::scan_under_replicated(
+                                &manifests, &placements_map, &online_peers,
+                            );
+                            if !under_rep.is_empty() {
+                                hollow_log!("[HOLLOW-VAULT] Event-driven: {} under-replicated items in {server_id}", under_rep.len());
+                                for item in &under_rep {
+                                    let manifest = manifests.iter().find(|m| m.content_id == item.content_id);
+                                    let placements = placements_map.get(&item.content_id);
+                                    if let (Some(manifest), Some(placements)) = (manifest, placements) {
+                                        if let Some(plan) = crate::vault::rebalancer::compute_repair_plan(
+                                            manifest, placements, &online_peers, &members, &pledges,
+                                        ) {
+                                            for (shard_idx, source_peer) in &plan.available_shards {
+                                                let shard_key = placements.iter()
+                                                    .find(|p| p.shard_index as u16 == *shard_idx)
+                                                    .map(|p| p.shard_key.clone())
+                                                    .unwrap_or_default();
+                                                let envelope = MessageEnvelope::ShardRequest {
+                                                    sid: server_id.clone(),
+                                                    cid: item.content_id.clone(),
+                                                    si: *shard_idx,
+                                                    sk: shard_key,
+                                                    target: None,
+                                                };
+                                                if let Some(ref mut mls_mgr) = mls {
+                                                    if mls_mgr.has_group(server_id.as_str()) {
+                                                        let _ = send_mls_to_peer(mls_mgr, &ws_cmd_tx, server_id, source_peer, &envelope, &bundle_keypair);
+                                                        total_requested += 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Migration: shift shards to new members for balanced distribution.
+                            for manifest in &manifests {
+                                let old_placements = match placements_map.get(&manifest.content_id) {
+                                    Some(p) => p,
+                                    None => continue,
+                                };
+                                let n = if manifest.k > 0 { (manifest.k + manifest.m) as usize } else { old_placements.len() };
+                                let new_placements = crate::vault::placement::compute_shard_placements(
+                                    &manifest.content_id, n, &members, &pledges,
+                                );
+                                let migrations = crate::vault::rebalancer::compute_migration_plan(
+                                    &manifest.content_id, old_placements, &new_placements,
+                                );
+                                for migration in &migrations {
+                                    if !online_peers.contains(&migration.from_peer) { continue; }
+                                    // Migrate shards we hold locally to new targets.
+                                    if migration.from_peer == local_peer_str {
+                                        if let Ok(shard_data) = cs.read_shard_unchecked(server_id, &migration.shard_key) {
+                                            let data_b64 = base64::engine::general_purpose::STANDARD.encode(&shard_data);
+                                            let envelope = MessageEnvelope::ShardMigrate {
+                                                sid: server_id.clone(),
+                                                cid: manifest.content_id.clone(),
+                                                si: migration.shard_index,
+                                                sk: migration.shard_key.clone(),
+                                                data: data_b64,
+                                                target: None,
+                                            };
+                                            if let Some(ref mut mls_mgr) = mls {
+                                                if mls_mgr.has_group(server_id.as_str()) {
+                                                    let _ = send_mls_to_peer(mls_mgr, &ws_cmd_tx, server_id, &migration.to_peer, &envelope, &bundle_keypair);
+                                                    total_requested += 1;
+                                                    hollow_log!("[HOLLOW-VAULT] Migrating shard {} of {} from local → {}", migration.shard_index, manifest.content_id, migration.to_peer);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if total_requested > 0 {
+                                hollow_log!("[HOLLOW-VAULT] Event-driven: {total_requested} repair/migration shards for {server_id}");
+                                let _ = event_tx.send(NetworkEvent::RebalanceStarted {
+                                    server_id: server_id.clone(),
+                                    shards_to_move: total_requested,
+                                }).await;
+                            }
                         }
                     }
                 }
@@ -6650,6 +6848,41 @@ fn peer_is_reachable(
     peer_str: &str,
 ) -> bool {
     ws_room_peers.values().any(|peers| peers.contains(peer_str))
+}
+
+/// Deterministic MLS coordinator: lowest peer_id among online MLS group members.
+/// Returns true if local peer should be the coordinator for this server.
+/// Security: only MLS group members participate — non-members can't become coordinator.
+/// Pure coordinator election: lowest peer_id among online members wins.
+/// Testable without MlsManager dependency.
+fn elect_coordinator<'a>(
+    mls_members: &'a [String],
+    local_peer: &'a str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> Option<&'a str> {
+    let mut online: Vec<&str> = mls_members
+        .iter()
+        .filter(|p| p.as_str() == local_peer || peer_is_reachable(ws_room_peers, p))
+        .map(|p| p.as_str())
+        .collect();
+    if online.is_empty() {
+        return None;
+    }
+    online.sort();
+    Some(online[0])
+}
+
+fn is_mls_coordinator(
+    mls: &MlsManager,
+    server_id: &str,
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> bool {
+    if !mls.has_group(server_id) {
+        return false;
+    }
+    let members = mls.group_members(server_id);
+    elect_coordinator(&members, local_peer, ws_room_peers) == Some(local_peer)
 }
 
 /// Find a WS room containing the given peer.
@@ -10810,19 +11043,30 @@ async fn handle_incoming_request(
             hollow_log!("[HOLLOW-MLS] MlsKeyPackage from {peer_str} for server {server_id}");
             
 
-            // Only the server owner processes KeyPackages (single-committer model).
-            let local_peer = local_peer_str.to_string();
-            let is_owner = server_states.get(&server_id)
-                .map(|s| {
-                    s.roles.get(&local_peer)
-                        .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false);
-
-            if !is_owner {
-                hollow_log!("[HOLLOW-MLS] Not owner of {server_id}, ignoring KeyPackage");
-                return;
+            // Distributed committer: lowest online MLS member processes KeyPackages.
+            // Any MLS group member can be coordinator — OpenMLS enforces only valid
+            // group members can commit. Falls back to owner if no MLS group exists yet.
+            if let Some(mls_mgr) = mls.as_ref() {
+                if mls_mgr.has_group(&server_id) {
+                    if !is_mls_coordinator(mls_mgr, &server_id, local_peer_str, &ws_room_peers) {
+                        hollow_log!("[HOLLOW-MLS] Not MLS coordinator for {server_id}, skipping KeyPackage");
+                        return;
+                    }
+                } else {
+                    // No MLS group yet — only the owner can create it.
+                    let local_peer = local_peer_str.to_string();
+                    let is_owner = server_states.get(&server_id)
+                        .map(|s| {
+                            s.roles.get(&local_peer)
+                                .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false);
+                    if !is_owner {
+                        hollow_log!("[HOLLOW-MLS] No MLS group for {server_id} and not owner, skipping KeyPackage");
+                        return;
+                    }
+                }
             }
 
             if let Some(mls_mgr) = mls {
@@ -11721,5 +11965,52 @@ fn persist_crypto_state(olm: &OlmManager, crypto_store: &CryptoStore, peer_id: &
     }
     if let Ok(Some(session_json)) = olm.session_pickle_json(peer_id) {
         crypto_store.save_session(peer_id.to_string(), session_json);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    fn make_room_peers(rooms: &[(&str, &[&str])]) -> HashMap<String, HashSet<String>> {
+        rooms.iter().map(|(room, peers)| {
+            (room.to_string(), peers.iter().map(|p| p.to_string()).collect())
+        }).collect()
+    }
+
+    #[test]
+    fn coordinator_election_lowest_wins() {
+        let members = vec!["peer_c".into(), "peer_a".into(), "peer_b".into()];
+        let rooms = make_room_peers(&[("srv1", &["peer_a", "peer_b", "peer_c"])]);
+        // peer_a is lowest → coordinator
+        assert_eq!(elect_coordinator(&members, "peer_a", &rooms), Some("peer_a"));
+        assert_eq!(elect_coordinator(&members, "peer_b", &rooms), Some("peer_a"));
+        assert_eq!(elect_coordinator(&members, "peer_c", &rooms), Some("peer_a"));
+    }
+
+    #[test]
+    fn coordinator_election_single_member() {
+        let members = vec!["peer_x".into()];
+        let rooms = HashMap::new(); // no room peers, but local peer is always "online"
+        assert_eq!(elect_coordinator(&members, "peer_x", &rooms), Some("peer_x"));
+    }
+
+    #[test]
+    fn coordinator_election_offline_skipped() {
+        let members = vec!["peer_a".into(), "peer_b".into(), "peer_c".into()];
+        // peer_a is offline (not in any room), peer_b is lowest online
+        let rooms = make_room_peers(&[("srv1", &["peer_b", "peer_c"])]);
+        assert_eq!(elect_coordinator(&members, "peer_b", &rooms), Some("peer_b"));
+        assert_eq!(elect_coordinator(&members, "peer_c", &rooms), Some("peer_b"));
+        // peer_a calls elect but is not in rooms — however local_peer is always included
+        assert_eq!(elect_coordinator(&members, "peer_a", &rooms), Some("peer_a"));
+    }
+
+    #[test]
+    fn coordinator_election_empty_members() {
+        let members: Vec<String> = vec![];
+        let rooms = HashMap::new();
+        assert_eq!(elect_coordinator(&members, "peer_x", &rooms), None);
     }
 }

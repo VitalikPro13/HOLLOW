@@ -233,7 +233,7 @@ class ChannelChatNotifier
           await ref.read(storageServiceProvider).loadChannelMessages(
                 serverId: serverId,
                 channelId: channelId,
-                limit: 500,
+                limit: 200,
               );
       if (stored.isNotEmpty) {
         // Collect message IDs for bulk reaction loading.
@@ -354,6 +354,111 @@ class ChannelChatNotifier
     } catch (_) {}
   }
 
+  /// Merge DB contents with in-memory messages for a channel.
+  /// Unlike loadHistory(), this preserves live-delivered messages that
+  /// arrived between sync completion and this reload — preventing data loss.
+  Future<void> mergeFromDb(String serverId, String channelId) async {
+    try {
+      final stored =
+          await ref.read(storageServiceProvider).loadChannelMessages(
+                serverId: serverId,
+                channelId: channelId,
+                limit: 200,
+              );
+
+      final key = _key(serverId, channelId);
+      final existing = state[key] ?? <ChannelChatMessage>[];
+
+      // Build a set of message IDs from DB results for dedup.
+      final dbMessageIds = <String>{};
+      final dbMessages = <ChannelChatMessage>[];
+
+      // Load reactions + file attachments for DB messages (same as loadHistory).
+      final messageIds = stored
+          .where((m) => m.messageId != null)
+          .map((m) => m.messageId!)
+          .toList();
+      Map<String, Map<String, List<String>>> reactionsMap = {};
+      if (messageIds.isNotEmpty) {
+        try {
+          final storedReactions =
+              await storage_api.loadReactions(messageIds: messageIds);
+          for (final r in storedReactions) {
+            reactionsMap
+                .putIfAbsent(r.messageId, () => {})
+                .putIfAbsent(r.emoji, () => [])
+                .add(r.peerId);
+          }
+        } catch (_) {}
+      }
+
+      final fileIds = stored
+          .where((m) => m.fileId != null)
+          .map((m) => m.fileId!)
+          .toSet();
+      Map<String, FileAttachment> fileMap = {};
+      for (final fid in fileIds) {
+        try {
+          final info = await storage_api.getFileMetadata(fileId: fid);
+          if (info != null) {
+            fileMap[fid] = FileAttachment(
+              fileId: info.fileId,
+              fileName: info.fileName,
+              fileExt: info.fileExt,
+              mimeType: info.mimeType,
+              sizeBytes: info.sizeBytes.toInt(),
+              isImage: info.isImage,
+              width: info.width?.toInt(),
+              height: info.height?.toInt(),
+              totalChunks: info.chunkCount,
+              chunksReceived: info.chunksReceived,
+              isComplete: info.completedAt != null,
+              diskPath: info.diskPath,
+            );
+          }
+        } catch (_) {}
+      }
+
+      for (final m in stored) {
+        if (m.messageId != null) {
+          dbMessageIds.add(m.messageId!);
+        }
+        dbMessages.add(ChannelChatMessage(
+          senderId: m.senderId,
+          text: m.text,
+          isMe: m.isMine,
+          timestamp: DateTime.fromMillisecondsSinceEpoch(m.timestamp),
+          signature: m.signature,
+          publicKey: m.publicKey,
+          messageId: m.messageId,
+          editedAt: m.editedAt != null
+              ? DateTime.fromMillisecondsSinceEpoch(m.editedAt!)
+              : null,
+          replyToMid: m.replyToMid,
+          reactions:
+              m.messageId != null ? reactionsMap[m.messageId] : null,
+          fileAttachment: m.fileId != null ? fileMap[m.fileId] : null,
+        ));
+      }
+
+      // Merge: DB messages + any in-memory messages not in DB (live-delivered).
+      final liveOnly = existing.where((m) =>
+          m.messageId != null && !dbMessageIds.contains(m.messageId));
+      final merged = [...dbMessages, ...liveOnly];
+      // Sort by timestamp (newest last) and cap.
+      merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+      final capped = merged.length > _maxMessages
+          ? merged.sublist(merged.length - _maxMessages)
+          : merged;
+
+      final updated = Map.of(state);
+      updated[key] = capped;
+      state = updated;
+    } catch (e) {
+      debugPrint('[HOLLOW] Failed to merge channel history: $e');
+    }
+  }
+
   /// Clear cached messages for a server (forces reload from DB on next view).
   void clearServerCache(String serverId) {
     final updated = Map.of(state);
@@ -397,7 +502,7 @@ class ChannelChatNotifier
   }
 
   /// Max messages kept in memory per channel.
-  static const _maxMessages = 500;
+  static const _maxMessages = 200;
 
   void _addMessage(
       String serverId, String channelId, ChannelChatMessage message) {

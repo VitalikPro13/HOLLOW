@@ -212,7 +212,7 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
       final storageService = ref.read(storageServiceProvider);
       final stored = await storageService.loadMessages(
         peerId: peerId,
-        limit: 500,
+        limit: 200,
       );
 
       // Collect message IDs for bulk reaction loading.
@@ -348,7 +348,7 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
   }
 
   /// Max messages kept in memory per conversation.
-  static const _maxMessages = 500;
+  static const _maxMessages = 200;
 
   void _addMessage(String peerId, ChatMessage message) {
     final current = state[peerId] ?? <ChatMessage>[];

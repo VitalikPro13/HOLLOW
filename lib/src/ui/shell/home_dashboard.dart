@@ -11,6 +11,7 @@ import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
+import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/models/node_status.dart';
@@ -662,8 +663,8 @@ class _NetworkColumn extends ConsumerWidget {
     final nodeState = ref.watch(nodeProvider);
     final peers = ref.watch(peersProvider);
     final friends = ref.watch(friendsProvider);
-    final servers = ref.watch(serverListProvider);
     final profiles = ref.watch(profileProvider);
+    final relayStats = ref.watch(relayStatsProvider);
 
     final isOnline = nodeState.status == NodeStatus.connected;
 
@@ -694,9 +695,6 @@ class _NetworkColumn extends ConsumerWidget {
         offlineFriends.add(f.peerId);
       }
     }
-
-    // Server sync statuses.
-    final serverEntries = servers.values.toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -766,11 +764,6 @@ class _NetworkColumn extends ConsumerWidget {
           ),
         ),
 
-        const SizedBox(height: HollowSpacing.sm),
-
-        // Relay status
-        _RelayStatusCard(hollow: hollow),
-
         const SizedBox(height: HollowSpacing.lg),
 
         // ── Friends Connections ──
@@ -826,31 +819,43 @@ class _NetworkColumn extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.lg),
 
-        // ── Server Sync ──
-        _SectionLabel(hollow: hollow, label: 'SERVERS'),
+        // ── Relay Server ──
+        _SectionLabel(hollow: hollow, label: 'RELAY SERVER'),
         const SizedBox(height: HollowSpacing.sm),
 
-        Expanded(
-          child: serverEntries.isEmpty
-              ? Text(
-                  'No servers joined',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 11,
-                  ),
-                )
-              : ListView.builder(
-                  itemCount: serverEntries.length,
-                  padding: EdgeInsets.zero,
-                  itemBuilder: (context, index) {
-                    final server = serverEntries[index];
-                    return _ServerSyncRow(
-                      hollow: hollow,
-                      serverId: server.serverId,
-                      serverName: server.name,
-                    );
-                  },
+        _RelayStatsCard(hollow: hollow, stats: relayStats),
+
+        const Spacer(),
+
+        // ── Online Users (bottom) ──
+        Padding(
+          padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+          child: Row(
+            children: [
+              Icon(LucideIcons.users, size: 13, color: hollow.textSecondary),
+              const SizedBox(width: HollowSpacing.xs),
+              Text(
+                'Online',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 11,
                 ),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              Expanded(
+                child: _ShimmerDivider(hollow: hollow),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              Text(
+                '${relayStats.onlineUsers}',
+                style: HollowTypography.body.copyWith(
+                  color: hollow.textPrimary,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -886,30 +891,50 @@ class _SectionLabel extends StatelessWidget {
   }
 }
 
-/// Relay connection status card.
-class _RelayStatusCard extends ConsumerWidget {
+/// Relay server stats card — RAM + bandwidth progress bars + synced poll bar.
+class _RelayStatsCard extends StatefulWidget {
   final HollowTheme hollow;
-  const _RelayStatusCard({required this.hollow});
+  final RelayStats stats;
+  const _RelayStatsCard({required this.hollow, required this.stats});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final connStatus = ref.watch(connectionStatusProvider);
-    final relayStatus = connStatus.relayStatus;
+  State<_RelayStatsCard> createState() => _RelayStatsCardState();
+}
 
-    final Color dotColor;
-    final bool pulse;
-    switch (relayStatus) {
-      case RelayConnectionStatus.connected:
-        dotColor = hollow.success;
-        pulse = false;
-      case RelayConnectionStatus.connecting:
-      case RelayConnectionStatus.reconnecting:
-        dotColor = hollow.warning;
-        pulse = true;
-      case RelayConnectionStatus.disconnected:
-        dotColor = hollow.textSecondary;
-        pulse = false;
+class _RelayStatsCardState extends State<_RelayStatsCard>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  int _lastFetchCount = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 7),
+    )..forward();
+  }
+
+  @override
+  void didUpdateWidget(_RelayStatsCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Reset animation when a new fetch completes.
+    if (widget.stats.fetchCount != _lastFetchCount) {
+      _lastFetchCount = widget.stats.fetchCount;
+      _controller.forward(from: 0.0);
     }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = widget.hollow;
+    final stats = widget.stats;
 
     return Container(
       width: double.infinity,
@@ -919,35 +944,185 @@ class _RelayStatusCard extends ConsumerWidget {
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(color: hollow.border),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(LucideIcons.radio, size: 14, color: hollow.textSecondary),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Relay',
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontWeight: FontWeight.w500,
-                    fontSize: 12,
+          // RAM usage
+          _StatBar(
+            hollow: hollow,
+            icon: LucideIcons.memoryStick,
+            label: 'RAM',
+            value: stats.memLabel,
+            progress: stats.memUsagePercent,
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          // Bandwidth usage
+          _StatBar(
+            hollow: hollow,
+            icon: LucideIcons.activity,
+            label: 'Bandwidth',
+            value: stats.bandwidthLabel,
+            progress: stats.bandwidthUsagePercent,
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          // Poll cycle bar — synced to 5s fetch interval
+          AnimatedBuilder(
+            animation: _controller,
+            builder: (context, _) => SizedBox(
+              height: 3,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: LinearProgressIndicator(
+                  value: _controller.value,
+                  backgroundColor: hollow.border,
+                  valueColor: AlwaysStoppedAnimation<Color>(
+                    hollow.accent.withValues(alpha: 0.4),
                   ),
                 ),
-                Text(
-                  connStatus.relayLabel,
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 10,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Single stat row with label + animated progress bar + value.
+class _StatBar extends StatelessWidget {
+  final HollowTheme hollow;
+  final IconData icon;
+  final String label;
+  final String value;
+  final double progress;
+
+  const _StatBar({
+    required this.hollow,
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.progress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // Color shifts from accent → warning → error as usage increases.
+    final Color barColor;
+    if (progress < 0.6) {
+      barColor = hollow.accent;
+    } else if (progress < 0.85) {
+      barColor = hollow.warning;
+    } else {
+      barColor = hollow.error;
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 12, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.xs),
+            Text(
+              label,
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+                fontSize: 10,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const Spacer(),
+            Text(
+              value,
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textPrimary,
+                fontSize: 10,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(2),
+          child: SizedBox(
+            height: 4,
+            width: double.infinity,
+            child: Stack(
+              children: [
+                Container(color: hollow.border),
+                TweenAnimationBuilder<double>(
+                  tween: Tween(begin: 0, end: progress.clamp(0.0, 1.0)),
+                  duration: const Duration(milliseconds: 600),
+                  curve: Curves.easeOutCubic,
+                  builder: (context, value, _) => FractionallySizedBox(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: value,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: barColor,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
                   ),
                 ),
               ],
             ),
           ),
-          StatusDot(color: dotColor, size: 8, pulse: pulse),
-        ],
-      ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 1px divider with a looping teal shimmer sweep (ASOT style).
+class _ShimmerDivider extends StatefulWidget {
+  final HollowTheme hollow;
+  const _ShimmerDivider({required this.hollow});
+
+  @override
+  State<_ShimmerDivider> createState() => _ShimmerDividerState();
+}
+
+class _ShimmerDividerState extends State<_ShimmerDivider>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 4000),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) {
+        final pos = _controller.value * 4.0 - 1.5;
+        return Container(
+          height: 1,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment(pos - 0.5, 0),
+              end: Alignment(pos + 0.5, 0),
+              colors: [
+                widget.hollow.border,
+                widget.hollow.accent.withValues(alpha: 0.6),
+                widget.hollow.border,
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -1073,170 +1248,3 @@ class _CounterRow extends StatelessWidget {
   }
 }
 
-/// Per-server sync status row with server avatar + name + live status.
-class _ServerSyncRow extends ConsumerWidget {
-  final HollowTheme hollow;
-  final String serverId;
-  final String serverName;
-
-  const _ServerSyncRow({
-    required this.hollow,
-    required this.serverId,
-    required this.serverName,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final syncStatus = ref.watch(serverSyncStatusProvider(serverId));
-    final peers = ref.watch(peersProvider);
-    final membersAsync = ref.watch(serverMembersProvider(serverId));
-    final localPeerId = ref.watch(identityProvider).peerId;
-
-    // Count online members for this server.
-    final onlineCount = membersAsync.whenOrNull(
-          data: (members) => members
-              .where((m) =>
-                  m.peerId != localPeerId &&
-                  peers.containsKey(m.peerId))
-              .length,
-        ) ??
-        0;
-
-    final effectiveStatus = syncStatus == ServerSyncStatus.idle &&
-            onlineCount == 0
-        ? ServerSyncStatus.connecting
-        : syncStatus;
-
-    final Color statusColor;
-    final String statusLabel;
-    final bool showSpinner;
-
-    switch (effectiveStatus) {
-      case ServerSyncStatus.connecting:
-        statusColor = hollow.textSecondary;
-        // Check if we're actually trying to connect to members.
-        final connStatus = ref.watch(connectionStatusProvider);
-        final memberIds = membersAsync.whenOrNull(
-              data: (members) => members
-                  .where((m) => m.peerId != localPeerId)
-                  .map((m) => m.peerId)
-                  .toList(),
-            ) ??
-            [];
-        final connectingCount = memberIds
-            .where((id) {
-              final cs = connStatus.peers[id];
-              return cs != null &&
-                  (cs.stage == PeerConnectionStage.connected ||
-                   cs.stage == PeerConnectionStage.keyExchange);
-            })
-            .length;
-        statusLabel = connectingCount > 0
-            ? 'Connecting to $connectingCount member${connectingCount == 1 ? '' : 's'}...'
-            : 'No members online';
-        showSpinner = connectingCount > 0;
-      case ServerSyncStatus.syncing:
-        statusColor = hollow.accent;
-        statusLabel = 'Syncing...';
-        showSpinner = true;
-      case ServerSyncStatus.synced:
-      case ServerSyncStatus.idle:
-        statusColor = hollow.success;
-        statusLabel = 'Synced';
-        showSpinner = false;
-      case ServerSyncStatus.retrying:
-        statusColor = hollow.warning;
-        statusLabel = 'Retrying...';
-        showSpinner = true;
-      case ServerSyncStatus.failed:
-        statusColor = hollow.error;
-        statusLabel = 'Failed';
-        showSpinner = false;
-    }
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm,
-          vertical: HollowSpacing.xs + 2,
-        ),
-        decoration: BoxDecoration(
-          color: hollow.surface,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(color: hollow.border),
-        ),
-        child: Row(
-          children: [
-            // Server avatar (colored square with initials)
-            Container(
-              width: 22,
-              height: 22,
-              decoration: BoxDecoration(
-                color: _colorFromId(serverId),
-                borderRadius: BorderRadius.circular(6),
-              ),
-              alignment: Alignment.center,
-              child: Text(
-                _initialsFromName(serverName),
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.xs),
-            Expanded(
-              child: Text(
-                serverName,
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textPrimary,
-                  fontSize: 11,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            if (showSpinner) ...[
-              SizedBox(
-                width: 10,
-                height: 10,
-                child: CircularProgressIndicator(
-                  strokeWidth: 1.5,
-                  color: statusColor,
-                ),
-              ),
-              const SizedBox(width: 4),
-            ] else ...[
-              StatusDot(color: statusColor, size: 6),
-              const SizedBox(width: 4),
-            ],
-            Text(
-              statusLabel,
-              style: HollowTypography.caption.copyWith(
-                color: statusColor,
-                fontSize: 10,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Color _colorFromId(String id) {
-    final hash = id.hashCode;
-    final hue = (hash % 360).abs().toDouble();
-    return HSLColor.fromAHSL(1.0, hue, 0.5, 0.45).toColor();
-  }
-
-  String _initialsFromName(String name) {
-    final words = name.trim().split(RegExp(r'\s+'));
-    if (words.length >= 2) {
-      return '${words[0][0]}${words[1][0]}'.toUpperCase();
-    }
-    return name.substring(0, name.length.clamp(0, 2)).toUpperCase();
-  }
-}

@@ -39,6 +39,7 @@ pub enum NetworkEvent {
     MemberLeft { server_id: String, peer_id: String },
     SyncCompleted { server_id: String, ops_applied: u32 },
     ServerJoined { server_id: String, name: String },
+    ServerJoinFailed { server_id: String, reason: String },
     MessageSyncStarted { server_id: String, peer_id: String },
     MessageSyncCompleted { server_id: String, new_message_count: u32 },
     MessageSyncFailed { server_id: String, error: String },
@@ -250,6 +251,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::ServerJoined { server_id, name } => {
             hollow_log!("[HOLLOW] Server joined: {name} ({server_id})");
         }
+        node::NetworkEvent::ServerJoinFailed { server_id, reason } => {
+            hollow_log!("[HOLLOW] Server join failed: {server_id} — {reason}");
+        }
         node::NetworkEvent::MessageSyncStarted { server_id, peer_id } => {
             hollow_log!("[HOLLOW] Message sync started for {server_id} with {peer_id}");
         }
@@ -389,6 +393,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::ServerJoined { server_id, name } => {
             NetworkEvent::ServerJoined { server_id, name }
+        }
+        node::NetworkEvent::ServerJoinFailed { server_id, reason } => {
+            NetworkEvent::ServerJoinFailed { server_id, reason }
         }
         node::NetworkEvent::MessageSyncStarted { server_id, peer_id } => {
             NetworkEvent::MessageSyncStarted { server_id, peer_id }
@@ -634,8 +641,9 @@ pub fn start_node() -> Result<String, String> {
     let (event_tx, event_rx) = mpsc::channel::<node::NetworkEvent>(100);
     let (cmd_tx, cmd_rx) = mpsc::channel::<node::NodeCommand>(100);
 
+    let cmd_tx_clone = cmd_tx.clone();
     let (peer_id_str, handle) = rt
-        .block_on(node::spawn_node(id.keypair, event_tx, cmd_rx, olm, crypto_store))
+        .block_on(node::spawn_node(id.keypair, event_tx, cmd_rx, cmd_tx_clone, olm, crypto_store))
         .map_err(|e| format!("Failed to start node: {e}"))?;
 
     // Store event receiver separately so watch_network_events() can take it.

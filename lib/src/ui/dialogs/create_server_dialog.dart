@@ -7,6 +7,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
 /// Shows a dialog to join or create a server.
@@ -192,8 +193,11 @@ void _handleJoin(BuildContext context, TextEditingController controller) {
     serverId = input;
   }
 
+  final overlayContext = Navigator.of(context).context;
   Navigator.of(context).pop();
   crdt_api.joinServer(serverId: serverId);
+  HollowToast.show(overlayContext, 'Joining server...',
+      type: HollowToastType.info);
 }
 
 void _handleCreate(

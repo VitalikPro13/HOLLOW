@@ -506,6 +506,10 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String serverId,
     required String name,
   }) = NetworkEvent_ServerJoined;
+  const factory NetworkEvent.serverJoinFailed({
+    required String serverId,
+    required String reason,
+  }) = NetworkEvent_ServerJoinFailed;
   const factory NetworkEvent.messageSyncStarted({
     required String serverId,
     required String peerId,

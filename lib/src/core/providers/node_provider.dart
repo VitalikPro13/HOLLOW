@@ -4,6 +4,7 @@ import 'package:hollow/src/core/models/node_status.dart';
 import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
+import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// Node state: status + last error.
 class NodeState {
@@ -37,7 +38,20 @@ class NodeNotifier extends Notifier<NodeState> {
 
       state = state.copyWith(status: NodeStatus.connected);
 
+      // Reset stale file paths (files marked complete but missing on disk).
+      // Cleared entries will be picked up by _requestMissingFiles() when sync events fire.
+      try {
+        final resetCount = await storage_api.resetStaleFiles();
+        if (resetCount > 0) {
+          debugPrint('[HOLLOW] Reset $resetCount stale file paths for re-download');
+        }
+      } catch (e) {
+        debugPrint('[HOLLOW] Failed to reset stale files: $e');
+      }
+
       // Start polling for network events.
+      // Stale files (reset above) will be picked up by _requestMissingFiles()
+      // when SyncCompleted/MessageSyncCompleted events fire from peer connections.
       ref.read(eventStreamProvider.notifier).start();
     } catch (e) {
       debugPrint('[HOLLOW] Node start error: $e');

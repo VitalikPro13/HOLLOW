@@ -242,6 +242,128 @@ async fn handle_health() -> impl IntoResponse {
     }))
 }
 
+/// Server stats endpoint — returns RAM, network bandwidth, and online user count.
+/// Reads from /proc/meminfo and /proc/net/dev. Cached for 5s to handle many clients.
+async fn handle_server_stats(
+    State(ws_state): State<crate::ws_router::SharedWsState>,
+) -> impl IntoResponse {
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
+
+    struct CachedStats {
+        json: serde_json::Value,
+        fetched_at: std::time::Instant,
+        prev_rx_bytes: u64,
+        prev_tx_bytes: u64,
+        prev_sample_at: std::time::Instant,
+        rx_mbps: f64,
+        tx_mbps: f64,
+    }
+
+    static CACHE: OnceLock<Mutex<Option<CachedStats>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().await;
+
+    // Return cached response if fresh (<5s).
+    if let Some(ref cached) = *guard {
+        if cached.fetched_at.elapsed().as_secs() < 5 {
+            return (StatusCode::OK, Json(cached.json.clone()));
+        }
+    }
+
+    // Read /proc/meminfo.
+    let (mem_total_kb, mem_available_kb) = match tokio::fs::read_to_string("/proc/meminfo").await {
+        Ok(contents) => {
+            let mut total = 0u64;
+            let mut available = 0u64;
+            for line in contents.lines() {
+                if line.starts_with("MemTotal:") {
+                    total = parse_proc_kb(line);
+                } else if line.starts_with("MemAvailable:") {
+                    available = parse_proc_kb(line);
+                }
+            }
+            (total, available)
+        }
+        Err(_) => (0, 0),
+    };
+
+    // Read /proc/net/dev for ens16.
+    let (rx_bytes, tx_bytes) = match tokio::fs::read_to_string("/proc/net/dev").await {
+        Ok(contents) => {
+            let mut rx = 0u64;
+            let mut tx = 0u64;
+            for line in contents.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("ens16:") {
+                    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                    if parts.len() >= 10 {
+                        rx = parts[1].parse().unwrap_or(0);
+                        tx = parts[9].parse().unwrap_or(0);
+                    }
+                }
+            }
+            (rx, tx)
+        }
+        Err(_) => (0, 0),
+    };
+
+    // Compute bandwidth from previous sample.
+    let now = std::time::Instant::now();
+    let (rx_mbps, tx_mbps) = if let Some(ref prev) = *guard {
+        let elapsed = prev.prev_sample_at.elapsed().as_secs_f64();
+        if elapsed > 0.5 {
+            let rx_delta = rx_bytes.saturating_sub(prev.prev_rx_bytes) as f64;
+            let tx_delta = tx_bytes.saturating_sub(prev.prev_tx_bytes) as f64;
+            // bytes/sec → Mbps (megabits per second)
+            let rx_m = (rx_delta * 8.0) / (elapsed * 1_000_000.0);
+            let tx_m = (tx_delta * 8.0) / (elapsed * 1_000_000.0);
+            (rx_m, tx_m)
+        } else {
+            (prev.rx_mbps, prev.tx_mbps)
+        }
+    } else {
+        (0.0, 0.0)
+    };
+
+    // Count online users (unique peer IDs with active WS connections).
+    let online_users = {
+        let peers = ws_state.peer_count().await;
+        peers
+    };
+
+    let mem_used_kb = mem_total_kb.saturating_sub(mem_available_kb);
+
+    let json = serde_json::json!({
+        "mem_total_kb": mem_total_kb,
+        "mem_used_kb": mem_used_kb,
+        "rx_mbps": (rx_mbps * 100.0).round() / 100.0,
+        "tx_mbps": (tx_mbps * 100.0).round() / 100.0,
+        "bandwidth_cap_mbps": 400,
+        "online_users": online_users,
+    });
+
+    *guard = Some(CachedStats {
+        json: json.clone(),
+        fetched_at: now,
+        prev_rx_bytes: rx_bytes,
+        prev_tx_bytes: tx_bytes,
+        prev_sample_at: now,
+        rx_mbps,
+        tx_mbps,
+    });
+
+    (StatusCode::OK, Json(json))
+}
+
+/// Parse a /proc/meminfo line like "MemTotal:     8130796 kB" → 8130796.
+fn parse_proc_kb(line: &str) -> u64 {
+    line.split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
 /// Generate time-limited TURN credentials using HMAC-SHA1 shared secret.
 /// Coturn's `use-auth-secret` expects: username = "expiry_timestamp:arbitrary_id",
 /// password = Base64(HMAC-SHA1(secret, username)).
@@ -383,9 +505,10 @@ pub fn build_router(rooms: RoomMap, ws_state: crate::ws_router::SharedWsState) -
     let turn = Router::new()
         .route("/turn-credentials", get(handle_turn_credentials));
 
-    // WebSocket route uses WsState.
+    // WebSocket + stats routes use WsState.
     let ws = Router::new()
         .route("/ws", axum::routing::get(crate::ws_router::ws_upgrade))
+        .route("/server-stats", get(handle_server_stats))
         .with_state(ws_state);
 
     signaling.merge(ws).merge(turn).layer(cors)

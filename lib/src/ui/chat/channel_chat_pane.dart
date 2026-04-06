@@ -7,7 +7,6 @@ import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
-import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
@@ -117,13 +116,20 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   bool _loadingHistory = false;
 
   Future<void> _loadHistory() async {
-    if (_historyLoaded || _loadingHistory) return;
+    if (_loadingHistory) return;
+    // Skip if cache already has data (avoids redundant DB loads).
+    final cached = ref.read(channelChatProvider)[_stateKey];
+    if (cached != null && cached.isNotEmpty) {
+      _historyLoaded = true;
+      return;
+    }
     _loadingHistory = true;
     await ref
         .read(channelChatProvider.notifier)
         .loadHistory(widget.serverId, widget.channelId);
     ref.read(pinnedProvider.notifier).loadPins(widget.serverId, widget.channelId);
     _historyLoaded = true;
+    _loadingHistory = false;
     if (mounted) setState(() {});
     // Mark channel as read now that messages are loaded.
     final msgs = ref.read(channelChatProvider)['${widget.serverId}:${widget.channelId}'];
@@ -661,6 +667,16 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     final hollow = HollowTheme.of(context);
     final chatState = ref.watch(channelChatProvider);
     final messages = chatState[_stateKey] ?? [];
+
+    // If cache was cleared by sync (clearServerCache) and we have no messages,
+    // reload from DB. This catches the case where sync completed while we
+    // weren't viewing, cache was cleared, and now we need fresh data.
+    if (messages.isEmpty && _historyLoaded && !_loadingHistory) {
+      _historyLoaded = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _loadHistory();
+      });
+    }
 
     // Reversed ListView stays at bottom naturally when new messages arrive.
     // No manual auto-scroll needed.
@@ -1399,30 +1415,10 @@ class _ChannelConnectionStatus extends ConsumerWidget {
             .where((m) => connectedPeers.containsKey(m.peerId))
             .toList();
 
-        // Determine connection stage.
         // With MLS, online members in a WS room are already encrypted (MLS group broadcast).
-        // The old Olm isEncrypted check is no longer relevant for server channels.
-        final ConnectionStage stage;
-        String? detail;
-        if (onlineMembers.isEmpty) {
-          stage = ConnectionStage.connecting;
-          final connStatus = ref.watch(connectionStatusProvider);
-          final memberIds = otherMembers.map((m) => m.peerId).toList();
-          final connectingCount = memberIds
-              .where((id) {
-                final cs = connStatus.peers[id];
-                return cs != null &&
-                    (cs.stage == PeerConnectionStage.connected ||
-                     cs.stage == PeerConnectionStage.keyExchange);
-              })
-              .length;
-          detail = connectingCount > 0
-              ? 'Connecting to $connectingCount member${connectingCount == 1 ? '' : 's'}...'
-              : 'No members online';
-        } else {
-          // Online members present → MLS encrypted via WS room.
-          stage = ConnectionStage.encrypted;
-        }
+        final stage = onlineMembers.isEmpty
+            ? ConnectionStage.offline
+            : ConnectionStage.encrypted;
 
         return Row(
           mainAxisSize: MainAxisSize.min,
@@ -1430,7 +1426,6 @@ class _ChannelConnectionStatus extends ConsumerWidget {
             ConnectionProgress(
               key: ValueKey('conn-$serverId'),
               stage: stage,
-              detail: detail,
             ),
             if (stage == ConnectionStage.encrypted) ...[
               const SizedBox(width: HollowSpacing.md),
@@ -1442,7 +1437,7 @@ class _ChannelConnectionStatus extends ConsumerWidget {
       },
       loading: () => ConnectionProgress(
         key: ValueKey('conn-$serverId'),
-        stage: ConnectionStage.connecting,
+        stage: ConnectionStage.offline,
       ),
       error: (_, _) => const SizedBox.shrink(),
     );

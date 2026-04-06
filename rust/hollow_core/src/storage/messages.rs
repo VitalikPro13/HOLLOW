@@ -2347,6 +2347,53 @@ impl MessageStore {
         Ok(ids)
     }
 
+    /// Scan completed files for stale disk_paths (file no longer exists on disk).
+    /// Resets those entries to incomplete so they get re-requested from peers.
+    /// Returns the number of entries reset.
+    pub fn reset_stale_file_paths(&self) -> Result<u32, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT file_id, disk_path FROM files
+                 WHERE completed_at IS NOT NULL AND disk_path IS NOT NULL",
+            )
+            .map_err(|e| format!("Failed to prepare stale files query: {e}"))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                ))
+            })
+            .map_err(|e| format!("Failed to query completed files: {e}"))?;
+
+        let mut stale_ids = Vec::new();
+        for row in rows {
+            if let Ok((file_id, disk_path)) = row {
+                if !std::path::Path::new(&disk_path).exists() {
+                    stale_ids.push(file_id);
+                }
+            }
+        }
+
+        if stale_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let count = stale_ids.len() as u32;
+        for file_id in &stale_ids {
+            self.conn
+                .execute(
+                    "UPDATE files SET disk_path = NULL, completed_at = NULL WHERE file_id = ?1",
+                    rusqlite::params![file_id],
+                )
+                .map_err(|e| format!("Failed to reset stale file {file_id}: {e}"))?;
+        }
+
+        Ok(count)
+    }
+
     /// Get file_ids for missing *image* files in a specific server.
     /// Used for late-joiner image sync in 6+ member servers where non-image files
     /// use vault erasure shards instead of P2P streaming.

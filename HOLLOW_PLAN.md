@@ -1556,9 +1556,10 @@ Full scan of all code added since Phase 3.75 (WebRTC, voice channels, screen sha
 - [X] Custom background for the app / Custom color picker chooser
 - [X] GIF support for chats and as animated avatars/banners for Profiles
 - [X] Fix tooltip freezing on the call buttons (HollowTooltip _dismiss() pattern — immediate overlay removal, no animated reverse)
-- [ ] Fix "Encrypting..." / "Connecting..." labels on Network column and DMs header (ConnectionStatus provider not transitioning properly after key exchange)
-- [ ] Fix server join double-click bug (first JoinServer command joins WS room but doesn't send ServerJoinRequest — second click needed)
-- [ ] Export/import friend profile data (avatars, statuses, about) — either export to .hollow backup or trigger sync on import to pull from friends
+- [X] Fix "Encrypting..." / "Connecting..." labels on Network column and DMs header — simplified to just "Offline" and "Encrypted" (WSS is instant, intermediate states never visible). Removed progress bar animation, ConnectionProgress is now a simple stateless widget. (Apr 5, 2026)
+- [X] Fix server join double-click bug — `pending_server_joins` check was inside `is_new` guard (peer already in synced_peers from DM room → join request never sent). Moved check outside `is_new` in both RoomMembers + PeerJoined handlers. Added 15s timeout with `ServerJoinFailed` event. Toast feedback: "Joining server..." → "Joined {name}" / "Failed to join server". (Apr 6, 2026)
+- [X] Export/import friend profile data — full account backup (.hollow) already exports everything. Fixed stale file paths after restore: on startup, `reset_stale_files()` scans completed files with missing disk_path, resets them to incomplete so `_requestMissingFiles()` re-downloads from peers. (Apr 6, 2026)
+- [ ] Download manager UI — show background file re-downloads, vault shard transfers, and auto-recovery progress. Needed since stale file auto-recovery and vault operations run silently in the background with no user visibility.
 - [ ] Read/unread messages tick if possible
 - [ ] Fix the camera turning on when calling with video call
 - [ ] Add pill for camera/screen switching in DMs, just like it is in voice channels
@@ -1571,6 +1572,22 @@ Full scan of all code added since Phase 3.75 (WebRTC, voice channels, screen sha
   - [X] Reply-tap-scroll: `GlobalKey` per message + `Scrollable.ensureVisible()` — replaces `ScrollablePositionedList.scrollTo(index)`
   - [X] Preserve all existing UI: hover wrapper with message action bar, teal indicator line on right for own messages, message grouping, date separators, reactions, file attachments, edit/delete inline, reply references
   - [X] Remove `scrollable_positioned_list` dependency after migration
+- [X] **DM sync fix (Apr 5, 2026)** — 3 critical bugs in offline DM delivery, all in `swarm.rs`:
+  - [X] `send_encrypted_message` silently dropped messages when peer offline (encrypted then discarded) — now queues to `pending_messages` by checking `peer_is_reachable` before encrypting
+  - [X] `RoomMembers` handler had no Olm key exchange, DM sync, or channel message sync — sync was one-directional (only `PeerJoined` side asked). Added key exchange + pending drain + DmSyncRequest + sync_coordinator registration
+  - [X] `PeerJoined` didn't drain `pending_messages` when Olm session already existed — drain only ran after key exchange completion
+  - [X] Dart `DmSyncCompleted` handler no longer wipes in-memory messages when `newMessageCount == 0` (was destroying live-delivered messages)
+- [X] **MLS recovery auto-cleanup (Apr 5, 2026)** — fixes identity reset + leave/rejoin MLS epoch desync:
+  - [X] Owner auto-cleans stale MLS members not in CRDT member list (ghost peer IDs from identity resets)
+  - [X] Owner removes+re-adds peers already in MLS group for recovery (same peer_id, corrupted local state)
+  - [X] `remove_group()` now calls `group.delete(provider.storage())` to properly clear OpenMLS provider storage (was causing `GroupAlreadyExists` on Welcome)
+  - [X] Welcome handler removes stale local group before joining
+- [X] **Unread UI rework (Apr 5, 2026):**
+  - [X] Friends bar: teal dot → red numbered pill badge with unread count
+  - [X] Home dashboard: teal badge → red badge, repositioned next to time (vertically centered with row)
+  - [X] Unread count persistence: Rust FFI functions (`count_unread_dm`, `count_unread_channel`, etc.), `loadAll` at startup, DM badges working
+  - [X] Server badges: red numbered pill (already existed), real-time updates working
+  - [ ] Server unread on startup: infrastructure in place (`SyncCompleted` recomputes, MLS batch always emits `MessageSyncCompleted`, `RoomMembers` registers channel sync) but badge display still inconsistent on startup. Real-time server unreads work fine.
 - [ ] Different fonts/elements like hearts or sparkles on Profile and maybe nicknames
 - [ ] **Scaling:**
   - [X] Connection subset management + gossip relay tree — DONE (Phase 5D, Apr 3). See Phase 4 section (~line 1229) and Phase 5B voice channels section
@@ -1585,6 +1602,18 @@ Full scan of all code added since Phase 3.75 (WebRTC, voice channels, screen sha
 - [ ] **File deduplication** — content-addressable dedup via SHA-256 hash. If the same file is sent multiple times, store once on disk, point all file_ids to the same path. Reference counting for cleanup.
 - [X] Unread message indicator: floating pill above chat input with arrow-down icon + unread count, click to scroll to newest, auto-dismiss on scroll — also fix channel chat auto-reload when MessageSyncCompleted fires for currently-viewed channel
 - [ ] Proper roles on the server and editing of permissions
+- [X] **Distributed MLS committer (Apr 6, 2026)** — removed owner-only KeyPackage processing. Any MLS group member can add new members (OpenMLS cryptographically enforces only valid group members can commit). Deterministic coordinator: `is_mls_coordinator()` = lowest peer_id among online MLS members. Fixes: new members can't decrypt channel messages when owner is offline. Olm fan-out fallback is still E2EE. CRDT ops stay plaintext (public server structure data). MLS auto-recovery (678018d) handles epoch desync. Falls back to owner-only for initial MLS group creation (no group exists yet).
+  - [X] Remove `is_owner` gate on `MlsKeyPackage` handler — replaced with `is_mls_coordinator()` check
+  - [X] Add deterministic coordinator election: `is_mls_coordinator()` helper function
+  - [X] Replace coordinator check in PeerJoined handler (MlsKeyPackageRequest trigger)
+  - [ ] Test: owner offline, member B (next lowest peer_id) processes new joiner's KeyPackage → Welcome sent → new member decrypts MLS messages
+- [X] **Vault self-healing fixes (Apr 6, 2026)** — repaired broken shard redistribution and added event-driven rebalancing
+  - [X] Fix repair request logic bug: removed broken `missing_indices.contains(shard_idx)` check (disjoint sets, always false). Now requests all available shards from online holders for reconstruction.
+  - [X] Event-driven rebalance triggers: `rebalance_pending` set + 10s debounce timer, triggered on PeerJoined + PeerLeft for server rooms
+  - [X] Deterministic coordinator for vault: `is_mls_coordinator()` check in both 30-min timer and event-driven rebalance
+  - [X] Wire up `compute_migration_plan()` — coordinator migrates locally-held shards to new targets on rebalance. Shards held by other peers migrate when they become coordinator. 5 new unit tests (coordinator election + migration with new members). 217 total tests. (Apr 6, 2026)
+  - [X] 30-min timer kept as safety net, now also coordinator-gated
+- [X] **Channel sync fix (Apr 6, 2026)** — MLS `ChannelProbe` silently failed after reconnection (stale MLS epoch → decrypt fails → no response → sync never completes → messages don't appear). Replaced sync coordinator's MLS probe path with plaintext `ChannelSyncRequest`. Sync response still encrypted (MLS/Olm). Also: `mergeFromDb()` method prevents data loss during cache reload, empty-cache detection in channel_chat_pane triggers reload.
 - [ ] Video preview in chats
 - [ ] Link previews (URL metadata fetch + embed card rendering)
 - [ ] Discord import system (full implementation — parse GDPR export ZIP, map servers/channels/roles/messages, placeholder identities, member claiming) == reflect to the discord_migration_plan.md

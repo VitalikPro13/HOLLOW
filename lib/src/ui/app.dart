@@ -8,6 +8,9 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/shell/hollow_shell.dart';
 
+/// Global navigator key for showing toasts from providers (no BuildContext).
+final hollowNavigatorKey = GlobalKey<NavigatorState>();
+
 class HollowApp extends ConsumerWidget {
   const HollowApp({super.key});
 
@@ -43,6 +46,7 @@ class HollowApp extends ConsumerWidget {
     }
 
     return MaterialApp(
+      navigatorKey: hollowNavigatorKey,
       title: 'Hollow',
       debugShowCheckedModeBanner: false,
       theme: themeData,

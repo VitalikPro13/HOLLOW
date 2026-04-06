@@ -35,6 +35,11 @@ impl WsState {
             peers: RwLock::new(HashMap::new()),
         }
     }
+
+    /// Count unique authenticated peers with active WS connections.
+    pub async fn peer_count(&self) -> usize {
+        self.peers.read().await.len()
+    }
 }
 
 // -- Wire protocol --
