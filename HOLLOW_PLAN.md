@@ -1569,27 +1569,29 @@ Full scan of all code added since Phase 3.75 (WebRTC, voice channels, screen sha
 - [X] **Vault self-healing** — fixed broken repair logic, event-driven rebalance, coordinator-gated, migration wired up. 217 tests (Apr 6)
 - [X] **Channel sync fix** — MLS `ChannelProbe` silently failed after reconnection → plaintext `ChannelSyncRequest`. `mergeFromDb()` prevents data loss (Apr 6)
 
-#### TODO — MLS/Encryption Audit (CRITICAL — silent failures after reconnection)
-Audit (Apr 6) found 11 CRITICAL + 4 HIGH risk sites where MLS-encrypted coordination messages silently fail when receiver's MLS epoch is stale after reconnection. Pattern: sender encrypts OK → receiver can't decrypt → message vanishes → operation hangs.
+#### DONE — MLS/Encryption Audit (CRITICAL — silent failures after reconnection) — FIXED Apr 6
+Audit (Apr 6) found 11 CRITICAL + 4 HIGH risk sites where MLS-encrypted coordination messages silently fail when receiver's MLS epoch is stale after reconnection. Pattern: sender encrypts OK → receiver can't decrypt → message vanishes → operation hangs. **All fixed** with 3 patterns: (A) plaintext HavenMessage for requests/coordination, (B) Olm fallback for responses/sensitive data, (C) plaintext broadcast for voice state.
 
-- [ ] **Vault shard operations — NO fallback (CRITICAL):**
-  - [ ] ShardRequest in rebalance handler (lines ~6443, ~6547) — repair request lost, reconstruction hangs forever
-  - [ ] ShardMigrate in rebalance handler (line ~6586) — migration fails, shard stays in wrong location
-  - [ ] ShardResponse in MLS handler (lines ~10571, ~10588, ~10642) — response to repair request lost, requester waits forever
-  - Fix: add Olm fallback or switch to plaintext for shard coordination (shard DATA can stay encrypted)
-- [ ] **Sync responses — NO fallback (CRITICAL):**
-  - [ ] SyncResp in MLS handler (line ~10239) — CRDT sync response lost, peer stays out of sync
-  - [ ] ChannelSyncBatch in MLS handler (line ~10324) — channel message batch lost, messages never arrive
-  - [ ] ChannelProbeResp in MLS handler (line ~10352) — probe response lost (request already fixed to plaintext, but response still MLS)
-  - [ ] Post-Welcome ChannelSyncReq (line ~11193) — new member's first sync request fails, channels appear empty
-  - [ ] SyncReq in RoomMembers handler (line ~5969) — CRDT sync request fails, peer never gets server state
-  - Fix: switch to plaintext requests, keep response encryption (MLS/Olm)
-- [ ] **Voice channel state — NO fallback (HIGH):**
-  - [ ] VoiceChannelJoin broadcast (line ~5253) — peers don't see joiner
-  - [ ] VoiceChannelLeave broadcast (line ~5282) — audio keeps streaming to departed peer
-  - [ ] Voice SDP/ICE signaling (line ~5433) — WebRTC negotiation fails, no voice call
-  - [ ] Voice re-join after reconnect (line ~5795) — peers think you left
-  - Fix: add plaintext fallback for voice state, keep SDP/ICE encrypted (contains IP addresses)
+- [x] **Vault shard operations — Olm fallback added (CRITICAL):**
+  - [x] ShardRequest in rebalance handler — already had Olm fallback ✓
+  - [x] ShardMigrate in rebalance handler — added Olm fallback
+  - [x] ShardResponse in MLS handler (both found/not-found paths) — added Olm fallback
+  - [x] ShardProbeResponse in MLS handler — added Olm fallback
+- [x] **Sync responses — plaintext requests + Olm fallback responses (CRITICAL):**
+  - [x] SyncResp in MLS handler — added Olm fallback
+  - [x] ChannelSyncBatch in MLS handler — already had Olm fallback ✓
+  - [x] ChannelProbeResp in MLS handler — added Olm fallback + Olm receive handler
+  - [x] Post-Welcome ChannelSyncReq — switched to plaintext HavenMessage::ChannelSyncRequest
+  - [x] ChannelSyncReq in ChannelProbeResp handler — switched to plaintext HavenMessage::ChannelSyncRequest
+  - [x] SyncReq in RoomMembers handler — already had plaintext fallback ✓
+- [x] **Voice channel state — plaintext broadcasts + Olm SDP/ICE (HIGH):**
+  - [x] VoiceChannelJoin broadcast — MLS primary + plaintext HavenMessage::VoiceChannelJoin fallback
+  - [x] VoiceChannelLeave broadcast — MLS primary + plaintext HavenMessage::VoiceChannelLeave fallback
+  - [x] Voice SDP/ICE signaling — MLS primary + Olm fallback (IPs are sensitive)
+  - [x] Voice audio/screen/camera state — MLS broadcast + plaintext HavenMessage fallback (5 new variants)
+  - [x] Voice re-join after reconnect — switched to plaintext HavenMessage::VoiceChannelJoin
+  - [x] Olm receive handlers added for 8 voice SDP/ICE MessageEnvelope variants + ChannelProbeResp
+  - [x] Plaintext receive handlers added for 5 new HavenMessage voice variants (with security checks)
 - [ ] Server unread on startup — likely caused by the same MLS sync failure (sync never completes → unread count never recomputed). Should auto-fix when sync responses are fixed above
 - [ ] Test distributed MLS committer: owner offline, member B processes new joiner's KeyPackage
 

@@ -645,6 +645,54 @@ enum HavenMessage {
     /// Request a peer's profile (they respond with ProfileUpdate).
     #[serde(rename = "profile_request")]
     ProfileRequest,
+
+    // -- Voice channel coordination (plaintext for MLS epoch resilience) --
+    // These use plaintext HavenMessage instead of MLS MessageEnvelope so they
+    // survive epoch staleness after reconnection. SDP/ICE (which contain IPs)
+    // stay MLS-encrypted with Olm fallback — only state broadcasts are plaintext.
+
+    /// Broadcast: user joined a voice channel.
+    #[serde(rename = "vc_join")]
+    VoiceChannelJoin {
+        server_id: String,
+        channel_id: String,
+    },
+
+    /// Broadcast: user left a voice channel.
+    #[serde(rename = "vc_leave")]
+    VoiceChannelLeave {
+        server_id: String,
+        channel_id: String,
+    },
+
+    /// Broadcast: audio state (mute/deafen) in a voice channel.
+    #[serde(rename = "vc_audio_state")]
+    VoiceChannelAudioState {
+        server_id: String,
+        channel_id: String,
+        #[serde(default)]
+        muted: bool,
+        #[serde(default)]
+        deafened: bool,
+    },
+
+    /// Broadcast: screen share state (on/off) in a voice channel.
+    #[serde(rename = "vc_screen_state")]
+    VoiceChannelScreenState {
+        server_id: String,
+        channel_id: String,
+        #[serde(default)]
+        enabled: bool,
+    },
+
+    /// Broadcast: camera state (on/off) in a voice channel.
+    #[serde(rename = "vc_camera_state")]
+    VoiceChannelCameraState {
+        server_id: String,
+        channel_id: String,
+        #[serde(default)]
+        enabled: bool,
+    },
 }
 
 /// Envelope for the plaintext body inside an Encrypted message.
@@ -5244,14 +5292,24 @@ async fn run_event_loop(
                     // -- Voice channel commands (Phase 5C) --
                     NodeCommand::VoiceChannelJoin { server_id, channel_id } => {
                         hollow_log!("[HOLLOW-VC] Join voice channel {channel_id} in server {server_id}");
+                        // MLS broadcast primary, plaintext fallback for epoch resilience.
                         let envelope = MessageEnvelope::VoiceChannelJoin {
                             sid: server_id.clone(),
                             cid: channel_id.clone(),
                         };
                         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
-                        if mls_ok {
-                            if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &envelope, &bundle_keypair) {
-                                hollow_log!("[HOLLOW-VC] Join broadcast failed: {e}");
+                        let mls_sent = mls_ok && send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &envelope, &bundle_keypair).is_ok();
+                        if !mls_sent {
+                            if let Some(state) = server_states.get(&server_id) {
+                                let local_peer = local_peer_str.to_string();
+                                for member in state.members.keys() {
+                                    if member == &local_peer { continue; }
+                                    if peer_is_reachable(&ws_room_peers, member) {
+                                        send_message_to_peer(&ws_cmd_tx, &ws_room_peers, member, HavenMessage::VoiceChannelJoin {
+                                            server_id: server_id.clone(), channel_id: channel_id.clone(),
+                                        });
+                                    }
+                                }
                             }
                         }
                         // Track participant.
@@ -5273,14 +5331,24 @@ async fn run_event_loop(
 
                     NodeCommand::VoiceChannelLeave { server_id, channel_id } => {
                         hollow_log!("[HOLLOW-VC] Leave voice channel {channel_id} in server {server_id}");
+                        // MLS broadcast primary, plaintext fallback for epoch resilience.
                         let envelope = MessageEnvelope::VoiceChannelLeave {
                             sid: server_id.clone(),
                             cid: channel_id.clone(),
                         };
                         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
-                        if mls_ok {
-                            if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &envelope, &bundle_keypair) {
-                                hollow_log!("[HOLLOW-VC] Leave broadcast failed: {e}");
+                        let mls_sent = mls_ok && send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &envelope, &bundle_keypair).is_ok();
+                        if !mls_sent {
+                            if let Some(state) = server_states.get(&server_id) {
+                                let local_peer = local_peer_str.to_string();
+                                for member in state.members.keys() {
+                                    if member == &local_peer { continue; }
+                                    if peer_is_reachable(&ws_room_peers, member) {
+                                        send_message_to_peer(&ws_cmd_tx, &ws_room_peers, member, HavenMessage::VoiceChannelLeave {
+                                            server_id: server_id.clone(), channel_id: channel_id.clone(),
+                                        });
+                                    }
+                                }
                             }
                         }
                         // Untrack participant.
@@ -5428,10 +5496,61 @@ async fn run_event_loop(
                                 continue;
                             }
                         };
+                        // Broadcast state signals (audio/screen/camera state) → MLS broadcast + plaintext fallback.
+                        // Targeted SDP/ICE signals → MLS targeted + Olm fallback (IPs are sensitive).
+                        let is_broadcast = matches!(signal_type.as_str(), "audio_state" | "screen_state" | "camera_state");
                         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
-                        if mls_ok {
-                            if let Err(e) = send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &peer_id, &envelope, &bundle_keypair) {
-                                hollow_log!("[HOLLOW-VC] Signal send to {peer_id} failed: {e}");
+
+                        if is_broadcast {
+                            let mls_sent = mls_ok && send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &envelope, &bundle_keypair).is_ok();
+                            if !mls_sent {
+                                // Plaintext fallback: iterate members.
+                                let plaintext_msg = match signal_type.as_str() {
+                                    "audio_state" => {
+                                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                            Some(HavenMessage::VoiceChannelAudioState {
+                                                server_id: server_id.clone(), channel_id: channel_id.clone(),
+                                                muted: v["muted"].as_bool().unwrap_or(false),
+                                                deafened: v["deafened"].as_bool().unwrap_or(false),
+                                            })
+                                        } else { None }
+                                    }
+                                    "screen_state" => {
+                                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                            Some(HavenMessage::VoiceChannelScreenState {
+                                                server_id: server_id.clone(), channel_id: channel_id.clone(),
+                                                enabled: v["enabled"].as_bool().unwrap_or(false),
+                                            })
+                                        } else { None }
+                                    }
+                                    "camera_state" => {
+                                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                            Some(HavenMessage::VoiceChannelCameraState {
+                                                server_id: server_id.clone(), channel_id: channel_id.clone(),
+                                                enabled: v["enabled"].as_bool().unwrap_or(false),
+                                            })
+                                        } else { None }
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(msg) = plaintext_msg
+                                    && let Some(state) = server_states.get(&server_id)
+                                {
+                                    let local_peer = local_peer_str.to_string();
+                                    for member in state.members.keys() {
+                                        if member == &local_peer { continue; }
+                                        if peer_is_reachable(&ws_room_peers, member) {
+                                            send_message_to_peer(&ws_cmd_tx, &ws_room_peers, member, msg.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Targeted SDP/ICE: MLS first, Olm fallback.
+                            let mls_sent = mls_ok && send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &peer_id, &envelope, &bundle_keypair).is_ok();
+                            if !mls_sent {
+                                let env_json = serde_json::to_string(&envelope).unwrap_or_default();
+                                send_encrypted_message(&mut olm, &crypto_store, &peer_id, &env_json, &event_tx, &ws_cmd_tx, &ws_room_peers).await;
                             }
                         }
                     }
@@ -5786,14 +5905,14 @@ async fn run_event_loop(
                                                         let vc_cid = &vc_key[colon+1..];
                                                         if vc_sid == sid {
                                                             hollow_log!("[HOLLOW-VC] Re-broadcasting VC join to reconnected peer {peer_id} for {vc_cid}");
-                                                            let envelope = MessageEnvelope::VoiceChannelJoin {
-                                                                sid: vc_sid.to_string(),
-                                                                cid: vc_cid.to_string(),
-                                                            };
-                                                            let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(vc_sid));
-                                                            if mls_ok {
-                                                                let _ = send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, vc_sid, &peer_id, &envelope, &bundle_keypair);
-                                                            }
+                                                            // Plaintext — MLS epoch is likely stale on reconnecting peer.
+                                                            send_message_to_peer(
+                                                                &ws_cmd_tx, &ws_room_peers,
+                                                                &peer_id, HavenMessage::VoiceChannelJoin {
+                                                                    server_id: vc_sid.to_string(),
+                                                                    channel_id: vc_cid.to_string(),
+                                                                },
+                                                            );
                                                         }
                                                     }
                                                 }
@@ -6581,13 +6700,17 @@ async fn run_event_loop(
                                                 data: data_b64,
                                                 target: None,
                                             };
-                                            if let Some(ref mut mls_mgr) = mls {
-                                                if mls_mgr.has_group(server_id.as_str()) {
-                                                    let _ = send_mls_to_peer(mls_mgr, &ws_cmd_tx, server_id, &migration.to_peer, &envelope, &bundle_keypair);
-                                                    total_requested += 1;
-                                                    hollow_log!("[HOLLOW-VAULT] Migrating shard {} of {} from local → {}", migration.shard_index, manifest.content_id, migration.to_peer);
-                                                }
+                                            // MLS first, Olm fallback (peer's epoch may be stale).
+                                            let mls_sent = mls.as_mut().map(|m| {
+                                                m.has_group(server_id.as_str()) &&
+                                                send_mls_to_peer(m, &ws_cmd_tx, server_id, &migration.to_peer, &envelope, &bundle_keypair).is_ok()
+                                            }).unwrap_or(false);
+                                            if !mls_sent {
+                                                let env_json = serde_json::to_string(&envelope).unwrap_or_default();
+                                                send_encrypted_message(&mut olm, &crypto_store, &migration.to_peer, &env_json, &event_tx, &ws_cmd_tx, &ws_room_peers).await;
                                             }
+                                            total_requested += 1;
+                                            hollow_log!("[HOLLOW-VAULT] Migrating shard {} of {} from local → {}", migration.shard_index, manifest.content_id, migration.to_peer);
                                         }
                                     }
                                 }
@@ -8741,28 +8864,182 @@ async fn handle_incoming_request(
                         }
                     }
                 }
+                // MLS-only envelopes that should never arrive via Olm (they use plaintext
+                // HavenMessage variants instead for epoch resilience).
                 Ok(MessageEnvelope::ServerDelete { .. })
                 | Ok(MessageEnvelope::MemberKick { .. })
                 | Ok(MessageEnvelope::Typing { .. })
                 | Ok(MessageEnvelope::ProfileUpdate { .. })
                 | Ok(MessageEnvelope::ChannelSyncReq { .. })
                 | Ok(MessageEnvelope::ChannelProbe { .. })
-                | Ok(MessageEnvelope::ChannelProbeResp { .. })
                 | Ok(MessageEnvelope::VoiceChannelJoin { .. })
                 | Ok(MessageEnvelope::VoiceChannelLeave { .. })
-                | Ok(MessageEnvelope::VoiceChannelSdpOffer { .. })
-                | Ok(MessageEnvelope::VoiceChannelSdpAnswer { .. })
-                | Ok(MessageEnvelope::VoiceChannelIce { .. })
                 | Ok(MessageEnvelope::VoiceChannelAudioState { .. })
-                | Ok(MessageEnvelope::VoiceChannelScreenOffer { .. })
-                | Ok(MessageEnvelope::VoiceChannelScreenAnswer { .. })
-                | Ok(MessageEnvelope::VoiceChannelScreenIce { .. })
                 | Ok(MessageEnvelope::VoiceChannelScreenState { .. })
-                | Ok(MessageEnvelope::VoiceChannelRenegOffer { .. })
-                | Ok(MessageEnvelope::VoiceChannelRenegAnswer { .. })
                 | Ok(MessageEnvelope::VoiceChannelCameraState { .. })
                 | Ok(MessageEnvelope::BroadcastMeta { .. }) => {
                     hollow_log!("[HOLLOW-MLS] Received MLS-only envelope via Olm from {peer_str} — ignoring");
+                }
+
+                // Voice SDP/ICE + ChannelProbeResp — Olm fallback handlers.
+                // These arrive via Olm when MLS encrypt failed on the sender side
+                // (peer's epoch may be stale after reconnection).
+                Ok(MessageEnvelope::ChannelProbeResp { sid, cid, their_latest, msg_count, .. }) => {
+                    // Mirror the MLS ChannelProbeResp handler — compare timestamps,
+                    // send plaintext ChannelSyncRequest if peer has newer messages.
+                    let dedup_key = format!("{sid}:{cid}");
+                    if channel_sync_sent.get(&dedup_key).is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
+                        return;
+                    }
+                    if !server_states.contains_key(&sid) { return; }
+                    let data_dir = crate::identity::data_dir().unwrap_or_default();
+                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                        let our_latest = store.get_latest_channel_timestamp(&sid, &cid)
+                            .unwrap_or(None).unwrap_or(0);
+                        if their_latest > our_latest || msg_count > store.count_channel_messages(&sid, &cid) {
+                            channel_sync_sent.insert(dedup_key, std::time::Instant::now());
+                            let per_sender = store.get_per_sender_timestamps(&sid, &cid)
+                                .unwrap_or_default();
+                            send_message_to_peer(
+                                ws_cmd_tx, ws_room_peers,
+                                peer_str, HavenMessage::ChannelSyncRequest {
+                                    server_id: sid.clone(),
+                                    channel_id: cid,
+                                    since_timestamp: our_latest,
+                                    sender_timestamps: per_sender,
+                                },
+                            );
+                        }
+                    }
+                }
+
+                Ok(MessageEnvelope::VoiceChannelSdpOffer { sid, cid, sdp, .. }) => {
+                    let vc_key = format!("{sid}:{cid}");
+                    let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
+                    if !is_participant {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC SDP offer (Olm) from non-participant {peer_str} in {cid}");
+                    } else if sdp.len() > 64 * 1024 {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC SDP offer (Olm) — size {} exceeds limit from {peer_str}", sdp.len());
+                    } else {
+                        let payload = serde_json::json!({"sdp": sdp}).to_string();
+                        let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                            server_id: sid, channel_id: cid, peer_id: peer_str.to_string(),
+                            signal_type: "sdp_offer".to_string(), payload,
+                        }).await;
+                    }
+                }
+                Ok(MessageEnvelope::VoiceChannelSdpAnswer { sid, cid, sdp, .. }) => {
+                    let vc_key = format!("{sid}:{cid}");
+                    let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
+                    if !is_participant {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC SDP answer (Olm) from non-participant {peer_str} in {cid}");
+                    } else if sdp.len() > 64 * 1024 {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC SDP answer (Olm) — size {} exceeds limit from {peer_str}", sdp.len());
+                    } else {
+                        let payload = serde_json::json!({"sdp": sdp}).to_string();
+                        let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                            server_id: sid, channel_id: cid, peer_id: peer_str.to_string(),
+                            signal_type: "sdp_answer".to_string(), payload,
+                        }).await;
+                    }
+                }
+                Ok(MessageEnvelope::VoiceChannelIce { sid, cid, candidate, sdp_mid, sdp_mline_index, .. }) => {
+                    let vc_key = format!("{sid}:{cid}");
+                    let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
+                    if !is_participant {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC ICE (Olm) from non-participant {peer_str} in {cid}");
+                    } else {
+                        let payload = serde_json::json!({
+                            "candidate": candidate,
+                            "sdpMid": sdp_mid,
+                            "sdpMLineIndex": sdp_mline_index,
+                        }).to_string();
+                        let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                            server_id: sid, channel_id: cid, peer_id: peer_str.to_string(),
+                            signal_type: "ice".to_string(), payload,
+                        }).await;
+                    }
+                }
+                Ok(MessageEnvelope::VoiceChannelScreenOffer { sid, cid, sdp, .. }) => {
+                    let vc_key = format!("{sid}:{cid}");
+                    let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
+                    if !is_participant {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen offer (Olm) from non-participant {peer_str} in {cid}");
+                    } else if sdp.len() > 64 * 1024 {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen offer (Olm) — size {} exceeds limit from {peer_str}", sdp.len());
+                    } else {
+                        let payload = serde_json::json!({"sdp": sdp}).to_string();
+                        let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                            server_id: sid, channel_id: cid, peer_id: peer_str.to_string(),
+                            signal_type: "screen_offer".to_string(), payload,
+                        }).await;
+                    }
+                }
+                Ok(MessageEnvelope::VoiceChannelScreenAnswer { sid, cid, sdp, .. }) => {
+                    let vc_key = format!("{sid}:{cid}");
+                    let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
+                    if !is_participant {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen answer (Olm) from non-participant {peer_str} in {cid}");
+                    } else if sdp.len() > 64 * 1024 {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen answer (Olm) — size {} exceeds limit from {peer_str}", sdp.len());
+                    } else {
+                        let payload = serde_json::json!({"sdp": sdp}).to_string();
+                        let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                            server_id: sid, channel_id: cid, peer_id: peer_str.to_string(),
+                            signal_type: "screen_answer".to_string(), payload,
+                        }).await;
+                    }
+                }
+                Ok(MessageEnvelope::VoiceChannelScreenIce { sid, cid, candidate, sdp_mid, sdp_mline_index, role, .. }) => {
+                    let vc_key = format!("{sid}:{cid}");
+                    let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
+                    if !is_participant {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen ICE (Olm) from non-participant {peer_str} in {cid}");
+                    } else {
+                        let payload = serde_json::json!({
+                            "candidate": candidate,
+                            "sdpMid": sdp_mid,
+                            "sdpMLineIndex": sdp_mline_index,
+                            "role": role,
+                        }).to_string();
+                        let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                            server_id: sid, channel_id: cid, peer_id: peer_str.to_string(),
+                            signal_type: "screen_ice".to_string(), payload,
+                        }).await;
+                    }
+                }
+                Ok(MessageEnvelope::VoiceChannelRenegOffer { sid, cid, sdp, .. }) => {
+                    let vc_key = format!("{sid}:{cid}");
+                    let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
+                    if !is_participant {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC reneg offer (Olm) from non-participant {peer_str} in {cid}");
+                    } else if sdp.len() > 64 * 1024 {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC reneg offer (Olm) — size {} exceeds limit from {peer_str}", sdp.len());
+                    } else {
+                        let payload = serde_json::json!({"sdp": sdp}).to_string();
+                        let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                            server_id: sid, channel_id: cid, peer_id: peer_str.to_string(),
+                            signal_type: "reneg_offer".to_string(), payload,
+                        }).await;
+                    }
+                }
+                Ok(MessageEnvelope::VoiceChannelRenegAnswer { sid, cid, sdp, .. }) => {
+                    let vc_key = format!("{sid}:{cid}");
+                    let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
+                    if !is_participant {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC reneg answer (Olm) from non-participant {peer_str} in {cid}");
+                    } else if sdp.len() > 64 * 1024 {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC reneg answer (Olm) — size {} exceeds limit from {peer_str}", sdp.len());
+                    } else {
+                        let payload = serde_json::json!({"sdp": sdp}).to_string();
+                        let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                            server_id: sid, channel_id: cid, peer_id: peer_str.to_string(),
+                            signal_type: "reneg_answer".to_string(), payload,
+                        }).await;
+                    }
                 }
 
                 Err(_) => {
@@ -10235,10 +10512,16 @@ async fn handle_incoming_request(
                                                 ops_json,
                                                 target: None,
                                             };
-                                            if let Some(mls_mgr_ref) = mls {
-                                                if let Err(e) = send_mls_to_peer(mls_mgr_ref, ws_cmd_tx, &sid, &sender_peer_id, &resp, bundle_keypair) {
-                                                    hollow_log!("[HOLLOW-MLS] Failed to send MLS SyncResp: {e}");
-                                                }
+                                            // Try MLS first, fall back to Olm if encrypt fails
+                                            // (peer's epoch may be stale after reconnection).
+                                            let mls_sent = send_mls_to_peer(mls_mgr, ws_cmd_tx, &sid, &sender_peer_id, &resp, bundle_keypair).is_ok();
+                                            if !mls_sent {
+                                                let resp_json = serde_json::to_string(&resp).unwrap_or_default();
+                                                send_encrypted_message(
+                                                    olm, crypto_store,
+                                                    &sender_peer_id, &resp_json, event_tx,
+                                                    ws_cmd_tx, ws_room_peers,
+                                                ).await;
                                             }
                                         }
                                     }
@@ -10348,10 +10631,16 @@ async fn handle_incoming_request(
                                         msg_count: our_count,
                                         target: None,
                                     };
-                                    if let Some(mls_mgr_ref) = mls {
-                                        if let Err(e) = send_mls_to_peer(mls_mgr_ref, ws_cmd_tx, &sid, &sender_peer_id, &resp, bundle_keypair) {
-                                            hollow_log!("[HOLLOW-MLS] Failed to send MLS ChannelProbeResp: {e}");
-                                        }
+                                    // Try MLS first, fall back to Olm if encrypt fails
+                                    // (peer's epoch may be stale after reconnection).
+                                    let mls_sent = send_mls_to_peer(mls_mgr, ws_cmd_tx, &sid, &sender_peer_id, &resp, bundle_keypair).is_ok();
+                                    if !mls_sent {
+                                        let resp_json = serde_json::to_string(&resp).unwrap_or_default();
+                                        send_encrypted_message(
+                                            olm, crypto_store,
+                                            &sender_peer_id, &resp_json, event_tx,
+                                            ws_cmd_tx, ws_room_peers,
+                                        ).await;
                                     }
                                 }
                             }
@@ -10375,18 +10664,17 @@ async fn handle_incoming_request(
                                         channel_sync_sent.insert(dedup_key, std::time::Instant::now());
                                         let per_sender = store.get_per_sender_timestamps(&sid, &cid)
                                             .unwrap_or_default();
-                                        let req = MessageEnvelope::ChannelSyncReq {
-                                            sid: sid.clone(),
-                                            cid: cid.clone(),
-                                            since_timestamp: our_latest,
-                                            sender_timestamps: per_sender,
-                                            target: None,
-                                        };
-                                        if let Some(mls_mgr_ref) = mls {
-                                            if let Err(e) = send_mls_to_peer(mls_mgr_ref, ws_cmd_tx, &sid, &sender_peer_id, &req, bundle_keypair) {
-                                                hollow_log!("[HOLLOW-MLS] Failed to send MLS ChannelSyncReq: {e}");
-                                            }
-                                        }
+                                        // Use plaintext ChannelSyncRequest — MLS epoch may be
+                                        // stale after reconnection, causing silent decrypt failure.
+                                        send_message_to_peer(
+                                            ws_cmd_tx, ws_room_peers,
+                                            &sender_peer_id, HavenMessage::ChannelSyncRequest {
+                                                server_id: sid.clone(),
+                                                channel_id: cid.clone(),
+                                                since_timestamp: our_latest,
+                                                sender_timestamps: per_sender,
+                                            },
+                                        );
                                     }
                                 }
                             }
@@ -10567,8 +10855,11 @@ async fn handle_incoming_request(
                                                 sid: sid.clone(), cid: cid.clone(), si,
                                                 data: String::new(), chunks: 0, found: true, target: None,
                                             };
-                                            if let Some(mls_mgr_ref) = mls {
-                                                let _ = send_mls_to_peer(mls_mgr_ref, ws_cmd_tx, &sid, &sender_peer_id, &resp, bundle_keypair);
+                                            // MLS first, Olm fallback (peer's epoch may be stale).
+                                            let mls_sent = send_mls_to_peer(mls_mgr, ws_cmd_tx, &sid, &sender_peer_id, &resp, bundle_keypair).is_ok();
+                                            if !mls_sent {
+                                                let resp_json = serde_json::to_string(&resp).unwrap_or_default();
+                                                send_encrypted_message(olm, crypto_store, &sender_peer_id, &resp_json, event_tx, ws_cmd_tx, ws_room_peers).await;
                                             }
                                             // Stream shard bytes.
                                                 let shard_temp_dir = crate::node::file_transfer::files_dir();
@@ -10588,8 +10879,10 @@ async fn handle_incoming_request(
                                             let resp = MessageEnvelope::ShardResponse {
                                                 sid, cid, si, data: String::new(), chunks: 0, found: false, target: None,
                                             };
-                                            if let Some(mls_mgr_ref) = mls {
-                                                let _ = send_mls_to_peer(mls_mgr_ref, ws_cmd_tx, &server_id, &sender_peer_id, &resp, bundle_keypair);
+                                            let mls_sent = send_mls_to_peer(mls_mgr, ws_cmd_tx, &server_id, &sender_peer_id, &resp, bundle_keypair).is_ok();
+                                            if !mls_sent {
+                                                let resp_json = serde_json::to_string(&resp).unwrap_or_default();
+                                                send_encrypted_message(olm, crypto_store, &sender_peer_id, &resp_json, event_tx, ws_cmd_tx, ws_room_peers).await;
                                             }
                                         }
                                     }
@@ -10638,8 +10931,10 @@ async fn handle_incoming_request(
                                 let resp = MessageEnvelope::ShardProbeResponse {
                                     sid: sid.clone(), cid, shards: indices, target: None,
                                 };
-                                if let Some(mls_mgr_ref) = mls {
-                                    let _ = send_mls_to_peer(mls_mgr_ref, ws_cmd_tx, &sid, &sender_peer_id, &resp, bundle_keypair);
+                                let mls_sent = send_mls_to_peer(mls_mgr, ws_cmd_tx, &sid, &sender_peer_id, &resp, bundle_keypair).is_ok();
+                                if !mls_sent {
+                                    let resp_json = serde_json::to_string(&resp).unwrap_or_default();
+                                    send_encrypted_message(olm, crypto_store, &sender_peer_id, &resp_json, event_tx, ws_cmd_tx, ws_room_peers).await;
                                 }
                             }
 
@@ -11190,16 +11485,18 @@ async fn handle_incoming_request(
                                     if our_latest == 0 {
                                         let sender_ts = store.get_per_sender_timestamps(&server_id, cid)
                                             .unwrap_or_default();
-                                        let req = MessageEnvelope::ChannelSyncReq {
-                                            sid: server_id.clone(),
-                                            cid: cid.clone(),
-                                            since_timestamp: 0,
-                                            sender_timestamps: sender_ts,
-                                            target: None,
-                                        };
-                                        if let Err(e) = send_mls_to_peer(mls_mgr, ws_cmd_tx, &server_id, &peer_str, &req, bundle_keypair) {
-                                            hollow_log!("[HOLLOW-MLS] Post-Welcome sync request failed: {e}");
-                                        }
+                                        // Use plaintext ChannelSyncRequest — MLS epoch may be
+                                        // stale on the responder (they haven't processed our
+                                        // Welcome yet), so MLS ChannelSyncReq would silently fail.
+                                        send_message_to_peer(
+                                            ws_cmd_tx, ws_room_peers,
+                                            &peer_str, HavenMessage::ChannelSyncRequest {
+                                                server_id: server_id.clone(),
+                                                channel_id: cid.clone(),
+                                                since_timestamp: 0,
+                                                sender_timestamps: sender_ts,
+                                            },
+                                        );
                                     }
                                 }
                             }
@@ -11821,6 +12118,107 @@ async fn handle_incoming_request(
                 ws_cmd_tx, ws_room_peers,
                 bundle_keypair, local_peer_str, peer_str,
             );
+        }
+
+        // -- Plaintext voice channel handlers (MLS epoch-resilient) --
+        // These arrive as plaintext HavenMessage instead of MLS MessageEnvelope
+        // to survive epoch staleness after reconnection.
+
+        HavenMessage::VoiceChannelJoin { server_id, channel_id } => {
+            if peer_str == local_peer_str { return; }
+            let is_member = server_states.get(&server_id)
+                .map(|s| s.members.contains_key(peer_str))
+                .unwrap_or(false);
+            let is_voice_channel = server_states.get(&server_id)
+                .and_then(|s| s.channels.get(&channel_id))
+                .map(|ch| ch.channel_type == crate::crdt::server_state::ChannelType::Voice)
+                .unwrap_or(false);
+            if !is_member {
+                hollow_log!("[HOLLOW-SECURITY] BLOCKED plaintext VoiceChannelJoin from non-member {peer_str} in server {server_id}");
+            } else if !is_voice_channel {
+                hollow_log!("[HOLLOW-SECURITY] BLOCKED plaintext VoiceChannelJoin for non-voice channel {channel_id} in server {server_id}");
+            } else {
+                hollow_log!("[HOLLOW-VC] {peer_str} joined voice channel {channel_id} in {server_id} (plaintext)");
+                let vc_key = format!("{server_id}:{channel_id}");
+                voice_channel_participants.entry(vc_key.clone()).or_default()
+                    .insert(peer_str.to_string());
+                let _ = event_tx.send(NetworkEvent::VoiceChannelJoined {
+                    server_id: server_id.clone(), channel_id: channel_id.clone(),
+                    peer_id: peer_str.to_string(),
+                }).await;
+                check_voice_mode_transition(
+                    &vc_key, &server_id, &channel_id,
+                    &voice_channel_participants, voice_channel_gossip_mode,
+                    &gossip_overlays, local_peer_str, &event_tx,
+                ).await;
+            }
+        }
+
+        HavenMessage::VoiceChannelLeave { server_id, channel_id } => {
+            if peer_str == local_peer_str { return; }
+            hollow_log!("[HOLLOW-VC] {peer_str} left voice channel {channel_id} in {server_id} (plaintext)");
+            let vc_key = format!("{server_id}:{channel_id}");
+            if let Some(participants) = voice_channel_participants.get_mut(&vc_key) {
+                participants.remove(peer_str);
+                if participants.is_empty() {
+                    voice_channel_participants.remove(&vc_key);
+                    voice_channel_gossip_mode.remove(&vc_key);
+                }
+            }
+            let _ = event_tx.send(NetworkEvent::VoiceChannelLeft {
+                server_id: server_id.clone(), channel_id: channel_id.clone(),
+                peer_id: peer_str.to_string(),
+            }).await;
+            check_voice_mode_transition(
+                &vc_key, &server_id, &channel_id,
+                &voice_channel_participants, voice_channel_gossip_mode,
+                &gossip_overlays, local_peer_str, &event_tx,
+            ).await;
+        }
+
+        HavenMessage::VoiceChannelAudioState { server_id, channel_id, muted, deafened } => {
+            let vc_key = format!("{server_id}:{channel_id}");
+            let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
+            if !is_participant {
+                hollow_log!("[HOLLOW-SECURITY] BLOCKED plaintext VC audio state from non-participant {peer_str} in {channel_id}");
+            } else {
+                let payload = serde_json::json!({
+                    "muted": muted,
+                    "deafened": deafened,
+                }).to_string();
+                let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                    server_id, channel_id, peer_id: peer_str.to_string(),
+                    signal_type: "audio_state".to_string(), payload,
+                }).await;
+            }
+        }
+
+        HavenMessage::VoiceChannelScreenState { server_id, channel_id, enabled } => {
+            let vc_key = format!("{server_id}:{channel_id}");
+            let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
+            if !is_participant {
+                hollow_log!("[HOLLOW-SECURITY] BLOCKED plaintext VC screen state from non-participant {peer_str} in {channel_id}");
+            } else {
+                let payload = serde_json::json!({"enabled": enabled}).to_string();
+                let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                    server_id, channel_id, peer_id: peer_str.to_string(),
+                    signal_type: "screen_state".to_string(), payload,
+                }).await;
+            }
+        }
+
+        HavenMessage::VoiceChannelCameraState { server_id, channel_id, enabled } => {
+            let vc_key = format!("{server_id}:{channel_id}");
+            let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
+            if !is_participant {
+                hollow_log!("[HOLLOW-SECURITY] BLOCKED plaintext VC camera state from non-participant {peer_str} in {channel_id}");
+            } else {
+                let payload = serde_json::json!({"enabled": enabled}).to_string();
+                let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                    server_id, channel_id, peer_id: peer_str.to_string(),
+                    signal_type: "camera_state".to_string(), payload,
+                }).await;
+            }
         }
 
         _ => {}

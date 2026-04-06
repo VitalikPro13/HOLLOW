@@ -760,7 +760,7 @@ class EventStreamNotifier extends Notifier<bool> {
     if (memberCount >= 6) {
       // For 6+ servers, only auto-request images via P2P streaming.
       // Non-image files use vault erasure shards and are fetched via VaultDownloadFile.
-      await Future.delayed(const Duration(seconds: 3));
+      await Future.delayed(const Duration(milliseconds: 1500));
       try {
         missingIds = await storage_api.getMissingImageFileIdsForServer(serverId: serverId);
       } catch (e) {
@@ -768,7 +768,7 @@ class EventStreamNotifier extends Notifier<bool> {
         return;
       }
     } else {
-      await Future.delayed(const Duration(seconds: 2));
+      await Future.delayed(const Duration(seconds: 1));
       try {
         missingIds = await storage_api.getMissingFileIds();
       } catch (e) {
@@ -800,13 +800,13 @@ class EventStreamNotifier extends Notifier<bool> {
           break;
         } catch (_) {}
       }
-      await Future.delayed(const Duration(milliseconds: 500));
+      await Future.delayed(const Duration(milliseconds: 100));
     }
   }
 
   /// Request missing files after DM sync completes.
   Future<void> _requestMissingFilesForDm(String peerId) async {
-    await Future.delayed(const Duration(seconds: 2));
+    await Future.delayed(const Duration(seconds: 1));
     try {
       final missingIds = await storage_api.getMissingFileIds();
       if (missingIds.isEmpty) return;
@@ -825,7 +825,7 @@ class EventStreamNotifier extends Notifier<bool> {
             chunks: [],
           );
         } catch (_) {}
-        await Future.delayed(const Duration(milliseconds: 500));
+        await Future.delayed(const Duration(milliseconds: 100));
       }
     } catch (e) {
       debugPrint('[HOLLOW] Failed to request missing DM files: $e');
