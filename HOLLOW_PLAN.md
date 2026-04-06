@@ -1595,6 +1595,17 @@ Audit (Apr 6) found 11 CRITICAL + 4 HIGH risk sites where MLS-encrypted coordina
 - [X] Server unread on startup — likely caused by the same MLS sync failure (sync never completes → unread count never recomputed). Should auto-fix when sync responses are fixed above
 - [ ] Test distributed MLS committer: owner offline, member B processes new joiner's KeyPackage
 
+#### DONE — Performance: Background CPU optimization (10-20% → near 0%)
+DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely by Flutter animations running at 60fps even when the app is in system tray. Not WebSocket, not Rust, not reconnection. **Fixed (Apr 6):** Created `SharedTickers` singleton (`shared_tickers.dart`) — one ticker drives all decorative animations. N per-widget AnimationControllers → 1 shared Ticker + ValueNotifiers. All animations auto-pause on window hide/minimize/tray and resume on restore/focus.
+- [x] **Pause all repeating animations when window is hidden/tray'd** — `SharedTickers` implements `WidgetsBindingObserver` + `_HollowWindowListener` hooks (`onWindowMinimize`/`onWindowRestore`/`onWindowFocus`) + tray hide/show. Single `pause()`/`resume()` stops all animation tickers instantly
+- [x] `ambient_background.dart` — converted to `SharedTickers.ambient` at ~15fps (`Timer.periodic(67ms)` instead of 60fps ticker). Wrapped in `RepaintBoundary`. ConsumerStatefulWidget → ConsumerWidget
+- [x] `status_dot.dart` — all pulsing dots share `SharedTickers.pulse` (3s easeInOut ping-pong). N controllers → 1 ValueNotifier. StatefulWidget → StatelessWidget
+- [x] `member_panel.dart` — `_SectionDivider` glow sweep uses `SharedTickers.shimmer` with local ping-pong + easeInOut transform. StatefulWidget → StatelessWidget, removed AnimationController + CurvedAnimation
+- [x] `selection_shimmer.dart` — uses `SharedTickers.shimmer` (4s linear). StatefulWidget → StatelessWidget
+- [x] `home_dashboard.dart` — `_ShimmerDivider` uses `SharedTickers.shimmer`. StatefulWidget → StatelessWidget
+- [x] `chat_pane.dart` — `TypingDots` uses `SharedTickers.typingDots` (1.2s). StatefulWidget → StatelessWidget
+- [x] `chat_pane.dart` + `channel_chat_pane.dart` — call overlay shimmer already uses SelectionShimmer (now shared). SpinningRefreshIcon uses RotationTransition (GPU-composited, negligible cost)
+
 #### TODO — Features
 - [ ] Download manager UI — show background file re-downloads, vault shard transfers, auto-recovery progress
 - [ ] Read/unread messages tick if possible

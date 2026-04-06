@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/frb_generated.dart';
+import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/ui/app.dart';
 import 'package:hollow/src/ui/shader_warmup.dart';
 import 'package:tray_manager/tray_manager.dart';
@@ -179,6 +180,9 @@ Future<void> main() async {
   // Set up crash dump logging to hollow_crash.log.
   _initCrashLogging();
 
+  // Start shared animation tickers (one ticker drives all decorative anims).
+  SharedTickers.instance.start();
+
   runApp(UncontrolledProviderScope(
     container: container,
     child: const HollowApp(),
@@ -273,6 +277,7 @@ class _HollowTrayListener extends TrayListener {
     await windowManager.show();
     await windowManager.focus();
     _container.read(windowVisibleProvider.notifier).state = true;
+    SharedTickers.instance.resume();
   }
 
   Future<void> _quitApp() async {
@@ -290,8 +295,23 @@ class _HollowTrayListener extends TrayListener {
   }
 }
 
-/// Handles window close — minimizes to tray or quits based on user setting.
+/// Handles window close, minimize, restore — pauses animations when hidden.
 class _HollowWindowListener extends WindowListener {
+  @override
+  void onWindowMinimize() {
+    SharedTickers.instance.pause();
+  }
+
+  @override
+  void onWindowRestore() {
+    SharedTickers.instance.resume();
+  }
+
+  @override
+  void onWindowFocus() {
+    SharedTickers.instance.resume();
+  }
+
   @override
   void onWindowClose() async {
     // Check user preference.
@@ -305,6 +325,7 @@ class _HollowWindowListener extends WindowListener {
       // Minimize to system tray — app keeps running in background.
       await _showTrayIcon();
       _container.read(windowVisibleProvider.notifier).state = false;
+      SharedTickers.instance.pause();
       await windowManager.hide();
     } else {
       // Quit the app.

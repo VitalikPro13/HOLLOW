@@ -449,11 +449,13 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
           children: [
             // Video or avatar fallback
             if (renderer != null)
-              RTCVideoView(
-                renderer,
-                mirror: isLocal,
-                objectFit:
-                    RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+              RepaintBoundary(
+                child: RTCVideoView(
+                  renderer,
+                  mirror: isLocal,
+                  objectFit:
+                      RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                ),
               )
             else
               Center(
@@ -528,11 +530,13 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
           // Main video (full area)
           Positioned.fill(
             child: renderer != null
-                ? RTCVideoView(
-                    renderer,
-                    mirror: isLocal,
-                    objectFit:
-                        RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                ? RepaintBoundary(
+                    child: RTCVideoView(
+                      renderer,
+                      mirror: isLocal,
+                      objectFit:
+                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                    ),
                   )
                 : Container(color: hollow.elevated),
           ),
@@ -602,11 +606,13 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                         ),
                         clipBehavior: Clip.antiAlias,
                         child: pipRenderer != null
-                            ? RTCVideoView(
-                                pipRenderer,
-                                mirror: pipIsLocal,
-                                objectFit: RTCVideoViewObjectFit
-                                    .RTCVideoViewObjectFitCover,
+                            ? RepaintBoundary(
+                                child: RTCVideoView(
+                                  pipRenderer,
+                                  mirror: pipIsLocal,
+                                  objectFit: RTCVideoViewObjectFit
+                                      .RTCVideoViewObjectFitCover,
+                                ),
                               )
                             : Container(
                                 color: hollow.elevated,
@@ -840,10 +846,12 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     return Container(
       color: Colors.black,
       child: renderer != null
-          ? RTCVideoView(
-              renderer,
-              mirror: false,
-              objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+          ? RepaintBoundary(
+              child: RTCVideoView(
+                renderer,
+                mirror: false,
+                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+              ),
             )
           : Center(
               child: Column(
@@ -877,10 +885,12 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     return Container(
       color: Colors.black,
       child: renderer != null
-          ? RTCVideoView(
-              renderer,
-              mirror: isLocal,
-              objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+          ? RepaintBoundary(
+              child: RTCVideoView(
+                renderer,
+                mirror: isLocal,
+                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+              ),
             )
           : Center(
               child: Column(

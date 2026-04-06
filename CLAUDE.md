@@ -81,6 +81,8 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 - **Message text selection + copy: DONE (Apr 6).** `SelectionArea` wraps chat ListView (both DM + channel). Copy button in message hover action bar. Image-only messages hide copy button.
 - **Attachment preview + text with file: DONE (Apr 6).** Paperclip stages file, preview card above input bar (thumbnail or file icon + name + X to remove). User can type text alongside file. `addFileMessage` accepts optional text param.
 - **File sync delays reduced: DONE (Apr 6).** 2-3s → 1-1.5s, 500ms → 100ms between files. Safe because file bytes go via WebRTC P2P.
+- **Background CPU optimization: DONE (Apr 6).** `SharedTickers` singleton — 1 ticker drives all decorative anims (shimmer, pulse, typing dots). Ambient background → ~15fps Timer. Auto-pause on window hide/minimize/tray, resume on restore/focus. 6 StatefulWidgets → StatelessWidgets. N per-widget AnimationControllers → 3 shared ValueNotifiers.
+- **RTCVideoView RepaintBoundary: DONE (Apr 6).** All 15 RTCVideoView instances wrapped in RepaintBoundary (call_video_view.dart: 2, voice_channel_pane.dart: 5, chat_pane.dart: 8). Isolates video frame updates from parent tree repaints.
 - Next up: Paste images from clipboard, drag-and-drop files, remaining Phase 6.75 items.
 - flutter_chat_ui package evaluated and rejected (too opinionated for Hollow's custom UI).
 

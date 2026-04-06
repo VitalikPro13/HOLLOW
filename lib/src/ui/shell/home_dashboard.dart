@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
@@ -1075,39 +1076,17 @@ class _StatBar extends StatelessWidget {
 }
 
 /// 1px divider with a looping teal shimmer sweep (ASOT style).
-class _ShimmerDivider extends StatefulWidget {
+/// Uses [SharedTickers.shimmer] instead of its own AnimationController.
+class _ShimmerDivider extends StatelessWidget {
   final HollowTheme hollow;
   const _ShimmerDivider({required this.hollow});
 
   @override
-  State<_ShimmerDivider> createState() => _ShimmerDividerState();
-}
-
-class _ShimmerDividerState extends State<_ShimmerDivider>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 4000),
-    )..repeat();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        final pos = _controller.value * 4.0 - 1.5;
+    return ValueListenableBuilder<double>(
+      valueListenable: SharedTickers.instance.shimmer,
+      builder: (context, value, _) {
+        final pos = value * 4.0 - 1.5;
         return Container(
           height: 1,
           decoration: BoxDecoration(
@@ -1115,9 +1094,9 @@ class _ShimmerDividerState extends State<_ShimmerDivider>
               begin: Alignment(pos - 0.5, 0),
               end: Alignment(pos + 0.5, 0),
               colors: [
-                widget.hollow.border,
-                widget.hollow.accent.withValues(alpha: 0.6),
-                widget.hollow.border,
+                hollow.border,
+                hollow.accent.withValues(alpha: 0.6),
+                hollow.border,
               ],
             ),
           ),

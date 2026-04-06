@@ -70,10 +70,12 @@ class _CallVideoViewState extends ConsumerState<CallVideoView> {
               children: [
                 if (call.remoteVideoEnabled && remoteRenderer != null)
                   Positioned.fill(
-                    child: RTCVideoView(
-                      remoteRenderer,
-                      objectFit:
-                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                    child: RepaintBoundary(
+                      child: RTCVideoView(
+                        remoteRenderer,
+                        objectFit:
+                            RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                      ),
                     ),
                   )
                 else
@@ -143,11 +145,13 @@ class _CallVideoViewState extends ConsumerState<CallVideoView> {
                       ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(7),
-                        child: RTCVideoView(
-                          localRenderer,
-                          mirror: true,
-                          objectFit:
-                              RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                        child: RepaintBoundary(
+                          child: RTCVideoView(
+                            localRenderer,
+                            mirror: true,
+                            objectFit:
+                                RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                          ),
                         ),
                       ),
                     ),

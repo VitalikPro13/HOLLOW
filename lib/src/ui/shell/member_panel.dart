@@ -7,6 +7,7 @@ import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
+import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -68,8 +69,9 @@ class MemberPanel extends ConsumerWidget {
 
 /// ASOT-style section divider: "Online ------------ 10"
 /// Online variant has a subtle left-to-right glow sweep on the line.
+/// Uses [SharedTickers.shimmer] instead of per-instance AnimationController.
 /// [glowColor] overrides the default accent color for the glow sweep.
-class _SectionDivider extends StatefulWidget {
+class _SectionDivider extends StatelessWidget {
   final String label;
   final int count;
   final bool isOnline;
@@ -81,40 +83,6 @@ class _SectionDivider extends StatefulWidget {
     required this.isOnline,
     this.glowColor,
   });
-
-  @override
-  State<_SectionDivider> createState() => _SectionDividerState();
-}
-
-class _SectionDividerState extends State<_SectionDivider>
-    with SingleTickerProviderStateMixin {
-  AnimationController? _controller;
-
-  late final CurvedAnimation? _curved;
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.isOnline) {
-      _controller = AnimationController(
-        vsync: this,
-        duration: const Duration(milliseconds: 4000),
-      )..repeat(reverse: true);
-      _curved = CurvedAnimation(
-        parent: _controller!,
-        curve: Curves.easeInOut,
-      );
-    } else {
-      _curved = null;
-    }
-  }
-
-  @override
-  void dispose() {
-    _curved?.dispose();
-    _controller?.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -134,17 +102,23 @@ class _SectionDividerState extends State<_SectionDivider>
       ),
       child: Row(
         children: [
-          Text(widget.label, style: textStyle),
+          Text(label, style: textStyle),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
-            child: widget.isOnline && _curved != null
-                ? AnimatedBuilder(
-                    animation: _curved,
-                    builder: (context, child) {
+            child: isOnline
+                ? ValueListenableBuilder<double>(
+                    valueListenable: SharedTickers.instance.shimmer,
+                    builder: (context, value, _) {
+                      // Ping-pong: 0→1→0 with easeInOut curve.
+                      final pingPong = value < 0.5
+                          ? value * 2.0
+                          : 2.0 - value * 2.0;
+                      final curved =
+                          Curves.easeInOut.transform(pingPong);
                       // Map 0..1 to -0.2..1.2 so the glow fully exits both edges.
-                      final t = -0.2 + _curved.value * 1.4;
+                      final t = -0.2 + curved * 1.4;
                       const glowWidth = 0.15;
-                      final color = widget.glowColor ?? hollow.accent;
+                      final color = glowColor ?? hollow.accent;
                       return Container(
                         height: 1,
                         decoration: BoxDecoration(
@@ -176,7 +150,7 @@ class _SectionDividerState extends State<_SectionDivider>
                   ),
           ),
           const SizedBox(width: HollowSpacing.sm),
-          Text('${widget.count}', style: textStyle),
+          Text('$count', style: textStyle),
         ],
       ),
     );

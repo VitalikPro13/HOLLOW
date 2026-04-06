@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
@@ -1698,10 +1699,12 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
               ),
               clipBehavior: Clip.antiAlias,
               child: hasLocalVideo && localRenderer != null
-                  ? RTCVideoView(
-                      localRenderer,
-                      mirror: true,
-                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                  ? RepaintBoundary(
+                      child: RTCVideoView(
+                        localRenderer,
+                        mirror: true,
+                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                      ),
                     )
                   : Center(
                       child: Column(
@@ -1740,9 +1743,11 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
               ),
               clipBehavior: Clip.antiAlias,
               child: hasRemoteVideo && remoteRenderer != null
-                  ? RTCVideoView(
-                      remoteRenderer,
-                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                  ? RepaintBoundary(
+                      child: RTCVideoView(
+                        remoteRenderer,
+                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                      ),
                     )
                   : Center(
                       child: Column(
@@ -1797,10 +1802,12 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
           // Main video (full area)
           Positioned.fill(
             child: mainRenderer != null
-                ? RTCVideoView(
-                    mainRenderer,
-                    mirror: isLocalExpanded,
-                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                ? RepaintBoundary(
+                    child: RTCVideoView(
+                      mainRenderer,
+                      mirror: isLocalExpanded,
+                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                    ),
                   )
                 : Container(color: hollow.elevated),
           ),
@@ -1825,10 +1832,12 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(7),
-                  child: RTCVideoView(
-                    pipRenderer,
-                    mirror: !isLocalExpanded,
-                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                  child: RepaintBoundary(
+                    child: RTCVideoView(
+                      pipRenderer,
+                      mirror: !isLocalExpanded,
+                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                    ),
                   ),
                 ),
               ),
@@ -1880,11 +1889,13 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
             child: Container(
               color: Colors.black,
               child: remoteRenderer != null
-                  ? RTCVideoView(
-                      remoteRenderer,
-                      mirror: false,
-                      objectFit:
-                          RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                  ? RepaintBoundary(
+                      child: RTCVideoView(
+                        remoteRenderer,
+                        mirror: false,
+                        objectFit:
+                            RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                      ),
                     )
                   : const SizedBox.shrink(),
             ),
@@ -1955,10 +1966,12 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
       return Container(
         color: Colors.black,
         child: remoteRenderer != null
-            ? RTCVideoView(
-                remoteRenderer,
-                mirror: false,
-                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+            ? RepaintBoundary(
+                child: RTCVideoView(
+                  remoteRenderer,
+                  mirror: false,
+                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                ),
               )
             : Center(
                 child: Text(
@@ -2195,11 +2208,13 @@ class _ScreenShareFullView extends ConsumerWidget {
             child: Container(
               color: Colors.black,
               child: remoteRenderer != null
-                  ? RTCVideoView(
-                      remoteRenderer,
-                      mirror: false,
-                      objectFit: RTCVideoViewObjectFit
-                          .RTCVideoViewObjectFitContain,
+                  ? RepaintBoundary(
+                      child: RTCVideoView(
+                        remoteRenderer,
+                        mirror: false,
+                        objectFit: RTCVideoViewObjectFit
+                            .RTCVideoViewObjectFitContain,
+                      ),
                     )
                   : const SizedBox.shrink(),
             ),
@@ -2293,11 +2308,13 @@ class _ScreenShareFullView extends ConsumerWidget {
       return Container(
         color: Colors.black,
         child: remoteRenderer != null
-            ? RTCVideoView(
-                remoteRenderer,
-                mirror: false,
-                objectFit:
-                    RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+            ? RepaintBoundary(
+                child: RTCVideoView(
+                  remoteRenderer,
+                  mirror: false,
+                  objectFit:
+                      RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                ),
               )
             : Center(
                 child: Column(
@@ -2947,45 +2964,22 @@ class TypingIndicatorBar extends StatelessWidget {
 }
 
 /// Animated bouncing dots for typing indicators.
-class TypingDots extends StatefulWidget {
+/// Uses [SharedTickers.typingDots] instead of per-instance controller.
+class TypingDots extends StatelessWidget {
   final Color color;
 
   const TypingDots({super.key, required this.color});
 
   @override
-  State<TypingDots> createState() => TypingDotsState();
-}
-
-class TypingDotsState extends State<TypingDots>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1200),
-    )..repeat();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      child: null,
-      builder: (context, _) {
+    return ValueListenableBuilder<double>(
+      valueListenable: SharedTickers.instance.typingDots,
+      builder: (context, value, _) {
         return Row(
           mainAxisSize: MainAxisSize.min,
           children: List.generate(3, (i) {
             final delay = i * 0.2;
-            final t = (_controller.value - delay).clamp(0.0, 1.0);
+            final t = (value - delay).clamp(0.0, 1.0);
             final bounce = t < 0.5
                 ? (t * 2) // 0→1
                 : (1 - (t - 0.5) * 2); // 1→0
@@ -2994,7 +2988,7 @@ class TypingDotsState extends State<TypingDots>
               width: 4,
               height: 4,
               decoration: BoxDecoration(
-                color: widget.color.withValues(alpha: 0.4 + bounce * 0.6),
+                color: color.withValues(alpha: 0.4 + bounce * 0.6),
                 shape: BoxShape.circle,
               ),
             );
