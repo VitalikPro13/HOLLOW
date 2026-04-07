@@ -24,6 +24,7 @@ class ScreenShareService {
 
   RTCPeerConnection? _pc;
   MediaStream? _screenStream; // Local screen capture (outgoing only)
+  RTCVideoRenderer? _localRenderer; // Self-preview of outgoing screen
   RTCVideoRenderer? _remoteRenderer; // Renderer for incoming screen
   MediaStream? _remoteStream;
   Timer? _screenTrackPoller;
@@ -40,6 +41,7 @@ class ScreenShareService {
   void Function()? onScreenShareEnded; // Track ended (window closed)
 
   RTCVideoRenderer? get remoteRenderer => _remoteRenderer;
+  RTCVideoRenderer? get localRenderer => _localRenderer;
   bool get isActive => _pc != null;
 
   /// Preferred audio output device — set by CallNotifier before handleOffer.
@@ -90,6 +92,12 @@ class ScreenShareService {
     final screenTrack = videoTracks.first;
     _log('[HOLLOW-SCREEN] Got screen track: ${screenTrack.id}');
 
+    // Build a local self-preview renderer so the UI can show what we're
+    // sharing in the screen share view.
+    _localRenderer = RTCVideoRenderer();
+    await _localRenderer!.initialize();
+    _localRenderer!.srcObject = _screenStream;
+
     // Create PC.
     _pc = await createPeerConnection(iceServers);
     _setupCallbacks();
@@ -136,6 +144,12 @@ class ScreenShareService {
     _screenStream = stream;
     final screenTrack = _screenStream!.getVideoTracks().first;
     _log('[HOLLOW-SCREEN] Using shared screen track: ${screenTrack.id}');
+
+    // Build a local self-preview renderer so the UI can show what we're
+    // sharing in the screen share view.
+    _localRenderer = RTCVideoRenderer();
+    await _localRenderer!.initialize();
+    _localRenderer!.srcObject = _screenStream;
 
     // Create PC.
     _pc = await createPeerConnection(iceServers);
@@ -252,6 +266,13 @@ class ScreenShareService {
 
     _screenTrackPoller?.cancel();
     _screenTrackPoller = null;
+
+    // Dispose local self-preview renderer first (before stream goes away).
+    if (_localRenderer != null) {
+      _localRenderer!.srcObject = null;
+      await _localRenderer!.dispose();
+      _localRenderer = null;
+    }
 
     // Stop local screen capture.
     if (_screenStream != null) {

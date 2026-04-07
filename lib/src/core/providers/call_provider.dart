@@ -102,6 +102,11 @@ class CallNotifier extends Notifier<CallState> {
   RTCVideoRenderer? get screenShareRenderer =>
       _incomingScreenShare?.remoteRenderer;
 
+  /// Renderer for the local outgoing screen share (self-preview).
+  /// Used by UI to show what we're currently sharing in the screen share view.
+  RTCVideoRenderer? get localScreenShareRenderer =>
+      _outgoingScreenShare?.localRenderer;
+
   VoiceService get _service {
     if (_voiceService == null) {
       final localPeerId = ref.read(identityProvider).peerId ?? '';
@@ -138,6 +143,30 @@ class CallNotifier extends Notifier<CallState> {
           startedAt: DateTime.now(),
         );
         _scheduleStatsDump(peerId);
+
+        // Video call: auto-enable the camera now that the audio connection
+        // is up. Both sides do this — the side without a camera will see
+        // toggleVideo() return false (no-op) and stay audio-only. The side
+        // with a camera goes through the mid-call addTrack/renegotiate
+        // path which is the proven-working flow for cross-peer video.
+        if (state.isVideoCall) {
+          _callLog('[HOLLOW-CALL] Video call connected — scheduling '
+              'auto-toggle in 300ms');
+          // Small delay so the SDP/ICE handshake fully settles before we
+          // start a renegotiation on top of it.
+          Future.delayed(const Duration(milliseconds: 300), () {
+            if (state.status == CallStatus.active &&
+                state.isVideoCall &&
+                !state.isVideoEnabled) {
+              _callLog('[HOLLOW-CALL] Auto-enabling camera for video call');
+              toggleVideo();
+            } else {
+              _callLog('[HOLLOW-CALL] Auto-toggle skipped: '
+                  'status=${state.status} isVideoCall=${state.isVideoCall} '
+                  'isVideoEnabled=${state.isVideoEnabled}');
+            }
+          });
+        }
       }
     };
 
@@ -152,12 +181,12 @@ class CallNotifier extends Notifier<CallState> {
 
     _voiceService!.onRemoteVideoTrack = (peerId) {
       debugPrint('[HOLLOW-CALL] Remote video track/renderer ready for $peerId');
-      // Don't set remoteVideoEnabled here — that's controlled by the
-      // video_state signal. The track always arrives (it's in the initial SDP)
-      // but the remote user's camera may be disabled.
-      if (state.remoteVideoEnabled) {
-        state = state.copyWith(); // Force UI rebuild if already enabled
-      }
+      // With the H4 addTrack pattern, a fresh remote video track means the
+      // remote peer just enabled their camera — flip remoteVideoEnabled
+      // immediately so the UI rebuilds with the new renderer. The
+      // video_state signal that arrives on a separate channel will
+      // confirm this redundantly.
+      state = state.copyWith(remoteVideoEnabled: true);
     };
   }
 
@@ -200,7 +229,11 @@ class CallNotifier extends Notifier<CallState> {
       callId: callId,
       direction: CallDirection.outgoing,
       isVideoCall: withVideo,
-      isVideoEnabled: withVideo,
+      // Do NOT preset isVideoEnabled — the camera isn't actually captured
+      // until onConnected → auto-toggleVideo runs after the call goes
+      // active. Pre-setting this would make the auto-toggle skip its
+      // !state.isVideoEnabled guard and the camera would never turn on.
+      isVideoEnabled: false,
       sframeKey: sframeKey,
     );
 
@@ -283,9 +316,19 @@ class CallNotifier extends Notifier<CallState> {
   }
 
   /// Toggle camera on/off.
+  ///
+  /// Sends a plaintext `video_state` signal so the remote UI immediately
+  /// knows to update its layout, AND triggers an SDP renegotiation so the
+  /// remote peer's WebRTC stack actually receives (or stops receiving) the
+  /// video track. Without the renegotiation, `replaceTrack()` alone does
+  /// not fire `onTrack` on the remote side — the track is silently swapped
+  /// at the sender but never announced to the receiver, so the remote
+  /// renderer is never created and the video layout stays audio-only.
+  /// Matches the pattern used by voice_channel_service.dart.
   Future<void> toggleVideo() async {
     if (state.status != CallStatus.active) return;
 
+    final wasEnabled = state.isVideoEnabled;
     final enabled = await _service.toggleVideo();
     state = state.copyWith(isVideoEnabled: enabled);
 
@@ -293,13 +336,46 @@ class CallNotifier extends Notifier<CallState> {
     final callId = state.callId;
     if (peerId == null || callId == null) return;
 
-    // Send video_state notification so remote UI knows.
-    // No SDP renegotiation needed — video track was in the initial SDP.
+    // If the service returned the SAME state we already had, the toggle was
+    // a no-op (e.g. tried to enable but no camera available). Don't send
+    // any signals or renegotiation — there's nothing to communicate.
+    if (enabled == wasEnabled) {
+      _callLog('[HOLLOW-CALL] toggleVideo: no-op (enabled=$enabled)');
+      return;
+    }
+
+    // Send video_state notification so remote UI knows to update the layout.
     final videoStatePayload = jsonEncode({
       'call_id': callId,
       'enabled': enabled,
     });
     _sendSignal(peerId, 'video_state', videoStatePayload);
+
+    // Send SDP renegotiation offer so the remote peer's WebRTC stack
+    // picks up the new track. Guarded by _renegotiationInProgress to
+    // avoid glare with inbound reneg.
+    if (_renegotiationInProgress) {
+      _callLog('[HOLLOW-CALL] toggleVideo: renegotiation already in '
+          'progress, skipping offer');
+      return;
+    }
+    _renegotiationInProgress = true;
+    try {
+      final offerSdp = await _service.createRenegotiationOffer();
+      if (offerSdp != null) {
+        final offerPayload = jsonEncode({
+          'call_id': callId,
+          'sdp': offerSdp,
+        });
+        _sendSignal(peerId, 'sdp_offer', offerPayload);
+        _callLog('[HOLLOW-CALL] toggleVideo: sent renegotiation offer '
+            '(enabled=$enabled)');
+      }
+    } catch (e) {
+      _callLog('[HOLLOW-CALL] toggleVideo: renegotiation failed: $e');
+    } finally {
+      _renegotiationInProgress = false;
+    }
   }
 
   /// Switch between front and back camera.
@@ -577,11 +653,16 @@ class CallNotifier extends Notifier<CallState> {
     // Ensure device preferences are loaded before starting media.
     await _ensureDevicePreferences();
 
-    // We are the caller — create a dedicated voice PC, capture audio, create offer.
+    // We are the caller — create a dedicated voice PC, capture audio, create
+    // offer. Always start as audio-only — even for video calls. The camera
+    // gets turned on automatically once the connection is `active` via the
+    // mid-call addTrack/renegotiate path (which is the proven-working flow).
+    // Starting with `withVideo: true` here would put us back into the
+    // initial-SDP video transceiver mess that broke onTrack on the receiver.
     final sdp = await _service.createOffer(
       peerId,
       callId,
-      withVideo: state.isVideoCall,
+      withVideo: false,
     );
 
     // Enable SFrame E2EE using the key we generated in startCall.
@@ -648,12 +729,15 @@ class CallNotifier extends Notifier<CallState> {
     } else {
       // Ensure device preferences are loaded before starting media.
       await _ensureDevicePreferences();
-      // Initial call setup — create a dedicated voice PC, capture audio, answer.
+      // Initial call setup — create a dedicated voice PC, capture audio,
+      // answer. Always start as audio-only (matching createOffer above);
+      // camera is turned on automatically post-connect via the mid-call
+      // addTrack/renegotiate path.
       final answerSdp = await _service.handleOffer(
         peerId,
         callId,
         sdp,
-        withVideo: state.isVideoCall,
+        withVideo: false,
       );
 
       // Enable SFrame E2EE using the key from the invite.
@@ -834,6 +918,9 @@ class CallNotifier extends Notifier<CallState> {
     _outgoingScreenShare = null;
     _incomingScreenShare?.close();
     _incomingScreenShare = null;
+    // Reset the screen-share view focus so the next call starts fresh.
+    ref.read(focusedDmSourceProvider.notifier).state =
+        const DmFocusedSource.none();
     state = const CallState();
   }
 
@@ -864,3 +951,20 @@ class CallNotifier extends Notifier<CallState> {
 
 final callProvider =
     NotifierProvider<CallNotifier, CallState>(CallNotifier.new);
+
+/// Which DM call source is focused (big tile) in the screen-share view.
+/// `peerId` = which peer's source. `type` = 'screen' or 'camera'.
+/// `null` means "no explicit focus — use default layout for the current
+/// share state". Lifted to a provider so both `_ChatPaneState` (the source
+/// switcher pill) and `_ScreenShareFullView` (the big tile renderer) can
+/// read and write it. Modeled after voice_channel_pane's
+/// focusedScreenSharePeerId / focusedSourceType pair.
+class DmFocusedSource {
+  final String? peerId;
+  final String? type; // 'screen' | 'camera'
+  const DmFocusedSource({this.peerId, this.type});
+  const DmFocusedSource.none() : peerId = null, type = null;
+}
+
+final focusedDmSourceProvider =
+    StateProvider<DmFocusedSource>((_) => const DmFocusedSource.none());

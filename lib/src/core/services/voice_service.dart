@@ -42,6 +42,10 @@ class VoiceService {
   RTCVideoRenderer? _localRenderer;
   RTCVideoRenderer? _remoteRenderer;
   MediaStream? _remoteStream;
+  /// True if `_remoteStream` was created locally via `createLocalMediaStream`
+  /// (and we own it). False if it came from `event.streams.first` in onTrack
+  /// (libwebrtc owns it — disposing it from Dart throws "stream not found").
+  bool _remoteStreamIsSynthetic = false;
 
   // Callbacks
   void Function(String peerId)? onConnected;
@@ -77,10 +81,12 @@ class VoiceService {
   // ---------------------------------------------------------------------------
 
   /// Start mic + camera capture, create RTCPeerConnection, and generate an SDP offer.
-  /// Camera is always captured so the video transceiver is in the initial SDP —
-  /// this avoids the streams=0 problem when adding video via renegotiation later.
-  /// If [withVideo] is false, the camera track is immediately disabled (no data flows).
-  /// Returns the SDP offer string.
+  /// Create the initial SDP offer for a DM call. Audio is always captured.
+  /// Camera is captured only if [withVideo] is true — for audio-only calls
+  /// we do NOT pre-add a video transceiver, matching the voice channel
+  /// pattern. When the user later enables video, [toggleVideo] uses
+  /// `pc.addTrack` to create a fresh transceiver and renegotiate, which
+  /// fires `onTrack` reliably on the remote peer.
   Future<String> createOffer(
     String peerId,
     String callId, {
@@ -93,17 +99,14 @@ class VoiceService {
     await _initPeerConnection(peerId, callId);
     await _startLocalAudio();
 
-    // Always capture camera so video m-line is in the initial SDP.
-    final cameraOk = await _startCamera(_pc!);
-    if (cameraOk) {
-      if (withVideo) {
+    // Only capture camera for video calls. Audio-only calls have no video
+    // m-line in the initial SDP — the transceiver is added later via
+    // toggleVideo()'s addTrack call.
+    if (withVideo) {
+      final cameraOk = await _startCamera(_pc!);
+      if (cameraOk) {
         _isVideoEnabled = true;
         await _initLocalRenderer();
-      } else {
-        // Audio-only: stop the camera hardware (turns off the light) but keep
-        // the transceiver in the SDP. We'll recapture when user enables video.
-        _isVideoEnabled = false;
-        await _releaseCamera();
       }
     }
 
@@ -117,8 +120,12 @@ class VoiceService {
     return mungedOffer;
   }
 
-  /// Handle an incoming SDP offer (answerer side). Creates PC, starts mic + camera,
-  /// sets remote description, creates answer. Returns the SDP answer string.
+  /// Handle an incoming SDP offer (answerer side). Creates PC, starts mic,
+  /// optionally captures the camera, sets remote description, creates answer.
+  /// Camera is only captured when [withVideo] is true (the local user accepted
+  /// a video call). If the remote offer has a video m-line but we have no
+  /// camera, libwebrtc will produce an `a=recvonly` answer for the video
+  /// m-line — that's fine, RTP still flows from sender to receiver.
   Future<String> handleOffer(
     String peerId,
     String callId,
@@ -134,15 +141,11 @@ class VoiceService {
     await _initPeerConnection(peerId, callId);
     await _startLocalAudio();
 
-    // Always capture camera so video m-line is in the answer SDP.
-    final cameraOk = await _startCamera(_pc!);
-    if (cameraOk) {
-      if (withVideo) {
+    if (withVideo) {
+      final cameraOk = await _startCamera(_pc!);
+      if (cameraOk) {
         _isVideoEnabled = true;
         await _initLocalRenderer();
-      } else {
-        _isVideoEnabled = false;
-        await _releaseCamera();
       }
     }
 
@@ -194,7 +197,114 @@ class VoiceService {
 
     _log('[HOLLOW-VOICE] Renegotiation answer created, SDP length=${answer.sdp?.length}');
     _dumpSdp('RENEG-ANSWER-OUT', answer.sdp!);
+
+    // Defer the safety net by a frame so onTrack has a chance to fire and
+    // build the renderer. With H4 it should always fire — the safety net
+    // only does work if the renderer is still null after the delay (and
+    // even then, _checkRemoteVideoTrack is a no-op when a renderer exists).
+    Future.delayed(const Duration(milliseconds: 150), _checkRemoteVideoTrack);
+
     return answer.sdp!;
+  }
+
+  /// Safety net for when [pc.onTrack] doesn't fire after a renegotiation.
+  /// Walks the PC's receivers, and if a video track exists without a
+  /// corresponding `_remoteRenderer`, creates one and notifies the UI.
+  ///
+  /// This is needed because on Windows/libwebrtc, calling `replaceTrack()`
+  /// to swap a null sender track for a real camera track on an existing
+  /// transceiver does NOT fire `onTrack` on the remote peer — even after
+  /// a full SDP renegotiation cycle. Without this safety net, the remote
+  /// peer would never create a renderer and the UI would stay audio-only.
+  Future<void> _checkRemoteVideoTrack() async {
+    final pc = _pc;
+    if (pc == null) return;
+    // With the H4 addTrack/removeTrack pattern, onTrack fires reliably for
+    // every fresh video transceiver. If we already have a remote renderer,
+    // trust that the onTrack handler built it correctly — running the
+    // safety net here would walk pc.getReceivers() and pick up STALE
+    // inactive transceivers from previous toggles, then trash the working
+    // renderer trying to rebind to a dead track.
+    if (_remoteRenderer != null) return;
+    try {
+      final receivers = await pc.getReceivers();
+      for (final receiver in receivers) {
+        final track = receiver.track;
+        if (track == null || track.kind != 'video') continue;
+        // Capture the id once so a later null on the native side doesn't
+        // crash logging or string interpolation.
+        final trackId = track.id;
+        if (trackId == null) continue;
+
+        _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: found video track '
+            '$trackId without renderer — creating manually');
+
+        // Stash old state for post-build dispose (same pattern as
+        // _handleRemoteVideoTrack — never dispose the old stream BEFORE
+        // the new renderer is committed).
+        final oldRenderer = _remoteRenderer;
+        final oldStream = _remoteStream;
+        final oldWasSynthetic = _remoteStreamIsSynthetic;
+
+        // Re-fetch the track right before addTrack — between awaits the
+        // native track may have been GC'd / detached.
+        final liveTrack = receiver.track;
+        if (liveTrack == null) {
+          _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: track went away '
+              'before addTrack, skipping');
+          continue;
+        }
+        final newStream =
+            await createLocalMediaStream('remote-video-$trackId');
+        try {
+          await newStream.addTrack(liveTrack);
+        } catch (e) {
+          _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: addTrack failed '
+              '($e), disposing partial stream');
+          try {
+            await newStream.dispose();
+          } catch (_) {}
+          continue;
+        }
+
+        final newRenderer = RTCVideoRenderer();
+        await newRenderer.initialize();
+        newRenderer.srcObject = newStream;
+
+        // Commit new state first.
+        _remoteRenderer = newRenderer;
+        _remoteStream = newStream;
+        _remoteStreamIsSynthetic = true;
+
+        // Best-effort dispose of the old.
+        if (oldRenderer != null) {
+          try {
+            oldRenderer.srcObject = null;
+            await oldRenderer.dispose();
+          } catch (_) {}
+        }
+        if (oldStream != null && oldWasSynthetic) {
+          try {
+            await oldStream.dispose();
+          } catch (_) {}
+        }
+
+        _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: renderer created for '
+            'track=$trackId, stream=${_remoteStream?.id}');
+
+        // Give the renderer a moment to settle before notifying UI.
+        await Future.delayed(const Duration(milliseconds: 100));
+
+        // Notify UI via the same callback that _handleRemoteVideoTrack uses.
+        final activePeerId = _activePeerId;
+        if (activePeerId != null) {
+          onRemoteVideoTrack?.call(activePeerId);
+        }
+        return;
+      }
+    } catch (e) {
+      _log('[HOLLOW-VOICE] _checkRemoteVideoTrack error: $e');
+    }
   }
 
   /// Handle incoming SDP answer (offerer side).
@@ -208,6 +318,9 @@ class VoiceService {
     await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
     _remoteDescriptionSet = true;
     await _flushPendingCandidates();
+
+    // Defer the safety net by a frame so onTrack has a chance to fire first.
+    Future.delayed(const Duration(milliseconds: 150), _checkRemoteVideoTrack);
   }
 
   /// Handle incoming ICE candidate.
@@ -260,25 +373,61 @@ class VoiceService {
   }
 
   /// Toggle camera on/off. Returns the new state.
-  /// The video transceiver was set up during call init — toggling recaptures
-  /// the camera (turning the light on) or releases it (turning it off).
-  /// No SDP renegotiation needed since the transceiver is already in the SDP.
+  ///
+  /// Uses the same `addTrack` / `removeTrack` pattern as
+  /// [VoiceChannelService.startCamera] / [VoiceChannelService.stopCamera]
+  /// — every camera enable creates a fresh transceiver, every disable
+  /// removes it. This ensures the remote peer's `onTrack` fires reliably
+  /// (the receiver-side `replaceTrack` reuse pattern silently fails on
+  /// libwebrtc Windows: the receiver renderer stays bound to a stale
+  /// muted track and never recovers when sender RTP resumes).
+  ///
+  /// The caller must trigger an SDP renegotiation after toggleVideo
+  /// returns successfully — see `CallNotifier.toggleVideo`.
   Future<bool> toggleVideo() async {
     if (_pc == null) return false;
 
     if (_isVideoEnabled) {
-      // Turn off: release camera hardware.
-      _isVideoEnabled = false;
-      await _releaseCamera();
+      // Turn off: remove video sender from the PC entirely (not just
+      // replaceTrack(null)). removeTrack causes the next renegotiation
+      // to drop the video m-line, which the remote peer interprets as
+      // "no more video" and tears down the receive side cleanly.
+      try {
+        final senders = await _pc!.getSenders();
+        for (final s in senders) {
+          if (s.track?.kind == 'video') {
+            await _pc!.removeTrack(s);
+            _log('[HOLLOW-VOICE] toggleVideo: removed video sender');
+            break;
+          }
+        }
+      } catch (e) {
+        _log('[HOLLOW-VOICE] toggleVideo: removeTrack failed: $e');
+      }
+
+      // Stop & dispose the camera stream (turns off the camera light).
+      if (_localVideoStream != null) {
+        for (final t in _localVideoStream!.getTracks()) {
+          await t.stop();
+        }
+        await _localVideoStream!.dispose();
+        _localVideoStream = null;
+      }
+
+      // Dispose local self-preview renderer.
       if (_localRenderer != null) {
         _localRenderer!.srcObject = null;
         await _localRenderer!.dispose();
         _localRenderer = null;
       }
+
+      _isVideoEnabled = false;
       _log('[HOLLOW-VOICE] Video disabled, camera released');
     } else {
-      // Turn on: recapture camera and replace the sender's null track.
-      _log('[HOLLOW-VOICE] Recapturing camera for video enable');
+      // Turn on: capture camera and addTrack a brand new sender. This
+      // creates a fresh transceiver with a fresh ssrc — the remote peer
+      // gets a new onTrack event and builds a new renderer.
+      _log('[HOLLOW-VOICE] Capturing camera for video enable');
       try {
         final constraints = {
           'audio': false,
@@ -289,7 +438,8 @@ class VoiceService {
             'frameRate': {'ideal': 30},
           },
         };
-        // Dispose old stream before replacement (Phase 6.25 leak fix).
+        // Belt-and-suspenders cleanup of any leaked stream from a
+        // previous failed enable.
         if (_localVideoStream != null) {
           for (final t in _localVideoStream!.getTracks()) {
             await t.stop();
@@ -308,21 +458,14 @@ class VoiceService {
         }
         final videoTrack = videoTracks.first;
 
-        // Replace the sender's null track with the new camera track.
-        final senders = await _pc!.getSenders();
-        for (final s in senders) {
-          if (s.track == null || s.track?.kind == 'video') {
-            await s.replaceTrack(videoTrack);
-            _log('[HOLLOW-VOICE] Replaced sender track with camera');
-            break;
-          }
-        }
+        await _pc!.addTrack(videoTrack, _localVideoStream!);
+        _log('[HOLLOW-VOICE] toggleVideo: added new video track via addTrack');
 
         _isVideoEnabled = true;
         await _initLocalRenderer();
         _log('[HOLLOW-VOICE] Video enabled, camera active');
       } catch (e) {
-        _log('[HOLLOW-VOICE] Failed to recapture camera: $e');
+        _log('[HOLLOW-VOICE] Failed to capture camera: $e');
         return false;
       }
     }
@@ -377,6 +520,7 @@ class VoiceService {
       _remoteRenderer = null;
     }
     _remoteStream = null;
+    _remoteStreamIsSynthetic = false;
 
     // Close the dedicated voice peer connection.
     if (_pc != null) {
@@ -585,10 +729,10 @@ class VoiceService {
   // Private — Video
   // ---------------------------------------------------------------------------
 
-  /// Start camera. Returns true if successful, false if no camera available.
-  /// When the camera is unavailable, a sendrecv video transceiver is still
-  /// added (with null track) so the SDP always has a video m-line — this is
-  /// required for screen sharing to work on devices without cameras.
+  /// Capture the camera and add it as a fresh sender on [pc]. Returns true
+  /// on success, false if no camera is available. Only used for the initial
+  /// call setup when the user accepts/places a video call — mid-call camera
+  /// enable goes through [toggleVideo] which has its own capture path.
   Future<bool> _startCamera(RTCPeerConnection pc) async {
     _log('[HOLLOW-VOICE] Starting camera (front=$_useFrontCamera)');
     final constraints = {
@@ -613,26 +757,10 @@ class VoiceService {
       final videoTrack = videoTracks.first;
       _log('[HOLLOW-VOICE] Got camera track: ${videoTrack.id}');
 
-      // Try to reuse an existing stopped video transceiver.
-      bool reused = false;
-      final transceivers = await pc.getTransceivers();
-      for (final t in transceivers) {
-        if (t.receiver.track?.kind == 'video' && t.sender.track == null) {
-          await t.sender.replaceTrack(videoTrack);
-          await t.setDirection(TransceiverDirection.SendRecv);
-          _log('[HOLLOW-VOICE] Reused video transceiver mid=${t.mid}');
-          reused = true;
-          break;
-        }
-      }
+      await pc.addTrack(videoTrack, _localVideoStream!);
+      _log('[HOLLOW-VOICE] Added video track via addTrack');
 
-      if (!reused) {
-        await pc.addTrack(videoTrack, _localVideoStream!);
-        _log('[HOLLOW-VOICE] Added new video track via addTrack');
-      }
-
-      // Don't set _isVideoEnabled here — let the caller control it.
-      // _startCamera only captures and adds the track to the PC.
+      // Caller sets _isVideoEnabled — _startCamera only captures and adds.
       return true;
     } catch (e) {
       _log('[HOLLOW-VOICE] Failed to start camera: $e');
@@ -642,91 +770,80 @@ class VoiceService {
     }
   }
 
-  /// Release camera hardware (stop tracks, dispose stream) without removing
-  /// the transceiver from the PC. Turns off the camera light.
-  Future<void> _releaseCamera() async {
-    if (_localVideoStream == null) return;
-    // Replace the sender's track with null — keeps transceiver alive.
-    if (_pc != null) {
-      final senders = await _pc!.getSenders();
-      for (final s in senders) {
-        if (s.track?.kind == 'video') {
-          await s.replaceTrack(null);
-          break;
-        }
-      }
-    }
-    // Stop the physical camera.
-    for (final track in _localVideoStream!.getVideoTracks()) {
-      await track.stop();
-    }
-    await _localVideoStream!.dispose();
-    _localVideoStream = null;
-    _log('[HOLLOW-VOICE] Camera released (light off)');
-  }
-
   Future<void> _handleRemoteVideoTrack(
       String peerId, RTCTrackEvent event) async {
-    // SECURITY (Phase 6.25): Wrap in try-catch to prevent inconsistent state
-    // if renderer init fails (corrupt track, GPU failure, etc.).
+    // Stash the OLD renderer/stream so we can dispose them AFTER the new
+    // renderer is built. This way a dispose failure on the old (e.g.
+    // libwebrtc already cleaned up the event-owned stream during the
+    // renegotiation that triggered this onTrack) doesn't trash the new
+    // renderer that we still need.
+    final oldRenderer = _remoteRenderer;
+    final oldStream = _remoteStream;
+    final oldWasSynthetic = _remoteStreamIsSynthetic;
+
     try {
-      // Dispose old remote stream before replacement (Phase 6.25 leak fix).
-      if (_remoteStream != null) {
-        await _remoteStream!.dispose();
-        _remoteStream = null;
-      }
+      // Pick the new stream — prefer the event-provided one (libwebrtc owns
+      // it, we must NOT dispose it), fall back to a synthetic one if the
+      // event came with streams=0 (Windows/libwebrtc renegotiation quirk).
+      MediaStream newStream;
+      bool newIsSynthetic;
       if (event.streams.isNotEmpty) {
-        _remoteStream = event.streams.first;
-        _log('[HOLLOW-VOICE] Using stream from onTrack event (streams=${event.streams.length})');
+        newStream = event.streams.first;
+        newIsSynthetic = false;
+        _log('[HOLLOW-VOICE] Using stream from onTrack event '
+            '(streams=${event.streams.length})');
       } else {
-        // Windows/libwebrtc fires onTrack with streams=0 during renegotiation.
-        // Get the stream from the receiver's track instead.
-        _log('[HOLLOW-VOICE] onTrack fired with streams=0, getting stream from PC receivers');
-        if (_pc != null) {
-          final receivers = await _pc!.getReceivers();
-          for (final r in receivers) {
-            if (r.track?.kind == 'video' && r.track?.id == event.track.id) {
-              // Found the receiver — but it doesn't have a stream either.
-              // Fall back to creating a MediaStream.
-              break;
-            }
-          }
-        }
-        _remoteStream = await createLocalMediaStream(
-          'remote-video-${event.track.id}',
-        );
-        _remoteStream!.addTrack(event.track);
-        _log('[HOLLOW-VOICE] Created synthetic stream for video track');
+        _log('[HOLLOW-VOICE] onTrack fired with streams=0, creating '
+            'synthetic stream');
+        newStream =
+            await createLocalMediaStream('remote-video-${event.track.id}');
+        await newStream.addTrack(event.track);
+        newIsSynthetic = true;
       }
 
-      // Initialize renderer — dispose old one first to force RTCVideoView rebuild.
-      if (_remoteRenderer != null) {
-        _remoteRenderer!.srcObject = null;
-        await _remoteRenderer!.dispose();
-        _remoteRenderer = null;
-      }
-
-      _remoteRenderer = RTCVideoRenderer();
-      await _remoteRenderer!.initialize();
-      _remoteRenderer!.srcObject = _remoteStream;
+      // Build the new renderer.
+      final newRenderer = RTCVideoRenderer();
+      await newRenderer.initialize();
+      newRenderer.srcObject = newStream;
       _log('[HOLLOW-VOICE] Remote video renderer initialized, '
-          'track=${event.track.id}, stream=${_remoteStream?.id}');
+          'track=${event.track.id}, stream=${newStream.id}');
 
-      // Notify UI — slight delay to ensure renderer is ready for RTCVideoView.
+      // Commit the new state BEFORE attempting to dispose the old, so even
+      // if the dispose throws we still have a working renderer.
+      _remoteRenderer = newRenderer;
+      _remoteStream = newStream;
+      _remoteStreamIsSynthetic = newIsSynthetic;
+
+      // Best-effort dispose of the old renderer/stream. Wrapped in try/catch
+      // because libwebrtc may have already cleaned up the underlying
+      // MediaStream during renegotiation.
+      if (oldRenderer != null) {
+        try {
+          oldRenderer.srcObject = null;
+          await oldRenderer.dispose();
+        } catch (e) {
+          _log('[HOLLOW-VOICE] Old renderer dispose failed (non-fatal): $e');
+        }
+      }
+      // Only dispose streams we actually own. Streams from onTrack events
+      // are owned by libwebrtc and disposing them throws "not found".
+      if (oldStream != null && oldWasSynthetic) {
+        try {
+          await oldStream.dispose();
+        } catch (e) {
+          _log('[HOLLOW-VOICE] Old synthetic stream dispose failed '
+              '(non-fatal): $e');
+        }
+      }
+
+      // Slight delay to ensure renderer is ready for RTCVideoView, then
+      // notify the UI.
       await Future.delayed(const Duration(milliseconds: 100));
       onRemoteVideoTrack?.call(peerId);
     } catch (e) {
       _log('[HOLLOW-VOICE] ERROR handling remote video track: $e');
-      // Clean up partially-created resources.
-      if (_remoteRenderer != null) {
-        _remoteRenderer!.srcObject = null;
-        await _remoteRenderer!.dispose();
-        _remoteRenderer = null;
-      }
-      if (_remoteStream != null) {
-        await _remoteStream!.dispose();
-      }
-      _remoteStream = null;
+      // Don't trash existing state on error — the previous renderer may
+      // still be usable. Just log and bail.
     }
   }
 

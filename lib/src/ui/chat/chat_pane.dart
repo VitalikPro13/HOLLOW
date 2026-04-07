@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
+import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
@@ -242,6 +243,120 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     }
   }
 
+  /// Count active video sources for the screen-share-view source switcher
+  /// pill. Mirrors `_InlineCallPanelState._countActiveDmSources`.
+  int _countActiveDmSources(CallState call) {
+    int count = 0;
+    if (call.isVideoEnabled) count++;
+    if (call.remoteVideoEnabled) count++;
+    if (call.isScreenSharing) count++;
+    if (call.remoteScreenSharing) count++;
+    return count;
+  }
+
+  /// Build the source-switcher pill for the full-bleed screen-share view.
+  /// Source switcher pill for the full-bleed screen share view. Shows one
+  /// tab per active source (camera or screen, local or remote). ALL tabs
+  /// are clickable — tapping a tab sets [focusedDmSourceProvider] to that
+  /// (peerId, type) pair, and the screen-share view's big tile updates to
+  /// show that source. Modeled after voice_channel_pane's _buildSharerSwitcher.
+  Widget _buildScreenShareSourcePill(
+    HollowTheme hollow,
+    CallState call,
+    String localPeerId,
+    String remotePeerId,
+  ) {
+    final profiles = ref.watch(profileProvider);
+    final focused = ref.watch(focusedDmSourceProvider);
+
+    final sources = <({String peerId, String type})>[];
+    // Screens first, then cameras — matches voice channel pill order.
+    if (call.isScreenSharing) {
+      sources.add((peerId: localPeerId, type: 'screen'));
+    }
+    if (call.remoteScreenSharing) {
+      sources.add((peerId: remotePeerId, type: 'screen'));
+    }
+    if (call.isVideoEnabled) {
+      sources.add((peerId: localPeerId, type: 'camera'));
+    }
+    if (call.remoteVideoEnabled) {
+      sources.add((peerId: remotePeerId, type: 'camera'));
+    }
+
+    return MouseRegion(
+      onEnter: (_) => _pinOverlays(),
+      onExit: (_) => _resetOverlayTimer(),
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm,
+          vertical: HollowSpacing.xs,
+        ),
+        decoration: BoxDecoration(
+          color: hollow.surface.withValues(alpha: 0.9),
+          borderRadius: BorderRadius.circular(HollowRadius.pill),
+          border: Border.all(color: hollow.border.withValues(alpha: 0.5)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: sources.map((source) {
+            final name = displayNameFor(profiles, source.peerId);
+            final profile = profiles[source.peerId];
+            final isScreen = source.type == 'screen';
+            final isFocused = focused.peerId == source.peerId &&
+                focused.type == source.type;
+
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
+              child: HollowPressable(
+                onTap: () {
+                  ref.read(focusedDmSourceProvider.notifier).state =
+                      DmFocusedSource(
+                          peerId: source.peerId, type: source.type);
+                },
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                backgroundColor:
+                    isFocused ? hollow.accentMuted : Colors.transparent,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.sm,
+                  vertical: HollowSpacing.xs,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      isScreen ? LucideIcons.monitor : LucideIcons.video,
+                      size: 12,
+                      color: isFocused ? hollow.accent : hollow.textSecondary,
+                    ),
+                    const SizedBox(width: HollowSpacing.xs),
+                    HollowAvatar(
+                      peerId: source.peerId,
+                      size: 18,
+                      imageBytes: profile?.avatarBytes,
+                    ),
+                    const SizedBox(width: HollowSpacing.xs),
+                    Text(
+                      source.peerId == localPeerId ? 'You' : name,
+                      style: HollowTypography.caption.copyWith(
+                        color: isFocused
+                            ? hollow.textPrimary
+                            : hollow.textSecondary,
+                        fontWeight:
+                            isFocused ? FontWeight.w600 : FontWeight.w400,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _overlayHideTimer?.cancel();
@@ -336,6 +451,34 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       _stagedFilePath = path;
       _stagedFileName = name;
       _stagedFileIsImage = true;
+    });
+    _focusNode.requestFocus();
+  }
+
+  /// Stages a file dropped from the OS via desktop_drop.
+  /// Enforces the same 34 MB DM cap as [_pickAndStageFile].
+  void _handleDroppedFile(String path, String name, int sizeBytes) {
+    if (!mounted) return;
+
+    // Enforce 34 MB limit for DMs.
+    const maxDmBytes = 34 * 1024 * 1024;
+    if (sizeBytes > maxDmBytes) {
+      final fileMb = (sizeBytes / (1024 * 1024)).toStringAsFixed(1);
+      HollowToast.show(
+        context,
+        'File too large (${fileMb}MB). DM limit is 34 MB.',
+        type: HollowToastType.error,
+        duration: const Duration(seconds: 4),
+      );
+      return;
+    }
+
+    final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
+    setState(() {
+      _stagedFilePath = path;
+      _stagedFileName = name;
+      _stagedFileIsImage =
+          ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].contains(ext);
     });
     _focusNode.requestFocus();
   }
@@ -497,7 +640,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
         // Chat area
         Expanded(
-          child: Column(
+          child: ChatDropZone(
+            onFileDropped: _handleDroppedFile,
+            child: Column(
       children: [
         // Peer ID header
         Container(
@@ -697,6 +842,33 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                     child: _ScreenShareFullView(peerId: widget.peerId),
                   ),
 
+                  // Layer 0.5: source switcher pill (top-center)
+                  // Shows only when at least one screen share is active AND
+                  // there are 2+ sources to switch between. Camera-only DMs
+                  // don't need a switcher (cameras live side-by-side).
+                  if ((call.isScreenSharing || call.remoteScreenSharing) &&
+                      _countActiveDmSources(call) >= 2)
+                    Positioned(
+                      top: HollowSpacing.md,
+                      left: 0,
+                      right: 0,
+                      child: AnimatedOpacity(
+                        opacity: _overlaysVisible ? 1.0 : 0.0,
+                        duration: HollowDurations.normal,
+                        child: IgnorePointer(
+                          ignoring: !_overlaysVisible,
+                          child: Center(
+                            child: _buildScreenShareSourcePill(
+                              hollow,
+                              call,
+                              ref.read(identityProvider).peerId ?? '',
+                              widget.peerId,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+
                   // Layer 1: chat overlay (right side) + toggle button
                   Positioned(
                     right: 0,
@@ -803,6 +975,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         ],
       ],
           ), // Column
+          ), // ChatDropZone
         ), // Expanded (chat area)
       ],
     ); // Row
@@ -1420,6 +1593,146 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   static const _maxVideoHeight = 500.0;
   String? _expandedRenderer; // null = side-by-side, 'local' or 'remote' = fullscreen
 
+  /// Count active video sources in a DM call. Used to decide whether to
+  /// show the source-switcher pill (only shown when >= 2 sources exist).
+  int _countActiveDmSources(CallState call) {
+    int count = 0;
+    if (call.isVideoEnabled) count++;
+    if (call.remoteVideoEnabled) count++;
+    if (call.isScreenSharing) count++;
+    if (call.remoteScreenSharing) count++;
+    return count;
+  }
+
+  /// Build the ordered list of active sources for the switcher pill.
+  /// Order: screens first, then cameras (matches voice channel pill).
+  List<({String peerId, String type})> _buildDmSources(
+    CallState call,
+    String localPeerId,
+    String remotePeerId,
+  ) {
+    final sources = <({String peerId, String type})>[];
+    if (call.isScreenSharing) {
+      sources.add((peerId: localPeerId, type: 'screen'));
+    }
+    if (call.remoteScreenSharing) {
+      sources.add((peerId: remotePeerId, type: 'screen'));
+    }
+    if (call.isVideoEnabled) {
+      sources.add((peerId: localPeerId, type: 'camera'));
+    }
+    if (call.remoteVideoEnabled) {
+      sources.add((peerId: remotePeerId, type: 'camera'));
+    }
+    return sources;
+  }
+
+  /// Handle a tap on a source switcher tab. For cameras, this sets
+  /// _expandedRenderer to show the camera fullscreen with the other
+  /// side as PiP. For screens, this is a no-op in the inline panel
+  /// (the full-bleed screen share view takes over automatically via
+  /// isScreenShareActive).
+  void _onDmSourceTapped(String peerId, String type, String localPeerId) {
+    if (type != 'camera') return;
+    setState(() {
+      _expandedRenderer = peerId == localPeerId ? 'local' : 'remote';
+    });
+  }
+
+  /// Build the source switcher pill for DM calls. Shows one tab per
+  /// active video source (camera or screen) with highlighting on the
+  /// currently focused one. Visual design mirrors the voice channel
+  /// pill in voice_channel_pane.dart `_buildSharerSwitcher`.
+  Widget _buildDmSourceSwitcher(
+    HollowTheme hollow,
+    CallState call,
+    String localPeerId,
+    String remotePeerId,
+  ) {
+    final profiles = ref.watch(profileProvider);
+    final sources = _buildDmSources(call, localPeerId, remotePeerId);
+
+    // Derive the "focused" source for highlight purposes. For cameras,
+    // _expandedRenderer drives it. For screens, the pill is not
+    // interactive in the inline panel, so nothing is highlighted.
+    String? focusedPeerId;
+    String? focusedType;
+    if (_expandedRenderer == 'local') {
+      focusedPeerId = localPeerId;
+      focusedType = 'camera';
+    } else if (_expandedRenderer == 'remote') {
+      focusedPeerId = remotePeerId;
+      focusedType = 'camera';
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.sm,
+        vertical: HollowSpacing.xs,
+      ),
+      decoration: BoxDecoration(
+        color: hollow.surface.withValues(alpha: 0.9),
+        borderRadius: BorderRadius.circular(HollowRadius.pill),
+        border: Border.all(color: hollow.border.withValues(alpha: 0.5)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: sources.map((source) {
+          final isFocused =
+              source.peerId == focusedPeerId && source.type == focusedType;
+          final name = displayNameFor(profiles, source.peerId);
+          final profile = profiles[source.peerId];
+
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
+            child: HollowPressable(
+              onTap: () =>
+                  _onDmSourceTapped(source.peerId, source.type, localPeerId),
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              backgroundColor:
+                  isFocused ? hollow.accentMuted : Colors.transparent,
+              padding: const EdgeInsets.symmetric(
+                horizontal: HollowSpacing.sm,
+                vertical: HollowSpacing.xs,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    source.type == 'screen'
+                        ? LucideIcons.monitor
+                        : LucideIcons.video,
+                    size: 12,
+                    color:
+                        isFocused ? hollow.accent : hollow.textSecondary,
+                  ),
+                  const SizedBox(width: HollowSpacing.xs),
+                  HollowAvatar(
+                    peerId: source.peerId,
+                    size: 18,
+                    imageBytes: profile?.avatarBytes,
+                  ),
+                  const SizedBox(width: HollowSpacing.xs),
+                  Text(
+                    source.peerId == localPeerId ? 'You' : name,
+                    style: HollowTypography.caption.copyWith(
+                      color: isFocused
+                          ? hollow.textPrimary
+                          : hollow.textSecondary,
+                      fontWeight:
+                          isFocused ? FontWeight.w600 : FontWeight.w400,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _durationTimer?.cancel();
@@ -1507,15 +1820,35 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
             else
               SizedBox(
                 height: _videoHeight,
-                child: _expandedRenderer != null
-                    ? _buildFullscreenVideo(
-                        hollow, displayName, remoteAvatar, localAvatar,
-                        remoteRenderer, localRenderer,
-                        hasRemoteVideo, hasLocalVideo)
-                    : _buildSideBySideVideo(
-                        hollow, displayName, remoteAvatar, localAvatar,
-                        remoteRenderer, localRenderer,
-                        hasRemoteVideo, hasLocalVideo),
+                child: Stack(
+                  children: [
+                    Positioned.fill(
+                      child: _expandedRenderer != null
+                          ? _buildFullscreenVideo(
+                              hollow, displayName, remoteAvatar, localAvatar,
+                              remoteRenderer, localRenderer,
+                              hasRemoteVideo, hasLocalVideo)
+                          : _buildSideBySideVideo(
+                              hollow, displayName, remoteAvatar, localAvatar,
+                              remoteRenderer, localRenderer,
+                              hasRemoteVideo, hasLocalVideo),
+                    ),
+                    // Source switcher pill (top-center) — only when at
+                    // least one screen share is active AND there are 2+
+                    // sources. Camera-only DMs don't need a switcher.
+                    if ((call.isScreenSharing || call.remoteScreenSharing) &&
+                        _countActiveDmSources(call) >= 2)
+                      Positioned(
+                        top: HollowSpacing.sm,
+                        left: 0,
+                        right: 0,
+                        child: Center(
+                          child: _buildDmSourceSwitcher(
+                            hollow, call, localPeerId, widget.peerId),
+                        ),
+                      ),
+                  ],
+                ),
               ),
             // Resize handle for video (not needed during screen share — it fills Expanded)
             if (!isScreenShare)
@@ -2218,150 +2551,247 @@ class _ScreenShareFullView extends ConsumerWidget {
   final String peerId;
   const _ScreenShareFullView({required this.peerId});
 
+  /// Mirror semantics for a renderer: cameras are mirrored when local,
+  /// screens are never mirrored.
+  Widget _renderTile(RTCVideoRenderer? renderer,
+      {required bool isCamera, required bool isLocal}) {
+    if (renderer == null) return const SizedBox.shrink();
+    return RepaintBoundary(
+      child: RTCVideoView(
+        renderer,
+        mirror: isCamera && isLocal,
+        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final call = ref.watch(callProvider);
     final hollow = HollowTheme.of(context);
-    final remoteRenderer = ref.read(callProvider.notifier).screenShareRenderer;
+    final notifier = ref.read(callProvider.notifier);
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final voice = notifier.voiceService;
+    final remoteScreen = notifier.screenShareRenderer;
+    final localScreen = notifier.localScreenShareRenderer;
+    final remoteCamera = voice?.remoteRenderer;
+    final localCamera = voice?.localRenderer;
     final bothSharing = call.isScreenSharing && call.remoteScreenSharing;
 
+    // Resolve the focused source. Falls back to a sensible default if the
+    // focused source isn't currently active.
+    final focused = ref.watch(focusedDmSourceProvider);
+    final ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal})
+        bigChoice = _resolveBig(
+      focused: focused,
+      call: call,
+      localPeerId: localPeerId,
+      remotePeerId: peerId,
+      remoteScreen: remoteScreen,
+      localScreen: localScreen,
+      remoteCamera: remoteCamera,
+      localCamera: localCamera,
+    );
+
+    // (Auto-focus-on-build was reverted — caused issues during the
+    // screen-share toggling dance. The pill simply won't highlight any tab
+    // until the user explicitly taps one. The big tile still uses
+    // _resolveBig's fallback so it shows the right thing.)
+
     if (bothSharing) {
-      // Both sharing — remote screen fills area, banner at top.
+      // PiP shows the OTHER screen (the one that isn't the big tile).
+      final isLocalBig = bigChoice.isLocal && !bigChoice.isCamera;
+      final pipRenderer = isLocalBig ? remoteScreen : localScreen;
+      final pipOwnerLabel = isLocalBig ? 'Them' : 'You';
+      final pipIsLocal = !isLocalBig;
+
+      return Stack(
+        children: [
+          // Big tile — focused source (could be a camera or a screen).
+          Positioned.fill(
+            child: Container(
+              color: Colors.black,
+              child: _renderTile(
+                bigChoice.renderer,
+                isCamera: bigChoice.isCamera,
+                isLocal: bigChoice.isLocal,
+              ),
+            ),
+          ),
+          // PiP tile — the other screen. Tap to swap focus.
+          Positioned(
+            right: HollowSpacing.md,
+            bottom: HollowSpacing.md,
+            child: GestureDetector(
+              onTap: () {
+                ref.read(focusedDmSourceProvider.notifier).state =
+                    DmFocusedSource(
+                  peerId: pipIsLocal ? localPeerId : peerId,
+                  type: 'screen',
+                );
+              },
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(HollowRadius.md),
+                child: Container(
+                  width: 220,
+                  height: 132,
+                  decoration: BoxDecoration(
+                    color: Colors.black,
+                    border: Border.all(
+                      color: hollow.border.withValues(alpha: 0.6),
+                      width: 1,
+                    ),
+                  ),
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: _renderTile(
+                          pipRenderer,
+                          isCamera: false,
+                          isLocal: pipIsLocal,
+                        ),
+                      ),
+                      // Small label so the user knows which screen this is.
+                      Positioned(
+                        left: HollowSpacing.xs,
+                        bottom: HollowSpacing.xs,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: HollowSpacing.xs,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.55),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            pipOwnerLabel,
+                            style: HollowTypography.caption.copyWith(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // Small "Stop sharing" affordance, top-right.
+          Positioned(
+            top: HollowSpacing.md,
+            right: HollowSpacing.md,
+            child: HollowButton.danger(
+              onPressed: () => notifier.stopScreenShare(),
+              compact: true,
+              icon: const Icon(LucideIcons.monitorOff, size: 14),
+              child: const Text('Stop sharing'),
+            ),
+          ),
+        ],
+      );
+    } else {
+      // Only one peer is sharing a screen (or only cameras are present
+      // because we got opened in this view from a camera focus tap).
+      // Show whatever the focus resolved to in the big tile.
       return Stack(
         children: [
           Positioned.fill(
             child: Container(
               color: Colors.black,
-              child: remoteRenderer != null
-                  ? RepaintBoundary(
-                      child: RTCVideoView(
-                        remoteRenderer,
-                        mirror: false,
-                        objectFit: RTCVideoViewObjectFit
-                            .RTCVideoViewObjectFitContain,
-                      ),
+              child: bigChoice.renderer != null
+                  ? _renderTile(
+                      bigChoice.renderer,
+                      isCamera: bigChoice.isCamera,
+                      isLocal: bigChoice.isLocal,
                     )
-                  : const SizedBox.shrink(),
+                  : Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            LucideIcons.monitor,
+                            size: 48,
+                            color: hollow.textSecondary.withValues(alpha: 0.3),
+                          ),
+                          const SizedBox(height: HollowSpacing.md),
+                          Text(
+                            call.isScreenSharing
+                                ? 'You are sharing your screen'
+                                : 'Waiting for screen share...',
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.textSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
             ),
           ),
-          Positioned(
-            top: HollowSpacing.md,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.lg,
-                  vertical: HollowSpacing.sm,
-                ),
-                decoration: BoxDecoration(
-                  color: hollow.surface.withValues(alpha: 0.9),
-                  borderRadius: BorderRadius.circular(HollowRadius.pill),
-                  border: Border.all(
-                    color: hollow.border.withValues(alpha: 0.5),
-                  ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(LucideIcons.monitor,
-                        size: 16,
-                        color: hollow.accent.withValues(alpha: 0.6)),
-                    const SizedBox(width: HollowSpacing.sm),
-                    Text(
-                      'You are also sharing',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(width: HollowSpacing.md),
-                    HollowButton.danger(
-                      onPressed: () =>
-                          ref.read(callProvider.notifier).stopScreenShare(),
-                      compact: true,
-                      child: const Text('Stop'),
-                    ),
-                  ],
-                ),
+          if (call.isScreenSharing)
+            Positioned(
+              top: HollowSpacing.md,
+              right: HollowSpacing.md,
+              child: HollowButton.danger(
+                onPressed: () => notifier.stopScreenShare(),
+                compact: true,
+                icon: const Icon(LucideIcons.monitorOff, size: 14),
+                child: const Text('Stop sharing'),
               ),
             ),
-          ),
         ],
       );
-    } else if (call.isScreenSharing) {
-      // Only local sharing — centered banner.
-      return Container(
-        color: Colors.black,
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                LucideIcons.monitor,
-                size: 56,
-                color: hollow.accent.withValues(alpha: 0.5),
-              ),
-              const SizedBox(height: HollowSpacing.lg),
-              Text(
-                'You are sharing your screen',
-                style: HollowTypography.heading.copyWith(
-                  color: hollow.textPrimary,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 18,
-                ),
-              ),
-              const SizedBox(height: HollowSpacing.sm),
-              Text(
-                'Others can see your screen',
-                style: HollowTypography.body.copyWith(
-                  color: hollow.textSecondary,
-                ),
-              ),
-              const SizedBox(height: HollowSpacing.lg),
-              HollowButton.danger(
-                onPressed: () =>
-                    ref.read(callProvider.notifier).stopScreenShare(),
-                child: const Text('Stop Sharing'),
-              ),
-            ],
-          ),
-        ),
-      );
-    } else {
-      // Only remote sharing — their screen fills area.
-      return Container(
-        color: Colors.black,
-        child: remoteRenderer != null
-            ? RepaintBoundary(
-                child: RTCVideoView(
-                  remoteRenderer,
-                  mirror: false,
-                  objectFit:
-                      RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                ),
-              )
-            : Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      LucideIcons.monitor,
-                      size: 48,
-                      color: hollow.textSecondary.withValues(alpha: 0.3),
-                    ),
-                    const SizedBox(height: HollowSpacing.md),
-                    Text(
-                      'Waiting for screen share...',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-      );
     }
+  }
+
+  /// Resolve which renderer to show in the big tile based on the focus state
+  /// and what's actually active. Falls back to a sensible default if the
+  /// focused source isn't currently sharing.
+  ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal}) _resolveBig({
+    required DmFocusedSource focused,
+    required CallState call,
+    required String localPeerId,
+    required String remotePeerId,
+    required RTCVideoRenderer? remoteScreen,
+    required RTCVideoRenderer? localScreen,
+    required RTCVideoRenderer? remoteCamera,
+    required RTCVideoRenderer? localCamera,
+  }) {
+    // Try focused source first.
+    if (focused.peerId != null && focused.type != null) {
+      final isLocal = focused.peerId == localPeerId;
+      if (focused.type == 'screen') {
+        final r = isLocal ? localScreen : remoteScreen;
+        final active = isLocal ? call.isScreenSharing : call.remoteScreenSharing;
+        if (active && r != null) {
+          return (renderer: r, isCamera: false, isLocal: isLocal);
+        }
+      } else if (focused.type == 'camera') {
+        final r = isLocal ? localCamera : remoteCamera;
+        final active = isLocal ? call.isVideoEnabled : call.remoteVideoEnabled;
+        if (active && r != null) {
+          return (renderer: r, isCamera: true, isLocal: isLocal);
+        }
+      }
+    }
+
+    // Fallback priority: remote screen → local screen → remote camera → local camera.
+    if (call.remoteScreenSharing && remoteScreen != null) {
+      return (renderer: remoteScreen, isCamera: false, isLocal: false);
+    }
+    if (call.isScreenSharing && localScreen != null) {
+      return (renderer: localScreen, isCamera: false, isLocal: true);
+    }
+    if (call.remoteVideoEnabled && remoteCamera != null) {
+      return (renderer: remoteCamera, isCamera: true, isLocal: false);
+    }
+    if (call.isVideoEnabled && localCamera != null) {
+      return (renderer: localCamera, isCamera: true, isLocal: true);
+    }
+    return (renderer: null, isCamera: false, isLocal: false);
   }
 }
 

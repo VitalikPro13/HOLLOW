@@ -46,6 +46,7 @@ dependencies:
   win32audio: ^1.5.0
   audioplayers: ^6.6.0
   super_clipboard: ^0.9.1
+  desktop_drop: ^0.7.0
 
 dev_dependencies:
   flutter_test:

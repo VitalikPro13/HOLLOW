@@ -25,6 +25,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
+import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
@@ -443,6 +444,44 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     _focusNode.requestFocus();
   }
 
+  /// Stages a file dropped from the OS via desktop_drop.
+  /// Enforces the same per-server file size limit as [_pickAndStageFile].
+  Future<void> _handleDroppedFile(String path, String name, int sizeBytes) async {
+    if (!mounted) return;
+
+    // Check file size against server limit (matches _pickAndStageFile logic).
+    try {
+      final maxMbStr = await crdt_api.getServerSetting(
+        serverId: widget.serverId,
+        key: 'max_file_size_mb',
+      );
+      final maxMb = int.tryParse(maxMbStr) ?? 34;
+      final maxBytes = maxMb * 1024 * 1024;
+      if (sizeBytes > maxBytes) {
+        if (mounted) {
+          final fileMb = (sizeBytes / (1024 * 1024)).toStringAsFixed(1);
+          HollowToast.show(
+            context,
+            'File too large (${fileMb}MB). Server limit is ${maxMb}MB.',
+            type: HollowToastType.error,
+            duration: const Duration(seconds: 4),
+          );
+        }
+        return;
+      }
+    } catch (_) {}
+
+    if (!mounted) return;
+    final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
+    setState(() {
+      _stagedFilePath = path;
+      _stagedFileName = name;
+      _stagedFileIsImage =
+          ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].contains(ext);
+    });
+    _focusNode.requestFocus();
+  }
+
   Future<void> _pickAndStageFile() async {
     if (_isPicking) return;
     _isPicking = true;
@@ -744,7 +783,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
     final typingPeers = ref.watch(typingProvider)[_stateKey] ?? {};
 
-    return Column(
+    return ChatDropZone(
+      onFileDropped: _handleDroppedFile,
+      child: Column(
       children: [
         // Channel header
         Container(
@@ -1505,6 +1546,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           ),
         ),
       ],
+      ),
     );
   }
 }
