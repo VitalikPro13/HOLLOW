@@ -1642,6 +1642,7 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
     - **`Material` ancestor required in `showHollowDialog` overlays for `Text` widgets.** Otherwise text renders with the yellow debug double-underline. Wrap dialog content in `Material(type: MaterialType.transparency)`.
     - **`ffmpeg-next` Rust crate is brutal on Windows.** vcpkg ffmpeg port is famously broken. Bundled binary + `Process.run` is the right call for desktop. Mobile (when we get there) will need a different path — `video_thumbnail` Dart package for Android/iOS via native AVAssetImageGenerator/MediaMetadataRetriever, since iOS/Android sandboxes block executing arbitrary binaries.
 - [X] Link previews (URL metadata fetch + embed card rendering)
+- [X] Image quality tiers (user-configurable WebP Q: Lossless / Balanced 50% default / Small 30%, ~95% bandwidth + storage savings)
 - [ ] Discord import system (full implementation — parse GDPR export ZIP, map servers/channels/roles/messages, placeholder identities, member claiming) == reflect to the discord_migration_plan.md
 - [ ] Data export system (messages, files, identity — verifiable with Ed25519 signatures)
 - [ ] Server template export/import (share server structures)

@@ -3,6 +3,58 @@
 use image::imageops::FilterType;
 use image::ImageFormat;
 
+/// User-configurable image quality tier for the outgoing image pipeline.
+///
+/// Applied to every user-uploaded image that goes through the file-send
+/// path in `swarm.rs`. Does NOT affect link preview thumbnails (those
+/// always use `convert_to_webp_preview` at Q=50 / 400px, because the
+/// user didn't opt into those image uploads and can't meaningfully
+/// override their fidelity).
+///
+/// Phase 6.75 image quality tiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebpQuality {
+    /// Lossless WebP via the `image` crate. ~20-40% smaller than PNG.
+    /// For users who share pixel art, screenshots with tiny text, or
+    /// diagrams where artifacts would matter.
+    Lossless,
+    /// Lossy WebP at Q=50. ~95-98% smaller than PNG on photographic
+    /// content, visually indistinguishable at render sizes. Default for
+    /// new installs.
+    Balanced,
+    /// Lossy WebP at Q=30. More aggressive than Balanced — noticeable
+    /// on gradients but still fine for casual photos. Use for very
+    /// low-bandwidth or quota-constrained situations.
+    Small,
+}
+
+impl WebpQuality {
+    /// Parse from the string stored in `app_settings`. Falls back to
+    /// Balanced for any unknown or missing value.
+    pub fn from_setting(s: &str) -> Self {
+        match s {
+            "lossless" => Self::Lossless,
+            "small" => Self::Small,
+            _ => Self::Balanced,
+        }
+    }
+
+    /// Serialize for `app_settings` storage.
+    pub fn as_setting(&self) -> &'static str {
+        match self {
+            Self::Lossless => "lossless",
+            Self::Balanced => "balanced",
+            Self::Small => "small",
+        }
+    }
+}
+
+impl Default for WebpQuality {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
 /// Extensions that should be converted to WebP on send.
 /// GIFs are excluded to preserve animation frames.
 pub fn should_convert_to_webp(ext: &str) -> bool {
@@ -28,6 +80,43 @@ pub fn convert_to_webp_lossless(data: &[u8]) -> Result<(Vec<u8>, u32, u32), Stri
         .map_err(|e| format!("Failed to encode WebP: {e}"))?;
 
     Ok((buf, width, height))
+}
+
+/// Convert image bytes to WebP at the quality tier chosen by the user.
+/// Preserves dimensions (no resize). This is the main entry point for
+/// the user-configurable image send pipeline — callers should always
+/// use this rather than calling the lossless/preview functions directly.
+///
+/// For `Lossless`, delegates to `convert_to_webp_lossless`.
+/// For `Balanced` / `Small`, uses the `webp` crate at Q=50 / Q=30.
+///
+/// Returns `(webp_bytes, width, height)`. Phase 6.75.
+pub fn convert_to_webp_with_quality(
+    data: &[u8],
+    quality: WebpQuality,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    if quality == WebpQuality::Lossless {
+        return convert_to_webp_lossless(data);
+    }
+
+    let img = image::load_from_memory(data)
+        .map_err(|e| format!("Failed to decode image: {e}"))?;
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return Err("Image has zero dimensions".into());
+    }
+
+    let q_value: f32 = match quality {
+        WebpQuality::Balanced => 50.0,
+        WebpQuality::Small => 30.0,
+        WebpQuality::Lossless => unreachable!(), // handled above
+    };
+
+    let rgba = img.to_rgba8();
+    let (ew, eh) = (rgba.width(), rgba.height());
+    let encoder = webp::Encoder::from_rgba(rgba.as_raw(), ew, eh);
+    let webp_mem = encoder.encode(q_value);
+    Ok((webp_mem.to_vec(), ew, eh))
 }
 
 /// Get image dimensions without converting.
@@ -111,6 +200,90 @@ mod tests {
         let result = convert_to_webp_preview(b"not an image", 400);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn webp_quality_setting_roundtrip() {
+        assert_eq!(WebpQuality::from_setting("lossless"), WebpQuality::Lossless);
+        assert_eq!(WebpQuality::from_setting("balanced"), WebpQuality::Balanced);
+        assert_eq!(WebpQuality::from_setting("small"), WebpQuality::Small);
+        // Unknown / missing → Balanced (default).
+        assert_eq!(WebpQuality::from_setting(""), WebpQuality::Balanced);
+        assert_eq!(WebpQuality::from_setting("garbage"), WebpQuality::Balanced);
+        // Serialization round-trip.
+        for q in [WebpQuality::Lossless, WebpQuality::Balanced, WebpQuality::Small] {
+            assert_eq!(WebpQuality::from_setting(q.as_setting()), q);
+        }
+    }
+
+    #[test]
+    fn webp_quality_default_is_balanced() {
+        assert_eq!(WebpQuality::default(), WebpQuality::Balanced);
+    }
+
+    #[test]
+    fn convert_with_quality_lossless_preserves_dimensions() {
+        let png = make_test_png(200, 100);
+        let (webp_bytes, w, h) =
+            convert_to_webp_with_quality(&png, WebpQuality::Lossless).expect("encode");
+        assert_eq!(w, 200);
+        assert_eq!(h, 100);
+        let decoded = image::load_from_memory(&webp_bytes).expect("decode webp");
+        assert_eq!(decoded.width(), 200);
+        assert_eq!(decoded.height(), 100);
+    }
+
+    #[test]
+    fn convert_with_quality_balanced_preserves_dimensions() {
+        let png = make_test_png(200, 100);
+        let (webp_bytes, w, h) =
+            convert_to_webp_with_quality(&png, WebpQuality::Balanced).expect("encode");
+        assert_eq!(w, 200);
+        assert_eq!(h, 100);
+        let decoded = image::load_from_memory(&webp_bytes).expect("decode webp");
+        assert_eq!(decoded.width(), 200);
+        assert_eq!(decoded.height(), 100);
+    }
+
+    #[test]
+    fn convert_with_quality_small_preserves_dimensions() {
+        let png = make_test_png(400, 300);
+        let (webp_bytes, w, h) =
+            convert_to_webp_with_quality(&png, WebpQuality::Small).expect("encode");
+        assert_eq!(w, 400);
+        assert_eq!(h, 300);
+        let decoded = image::load_from_memory(&webp_bytes).expect("decode webp");
+        assert_eq!(decoded.width(), 400);
+        assert_eq!(decoded.height(), 300);
+    }
+
+    #[test]
+    fn small_tier_encodes_smaller_than_balanced() {
+        // Solid colors compress trivially at any quality — use a larger
+        // image with varied content to make the quality difference visible.
+        // Checkerboard pattern: two interleaved colors.
+        let mut buf = image::RgbaImage::new(256, 256);
+        for (x, y, pixel) in buf.enumerate_pixels_mut() {
+            let v = ((x ^ y) & 0xff) as u8;
+            *pixel = image::Rgba([v, v.wrapping_mul(3), v.wrapping_add(128), 255]);
+        }
+        let mut png = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut png);
+        buf.write_to(&mut cursor, image::ImageFormat::Png)
+            .expect("encode png");
+
+        let (balanced, _, _) =
+            convert_to_webp_with_quality(&png, WebpQuality::Balanced).expect("balanced");
+        let (small, _, _) =
+            convert_to_webp_with_quality(&png, WebpQuality::Small).expect("small");
+        // Q=30 should produce a smaller (or equal) file than Q=50.
+        assert!(
+            small.len() <= balanced.len(),
+            "Q=30 ({} bytes) should be <= Q=50 ({} bytes)",
+            small.len(),
+            balanced.len()
+        );
+    }
+
 }
 
 /// Convert a WebP file to another format (for "Save As").

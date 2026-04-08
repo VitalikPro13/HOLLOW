@@ -869,6 +869,13 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
 
           const SizedBox(height: HollowSpacing.xl),
 
+          // ── Media ──
+          _SectionLabel(label: 'MEDIA'),
+          const SizedBox(height: HollowSpacing.sm),
+          const _ImageQualitySelector(),
+
+          const SizedBox(height: HollowSpacing.xl),
+
           // ── Voice & Video ──
           _SectionLabel(label: 'VOICE & VIDEO'),
           const SizedBox(height: HollowSpacing.sm),
@@ -1559,6 +1566,96 @@ class _SectionLabel extends StatelessWidget {
           letterSpacing: 0.5,
           fontSize: 10,
         ),
+    );
+  }
+}
+
+/// Image quality tier selector — a row of three pill chips matching the
+/// screen share dialog's resolution/FPS selector style. Phase 6.75.
+class _ImageQualitySelector extends ConsumerWidget {
+  const _ImageQualitySelector();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final currentAsync = ref.watch(imageQualityProvider);
+    final current = currentAsync.valueOrNull ?? ImageQuality.balanced;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          'Image Quality',
+          style: HollowTypography.body.copyWith(
+            color: hollow.textPrimary,
+            fontWeight: FontWeight.w500,
+            fontSize: 13,
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+        Text(
+          current.description,
+          style: HollowTypography.caption.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 11,
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        Row(
+          children: ImageQuality.values
+              .map((q) => _buildPill(hollow, q.label, q == current, () {
+                    ref.read(imageQualityProvider.notifier).setQuality(q);
+                  }))
+              .toList(),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        Text(
+          'All images are converted to WebP to save bandwidth and storage. '
+          'Receivers can still save them as PNG, JPG, etc.',
+          style: HollowTypography.caption.copyWith(
+            color: hollow.textSecondary.withValues(alpha: 0.7),
+            fontSize: 10,
+            height: 1.4,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPill(
+      HollowTheme hollow, String label, bool active, VoidCallback onTap) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 4),
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.md,
+            vertical: HollowSpacing.xs + 2,
+          ),
+          decoration: BoxDecoration(
+            color: active
+                ? hollow.accent.withValues(alpha: 0.15)
+                : hollow.surface,
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            border: Border.all(
+              color: active
+                  ? hollow.accent.withValues(alpha: 0.4)
+                  : hollow.border,
+            ),
+          ),
+          child: Text(
+            label,
+            style: HollowTypography.caption.copyWith(
+              color: active ? hollow.accent : hollow.textSecondary,
+              fontSize: 11,
+              fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

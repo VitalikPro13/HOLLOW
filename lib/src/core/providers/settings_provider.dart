@@ -65,6 +65,50 @@ class AudioOutputDeviceNotifier extends AsyncNotifier<String?> {
   }
 }
 
+/// Outgoing image quality tier.
+///
+/// Controls the Rust-side WebP encoder in `image_convert::convert_to_webp_with_quality`.
+/// Persisted as `image_quality` in `app_settings`. Default: balanced.
+///
+/// Lossless is only worth picking if you share pixel art, diagrams, or
+/// screenshots with tiny text. For normal photos/artwork, Balanced is
+/// indistinguishable from lossless at render sizes and ~95% smaller.
+/// Small is for very tight bandwidth / quota-constrained situations.
+///
+/// Phase 6.75 image quality tiers.
+enum ImageQuality {
+  lossless('Lossless (100%)', 'Pixel-perfect — for art, diagrams, screenshots'),
+  balanced('Balanced (50%)', 'Indistinguishable, ~95% smaller'),
+  small('Small (30%)', 'Aggressive compression for slow connections');
+
+  final String label;
+  final String description;
+  const ImageQuality(this.label, this.description);
+}
+
+final imageQualityProvider =
+    AsyncNotifierProvider<ImageQualityNotifier, ImageQuality>(
+        ImageQualityNotifier.new);
+
+class ImageQualityNotifier extends AsyncNotifier<ImageQuality> {
+  @override
+  Future<ImageQuality> build() async {
+    final val = await storage_api.loadSetting(key: 'image_quality');
+    return ImageQuality.values.firstWhere(
+      (q) => q.name == val,
+      orElse: () => ImageQuality.balanced,
+    );
+  }
+
+  Future<void> setQuality(ImageQuality quality) async {
+    await storage_api.saveSetting(
+      key: 'image_quality',
+      value: quality.name,
+    );
+    state = AsyncData(quality);
+  }
+}
+
 /// Audio quality preset for voice calls.
 /// Controls Opus bitrate and stereo settings via SDP munging.
 enum AudioQualityPreset {

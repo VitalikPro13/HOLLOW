@@ -4771,13 +4771,39 @@ async fn run_event_loop(
                         }
 
                         // 4. Convert to WebP if image.
+                        //
+                        // Phase 6.75: honor the user-configurable image quality tier.
+                        // Lossless (100%) / Balanced (50%, default) / Small (30%).
+                        // We read the setting from app_settings each send — a single
+                        // SQLite KV lookup so the cost is negligible. Bypass rules:
+                        //   - GIFs are never re-encoded (preserve animation)
+                        //   - WebP inputs pass through untouched (already encoded)
+                        // No size-based bypass: even tiny 20 KB PNGs routinely drop
+                        // to 2-3 KB at Q=50 (~90% reduction), and "tiny × millions of
+                        // messages" is still meaningful bandwidth. The encode cost on
+                        // small files is trivial.
                         let mime = file_transfer::mime_from_ext(&original_ext);
                         let is_image = file_transfer::is_image_mime(&mime);
-                        let (final_data, final_ext, width, height) = if is_image && image_convert::should_convert_to_webp(&original_ext) {
-                            match image_convert::convert_to_webp_lossless(&file_data) {
+
+                        let webp_quality = {
+                            let data_dir = crate::identity::data_dir().unwrap_or_default();
+                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                            crate::storage::MessageStore::open(&db_path, &passphrase)
+                                .ok()
+                                .and_then(|s| s.load_setting("image_quality").ok().flatten())
+                                .map(|s| image_convert::WebpQuality::from_setting(&s))
+                                .unwrap_or_default()
+                        };
+
+                        let (final_data, final_ext, width, height) = if is_image
+                            && image_convert::should_convert_to_webp(&original_ext)
+                        {
+                            match image_convert::convert_to_webp_with_quality(&file_data, webp_quality) {
                                 Ok((webp_data, w, h)) => {
-                                    hollow_log!("[HOLLOW-FILE] Converted to WebP: {}KB -> {}KB ({}x{})",
-                                        file_data.len() / 1024, webp_data.len() / 1024, w, h);
+                                    hollow_log!("[HOLLOW-FILE] Converted to WebP ({:?}): {}KB -> {}KB ({}x{})",
+                                        webp_quality, file_data.len() / 1024, webp_data.len() / 1024, w, h);
                                     (webp_data, "webp".to_string(), Some(w), Some(h))
                                 }
                                 Err(e) => {
