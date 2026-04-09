@@ -7,4 +7,4 @@ pub(crate) mod ws_stream_transfer;
 mod swarm;
 pub(crate) mod ws_client;
 
-pub(crate) use swarm::{spawn_node, LinkPreviewRef, NetworkEvent, NodeCommand, VideoThumbRef};
+pub(crate) use swarm::{spawn_node, LinkPreviewRef, NetworkEvent, NodeCommand, VideoThumbRef, verify_message_signature};

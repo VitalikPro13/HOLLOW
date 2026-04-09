@@ -504,6 +504,16 @@ impl MessageStore {
             "ALTER TABLE files ADD COLUMN content_id TEXT;"
         ).unwrap_or(());
 
+        // -- Verified peers (RAT Files — peer identity verification) --
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS verified_peers (
+                peer_id     TEXT PRIMARY KEY,
+                verified_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| format!("Failed to create verified_peers table: {e}"))?;
+
         Ok(MessageStore { conn })
     }
 
@@ -2107,6 +2117,66 @@ impl MessageStore {
             Some(Err(e)) => Err(format!("Failed to read setting: {e}")),
             None => Ok(None),
         }
+    }
+
+    // ── Verified Peers (RAT Files) ─────────────────────────────────
+
+    /// Mark a peer as identity-verified (fingerprint confirmed).
+    pub fn set_peer_verified(&self, peer_id: &str) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        self.conn
+            .execute(
+                "INSERT INTO verified_peers (peer_id, verified_at) VALUES (?1, ?2)
+                 ON CONFLICT(peer_id) DO UPDATE SET verified_at = excluded.verified_at",
+                params![peer_id, now],
+            )
+            .map_err(|e| format!("Failed to set peer verified: {e}"))?;
+        Ok(())
+    }
+
+    /// Remove verified status from a peer.
+    pub fn remove_peer_verified(&self, peer_id: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM verified_peers WHERE peer_id = ?1",
+                params![peer_id],
+            )
+            .map_err(|e| format!("Failed to remove peer verified: {e}"))?;
+        Ok(())
+    }
+
+    /// Check if a peer is verified.
+    pub fn is_peer_verified(&self, peer_id: &str) -> Result<bool, String> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verified_peers WHERE peer_id = ?1",
+                params![peer_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to check peer verified: {e}"))?;
+        Ok(count > 0)
+    }
+
+    /// Get all verified peers (peer_id, verified_at_ms).
+    pub fn get_verified_peers(&self) -> Result<Vec<(String, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT peer_id, verified_at FROM verified_peers ORDER BY verified_at DESC")
+            .map_err(|e| format!("Failed to prepare verified_peers query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .map_err(|e| format!("Failed to query verified_peers: {e}"))?;
+        let mut result = Vec::new();
+        for row in rows {
+            if let Ok(r) = row {
+                result.push(r);
+            }
+        }
+        Ok(result)
     }
 
     // ── File sharing storage ────────────────────────────────────────

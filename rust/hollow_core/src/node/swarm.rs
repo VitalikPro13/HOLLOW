@@ -1756,7 +1756,7 @@ fn sign_message(
 
 /// Verify an Ed25519 signature on a message.
 /// Checks: public key decodes, PeerId matches sender, signature is valid.
-fn verify_message_signature(
+pub(crate) fn verify_message_signature(
     sender_peer_str: &str,
     sig_b64: Option<&str>,
     pk_b64: Option<&str>,
@@ -4908,7 +4908,25 @@ async fn run_event_loop(
                             message_text.clone()
                         };
 
-                        let (sig, pk) = sign_message(&bundle_keypair, &pub_key_b64, &signing_payload_text);
+                        // Sign using the canonical payload format (must match
+                        // verify_message_signature on the receive path).
+                        // Previously this called sign_message with raw text,
+                        // causing every file-message signature to fail verification.
+                        let (sig, pk) = if let Some(ref peer_str) = peer_id {
+                            // DM: context = recipient, sender = local
+                            let payload = message_signing_payload(
+                                "dm", peer_str, &local_peer, timestamp, &signing_payload_text,
+                            );
+                            sign_message(&bundle_keypair, &pub_key_b64, &payload)
+                        } else if let (Some(sid), Some(cid)) = (&server_id, &channel_id) {
+                            // Channel: context = server_id:channel_id, sender = local
+                            let payload = message_signing_payload(
+                                "ch", &format!("{sid}:{cid}"), &local_peer, timestamp, &signing_payload_text,
+                            );
+                            sign_message(&bundle_keypair, &pub_key_b64, &payload)
+                        } else {
+                            (None, None)
+                        };
 
                         if let Some(peer_str) = peer_id {
                             // DM path

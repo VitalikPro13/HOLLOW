@@ -41,6 +41,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:lucide_icons/lucide_icons.dart';
@@ -1229,6 +1230,32 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                                           }
                                         }
                                       : null,
+                                  onInfo: () {
+                                    final senderPeerId = msg.isMe
+                                        ? localPeerId
+                                        : widget.peerId;
+                                    showMessageProofDialog(
+                                      context,
+                                      MessageProofData(
+                                        senderPeerId: senderPeerId,
+                                        senderDisplayName: displayNameFor(
+                                            profiles, senderPeerId),
+                                        senderAvatar:
+                                            profiles[senderPeerId]?.avatarBytes,
+                                        text: msg.text,
+                                        timestampMs:
+                                            msg.timestamp.millisecondsSinceEpoch,
+                                        signature: msg.signature,
+                                        publicKey: msg.publicKey,
+                                        messageId: msg.messageId,
+                                        context: msg.isMe
+                                            ? widget.peerId
+                                            : localPeerId,
+                                        msgType: 'dm',
+                                        fileAttachment: msg.fileAttachment,
+                                      ),
+                                    );
+                                  },
                                   child: Builder(builder: (_) {
                                     String? replySender;
                                     String? replyText;

@@ -828,6 +828,41 @@ pub fn get_olm_fingerprint() -> Option<String> {
     guard.as_ref().map(|s| s.olm_fingerprint.clone())
 }
 
+/// Get the local Ed25519 public key as base64-encoded protobuf.
+/// Used by the Verify Peer screen to display "Your Fingerprint".
+#[frb]
+pub fn get_local_public_key() -> Result<String, String> {
+    use base64::Engine;
+    let identity = crate::identity::load_or_create_identity()?;
+    let proto = identity.keypair.public_key_protobuf();
+    Ok(base64::engine::general_purpose::STANDARD.encode(&proto))
+}
+
+/// Verify an Ed25519 message signature against a canonical payload.
+///
+/// Used by the Message Proof dialog ("The RAT Files") to show real-time
+/// VERIFIED / INVALID status. Pure crypto — no node state needed.
+///
+/// Arguments:
+/// - `sender_peer_id`: the sender's PeerId (Base58btc)
+/// - `signature_b64`: base64-encoded Ed25519 signature
+/// - `public_key_b64`: base64-encoded protobuf public key
+/// - `canonical_payload`: the signing payload string (e.g. "haven-msg:dm:...")
+#[frb]
+pub fn verify_message_proof(
+    sender_peer_id: String,
+    signature_b64: String,
+    public_key_b64: String,
+    canonical_payload: String,
+) -> bool {
+    crate::node::verify_message_signature(
+        &sender_peer_id,
+        Some(&signature_b64),
+        Some(&public_key_b64),
+        &canonical_payload,
+    )
+}
+
 /// Fetch OpenGraph metadata for a URL and return a link preview the sender
 /// can embed in their next outgoing message. Runs on the shared Tokio
 /// runtime. Fails silently at every step — the caller should treat errors

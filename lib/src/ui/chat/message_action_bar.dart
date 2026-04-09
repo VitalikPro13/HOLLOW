@@ -87,6 +87,7 @@ class MessageHoverWrapper extends StatefulWidget {
   final VoidCallback? onDownload;
   final VoidCallback? onCopy;
   final VoidCallback? onCopyImage;
+  final VoidCallback? onInfo;
 
   const MessageHoverWrapper({
     super.key,
@@ -105,6 +106,7 @@ class MessageHoverWrapper extends StatefulWidget {
     this.onDownload,
     this.onCopy,
     this.onCopyImage,
+    this.onInfo,
   });
 
   @override
@@ -224,7 +226,8 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
         widget.onReaction != null ||
         widget.onDownload != null ||
         widget.onCopy != null ||
-        widget.onCopyImage != null;
+        widget.onCopyImage != null ||
+        widget.onInfo != null;
     if (hasAnyAction) {
       // Vertically center the action bar on the right side of the message.
       final double barTop = offset.dy + (size.height / 2) - 14;
@@ -290,6 +293,12 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
                   ? () {
                       _dismissNow();
                       widget.onCopyImage?.call();
+                    }
+                  : null,
+              onInfo: widget.onInfo != null
+                  ? () {
+                      _dismissNow();
+                      widget.onInfo?.call();
                     }
                   : null,
             ),
@@ -370,12 +379,20 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
       return _buildEditView(HollowTheme.of(context));
     }
 
-    return MouseRegion(
-      onEnter: (_) => _onMessageEnter(),
-      onExit: (_) => _onMessageExit(),
-      child: KeyedSubtree(
-        key: _messageKey,
-        child: widget.child,
+    return GestureDetector(
+      onSecondaryTap: widget.onInfo != null
+          ? () {
+              _dismissNow();
+              widget.onInfo?.call();
+            }
+          : null,
+      child: MouseRegion(
+        onEnter: (_) => _onMessageEnter(),
+        onExit: (_) => _onMessageExit(),
+        child: KeyedSubtree(
+          key: _messageKey,
+          child: widget.child,
+        ),
       ),
     );
   }
@@ -443,6 +460,7 @@ class _ActionBarContent extends StatelessWidget {
   final VoidCallback? onPin;
   final VoidCallback? onDownload;
   final VoidCallback? onCopyImage;
+  final VoidCallback? onInfo;
 
   const _ActionBarContent({
     required this.hollow,
@@ -454,6 +472,7 @@ class _ActionBarContent extends StatelessWidget {
     this.onPin,
     this.onDownload,
     this.onCopyImage,
+    this.onInfo,
   });
 
   @override
@@ -516,6 +535,17 @@ class _ActionBarContent extends StatelessWidget {
               padding: const EdgeInsets.all(6),
               child: Icon(
                 LucideIcons.reply,
+                size: 14,
+                color: hollow.textSecondary,
+              ),
+            ),
+          if (onInfo != null)
+            HollowPressable(
+              onTap: onInfo,
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              padding: const EdgeInsets.all(6),
+              child: Icon(
+                LucideIcons.shieldCheck,
                 size: 14,
                 color: hollow.textSecondary,
               ),

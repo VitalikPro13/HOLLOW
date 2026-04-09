@@ -36,6 +36,33 @@ Future<String?> getLocalPeerId() =>
 Future<String?> getOlmFingerprint() =>
     RustLib.instance.api.crateApiNetworkGetOlmFingerprint();
 
+/// Get the local Ed25519 public key as base64-encoded protobuf.
+/// Used by the Verify Peer screen to display "Your Fingerprint".
+Future<String> getLocalPublicKey() =>
+    RustLib.instance.api.crateApiNetworkGetLocalPublicKey();
+
+/// Verify an Ed25519 message signature against a canonical payload.
+///
+/// Used by the Message Proof dialog ("The RAT Files") to show real-time
+/// VERIFIED / INVALID status. Pure crypto — no node state needed.
+///
+/// Arguments:
+/// - `sender_peer_id`: the sender's PeerId (Base58btc)
+/// - `signature_b64`: base64-encoded Ed25519 signature
+/// - `public_key_b64`: base64-encoded protobuf public key
+/// - `canonical_payload`: the signing payload string (e.g. "haven-msg:dm:...")
+Future<bool> verifyMessageProof({
+  required String senderPeerId,
+  required String signatureB64,
+  required String publicKeyB64,
+  required String canonicalPayload,
+}) => RustLib.instance.api.crateApiNetworkVerifyMessageProof(
+  senderPeerId: senderPeerId,
+  signatureB64: signatureB64,
+  publicKeyB64: publicKeyB64,
+  canonicalPayload: canonicalPayload,
+);
+
 /// Fetch OpenGraph metadata for a URL and return a link preview the sender
 /// can embed in their next outgoing message. Runs on the shared Tokio
 /// runtime. Fails silently at every step — the caller should treat errors

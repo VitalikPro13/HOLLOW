@@ -30,6 +30,7 @@ import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
+import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -1384,6 +1385,35 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                                 }
                               }
                             : null,
+                        onInfo: () {
+                          final localPeerId =
+                              ref.read(identityProvider).peerId ?? '';
+                          final senderPeerId =
+                              msg.isMe ? localPeerId : msg.senderId;
+                          showMessageProofDialog(
+                            context,
+                            MessageProofData(
+                              senderPeerId: senderPeerId,
+                              senderDisplayName: serverDisplayNameFor(
+                                profiles,
+                                senderPeerId,
+                                nickname: nicknames[senderPeerId] ?? '',
+                              ),
+                              senderAvatar:
+                                  profiles[senderPeerId]?.avatarBytes,
+                              text: msg.text,
+                              timestampMs:
+                                  msg.timestamp.millisecondsSinceEpoch,
+                              signature: msg.signature,
+                              publicKey: msg.publicKey,
+                              messageId: msg.messageId,
+                              context:
+                                  '${widget.serverId}:${widget.channelId}',
+                              msgType: 'ch',
+                              fileAttachment: msg.fileAttachment,
+                            ),
+                          );
+                        },
                         child: Builder(builder: (_) {
                           final localPeerId =
                               ref.watch(identityProvider).peerId ?? '';

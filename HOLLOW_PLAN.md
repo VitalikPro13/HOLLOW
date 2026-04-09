@@ -1646,16 +1646,27 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [ ] Discord import system (full implementation — parse GDPR export ZIP, map servers/channels/roles/messages, placeholder identities, member claiming) == reflect to the discord_migration_plan.md
 - [ ] Data export system (messages, files, identity — verifiable with Ed25519 signatures)
 - [ ] Server template export/import (share server structures)
-- [ ] **Cryptographic message verification ("The RAT Files")** — prove message authenticity, defeat fake screenshots
-  - [ ] Message Info tooltip button: shows sender peer ID, timestamp, Ed25519 signature (hex), public key fingerprint
-  - [ ] "Export Proof" button: exports JSON with message text, timestamp, context (server/channel/DM), signature, sender public key — anyone can verify with standard Ed25519
-  - [ ] "Verify Peer" screen in Security tab: compare public key fingerprints (in person or trusted channel) to confirm a peer ID belongs to the real person
-  - [ ] External verifier: standalone CLI/web tool that takes the proof JSON and runs Ed25519_verify() — no Hollow app needed, open-source, auditable
-  - [ ] Trust indicators in UI: verified peers get a checkmark badge on their avatar/name (fingerprint was confirmed)
+- [X] **Cryptographic message verification ("The RAT Files")** — prove message authenticity, defeat fake screenshots
+  - [x] Message Info panel: shieldCheck icon in hover toolbar + right-click opens RAT Files dialog — sender peer ID, timestamp, Ed25519 signature, public key fingerprint, SIGNED/UNSIGNED badge
+  - [x] "Export Proof" button: copies JSON proof with message text, timestamp, context (server/channel/DM), signature, sender public key, canonical payload, verification instructions — anyone can verify with standard Ed25519
+  - [x] "Verify Peer" in Security tab: your fingerprint display, peer ID lookup with fingerprint comparison, "Mark as Verified" button, verified peers list with unverify. Backed by `verified_peers` SQLCipher table + Riverpod provider
+  - [x] In-app proof verifier: "Verify a Proof" section in Security tab — paste JSON or import .json file, runs Ed25519 verification via Rust FFI, shows VERIFIED/INVALID with message text, sender, context, timestamp. Replaces standalone CLI/web tool
+- [ ] Favourites for the Friends strip instead of the "dump-all-friends" approach
 - [ ] Evidence Recovery UI tool (cooperative shard gathering for ex-members) — depends on Phase 4 shard system
 - [ ] Device linking via QR code (multi-device identity sync) — requires MLS + CRDTs. 🎞️ Animate: QR scan success celebration, device linked confirmation
 - [ ] Mobile platform testing & platform-specific fixes (adaptive layout built in Phase 2.5)
 - [ ] Accessibility (screen reader support, high contrast)
+- [ ] **swarm.rs modularization refactor** — split the 12,600-line monolith into focused modules (like the libp2p removal session)
+  - [ ] Create `SwarmContext` struct to hold the ~35 shared state variables (peer maps, pending transfers, voice participants, etc.)
+  - [ ] Extract `vault_ops.rs` (~1,000 lines) — shard store/retrieve, upload/download pipeline, rebalance/retention timer
+  - [ ] Extract `voice_handler.rs` (~800 lines) — voice channels, 1:1 calls, screen/camera state, mesh↔gossip transition
+  - [ ] Extract `crdt_sync.rs` (~1,500 lines) — SyncRequest/Response, CRDT op broadcast, multi-peer fan-out, channel/DM sync
+  - [ ] Extract `crypto_handler.rs` (~1,200 lines) — Olm key exchange (KeyRequest/KeyBundle/Encrypted), MLS group ops, message signing/verification
+  - [ ] Extract `file_transfer.rs` (~1,000 lines) — SendFile, FileHeader/Chunk handling, WebRTC streaming, completed stream handler
+  - [ ] Extract `gossip_relay.rs` (~600 lines) — overlay management, broadcast, peer exchange, rotation/eviction timers
+  - [ ] Extract `message_ops.rs` (~500 lines) — edit/delete/reactions/pins for both DMs and channels
+  - [ ] Extract `social.rs` (~450 lines) — friends, profiles, typing indicators
+  - [ ] Update `mod.rs` to re-export, verify `cargo check` + `cargo test` pass, run full app smoke test
 - [ ] **System audio capture plugin (screen share audio)**
   - [ ] Flutter plugin package (`system_audio_capture`) — single Dart API, platform-specific native implementations
   - [ ] Windows: WASAPI loopback capture (C++ via FFI)
