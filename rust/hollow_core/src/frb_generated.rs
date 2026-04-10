@@ -772,6 +772,7 @@ fn wire__crate__api__storage__export_backup_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_output_path = <String>::sse_decode(&mut deserializer);
             let api_include_vault = <bool>::sse_decode(&mut deserializer);
+            let api_include_files = <bool>::sse_decode(&mut deserializer);
             let api_passphrase = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
@@ -779,6 +780,7 @@ fn wire__crate__api__storage__export_backup_impl(
                     let output_ok = crate::api::storage::export_backup(
                         api_output_path,
                         api_include_vault,
+                        api_include_files,
                         api_passphrase,
                     )?;
                     Ok(output_ok)

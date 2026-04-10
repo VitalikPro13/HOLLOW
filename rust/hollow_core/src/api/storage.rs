@@ -629,11 +629,12 @@ pub fn has_identity() -> Result<bool, String> {
 }
 
 /// Export account backup as a passphrase-encrypted blob (.hollow file).
-/// Includes identity.key + messages.db. Optionally includes vault/ shard data.
+/// Includes identity.key + messages.db. Optionally includes vault/ shard data
+/// and/or downloaded files from files/.
 /// The backup is: [16-byte salt][12-byte nonce][AES-256-GCM ciphertext of zip bytes]
 /// Key derived from passphrase via Argon2id (memory=64MB, iterations=3, parallelism=1).
 #[frb]
-pub fn export_backup(output_path: String, include_vault: bool, passphrase: String) -> Result<u64, String> {
+pub fn export_backup(output_path: String, include_vault: bool, include_files: bool, passphrase: String) -> Result<u64, String> {
     use std::io::Write;
     use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
     use aes_gcm::Nonce;
@@ -670,6 +671,23 @@ pub fn export_backup(output_path: String, include_vault: bool, passphrase: Strin
                         if path.is_file() {
                             let name = format!("vault/{}", entry.file_name().to_string_lossy());
                             let data = std::fs::read(&path).map_err(|e| format!("Failed to read vault file: {e}"))?;
+                            zip.start_file(&name, options).map_err(|e| format!("Zip error: {e}"))?;
+                            zip.write_all(&data).map_err(|e| format!("Zip write error: {e}"))?;
+                        }
+                    }
+                }
+            }
+        }
+
+        if include_files {
+            let files_dir = data_dir.join("files");
+            if files_dir.exists() && files_dir.is_dir() {
+                for entry in std::fs::read_dir(&files_dir).map_err(|e| format!("Failed to read files dir: {e}"))? {
+                    if let Ok(entry) = entry {
+                        let path = entry.path();
+                        if path.is_file() {
+                            let name = format!("files/{}", entry.file_name().to_string_lossy());
+                            let data = std::fs::read(&path).map_err(|e| format!("Failed to read file: {e}"))?;
                             zip.start_file(&name, options).map_err(|e| format!("Zip error: {e}"))?;
                             zip.write_all(&data).map_err(|e| format!("Zip write error: {e}"))?;
                         }

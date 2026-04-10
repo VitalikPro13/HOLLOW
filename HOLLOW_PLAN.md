@@ -1651,7 +1651,8 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] Full images metadata strip for WebP/GIF
 - [X] Add floating pill about sender/receiver screen share quality
 - [X] Shows the audio channel as the default selection on the server (should select first text channel)
-- [ ] Data export system (messages, files, identity — verifiable with Ed25519 signatures)
+- [X] Fix bugged dialog for "Set Passphrase" (double press needed somehow) / Data export system (messages, files, identity — verifiable with Ed25519 signatures)
+- [ ] Fix the crash error (reflect to second_debug.log)
 - [ ] Server template export/import (share server structures)
 - [ ] Add ability to choose your camera device in User Settings
 - [ ] Download manager UI — show background file re-downloads, vault shard transfers, auto-recovery progress

@@ -229,16 +229,19 @@ Future<String?> getMnemonic() =>
 Future<bool> hasIdentity() => RustLib.instance.api.crateApiStorageHasIdentity();
 
 /// Export account backup as a passphrase-encrypted blob (.hollow file).
-/// Includes identity.key + messages.db. Optionally includes vault/ shard data.
+/// Includes identity.key + messages.db. Optionally includes vault/ shard data
+/// and/or downloaded files from files/.
 /// The backup is: [16-byte salt][12-byte nonce][AES-256-GCM ciphertext of zip bytes]
 /// Key derived from passphrase via Argon2id (memory=64MB, iterations=3, parallelism=1).
 Future<BigInt> exportBackup({
   required String outputPath,
   required bool includeVault,
+  required bool includeFiles,
   required String passphrase,
 }) => RustLib.instance.api.crateApiStorageExportBackup(
   outputPath: outputPath,
   includeVault: includeVault,
+  includeFiles: includeFiles,
   passphrase: passphrase,
 );
 

@@ -682,6 +682,29 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     }
   }
 
+  Future<void> _requestFileFromPeer(FileAttachment attachment, String senderId) async {
+    if (senderId.isEmpty) {
+      if (mounted) {
+        HollowToast.show(context, 'Cannot download: unknown sender', type: HollowToastType.error);
+      }
+      return;
+    }
+    try {
+      if (mounted) {
+        HollowToast.show(context, 'Requesting file from peer...', type: HollowToastType.info);
+      }
+      await network_api.requestFileFromPeer(
+        fileId: attachment.fileId,
+        peerId: senderId,
+        chunks: [],
+      );
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(context, 'File request failed: $e', type: HollowToastType.error);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
@@ -1206,9 +1229,22 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                                           }
                                         }
                                       : null,
-                                  onDownload: msg.fileAttachment != null &&
-                                          msg.fileAttachment!.diskPath != null
-                                      ? () => _saveFile(msg.fileAttachment!)
+                                  onDownload: msg.fileAttachment != null
+                                      ? () {
+                                          final att = msg.fileAttachment!;
+                                          // Guard against duplicate downloads.
+                                          final transfer = ref.read(fileTransferProvider)[att.fileId];
+                                          if (transfer != null && transfer.isDownloading) {
+                                            HollowToast.show(context, 'File is already downloading...', type: HollowToastType.info);
+                                            return;
+                                          }
+                                          if (att.diskPath != null) {
+                                            _saveFile(att);
+                                          } else {
+                                            // DM: request from the peer we're chatting with.
+                                            _requestFileFromPeer(att, widget.peerId);
+                                          }
+                                        }
                                       : null,
                                   onCopy: (msg.text.isNotEmpty && !msg.text.startsWith('[file:'))
                                       ? () {

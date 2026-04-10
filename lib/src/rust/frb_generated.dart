@@ -176,6 +176,7 @@ abstract class RustLibApi extends BaseApi {
   Future<BigInt> crateApiStorageExportBackup({
     required String outputPath,
     required bool includeVault,
+    required bool includeFiles,
     required String passphrase,
   });
 
@@ -1245,6 +1246,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<BigInt> crateApiStorageExportBackup({
     required String outputPath,
     required bool includeVault,
+    required bool includeFiles,
     required String passphrase,
   }) {
     return handler.executeNormal(
@@ -1253,6 +1255,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(outputPath, serializer);
           sse_encode_bool(includeVault, serializer);
+          sse_encode_bool(includeFiles, serializer);
           sse_encode_String(passphrase, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -1266,7 +1269,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiStorageExportBackupConstMeta,
-        argValues: [outputPath, includeVault, passphrase],
+        argValues: [outputPath, includeVault, includeFiles, passphrase],
         apiImpl: this,
       ),
     );
@@ -1275,7 +1278,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiStorageExportBackupConstMeta =>
       const TaskConstMeta(
         debugName: "export_backup",
-        argNames: ["outputPath", "includeVault", "passphrase"],
+        argNames: ["outputPath", "includeVault", "includeFiles", "passphrase"],
       );
 
   @override

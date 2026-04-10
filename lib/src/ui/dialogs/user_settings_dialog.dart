@@ -971,6 +971,7 @@ class _SecurityTabState extends State<_SecurityTab> {
   bool _revealed = false;
   bool _loading = true;
   bool _includeVault = false;
+  bool _includeFiles = false;
   String? _mnemonic;
   String? _error;
 
@@ -1014,6 +1015,7 @@ class _SecurityTabState extends State<_SecurityTab> {
       final size = await storage_api.exportBackup(
         outputPath: result,
         includeVault: _includeVault,
+        includeFiles: _includeFiles,
         passphrase: passphrase,
       );
       if (!mounted) return;
@@ -1028,61 +1030,73 @@ class _SecurityTabState extends State<_SecurityTab> {
   Future<String?> _askPassphrase(BuildContext context, String title, {bool confirm = false}) async {
     final controller = TextEditingController();
     final confirmController = TextEditingController();
-    return showDialog<String>(
+    return showHollowDialog<String>(
       context: context,
       builder: (ctx) {
         final hollow = HollowTheme.of(ctx);
-        return AlertDialog(
-          backgroundColor: hollow.surface,
-          title: Text(title, style: HollowTypography.heading.copyWith(color: hollow.textPrimary)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: controller,
-                obscureText: true,
-                autofocus: true,
-                decoration: InputDecoration(
-                  hintText: 'Enter passphrase',
-                  hintStyle: TextStyle(color: hollow.textSecondary),
-                ),
-                style: TextStyle(color: hollow.textPrimary),
-                onSubmitted: confirm ? null : (val) {
-                  if (val.isNotEmpty) Navigator.of(ctx).pop(val);
-                },
+        return Center(
+          child: Material(
+            type: MaterialType.transparency,
+            child: Container(
+              width: 360,
+              padding: const EdgeInsets.all(HollowSpacing.xl),
+              decoration: BoxDecoration(
+                color: hollow.elevated,
+                borderRadius: BorderRadius.circular(hollow.radiusLg),
+                border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
               ),
-              if (confirm) ...[
-                const SizedBox(height: HollowSpacing.sm),
-                TextField(
-                  controller: confirmController,
-                  obscureText: true,
-                  decoration: InputDecoration(
-                    hintText: 'Confirm passphrase',
-                    hintStyle: TextStyle(color: hollow.textSecondary),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: HollowTypography.heading.copyWith(
+                    color: hollow.textPrimary, fontSize: 16,
+                  )),
+                  const SizedBox(height: HollowSpacing.lg),
+                  HollowTextField(
+                    controller: controller,
+                    obscureText: true,
+                    autofocus: true,
+                    hintText: 'Enter passphrase',
+                    onSubmitted: confirm ? null : (val) {
+                      if (val.isNotEmpty) Navigator.of(ctx).pop(val);
+                    },
                   ),
-                  style: TextStyle(color: hollow.textPrimary),
-                ),
-              ],
-            ],
+                  if (confirm) ...[
+                    const SizedBox(height: HollowSpacing.sm),
+                    HollowTextField(
+                      controller: confirmController,
+                      obscureText: true,
+                      hintText: 'Confirm passphrase',
+                    ),
+                  ],
+                  const SizedBox(height: HollowSpacing.lg),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      HollowButton.ghost(
+                        onPressed: () => Navigator.of(ctx).pop(null),
+                        child: const Text('Cancel'),
+                      ),
+                      const SizedBox(width: HollowSpacing.sm),
+                      HollowButton.filled(
+                        onPressed: () {
+                          final pass = controller.text.trim();
+                          if (pass.isEmpty) return;
+                          if (confirm && pass != confirmController.text.trim()) {
+                            HollowToast.show(ctx, 'Passphrases don\'t match', type: HollowToastType.error);
+                            return;
+                          }
+                          Navigator.of(ctx).pop(pass);
+                        },
+                        child: const Text('Encrypt'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(null),
-              child: Text('Cancel', style: TextStyle(color: hollow.textSecondary)),
-            ),
-            TextButton(
-              onPressed: () {
-                final pass = controller.text.trim();
-                if (pass.isEmpty) return;
-                if (confirm && pass != confirmController.text.trim()) {
-                  HollowToast.show(ctx, 'Passphrases don\'t match', type: HollowToastType.error);
-                  return;
-                }
-                Navigator.of(ctx).pop(pass);
-              },
-              child: Text('OK', style: TextStyle(color: hollow.accent)),
-            ),
-          ],
         );
       },
     );
@@ -1285,6 +1299,40 @@ class _SecurityTabState extends State<_SecurityTab> {
                 const SizedBox(width: HollowSpacing.sm),
                 Text(
                   'Include vault shard data',
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: HollowSpacing.sm),
+
+          // Include downloaded files checkbox
+          GestureDetector(
+            onTap: () => setState(() => _includeFiles = !_includeFiles),
+            child: Row(
+              children: [
+                Container(
+                  width: 18,
+                  height: 18,
+                  decoration: BoxDecoration(
+                    color: _includeFiles ? hollow.accent : Colors.transparent,
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                      color: _includeFiles ? hollow.accent : hollow.border,
+                      width: 1.5,
+                    ),
+                  ),
+                  child: _includeFiles
+                      ? Icon(LucideIcons.check, size: 12, color: Colors.white)
+                      : null,
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                Text(
+                  'Include downloaded files',
                   style: HollowTypography.body.copyWith(
                     color: hollow.textPrimary,
                     fontSize: 13,
