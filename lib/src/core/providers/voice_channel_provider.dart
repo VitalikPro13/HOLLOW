@@ -207,6 +207,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Shared screen capture stream (captured once, shared across outgoing PCs).
   MediaStream? _screenCaptureStream;
   RTCVideoRenderer? _localScreenPreviewRenderer;
+  int _screenShareMaxWidth = 1920;
+  int _screenShareMaxHeight = 1080;
 
   /// Timer that polls for screen track ending (window closed).
   Timer? _screenTrackPoller;
@@ -705,6 +707,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
 
     debugPrint('[HOLLOW-VC] Starting screen share: $sourceId ${width}x$height @${fps}fps');
+    _screenShareMaxWidth = width;
+    _screenShareMaxHeight = height;
 
     // Capture screen ONCE.
     await desktopCapturer.getSources(
@@ -842,7 +846,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     _outgoingScreenShares[peerId] = service;
 
-    final sdp = await service.createOfferFromStream(_screenCaptureStream!);
+    final sdp = await service.createOfferFromStream(
+      _screenCaptureStream!,
+      maxWidth: _screenShareMaxWidth,
+      maxHeight: _screenShareMaxHeight,
+    );
 
     // Flush any ICE candidates that arrived before this service was created.
     final earlyKey = 'outgoing:$peerId';

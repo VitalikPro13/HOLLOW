@@ -53,6 +53,70 @@ class ScreenShareService {
     required this.iceServers,
   });
 
+  /// Apply resolution and bitrate cap on the video sender's encoding
+  /// parameters. getDisplayMedia captures at native resolution — this
+  /// constrains the encoder to downscale before transmitting AND caps
+  /// the bitrate so WebRTC's adaptive quality scaler can't ramp back up.
+  Future<void> _applyResolutionCap(int maxWidth, int maxHeight) async {
+    if (_pc == null) return;
+    final senders = await _pc!.getSenders();
+    for (final sender in senders) {
+      if (sender.track?.kind == 'video') {
+        final params = sender.parameters;
+        if (params.encodings == null || params.encodings!.isEmpty) {
+          params.encodings = [RTCRtpEncoding()];
+        }
+        for (final encoding in params.encodings!) {
+          final settings = sender.track!.getSettings();
+          final captureWidth = settings['width'] as int? ?? 1920;
+          final captureHeight = settings['height'] as int? ?? 1080;
+
+          // Downscale if the capture is larger than the target.
+          if (captureWidth > maxWidth || captureHeight > maxHeight) {
+            final scaleW = captureWidth / maxWidth;
+            final scaleH = captureHeight / maxHeight;
+            final scale = scaleW > scaleH ? scaleW : scaleH;
+            encoding.scaleResolutionDownBy = scale;
+            _log('[HOLLOW-SCREEN] Set scaleResolutionDownBy=$scale '
+                '(${captureWidth}x$captureHeight -> ${maxWidth}x$maxHeight)');
+          }
+
+          // Cap the bitrate to prevent BWE from ramping the quality back
+          // up when bandwidth is abundant. Without this, the adaptive
+          // quality scaler can override scaleResolutionDownBy.
+          // Bitrate tiers (screen share — higher than camera because
+          // screen content has sharp edges/text that compress poorly):
+          //   360p  →  800 kbps
+          //   480p  → 1500 kbps
+          //   720p  → 3000 kbps
+          //  1080p  → 6000 kbps
+          //  1440p  → 9000 kbps
+          //  4K     → 15000 kbps
+          final pixels = maxWidth * maxHeight;
+          final int maxBitrateKbps;
+          if (pixels <= 640 * 360) {
+            maxBitrateKbps = 800;
+          } else if (pixels <= 854 * 480) {
+            maxBitrateKbps = 1500;
+          } else if (pixels <= 1280 * 720) {
+            maxBitrateKbps = 3000;
+          } else if (pixels <= 1920 * 1080) {
+            maxBitrateKbps = 6000;
+          } else if (pixels <= 2560 * 1440) {
+            maxBitrateKbps = 9000;
+          } else {
+            maxBitrateKbps = 15000;
+          }
+          encoding.maxBitrate = maxBitrateKbps * 1000; // bps
+          _log('[HOLLOW-SCREEN] Set maxBitrate=${maxBitrateKbps}kbps '
+              'for ${maxWidth}x$maxHeight');
+        }
+        await sender.setParameters(params);
+        break;
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Outgoing: we share our screen to the remote peer.
   // ---------------------------------------------------------------------------
@@ -106,6 +170,9 @@ class ScreenShareService {
     await _pc!.addTrack(screenTrack, _screenStream!);
     _log('[HOLLOW-SCREEN] Added screen video track to PC');
 
+    // Apply resolution cap on the encoder (getDisplayMedia captures at native res).
+    await _applyResolutionCap(width, height);
+
     // Add audio tracks if getDisplayMedia returned any.
     // Note: native flutter_webrtc on Windows does not support audio capture
     // in getDisplayMedia (returns 0 audio tracks). System audio loopback
@@ -138,7 +205,7 @@ class ScreenShareService {
   /// Create an offer using a pre-captured screen stream (for voice channels
   /// where one capture is shared across multiple peer connections).
   /// The caller manages the track poller centrally.
-  Future<String> createOfferFromStream(MediaStream stream) async {
+  Future<String> createOfferFromStream(MediaStream stream, {int maxWidth = 1920, int maxHeight = 1080}) async {
     _log('[HOLLOW-SCREEN] Creating offer from shared stream');
 
     _screenStream = stream;
@@ -158,6 +225,9 @@ class ScreenShareService {
     // Add screen video track.
     await _pc!.addTrack(screenTrack, _screenStream!);
     _log('[HOLLOW-SCREEN] Added screen video track to PC');
+
+    // Apply resolution cap on the encoder.
+    await _applyResolutionCap(maxWidth, maxHeight);
 
     // Add audio tracks if available.
     final audioTracks = _screenStream!.getAudioTracks();

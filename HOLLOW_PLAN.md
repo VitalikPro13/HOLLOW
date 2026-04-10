@@ -1646,8 +1646,8 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
   - [x] "Verify Peer" in Security tab: your fingerprint display, peer ID lookup with fingerprint comparison, "Mark as Verified" button, verified peers list with unverify. Backed by `verified_peers` SQLCipher table + Riverpod provider
   - [x] In-app proof verifier: "Verify a Proof" section in Security tab — paste JSON or import .json file, runs Ed25519 verification via Rust FFI, shows VERIFIED/INVALID with message text, sender, context, timestamp. Replaces standalone CLI/web tool
 - [X] Favourites for the Friends strip instead of the "dump-all-friends" approach
-- [X] Use the same screen sharing for voice channels as in DMs (show your own screen)
-- [ ] Proper profiling for the high RAM usage during the call with screen sharing and afterwards
+- [X] Use the same screen sharing for voice channels as in DMs (show your own screen; DONE - and we put the max bitrate capping)
+- [X] Proper profiling for the high RAM usage during the call with screen sharing and afterwards
 
 - [ ] Download manager UI — show background file re-downloads, vault shard transfers, auto-recovery progress
 - [ ] Read/unread messages tick if possible
