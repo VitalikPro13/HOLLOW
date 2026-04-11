@@ -1656,7 +1656,8 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] Server template export/import (share server structures)
   - [ ] Roles copying - deferred to checkbox later
 - [X] Add ability to choose your camera device in User Settings
-- [ ] Download manager UI — show background file re-downloads, vault shard transfers, auto-recovery progress
+  - [ ] Add a package for camera device selection + test
+- [X] Download manager UI — popup card showing manually-saved files (Save button) with thumbnails + save paths + click-to-reveal in Explorer (with Win32 foreground lock bypass), plus active shard rebalance status
 - [ ] Read/unread messages tick if possible
 - [ ] Different fonts/elements like hearts or sparkles on Profile and maybe nicknames
 - [ ] View the data that you have in the DB inside the app in a designated viewer, which should show server data, previous DMs that might not be visible to you because you're not friends with someone anymore etc.

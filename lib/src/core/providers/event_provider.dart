@@ -25,6 +25,7 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/vault_status_provider.dart';
+import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
@@ -626,12 +627,15 @@ class EventStreamNotifier extends Notifier<bool> {
               serverId, contentId, error);
 
       // -- Vault rebalancing events (Phase 4) --
-      case NetworkEvent_RebalanceStarted():
-        break; // Logged in Rust, UI tracks via vault status provider
-      case NetworkEvent_RebalanceProgress():
-        break;
-      case NetworkEvent_RebalanceCompleted():
-        break;
+      case NetworkEvent_RebalanceStarted(:final serverId, :final shardsToMove):
+        ref.read(downloadManagerStateProvider.notifier)
+            .onRebalanceStarted(serverId, shardsToMove);
+      case NetworkEvent_RebalanceProgress(:final serverId, :final moved, :final total):
+        ref.read(downloadManagerStateProvider.notifier)
+            .onRebalanceProgress(serverId, moved, total);
+      case NetworkEvent_RebalanceCompleted(:final serverId):
+        ref.read(downloadManagerStateProvider.notifier)
+            .onRebalanceCompleted(serverId);
 
       // -- Connection status events --
       case NetworkEvent_KeyExchangeStarted(:final peerId):

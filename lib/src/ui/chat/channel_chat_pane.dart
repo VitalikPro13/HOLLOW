@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
+import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
@@ -673,6 +674,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         await File(attachment.diskPath!).copy(savePath);
       }
 
+      ref.read(downloadManagerStateProvider.notifier).recordSavedFile(
+            savedPath: savePath,
+            isImage: isImage,
+            isVideo: attachment.videoThumb != null,
+          );
+
       if (mounted) {
         HollowToast.show(context, 'File saved', type: HollowToastType.success);
       }
@@ -791,6 +798,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       );
       if (savePath == null) return;
       await File(cachePath).copy(savePath);
+
+      ref.read(downloadManagerStateProvider.notifier).recordSavedFile(
+            savedPath: savePath,
+            isVideo: true,
+          );
+
       if (mounted) {
         HollowToast.show(context, 'Video saved', type: HollowToastType.success);
       }
@@ -897,6 +910,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       } else {
         await File(cachePath).copy(savePath);
       }
+
+      ref.read(downloadManagerStateProvider.notifier).recordSavedFile(
+            savedPath: savePath,
+            isImage: isImage,
+            isVideo: attachment.videoThumb != null,
+          );
 
       if (mounted) {
         HollowToast.show(context, 'File saved', type: HollowToastType.success);

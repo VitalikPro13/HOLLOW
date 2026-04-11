@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
@@ -669,6 +670,12 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         // Direct copy.
         await File(attachment.diskPath!).copy(savePath);
       }
+
+      ref.read(downloadManagerStateProvider.notifier).recordSavedFile(
+            savedPath: savePath,
+            isImage: isImage,
+            isVideo: attachment.videoThumb != null,
+          );
 
       if (mounted) {
         HollowToast.show(context, 'File saved', type: HollowToastType.success);

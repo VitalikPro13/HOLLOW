@@ -21,6 +21,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/download_icon_button.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
@@ -285,6 +286,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                const DownloadIconButton(iconSize: 18),
                 HollowTooltip(
                   message: 'Settings',
                   child: HollowPressable(
