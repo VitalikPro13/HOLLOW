@@ -435,8 +435,12 @@ class VoiceService {
           'height': {'ideal': 480},
           'frameRate': {'ideal': 30},
         };
+        // flutter_webrtc native (Windows/macOS/Linux) uses 'sourceId' in
+        // optional array — 'deviceId' is ignored by GetUserVideo().
         if (preferredCameraDeviceId != null) {
-          videoConstraints['deviceId'] = {'exact': preferredCameraDeviceId};
+          videoConstraints['optional'] = [
+            {'sourceId': preferredCameraDeviceId}
+          ];
         } else {
           videoConstraints['facingMode'] =
               _useFrontCamera ? 'user' : 'environment';
@@ -748,8 +752,12 @@ class VoiceService {
       'height': {'ideal': 480},
       'frameRate': {'ideal': 30},
     };
+    // flutter_webrtc native (Windows/macOS/Linux) uses 'sourceId' in
+    // optional array — 'deviceId' is ignored by GetUserVideo().
     if (preferredCameraDeviceId != null) {
-      videoConstraints['deviceId'] = {'exact': preferredCameraDeviceId};
+      videoConstraints['optional'] = [
+        {'sourceId': preferredCameraDeviceId}
+      ];
     } else {
       videoConstraints['facingMode'] =
           _useFrontCamera ? 'user' : 'environment';

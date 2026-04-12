@@ -14,22 +14,33 @@ class ChannelListNotifier extends Notifier<Map<String, ChannelInfo>> {
   /// Load channels for a server from the local DB.
   Future<void> loadForServer(String serverId) async {
     try {
-      final channels = await crdt_api.getServerChannels(serverId: serverId);
-      final map = <String, ChannelInfo>{};
-      for (final ch in channels) {
-        map[ch.channelId] = ChannelInfo(
-          channelId: ch.channelId,
-          name: ch.name,
-          category: ch.category,
-          channelType: ch.channelType == 'voice'
-              ? ChannelType.voice
-              : ChannelType.text,
-        );
-      }
-      state = map;
+      state = await fetchChannels(serverId);
     } catch (e) {
       debugPrint('[HOLLOW] Failed to load channels: $e');
     }
+  }
+
+  /// Fetch channels without publishing to state. Callers can batch
+  /// multiple provider updates to avoid intermediate rebuilds.
+  static Future<Map<String, ChannelInfo>> fetchChannels(String serverId) async {
+    final channels = await crdt_api.getServerChannels(serverId: serverId);
+    final map = <String, ChannelInfo>{};
+    for (final ch in channels) {
+      map[ch.channelId] = ChannelInfo(
+        channelId: ch.channelId,
+        name: ch.name,
+        category: ch.category,
+        channelType: ch.channelType == 'voice'
+            ? ChannelType.voice
+            : ChannelType.text,
+      );
+    }
+    return map;
+  }
+
+  /// Set channels directly (used for batched provider updates).
+  void setChannels(Map<String, ChannelInfo> channels) {
+    state = channels;
   }
 
   /// Called when a ChannelAdded event arrives.
@@ -98,11 +109,20 @@ class ChannelLayoutNotifier extends Notifier<String> {
 
   Future<void> loadForServer(String serverId) async {
     try {
-      final json = await crdt_api.getChannelLayout(serverId: serverId);
-      state = json;
+      state = await fetchLayout(serverId);
     } catch (_) {
       state = '[]';
     }
+  }
+
+  /// Fetch layout without publishing to state.
+  static Future<String> fetchLayout(String serverId) async {
+    return await crdt_api.getChannelLayout(serverId: serverId);
+  }
+
+  /// Set layout directly (used for batched provider updates).
+  void setLayout(String json) {
+    state = json;
   }
 
   void clear() => state = '[]';

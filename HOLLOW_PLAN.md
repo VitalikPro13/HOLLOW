@@ -1656,7 +1656,7 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] Server template export/import (share server structures)
   - [ ] Roles copying - deferred to checkbox later
 - [X] Add ability to choose your camera device in User Settings
-  - [ ] Add a package for camera device selection + test
+  - [X] Add a package for camera device selection + test
 - [X] Download manager UI — popup card showing manually-saved files (Save button) with thumbnails + save paths + click-to-reveal in Explorer (with Win32 foreground lock bypass), plus active shard rebalance status
 - [ ] **Archive tab — personal data viewer + signed `.hollow-archive` export/import (part of "The RAT Files" protocol)**
   - **Philosophy:** SQLCipher DB is fully encrypted — the only way to see your own historical data (left servers, DMs with ex-friends, kicked channels, deleted messages you still have copies of) is through an in-app viewer. Combined with a portable, cryptographically-verifiable export format, this turns "your data is yours" from a slogan into a testable property. No PDF/EPUB/TXT support — those formats can be trivially edited, and shipping "signed PDF" would be security theater that undermines Hollow's reputation for cryptographic seriousness. **One format, one truth.**

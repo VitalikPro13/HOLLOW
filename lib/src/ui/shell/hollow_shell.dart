@@ -827,22 +827,22 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Handle pending migration: when the left pane was closed in split mode,
     // the right pane's context needs to be applied to global providers.
     if (splitState.pendingMigration != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
         final migration = ref.read(splitViewProvider).pendingMigration;
         if (migration == null) return;
         if (migration.serverId != null) {
+          // Fetch first, then batch all writes — no intermediate rebuilds.
+          final channels = await ChannelListNotifier.fetchChannels(
+              migration.serverId!);
+          final layout = await ChannelLayoutNotifier.fetchLayout(
+              migration.serverId!);
+          ref.read(selectedPeerProvider.notifier).state = null;
+          ref.read(channelListProvider.notifier).setChannels(channels);
+          ref.read(channelLayoutProvider.notifier).setLayout(layout);
           ref.read(selectedServerProvider.notifier).state =
               migration.serverId;
           ref.read(selectedChannelProvider.notifier).state =
               migration.channelId;
-          ref.read(selectedPeerProvider.notifier).state = null;
-          // Load channels for the new primary server.
-          ref
-              .read(channelListProvider.notifier)
-              .loadForServer(migration.serverId!);
-          ref
-              .read(channelLayoutProvider.notifier)
-              .loadForServer(migration.serverId!);
         } else if (migration.peerId != null) {
           ref.read(selectedPeerProvider.notifier).state =
               migration.peerId;

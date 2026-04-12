@@ -369,30 +369,29 @@ class _BottomBarState extends ConsumerState<BottomBar> {
       return;
     }
 
-    // Load channels BEFORE setting server — avoids empty sidebar flash.
-    ref.read(selectedPeerProvider.notifier).state = null;
-    ref.read(serverSettingsOpenProvider.notifier).state = false;
-
-    await ref.read(channelListProvider.notifier).loadForServer(serverId);
-    await ref.read(channelLayoutProvider.notifier).loadForServer(serverId);
-
-    // Now set the server — sidebar appears with channels already loaded.
-    ref.read(selectedServerProvider.notifier).state = serverId;
+    // Fetch data from DB first — no provider writes yet, so no rebuilds.
+    final channels = await ChannelListNotifier.fetchChannels(serverId);
+    final layout = await ChannelLayoutNotifier.fetchLayout(serverId);
 
     final lastChannels = ref.read(lastChannelPerServerProvider);
     final lastChannel = lastChannels[serverId];
 
-    final channels = ref.read(channelListProvider);
     String? channelToSelect;
     if (lastChannel != null && channels.containsKey(lastChannel)) {
       channelToSelect = lastChannel;
     } else if (channels.isNotEmpty) {
-      // Prefer first text channel in layout order.
-      final layout = ref.read(channelLayoutProvider);
       channelToSelect = firstTextChannelInLayout(channels, layout)
           ?? channels.keys.first;
     }
+
+    // Batch all provider writes synchronously — single rebuild with
+    // consistent server + channels + selectedChannel state.
+    ref.read(selectedPeerProvider.notifier).state = null;
+    ref.read(serverSettingsOpenProvider.notifier).state = false;
+    ref.read(channelListProvider.notifier).setChannels(channels);
+    ref.read(channelLayoutProvider.notifier).setLayout(layout);
     ref.read(selectedChannelProvider.notifier).state = channelToSelect;
+    ref.read(selectedServerProvider.notifier).state = serverId;
     if (channelToSelect != null) {
       final map =
           Map<String, String>.from(ref.read(lastChannelPerServerProvider));

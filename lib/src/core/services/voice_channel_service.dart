@@ -636,8 +636,12 @@ class VoiceChannelService {
         'height': {'ideal': 480},
         'frameRate': {'ideal': 30},
       };
+      // flutter_webrtc native (Windows/macOS/Linux) uses 'sourceId' in
+      // optional array — 'deviceId' is ignored by GetUserVideo().
       if (preferredCameraDeviceId != null) {
-        videoConstraints['deviceId'] = {'exact': preferredCameraDeviceId};
+        videoConstraints['optional'] = [
+          {'sourceId': preferredCameraDeviceId}
+        ];
       }
       _localVideoStream = await navigator.mediaDevices.getUserMedia({
         'audio': false,
