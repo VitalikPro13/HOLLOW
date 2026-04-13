@@ -35,6 +35,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String dco_decode_String(dynamic raw);
 
   @protected
+  ArchiveChannelInfoFfi dco_decode_archive_channel_info_ffi(dynamic raw);
+
+  @protected
   ArchiveData dco_decode_archive_data(dynamic raw);
 
   @protected
@@ -121,6 +124,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> dco_decode_list_String(dynamic raw);
 
   @protected
+  List<ArchiveChannelInfoFfi> dco_decode_list_archive_channel_info_ffi(
+    dynamic raw,
+  );
+
+  @protected
   List<ArchiveDeletionFfi> dco_decode_list_archive_deletion_ffi(dynamic raw);
 
   @protected
@@ -180,6 +188,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<StoredMessage> dco_decode_list_stored_message(dynamic raw);
+
+  @protected
+  List<StoredMessageEdit> dco_decode_list_stored_message_edit(dynamic raw);
 
   @protected
   List<StoredReaction> dco_decode_list_stored_reaction(dynamic raw);
@@ -242,6 +253,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   StoredMessage dco_decode_stored_message(dynamic raw);
 
   @protected
+  StoredMessageEdit dco_decode_stored_message_edit(dynamic raw);
+
+  @protected
   StoredReaction dco_decode_stored_reaction(dynamic raw);
 
   @protected
@@ -278,6 +292,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String sse_decode_String(SseDeserializer deserializer);
+
+  @protected
+  ArchiveChannelInfoFfi sse_decode_archive_channel_info_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ArchiveData sse_decode_archive_data(SseDeserializer deserializer);
@@ -384,6 +403,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> sse_decode_list_String(SseDeserializer deserializer);
 
   @protected
+  List<ArchiveChannelInfoFfi> sse_decode_list_archive_channel_info_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<ArchiveDeletionFfi> sse_decode_list_archive_deletion_ffi(
     SseDeserializer deserializer,
   );
@@ -459,6 +483,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<StoredMessage> sse_decode_list_stored_message(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<StoredMessageEdit> sse_decode_list_stored_message_edit(
     SseDeserializer deserializer,
   );
 
@@ -539,6 +568,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   StoredMessage sse_decode_stored_message(SseDeserializer deserializer);
 
   @protected
+  StoredMessageEdit sse_decode_stored_message_edit(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   StoredReaction sse_decode_stored_reaction(SseDeserializer deserializer);
 
   @protected
@@ -579,6 +613,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_archive_channel_info_ffi(
+    ArchiveChannelInfoFfi self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_archive_data(ArchiveData self, SseSerializer serializer);
@@ -716,6 +756,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_archive_channel_info_ffi(
+    List<ArchiveChannelInfoFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_archive_deletion_ffi(
     List<ArchiveDeletionFfi> self,
     SseSerializer serializer,
@@ -827,6 +873,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_stored_message_edit(
+    List<StoredMessageEdit> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_stored_reaction(
     List<StoredReaction> self,
     SseSerializer serializer,
@@ -924,6 +976,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_stored_message(StoredMessage self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_stored_message_edit(
+    StoredMessageEdit self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_stored_reaction(

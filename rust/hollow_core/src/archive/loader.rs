@@ -175,14 +175,18 @@ pub(crate) fn load_archive(zip_bytes: &[u8]) -> Result<LoadedArchive, String> {
 
     // ── 10. Per-message signature verification ──────────────────
     let msg_type = if manifest.archive_type == "dm" { "dm" } else { "ch" };
-    let context = if manifest.archive_type == "dm" {
-        manifest.peer_id.clone().unwrap_or_default()
-    } else {
-        format!(
+    // For single-channel archives, context is fixed.
+    // For server (multi-channel) archives, context is per-message from channel_id.
+    let fixed_context = if manifest.archive_type == "dm" {
+        Some(manifest.peer_id.clone().unwrap_or_default())
+    } else if manifest.archive_type == "channel" {
+        Some(format!(
             "{}:{}",
             manifest.server_id.as_deref().unwrap_or(""),
             manifest.channel_id.as_deref().unwrap_or("")
-        )
+        ))
+    } else {
+        None // Server archives use per-message context.
     };
 
     let mut per_message_results: Vec<MessageVerification> = Vec::new();
@@ -190,6 +194,16 @@ pub(crate) fn load_archive(zip_bytes: &[u8]) -> Result<LoadedArchive, String> {
         let has_signature = msg.signature.is_some() && msg.public_key.is_some();
 
         let signature_valid = if has_signature {
+            let context = if let Some(ref ctx) = fixed_context {
+                ctx.clone()
+            } else {
+                // Server archive: context = "server_id:channel_id" from the message.
+                format!(
+                    "{}:{}",
+                    manifest.server_id.as_deref().unwrap_or(""),
+                    msg.channel_id.as_deref().unwrap_or("")
+                )
+            };
             // For edited messages, the main-row signature uses edited_at timestamp.
             let ts = msg.edited_at.unwrap_or(msg.timestamp);
             let payload = message_signing_payload(msg_type, &context, &msg.sender_id, ts, &msg.text);
@@ -309,6 +323,8 @@ pub(crate) fn verify_archive(zip_bytes: &[u8]) -> Result<VerifyResult, String> {
         server_id: loaded.manifest.server_id.clone(),
         channel_id: loaded.manifest.channel_id.clone(),
         channel_name: loaded.manifest.channel_name.clone(),
+        server_name: loaded.manifest.server_name.clone(),
+        channels: loaded.manifest.channels.clone(),
     })
 }
 

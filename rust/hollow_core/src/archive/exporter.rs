@@ -24,7 +24,7 @@ pub(crate) fn export_archive(
         .as_millis() as i64;
 
     // ── 1. Load all messages (including hidden/deleted) ─────────
-    let (archive_type, _context_str, peer_id_opt, server_id_opt, channel_id_opt, channel_name_opt, messages) =
+    let (archive_type, _context_str, peer_id_opt, server_id_opt, channel_id_opt, channel_name_opt, server_name_opt, channel_infos, messages) =
         match &target {
             ArchiveTarget::Dm { peer_id } => {
                 let msgs = store.load_all_dm_messages(peer_id)?;
@@ -50,6 +50,7 @@ pub(crate) fn export_archive(
                             hidden_at: m.hidden_at,
                             reply_to_mid: m.reply_to_mid,
                             file_id: m.file_id,
+                            channel_id: None,
                             reactions: Vec::new(),
                         }
                     })
@@ -61,6 +62,8 @@ pub(crate) fn export_archive(
                     None,
                     None,
                     None,
+                    None,
+                    Vec::new(),
                     archive_msgs,
                 )
             }
@@ -87,6 +90,7 @@ pub(crate) fn export_archive(
                             hidden_at: m.hidden_at,
                             reply_to_mid: m.reply_to_mid,
                             file_id: m.file_id,
+                            channel_id: None,
                             reactions: Vec::new(),
                         }
                     })
@@ -98,6 +102,55 @@ pub(crate) fn export_archive(
                     Some(server_id.clone()),
                     Some(channel_id.clone()),
                     channel_name.clone(),
+                    None,
+                    Vec::new(),
+                    archive_msgs,
+                )
+            }
+            ArchiveTarget::Server {
+                server_id,
+                server_name,
+                channels,
+            } => {
+                let mut archive_msgs: Vec<ArchiveMessage> = Vec::new();
+                let mut channel_infos: Vec<ArchiveChannelInfo> = Vec::new();
+                for (ch_id, ch_name) in channels {
+                    let msgs = store.load_all_channel_messages(server_id, ch_id)?;
+                    let count = msgs.len() as u32;
+                    for m in msgs {
+                        let mid = m.message_id.clone().unwrap_or_else(|| {
+                            format!("legacy-{}-{}", m.sender_id, m.timestamp)
+                        });
+                        archive_msgs.push(ArchiveMessage {
+                            message_id: mid,
+                            sender_id: m.sender_id,
+                            text: m.text,
+                            timestamp: m.timestamp,
+                            signature: m.signature,
+                            public_key: m.public_key,
+                            edited_at: m.edited_at,
+                            hidden_at: m.hidden_at,
+                            reply_to_mid: m.reply_to_mid,
+                            file_id: m.file_id,
+                            channel_id: Some(ch_id.clone()),
+                            reactions: Vec::new(),
+                        });
+                    }
+                    channel_infos.push(ArchiveChannelInfo {
+                        channel_id: ch_id.clone(),
+                        channel_name: ch_name.clone(),
+                        message_count: count,
+                    });
+                }
+                (
+                    "server".to_string(),
+                    server_id.clone(),
+                    None,
+                    Some(server_id.clone()),
+                    None,
+                    None,
+                    Some(server_name.clone()),
+                    channel_infos,
                     archive_msgs,
                 )
             }
@@ -300,6 +353,8 @@ pub(crate) fn export_archive(
         server_id: server_id_opt,
         channel_id: channel_id_opt,
         channel_name: channel_name_opt,
+        server_name: server_name_opt,
+        channels: channel_infos,
         participants,
     };
 

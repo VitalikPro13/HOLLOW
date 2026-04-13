@@ -24,10 +24,15 @@ import 'package:hollow/src/ui/chat/chat_pane.dart'
     show shouldGroup, shouldShowDateSeparator, DateSeparator;
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
 import 'package:hollow/src/ui/chat/message_bubble.dart';
+import 'package:hollow/src/ui/archive/archive_message_viewer.dart'
+    show ArchiveSearchBar, EditHistoryIndicator;
+import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:lucide_icons/lucide_icons.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 /// Two-panel layout for "Imported Archives" sub-tab.
 class ImportedArchivesView extends ConsumerWidget {
@@ -338,9 +343,11 @@ class _ArchiveEntryCard extends ConsumerWidget {
 
               final typeIcon = result.archiveType == 'dm'
                   ? LucideIcons.messageSquare
-                  : LucideIcons.hash;
+                  : result.archiveType == 'server'
+                      ? LucideIcons.server
+                      : LucideIcons.hash;
 
-              // Resolve display name for DMs, or channel name for channels.
+              // Resolve display name for DMs, channel name for channels, or server name.
               final profiles = ref.watch(profileProvider);
               final servers = ref.watch(serverListProvider);
               String name;
@@ -349,9 +356,11 @@ class _ArchiveEntryCard extends ConsumerWidget {
                 name = result.peerId != null
                     ? displayNameFor(profiles, result.peerId!)
                     : 'DM';
+              } else if (result.archiveType == 'server') {
+                name = result.serverName ?? 'Server';
+                serverLabel = '${result.channels.length} channels';
               } else {
                 name = result.channelName ?? result.channelId ?? 'Channel';
-                // Look up server name from local server list.
                 if (result.serverId != null && servers.containsKey(result.serverId)) {
                   serverLabel = servers[result.serverId]?.name;
                 }
@@ -500,16 +509,39 @@ class _ImportedArchiveViewer extends ConsumerWidget {
   }
 }
 
-class _ArchivePovViewer extends ConsumerWidget {
+class _ArchivePovViewer extends ConsumerStatefulWidget {
   final archive_api.ArchiveData data;
 
   const _ArchivePovViewer({super.key, required this.data});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_ArchivePovViewer> createState() => _ArchivePovViewerState();
+}
+
+class _ArchivePovViewerState extends ConsumerState<_ArchivePovViewer> {
+  @override
+  void initState() {
+    super.initState();
+    // Reset shared state for the new archive.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(archiveFilterSenderProvider.notifier).state = null;
+      ref.read(archiveMessageSearchOpenProvider.notifier).state = false;
+      ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
+      ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
+      ref.read(archiveJumpToDateProvider.notifier).state = null;
+      ref.read(importedArchiveSelectedChannelProvider.notifier).state = null;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final data = widget.data;
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
     final v = data.verification;
+    final profiles = ref.watch(profileProvider);
+    final filterSender = ref.watch(archiveFilterSenderProvider);
+    final searchOpen = ref.watch(archiveMessageSearchOpenProvider);
 
     // Determine verification banner state.
     final isFullyValid =
@@ -545,20 +577,115 @@ class _ArchivePovViewer extends ConsumerWidget {
             ? LucideIcons.alertTriangle
             : LucideIcons.shieldOff;
 
-    // Convert archive messages.
     final isDm = data.archiveType == 'dm';
-    final messages = isDm
-        ? convertArchiveDmMessages(data, localPeerId)
-        : null;
-    final channelMessages = !isDm
-        ? convertArchiveChannelMessages(data, localPeerId)
-        : null;
+    final isServer = data.archiveType == 'server';
+
+    // For server archives, handle channel selection.
+    final selectedChannelId = ref.watch(importedArchiveSelectedChannelProvider);
+    String? activeChannelId;
+    String? activeChannelName;
+    if (isServer && data.channels.isNotEmpty) {
+      activeChannelId = selectedChannelId ?? data.channels.first.channelId;
+      activeChannelName = data.channels
+          .where((c) => c.channelId == activeChannelId)
+          .firstOrNull
+          ?.channelName ?? activeChannelId;
+    }
+
+    // Convert archive messages (filter by channel for server archives).
+    List<ChatMessage>? dmMessages;
+    List<ChannelChatMessage>? allChannelMessages;
+    List<ChannelChatMessage>? channelMessages;
+
+    if (isDm) {
+      dmMessages = convertArchiveDmMessages(data, localPeerId);
+    } else {
+      allChannelMessages = convertArchiveChannelMessages(data, localPeerId);
+      if (isServer && activeChannelId != null) {
+        // Filter messages by selected channel using the raw FFI data's channel_id.
+        final channelMsgIds = <String>{};
+        for (final m in data.messages) {
+          if (m.channelId == activeChannelId) {
+            channelMsgIds.add(m.messageId);
+          }
+        }
+        channelMessages = allChannelMessages
+            .where((m) => channelMsgIds.contains(m.messageId))
+            .toList();
+      } else {
+        channelMessages = allChannelMessages;
+      }
+    }
+
+    // Apply sender filter.
+    if (filterSender != null && channelMessages != null) {
+      channelMessages = channelMessages
+          .where((m) => m.senderId == filterSender)
+          .toList();
+    }
+
+    // Collect unique senders for filter (channel archives only).
+    final unfilteredChannelMessages = isDm ? null : (isServer && activeChannelId != null
+        ? allChannelMessages!.where((m) {
+            final channelMsgIds = <String>{};
+            for (final raw in data.messages) {
+              if (raw.channelId == activeChannelId) channelMsgIds.add(raw.messageId);
+            }
+            return channelMsgIds.contains(m.messageId);
+          }).toList()
+        : allChannelMessages);
+    final uniqueSenders = unfilteredChannelMessages?.map((m) => m.senderId).toSet().toList()?..sort();
+    final senderNames = uniqueSenders != null
+        ? {for (final id in uniqueSenders) id: displayNameFor(profiles, id)}
+        : <String, String>{};
+    final senderAvatars = uniqueSenders != null
+        ? {for (final id in uniqueSenders) id: profiles[id]?.avatarBytes}
+        : <String, dynamic>{};
+
+    // Build edits map from archive data.
+    final editsMap = <String, List<ArchiveEditEntry>>{};
+    for (final e in data.edits) {
+      editsMap.putIfAbsent(e.messageId, () => []).add(ArchiveEditEntry(
+        messageId: e.messageId,
+        oldText: e.oldText,
+        newText: e.newText,
+        editedAt: DateTime.fromMillisecondsSinceEpoch(e.editedAt),
+        signature: e.signature,
+        publicKey: e.publicKey,
+      ));
+    }
 
     // Context for Message Proof.
     final proofContext = isDm
         ? (data.peerId ?? '')
-        : '${data.serverId ?? ''}:${data.channelId ?? ''}';
+        : '${data.serverId ?? ''}:${activeChannelId ?? data.channelId ?? ''}';
     final proofMsgType = isDm ? 'dm' : 'ch';
+
+    // Header title/subtitle.
+    String headerTitle;
+    String? headerSubtitle;
+    Widget headerLeading;
+    if (isDm) {
+      headerTitle = displayNameFor(profiles, data.peerId ?? '');
+      headerLeading = HollowAvatar(
+        peerId: data.peerId ?? '',
+        size: 24,
+        imageBytes: profiles[data.peerId]?.avatarBytes,
+      );
+    } else if (isServer) {
+      headerTitle = activeChannelName ?? 'Channel';
+      headerSubtitle = 'in ${data.serverName ?? 'Server'}';
+      headerLeading = Text('#', style: TextStyle(
+        color: hollow.textSecondary, fontWeight: FontWeight.w700, fontSize: 18));
+    } else {
+      headerTitle = data.channelName ?? 'Channel';
+      headerSubtitle = data.serverId != null ? 'in ${data.serverId}' : null;
+      headerLeading = Text('#', style: TextStyle(
+        color: hollow.textSecondary, fontWeight: FontWeight.w700, fontSize: 18));
+    }
+
+    final visibleMessages = isDm ? dmMessages! : channelMessages!;
+    final totalForFilter = isDm ? null : unfilteredChannelMessages?.length;
 
     return Column(
       children: [
@@ -592,19 +719,131 @@ class _ArchivePovViewer extends ConsumerWidget {
           ),
         ),
 
+        // ── Channel selector for server archives ──
+        if (isServer && data.channels.length > 1)
+          Container(
+            height: 36,
+            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+            decoration: BoxDecoration(
+              color: hollow.surface,
+              border: Border(bottom: BorderSide(color: hollow.border)),
+            ),
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              children: data.channels.map((ch) {
+                final isActive = ch.channelId == activeChannelId;
+                return Padding(
+                  padding: const EdgeInsets.only(right: HollowSpacing.xs),
+                  child: Center(
+                    child: HollowPressable(
+                      onTap: () {
+                        ref.read(importedArchiveSelectedChannelProvider.notifier).state =
+                            ch.channelId;
+                        // Reset filter/search when switching channels.
+                        ref.read(archiveFilterSenderProvider.notifier).state = null;
+                        ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
+                        ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
+                      },
+                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: isActive
+                              ? hollow.accent.withValues(alpha: 0.15)
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          border: Border.all(
+                            color: isActive
+                                ? hollow.accent.withValues(alpha: 0.3)
+                                : hollow.border,
+                          ),
+                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        child: Text(
+                          '# ${ch.channelName}',
+                          style: HollowTypography.caption.copyWith(
+                            color: isActive ? hollow.accent : hollow.textSecondary,
+                            fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+
+        // ── Header with toolbar ──
+        _ImportedArchiveHeader(
+          leading: headerLeading,
+          title: headerTitle,
+          subtitle: headerSubtitle,
+          messageCount: visibleMessages.length,
+          totalMessageCount: filterSender != null ? totalForFilter : null,
+          senderIds: uniqueSenders,
+          selectedSender: filterSender,
+          senderDisplayNames: senderNames,
+          senderAvatars: senderAvatars,
+          onSenderFilterChanged: (sender) {
+            ref.read(archiveFilterSenderProvider.notifier).state = sender;
+            ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
+            ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
+          },
+          onJumpToDate: visibleMessages.isNotEmpty
+              ? () async {
+                  final msgs = visibleMessages;
+                  final ts = isDm
+                      ? (msgs as List<ChatMessage>).map((m) => m.timestamp).toList()
+                      : (msgs as List<ChannelChatMessage>).map((m) => m.timestamp).toList();
+                  final picked = await showDatePicker(
+                    context: context,
+                    initialDate: ts.last,
+                    firstDate: ts.first,
+                    lastDate: ts.last,
+                    builder: (context, child) => Theme(
+                      data: ThemeData.dark().copyWith(
+                        colorScheme: ColorScheme.dark(
+                          primary: hollow.accent,
+                          surface: hollow.surface,
+                        ),
+                      ),
+                      child: child!,
+                    ),
+                  );
+                  if (picked != null) {
+                    ref.read(archiveJumpToDateProvider.notifier).state = picked;
+                  }
+                }
+              : null,
+          searchOpen: searchOpen,
+          onToggleSearch: () {
+            final open = ref.read(archiveMessageSearchOpenProvider);
+            ref.read(archiveMessageSearchOpenProvider.notifier).state = !open;
+            if (open) {
+              ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
+              ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
+            }
+          },
+        ),
+
         // ── Messages ──
         Expanded(
           child: isDm
               ? _ImportedDmMessageList(
-                  messages: messages!,
+                  messages: dmMessages!,
                   peerId: data.peerId ?? '',
+                  editsMap: editsMap,
                   proofContext: proofContext,
                   proofMsgType: proofMsgType,
                 )
               : _ImportedChannelMessageList(
                   messages: channelMessages!,
+                  allMessages: unfilteredChannelMessages ?? channelMessages!,
                   serverId: data.serverId ?? '',
-                  channelId: data.channelId ?? '',
+                  channelId: activeChannelId ?? data.channelId ?? '',
+                  editsMap: editsMap,
                   proofContext: proofContext,
                   proofMsgType: proofMsgType,
                 ),
@@ -614,17 +853,261 @@ class _ArchivePovViewer extends ConsumerWidget {
   }
 }
 
+// ── Imported Archive Header ────────────────────────────────────
+
+class _ImportedArchiveHeader extends StatelessWidget {
+  final Widget leading;
+  final String title;
+  final String? subtitle;
+  final int? messageCount;
+  final int? totalMessageCount;
+  final VoidCallback? onJumpToDate;
+  final VoidCallback? onToggleSearch;
+  final bool searchOpen;
+  final List<String>? senderIds;
+  final String? selectedSender;
+  final ValueChanged<String?>? onSenderFilterChanged;
+  final Map<String, String>? senderDisplayNames;
+  final Map<String, dynamic>? senderAvatars;
+
+  const _ImportedArchiveHeader({
+    required this.leading,
+    required this.title,
+    this.subtitle,
+    this.messageCount,
+    this.totalMessageCount,
+    this.onJumpToDate,
+    this.onToggleSearch,
+    this.searchOpen = false,
+    this.senderIds,
+    this.selectedSender,
+    this.onSenderFilterChanged,
+    this.senderDisplayNames,
+    this.senderAvatars,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final countText = selectedSender != null && totalMessageCount != null
+        ? '$messageCount of $totalMessageCount'
+        : '${messageCount ?? 0}';
+
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: hollow.border)),
+      ),
+      child: Row(
+        children: [
+          leading,
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: subtitle != null
+                ? Text.rich(
+                    TextSpan(children: [
+                      TextSpan(text: title, style: HollowTypography.body.copyWith(
+                        color: hollow.textPrimary, fontWeight: FontWeight.w600)),
+                      TextSpan(text: '  $subtitle', style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary, fontSize: 12)),
+                    ]),
+                    maxLines: 1, overflow: TextOverflow.ellipsis,
+                  )
+                : Text(title, style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary, fontWeight: FontWeight.w600),
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
+          ),
+          if (messageCount != null)
+            Text('$countText messages', style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary, fontSize: 11)),
+          if (senderIds != null && senderIds!.length > 1) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            _ImportedFilterButton(
+              senderIds: senderIds!,
+              selectedSender: selectedSender,
+              senderDisplayNames: senderDisplayNames ?? {},
+              senderAvatars: senderAvatars ?? {},
+              onSenderFilterChanged: onSenderFilterChanged,
+            ),
+          ],
+          if (onJumpToDate != null) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            HollowPressable(
+              onTap: onJumpToDate,
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              padding: const EdgeInsets.all(6),
+              child: Icon(LucideIcons.calendar, size: 16, color: hollow.textSecondary),
+            ),
+          ],
+          if (onToggleSearch != null) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            HollowPressable(
+              onTap: onToggleSearch,
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              padding: const EdgeInsets.all(6),
+              child: Icon(LucideIcons.search, size: 16,
+                  color: searchOpen ? hollow.accent : hollow.textSecondary),
+            ),
+          ],
+          const SizedBox(width: HollowSpacing.sm),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: hollow.elevated,
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+            ),
+            child: Text('read-only', style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary, fontSize: 10)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Searchable filter button for imported archive headers.
+class _ImportedFilterButton extends StatelessWidget {
+  final List<String> senderIds;
+  final String? selectedSender;
+  final Map<String, String> senderDisplayNames;
+  final Map<String, dynamic> senderAvatars;
+  final ValueChanged<String?>? onSenderFilterChanged;
+
+  const _ImportedFilterButton({
+    required this.senderIds,
+    this.selectedSender,
+    required this.senderDisplayNames,
+    this.senderAvatars = const {},
+    this.onSenderFilterChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return HollowPressable(
+      onTap: () async {
+        final picked = await showDialog<String?>(
+          context: context,
+          barrierColor: Colors.transparent,
+          builder: (ctx) => _ImportedFilterDialog(
+            senderIds: senderIds,
+            selectedSender: selectedSender,
+            senderDisplayNames: senderDisplayNames,
+            senderAvatars: senderAvatars,
+          ),
+        );
+        if (picked != null) {
+          onSenderFilterChanged?.call(picked == '_clear_' ? null : picked);
+        }
+      },
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      padding: const EdgeInsets.all(6),
+      child: Icon(LucideIcons.filter, size: 16,
+          color: selectedSender != null ? hollow.accent : hollow.textSecondary),
+    );
+  }
+}
+
+class _ImportedFilterDialog extends StatefulWidget {
+  final List<String> senderIds;
+  final String? selectedSender;
+  final Map<String, String> senderDisplayNames;
+  final Map<String, dynamic> senderAvatars;
+
+  const _ImportedFilterDialog({
+    required this.senderIds,
+    this.selectedSender,
+    required this.senderDisplayNames,
+    this.senderAvatars = const {},
+  });
+
+  @override
+  State<_ImportedFilterDialog> createState() => _ImportedFilterDialogState();
+}
+
+class _ImportedFilterDialogState extends State<_ImportedFilterDialog> {
+  String _query = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final filtered = _query.isEmpty ? widget.senderIds
+        : widget.senderIds.where((id) =>
+            (widget.senderDisplayNames[id] ?? id).toLowerCase().contains(_query.toLowerCase())).toList();
+
+    return Align(
+      alignment: Alignment.topRight,
+      child: Padding(
+        padding: const EdgeInsets.only(top: 100, right: 80),
+        child: Material(type: MaterialType.transparency, child: Container(
+          width: 240, constraints: const BoxConstraints(maxHeight: 360),
+          decoration: BoxDecoration(
+            color: hollow.elevated, borderRadius: BorderRadius.circular(hollow.radiusSm),
+            border: Border.all(color: hollow.border),
+            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 12, offset: const Offset(0, 4))],
+          ),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Padding(padding: const EdgeInsets.all(HollowSpacing.sm), child: HollowTextField(
+              hintText: 'Search participants...', isDense: true, autofocus: true,
+              prefixIcon: Icon(LucideIcons.search, size: 12, color: hollow.textSecondary),
+              onChanged: (val) => setState(() => _query = val),
+            )),
+            HollowPressable(
+              onTap: () => Navigator.of(context).pop('_clear_'),
+              padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md, vertical: 6),
+              child: Row(children: [
+                Icon(LucideIcons.users, size: 14,
+                    color: widget.selectedSender == null ? hollow.accent : hollow.textSecondary),
+                const SizedBox(width: HollowSpacing.sm),
+                Text('All participants', style: HollowTypography.body.copyWith(
+                  color: widget.selectedSender == null ? hollow.accent : hollow.textPrimary,
+                  fontWeight: widget.selectedSender == null ? FontWeight.w600 : FontWeight.normal, fontSize: 13)),
+              ]),
+            ),
+            Divider(height: 1, color: hollow.border),
+            Flexible(child: ListView.builder(
+              padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+              shrinkWrap: true, itemCount: filtered.length,
+              itemBuilder: (_, index) {
+                final id = filtered[index];
+                final name = widget.senderDisplayNames[id] ?? id.substring(0, 8);
+                final isActive = widget.selectedSender == id;
+                return HollowPressable(
+                  onTap: () => Navigator.of(context).pop(id),
+                  padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md, vertical: 5),
+                  child: Row(children: [
+                    HollowAvatar(peerId: id, size: 20, imageBytes: widget.senderAvatars[id]),
+                    const SizedBox(width: HollowSpacing.sm),
+                    Expanded(child: Text(name, style: HollowTypography.body.copyWith(
+                      color: isActive ? hollow.accent : hollow.textPrimary,
+                      fontWeight: isActive ? FontWeight.w600 : FontWeight.normal, fontSize: 13),
+                      maxLines: 1, overflow: TextOverflow.ellipsis)),
+                    if (isActive) Icon(LucideIcons.check, size: 14, color: hollow.accent),
+                  ]),
+                );
+              },
+            )),
+          ]),
+        )),
+      ),
+    );
+  }
+}
+
 // ── Imported DM Message List ────────────────────────────────────
 
 class _ImportedDmMessageList extends ConsumerStatefulWidget {
   final List<ChatMessage> messages;
   final String peerId;
+  final Map<String, List<ArchiveEditEntry>> editsMap;
   final String proofContext;
   final String proofMsgType;
 
   const _ImportedDmMessageList({
     required this.messages,
     required this.peerId,
+    this.editsMap = const {},
     required this.proofContext,
     required this.proofMsgType,
   });
@@ -637,11 +1120,64 @@ class _ImportedDmMessageList extends ConsumerStatefulWidget {
 class _ImportedDmMessageListState
     extends ConsumerState<_ImportedDmMessageList> {
   bool _isPicking = false;
+  final _itemScrollController = ItemScrollController();
+  final _itemPositionsListener = ItemPositionsListener.create();
+  int? _highlightIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.listen(archiveJumpToDateProvider, (_, date) {
+        if (date != null && widget.messages.isNotEmpty) {
+          _jumpToDate(date);
+          ref.read(archiveJumpToDateProvider.notifier).state = null;
+        }
+      });
+    });
+  }
+
+  void _jumpToDate(DateTime target) {
+    final targetStart = DateTime(target.year, target.month, target.day);
+    int lo = 0, hi = widget.messages.length;
+    while (lo < hi) {
+      final mid = (lo + hi) ~/ 2;
+      if (widget.messages[mid].timestamp.isBefore(targetStart)) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo < widget.messages.length && _itemScrollController.isAttached) {
+      _itemScrollController.scrollTo(
+        index: lo, duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic, alignment: 0.1);
+    }
+  }
+
+  void _scrollToIndex(int index) {
+    if (!_itemScrollController.isAttached) return;
+    setState(() => _highlightIndex = index);
+    _itemScrollController.scrollTo(
+      index: index, duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic, alignment: 0.3);
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _highlightIndex = null);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final messages = widget.messages;
+    final searchOpen = ref.watch(archiveMessageSearchOpenProvider);
+    final searchQuery = ref.watch(archiveMessageSearchQueryProvider);
+    final matchIdx = ref.watch(archiveSearchMatchIndexProvider);
+
+    final matchIndices = <int>[];
+    if (searchQuery.isNotEmpty) {
+      final q = searchQuery.toLowerCase();
+      for (int i = 0; i < messages.length; i++) {
+        if (messages[i].text.toLowerCase().contains(q)) matchIndices.add(i);
+      }
+    }
 
     if (messages.isEmpty) {
       return Center(
@@ -654,7 +1190,32 @@ class _ImportedDmMessageListState
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
     final profiles = ref.watch(profileProvider);
 
-    return MessageActionBarScope(
+    return Column(
+      children: [
+        if (searchOpen)
+          ArchiveSearchBar(
+            matchCount: matchIndices.length, currentMatch: matchIdx,
+            onQueryChanged: (q) {
+              ref.read(archiveMessageSearchQueryProvider.notifier).state = q;
+              ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
+            },
+            onNext: matchIndices.isNotEmpty ? () {
+              final next = (matchIdx + 1) % matchIndices.length;
+              ref.read(archiveSearchMatchIndexProvider.notifier).state = next;
+              _scrollToIndex(matchIndices[next]);
+            } : null,
+            onPrev: matchIndices.isNotEmpty ? () {
+              final prev = (matchIdx - 1 + matchIndices.length) % matchIndices.length;
+              ref.read(archiveSearchMatchIndexProvider.notifier).state = prev;
+              _scrollToIndex(matchIndices[prev]);
+            } : null,
+            onClose: () {
+              ref.read(archiveMessageSearchOpenProvider.notifier).state = false;
+              ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
+              ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
+            },
+          ),
+        Expanded(child: MessageActionBarScope(
       child: Builder(
         builder: (scopeContext) =>
             NotificationListener<ScrollNotification>(
@@ -666,7 +1227,9 @@ class _ImportedDmMessageListState
           },
           child: SelectionArea(
             contextMenuBuilder: (_, __) => const SizedBox.shrink(),
-            child: ListView.builder(
+            child: ScrollablePositionedList.builder(
+              itemScrollController: _itemScrollController,
+              itemPositionsListener: _itemPositionsListener,
               padding:
                   const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
               itemCount: messages.length,
@@ -699,12 +1262,17 @@ class _ImportedDmMessageListState
                   }
                 }
 
+                final isCurrentMatch = matchIndices.isNotEmpty &&
+                    matchIdx < matchIndices.length &&
+                    matchIndices[matchIdx] == index;
+
                 Widget bubble = MessageBubble(
                   message: msg,
                   peerId: widget.peerId,
                   showHeader: showHeader,
                   replyToText: replyToText,
                   replyToSenderName: replyToSenderName,
+                  isHighlighted: _highlightIndex == index || isCurrentMatch,
                   onReplyTap: null,
                   onToggleReaction: null,
                 );
@@ -714,8 +1282,27 @@ class _ImportedDmMessageListState
                       hiddenAt: msg.hiddenAt!, child: bubble);
                 }
 
+                // Edit history indicator.
+                final msgEdits = msg.messageId != null
+                    ? widget.editsMap[msg.messageId]
+                    : null;
                 final senderPeerId =
                     msg.isMe ? localPeerId : widget.peerId;
+                if (msgEdits != null && msgEdits.isNotEmpty) {
+                  bubble = Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      bubble,
+                      EditHistoryIndicator(
+                        edits: msgEdits,
+                        senderPeerId: senderPeerId,
+                        proofContext: widget.proofContext,
+                        proofMsgType: widget.proofMsgType,
+                        messageId: msg.messageId,
+                      ),
+                    ],
+                  );
+                }
 
                 bubble = MessageHoverWrapper(
                   isMe: msg.isMe,
@@ -788,6 +1375,9 @@ class _ImportedDmMessageListState
           ),
         ),
       ),
+      ),
+      ),
+      ],
     );
   }
 
@@ -844,15 +1434,19 @@ class _ImportedDmMessageListState
 
 class _ImportedChannelMessageList extends ConsumerStatefulWidget {
   final List<ChannelChatMessage> messages;
+  final List<ChannelChatMessage> allMessages;
   final String serverId;
   final String channelId;
+  final Map<String, List<ArchiveEditEntry>> editsMap;
   final String proofContext;
   final String proofMsgType;
 
   const _ImportedChannelMessageList({
     required this.messages,
+    required this.allMessages,
     required this.serverId,
     required this.channelId,
+    this.editsMap = const {},
     required this.proofContext,
     required this.proofMsgType,
   });
@@ -865,11 +1459,64 @@ class _ImportedChannelMessageList extends ConsumerStatefulWidget {
 class _ImportedChannelMessageListState
     extends ConsumerState<_ImportedChannelMessageList> {
   bool _isPicking = false;
+  final _itemScrollController = ItemScrollController();
+  final _itemPositionsListener = ItemPositionsListener.create();
+  int? _highlightIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.listen(archiveJumpToDateProvider, (_, date) {
+        if (date != null && widget.messages.isNotEmpty) {
+          _jumpToDate(date);
+          ref.read(archiveJumpToDateProvider.notifier).state = null;
+        }
+      });
+    });
+  }
+
+  void _jumpToDate(DateTime target) {
+    final targetStart = DateTime(target.year, target.month, target.day);
+    int lo = 0, hi = widget.messages.length;
+    while (lo < hi) {
+      final mid = (lo + hi) ~/ 2;
+      if (widget.messages[mid].timestamp.isBefore(targetStart)) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo < widget.messages.length && _itemScrollController.isAttached) {
+      _itemScrollController.scrollTo(
+        index: lo, duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic, alignment: 0.1);
+    }
+  }
+
+  void _scrollToIndex(int index) {
+    if (!_itemScrollController.isAttached) return;
+    setState(() => _highlightIndex = index);
+    _itemScrollController.scrollTo(
+      index: index, duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic, alignment: 0.3);
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _highlightIndex = null);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final messages = widget.messages;
+    final searchOpen = ref.watch(archiveMessageSearchOpenProvider);
+    final searchQuery = ref.watch(archiveMessageSearchQueryProvider);
+    final matchIdx = ref.watch(archiveSearchMatchIndexProvider);
+
+    final matchIndices = <int>[];
+    if (searchQuery.isNotEmpty) {
+      final q = searchQuery.toLowerCase();
+      for (int i = 0; i < messages.length; i++) {
+        if (messages[i].text.toLowerCase().contains(q)) matchIndices.add(i);
+      }
+    }
 
     if (messages.isEmpty) {
       return Center(
@@ -881,7 +1528,32 @@ class _ImportedChannelMessageListState
 
     final profiles = ref.watch(profileProvider);
 
-    return MessageActionBarScope(
+    return Column(
+      children: [
+        if (searchOpen)
+          ArchiveSearchBar(
+            matchCount: matchIndices.length, currentMatch: matchIdx,
+            onQueryChanged: (q) {
+              ref.read(archiveMessageSearchQueryProvider.notifier).state = q;
+              ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
+            },
+            onNext: matchIndices.isNotEmpty ? () {
+              final next = (matchIdx + 1) % matchIndices.length;
+              ref.read(archiveSearchMatchIndexProvider.notifier).state = next;
+              _scrollToIndex(matchIndices[next]);
+            } : null,
+            onPrev: matchIndices.isNotEmpty ? () {
+              final prev = (matchIdx - 1 + matchIndices.length) % matchIndices.length;
+              ref.read(archiveSearchMatchIndexProvider.notifier).state = prev;
+              _scrollToIndex(matchIndices[prev]);
+            } : null,
+            onClose: () {
+              ref.read(archiveMessageSearchOpenProvider.notifier).state = false;
+              ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
+              ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
+            },
+          ),
+        Expanded(child: MessageActionBarScope(
       child: Builder(
         builder: (scopeContext) =>
             NotificationListener<ScrollNotification>(
@@ -893,7 +1565,9 @@ class _ImportedChannelMessageListState
           },
           child: SelectionArea(
             contextMenuBuilder: (_, __) => const SizedBox.shrink(),
-            child: ListView.builder(
+            child: ScrollablePositionedList.builder(
+              itemScrollController: _itemScrollController,
+              itemPositionsListener: _itemPositionsListener,
               padding:
                   const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
               itemCount: messages.length,
@@ -917,7 +1591,7 @@ class _ImportedChannelMessageListState
                 String? replyToText;
                 String? replyToSenderName;
                 if (msg.replyToMid != null) {
-                  final r = messages
+                  final r = widget.allMessages
                       .where((m) => m.messageId == msg.replyToMid)
                       .firstOrNull;
                   if (r != null) {
@@ -927,12 +1601,17 @@ class _ImportedChannelMessageListState
                   }
                 }
 
+                final isCurrentMatch = matchIndices.isNotEmpty &&
+                    matchIdx < matchIndices.length &&
+                    matchIndices[matchIdx] == index;
+
                 Widget bubble = ChannelMessageBubble(
                   message: msg,
                   serverId: widget.serverId,
                   showHeader: showHeader,
                   replyToText: replyToText,
                   replyToSenderName: replyToSenderName,
+                  isHighlighted: _highlightIndex == index || isCurrentMatch,
                   onReplyTap: null,
                   onToggleReaction: null,
                 );
@@ -940,6 +1619,26 @@ class _ImportedChannelMessageListState
                 if (msg.hiddenAt != null) {
                   bubble = _DeletedOverlay(
                       hiddenAt: msg.hiddenAt!, child: bubble);
+                }
+
+                // Edit history indicator.
+                final msgEdits = msg.messageId != null
+                    ? widget.editsMap[msg.messageId]
+                    : null;
+                if (msgEdits != null && msgEdits.isNotEmpty) {
+                  bubble = Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      bubble,
+                      EditHistoryIndicator(
+                        edits: msgEdits,
+                        senderPeerId: msg.senderId,
+                        proofContext: widget.proofContext,
+                        proofMsgType: widget.proofMsgType,
+                        messageId: msg.messageId,
+                      ),
+                    ],
+                  );
                 }
 
                 bubble = MessageHoverWrapper(
@@ -1013,6 +1712,9 @@ class _ImportedChannelMessageListState
           ),
         ),
       ),
+      ),
+      ),
+      ],
     );
   }
 

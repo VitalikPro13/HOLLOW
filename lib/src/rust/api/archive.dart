@@ -6,6 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`
+
 /// Export a DM conversation as a `.hollow-archive` file.
 /// `file_mode`: "full", "images_only", or "placeholder".
 /// Returns the file size in bytes on success.
@@ -36,6 +38,24 @@ Future<BigInt> exportChannelArchive({
   fileMode: fileMode,
 );
 
+/// Export all text channels of a server as a single `.hollow-archive` file.
+/// `channels_json`: JSON array of `[{"channel_id": "...", "channel_name": "..."}]`.
+/// `file_mode`: "full", "images_only", or "placeholder".
+/// Returns the file size in bytes on success.
+Future<BigInt> exportServerArchive({
+  required String serverId,
+  required String serverName,
+  required String channelsJson,
+  required String outputPath,
+  required String fileMode,
+}) => RustLib.instance.api.crateApiArchiveExportServerArchive(
+  serverId: serverId,
+  serverName: serverName,
+  channelsJson: channelsJson,
+  outputPath: outputPath,
+  fileMode: fileMode,
+);
+
 /// Verify a `.hollow-archive` file. Quick check — parses manifest + signatures,
 /// reports validity summary without loading full message data.
 Future<ArchiveVerifyResult> verifyArchive({required String archivePath}) =>
@@ -45,6 +65,32 @@ Future<ArchiveVerifyResult> verifyArchive({required String archivePath}) =>
 /// Full parse: returns all messages, edits, deletions, files, and verification results.
 Future<ArchiveData> loadArchive({required String archivePath}) =>
     RustLib.instance.api.crateApiArchiveLoadArchive(archivePath: archivePath);
+
+/// Channel info for multi-channel (server) archives.
+class ArchiveChannelInfoFfi {
+  final String channelId;
+  final String channelName;
+  final int messageCount;
+
+  const ArchiveChannelInfoFfi({
+    required this.channelId,
+    required this.channelName,
+    required this.messageCount,
+  });
+
+  @override
+  int get hashCode =>
+      channelId.hashCode ^ channelName.hashCode ^ messageCount.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ArchiveChannelInfoFfi &&
+          runtimeType == other.runtimeType &&
+          channelId == other.channelId &&
+          channelName == other.channelName &&
+          messageCount == other.messageCount;
+}
 
 /// Full loaded archive data for the POV viewer.
 class ArchiveData {
@@ -56,6 +102,8 @@ class ArchiveData {
   final String? serverId;
   final String? channelId;
   final String? channelName;
+  final String? serverName;
+  final List<ArchiveChannelInfoFfi> channels;
   final List<String> participants;
   final List<ArchiveMessageFfi> messages;
   final List<ArchiveEditFfi> edits;
@@ -77,6 +125,8 @@ class ArchiveData {
     this.serverId,
     this.channelId,
     this.channelName,
+    this.serverName,
+    required this.channels,
     required this.participants,
     required this.messages,
     required this.edits,
@@ -98,6 +148,8 @@ class ArchiveData {
       serverId.hashCode ^
       channelId.hashCode ^
       channelName.hashCode ^
+      serverName.hashCode ^
+      channels.hashCode ^
       participants.hashCode ^
       messages.hashCode ^
       edits.hashCode ^
@@ -121,6 +173,8 @@ class ArchiveData {
           serverId == other.serverId &&
           channelId == other.channelId &&
           channelName == other.channelName &&
+          serverName == other.serverName &&
+          channels == other.channels &&
           participants == other.participants &&
           messages == other.messages &&
           edits == other.edits &&
@@ -276,6 +330,9 @@ class ArchiveMessageFfi {
   final PlatformInt64? hiddenAt;
   final String? replyToMid;
   final String? fileId;
+
+  /// Channel ID — populated only in server (multi-channel) archives.
+  final String? channelId;
   final List<ArchiveReactionFfi> reactions;
 
   /// Whether this message's signature is valid (None if not yet verified).
@@ -292,6 +349,7 @@ class ArchiveMessageFfi {
     this.hiddenAt,
     this.replyToMid,
     this.fileId,
+    this.channelId,
     required this.reactions,
     this.signatureValid,
   });
@@ -308,6 +366,7 @@ class ArchiveMessageFfi {
       hiddenAt.hashCode ^
       replyToMid.hashCode ^
       fileId.hashCode ^
+      channelId.hashCode ^
       reactions.hashCode ^
       signatureValid.hashCode;
 
@@ -326,6 +385,7 @@ class ArchiveMessageFfi {
           hiddenAt == other.hiddenAt &&
           replyToMid == other.replyToMid &&
           fileId == other.fileId &&
+          channelId == other.channelId &&
           reactions == other.reactions &&
           signatureValid == other.signatureValid;
 }
@@ -440,6 +500,8 @@ class ArchiveVerifyResult {
   final String? serverId;
   final String? channelId;
   final String? channelName;
+  final String? serverName;
+  final List<ArchiveChannelInfoFfi> channels;
 
   const ArchiveVerifyResult({
     required this.archiveType,
@@ -455,6 +517,8 @@ class ArchiveVerifyResult {
     this.serverId,
     this.channelId,
     this.channelName,
+    this.serverName,
+    required this.channels,
   });
 
   @override
@@ -471,7 +535,9 @@ class ArchiveVerifyResult {
       peerId.hashCode ^
       serverId.hashCode ^
       channelId.hashCode ^
-      channelName.hashCode;
+      channelName.hashCode ^
+      serverName.hashCode ^
+      channels.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -490,5 +556,7 @@ class ArchiveVerifyResult {
           peerId == other.peerId &&
           serverId == other.serverId &&
           channelId == other.channelId &&
-          channelName == other.channelName;
+          channelName == other.channelName &&
+          serverName == other.serverName &&
+          channels == other.channels;
 }

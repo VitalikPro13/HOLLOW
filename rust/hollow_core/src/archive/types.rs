@@ -13,6 +13,19 @@ pub(crate) enum ArchiveTarget {
         channel_id: String,
         channel_name: Option<String>,
     },
+    Server {
+        server_id: String,
+        server_name: String,
+        channels: Vec<(String, String)>, // (channel_id, channel_name)
+    },
+}
+
+/// Channel info entry for multi-channel (server) archives.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct ArchiveChannelInfo {
+    pub channel_id: String,
+    pub channel_name: String,
+    pub message_count: u32,
 }
 
 /// File attachment inclusion mode.
@@ -48,7 +61,7 @@ impl FileMode {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ArchiveManifest {
     pub format_version: u32,
-    pub archive_type: String, // "dm" or "channel"
+    pub archive_type: String, // "dm", "channel", or "server"
     pub exporter_peer_id: String,
     pub export_timestamp: i64, // millis since epoch
     pub message_count: u32,
@@ -63,6 +76,11 @@ pub(crate) struct ArchiveManifest {
     pub channel_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_name: Option<String>,
+    // Server-specific (multi-channel)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<ArchiveChannelInfo>,
     /// All unique sender peer_ids in the conversation.
     pub participants: Vec<String>,
 }
@@ -86,6 +104,9 @@ pub(crate) struct ArchiveMessage {
     pub reply_to_mid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_id: Option<String>,
+    /// Channel ID — populated only in server (multi-channel) archives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<ArchiveReaction>,
 }
@@ -218,4 +239,7 @@ pub(crate) struct VerifyResult {
     pub server_id: Option<String>,
     pub channel_id: Option<String>,
     pub channel_name: Option<String>,
+    // Server (multi-channel)
+    pub server_name: Option<String>,
+    pub channels: Vec<ArchiveChannelInfo>,
 }

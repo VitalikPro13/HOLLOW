@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
 /// Left panel of "My Data" — DMs|Channels inner tabs + search + scrollable list.
@@ -272,7 +273,7 @@ class _ChannelList extends ConsumerWidget {
           }).toList();
 
           if (matchingChannels.isNotEmpty) {
-            items.add(_ChannelListItem.header(group.serverName));
+            items.add(_ChannelListItem.header(group.serverName, group));
             for (final ch in matchingChannels) {
               items.add(_ChannelListItem.channel(ch));
             }
@@ -303,16 +304,50 @@ class _ChannelList extends ConsumerWidget {
                   top: index == 0 ? 0 : HollowSpacing.md,
                   bottom: HollowSpacing.xs,
                 ),
-                child: Text(
-                  item.headerName!,
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 10,
-                    letterSpacing: 0.5,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        item.headerName!,
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.textSecondary,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 10,
+                          letterSpacing: 0.5,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (item.group != null)
+                      HollowPressable(
+                        onTap: () {
+                          final g = item.group!;
+                          final totalMsgCount = g.channels
+                              .fold<int>(0, (s, c) => s + c.messageCount);
+                          showExportArchiveDialog(
+                            context,
+                            isDm: false,
+                            isServer: true,
+                            serverId: g.serverId,
+                            serverName: g.serverName,
+                            channels: g.channels
+                                .map((c) => {
+                                      'channel_id': c.channelId,
+                                      'channel_name': c.channelName,
+                                    })
+                                .toList(),
+                            name: g.serverName,
+                            messageCount: totalMsgCount,
+                          );
+                        },
+                        borderRadius:
+                            BorderRadius.circular(hollow.radiusSm),
+                        padding: const EdgeInsets.all(3),
+                        child: Icon(LucideIcons.fileOutput,
+                            size: 12, color: hollow.accent),
+                      ),
+                  ],
                 ),
               );
             }
@@ -405,12 +440,14 @@ class _ChannelList extends ConsumerWidget {
 class _ChannelListItem {
   final bool isHeader;
   final String? headerName;
+  final ArchiveChannelGroup? group;
   final ArchiveChannelEntry? entry;
 
-  _ChannelListItem.header(this.headerName)
+  _ChannelListItem.header(this.headerName, this.group)
       : isHeader = true,
         entry = null;
   _ChannelListItem.channel(this.entry)
       : isHeader = false,
-        headerName = null;
+        headerName = null,
+        group = null;
 }

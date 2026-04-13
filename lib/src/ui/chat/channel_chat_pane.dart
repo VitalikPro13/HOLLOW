@@ -42,6 +42,7 @@ import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:lucide_icons/lucide_icons.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 class ChannelChatPane extends ConsumerStatefulWidget {
   final String serverId;
@@ -75,7 +76,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   }
 
   final _controller = TextEditingController();
-  final _scrollController = ScrollController();
+  final _itemScrollController = ItemScrollController();
+  final _itemPositionsListener = ItemPositionsListener.create();
+  final _scrollOffsetController = ScrollOffsetController();
   final _focusNode = FocusNode();
   bool _historyLoaded = false;
   bool _isPicking = false;
@@ -85,7 +88,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   String? _replyToSenderName;
   String? _replyToImagePath;
   DateTime? _lastTypingSent;
-  String? _highlightMessageId;
+  int? _highlightIndex;
   final _searchController = TextEditingController();
   List<dynamic> _searchResults = [];
   final _searchFocusNode = FocusNode();
@@ -102,8 +105,6 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   /// First http/https URL in a string. Conservative match — excludes
   /// whitespace and common markup delimiters.
   static final RegExp _urlRegex = RegExp(r'https?://[^\s<>"' "'" r')\]}]+');
-  /// GlobalKeys for reply-tap-scroll (keyed by messageId).
-  final Map<String, GlobalKey> _messageKeys = {};
 
   String get _stateKey => '${widget.serverId}:${widget.channelId}';
 
@@ -119,10 +120,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       }
     });
     _loadHistory();
-    _scrollController.addListener(_onScrollChanged);
+    _itemPositionsListener.itemPositions.addListener(_onScrollPositionChanged);
   }
 
-  void _onScrollChanged() {
+  void _onScrollPositionChanged() {
     final nearBottom = _isNearBottom;
     if (_showScrollPill == nearBottom) {
       setState(() => _showScrollPill = !nearBottom);
@@ -172,8 +173,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   @override
   void dispose() {
     _urlDebounce?.cancel();
-    _scrollController.removeListener(_onScrollChanged);
-    _scrollController.dispose();
+    _itemPositionsListener.itemPositions.removeListener(_onScrollPositionChanged);
     _controller.dispose();
     _focusNode.dispose();
     _searchController.dispose();
@@ -181,42 +181,46 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     super.dispose();
   }
 
-  /// In a reversed ListView, offset 0 = bottom. Near-bottom = small offset.
   bool get _isNearBottom {
-    if (!_scrollController.hasClients) return true;
-    return _scrollController.offset < 50;
+    final positions = _itemPositionsListener.itemPositions.value;
+    if (positions.isEmpty) return true;
+    final messages = ref.read(channelChatProvider)[_stateKey] ?? [];
+    if (messages.isEmpty) return true;
+    // Sentinel item (index == messages.length) visible = at bottom.
+    return positions.any((p) => p.index >= messages.length - 1);
   }
 
   void _jumpToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scrollController.hasClients) return;
-      _scrollController.jumpTo(0);
+      if (!mounted || !_itemScrollController.isAttached) return;
+      final messages = ref.read(channelChatProvider)[_stateKey] ?? [];
+      if (messages.isEmpty) return;
+      _itemScrollController.jumpTo(index: messages.length, alignment: 1.0);
     });
   }
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scrollController.hasClients) return;
-      _scrollController.animateTo(
-        0,
+      if (!mounted || !_itemScrollController.isAttached) return;
+      _scrollOffsetController.animateScroll(
+        offset: 100000,
         duration: const Duration(milliseconds: 150),
         curve: Curves.easeOut,
       );
     });
   }
 
-  void _scrollToMessage(String messageId) {
-    final key = _messageKeys[messageId];
-    if (key == null || key.currentContext == null) return;
-    setState(() => _highlightMessageId = messageId);
-    Scrollable.ensureVisible(
-      key.currentContext!,
+  void _scrollToMessage(int index) {
+    if (!_itemScrollController.isAttached) return;
+    setState(() => _highlightIndex = index);
+    _itemScrollController.scrollTo(
+      index: index,
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOutCubic,
       alignment: 0.3,
     );
     Future.delayed(const Duration(milliseconds: 1500), () {
-      if (mounted) setState(() => _highlightMessageId = null);
+      if (mounted) setState(() => _highlightIndex = null);
     });
   }
 
@@ -1138,11 +1142,16 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                           child: HollowPressable(
                             subtle: true,
                             onTap: () {
+                              // Scroll to the matched message in the list.
+                              final messages = ref.read(channelChatProvider)[_stateKey] ?? [];
+                              final idx = messages.indexWhere(
+                                  (m) => m.messageId == msg.messageId);
                               ref.read(channelSearchOpenProvider.notifier).state = false;
                               setState(() {
                                 _searchController.clear();
                                 _searchResults = [];
                               });
+                              if (idx != -1) _scrollToMessage(idx);
                             },
                             borderRadius:
                                 BorderRadius.circular(hollow.radiusSm),
@@ -1248,31 +1257,32 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                   child: ScrollConfiguration(
                     behavior: ScrollConfiguration.of(context)
                         .copyWith(scrollbars: false),
-                    child: ListView.builder(
+                    child: ScrollablePositionedList.builder(
                     key: ValueKey('ch-list-${widget.serverId}-${widget.channelId}'),
-                    controller: _scrollController,
-                    reverse: true,
+                    itemScrollController: _itemScrollController,
+                    itemPositionsListener: _itemPositionsListener,
+                    scrollOffsetController: _scrollOffsetController,
+                    initialScrollIndex: messages.length,
+                    initialAlignment: 1.0,
                     padding: const EdgeInsets.symmetric(
                       vertical: HollowSpacing.sm,
                     ),
-                    itemCount: messages.length,
+                    itemCount: messages.length + 1,
                     itemBuilder: (context, index) {
-                      // Reversed list: index 0 = newest (bottom), last index = oldest (top).
-                      final msgIndex = messages.length - 1 - index;
-                      final msg = messages[msgIndex];
-                      // Register GlobalKey for reply-tap-scroll.
-                      if (msg.messageId != null) {
-                        _messageKeys.putIfAbsent(msg.messageId!, () => GlobalKey());
+                      // Sentinel item at the end for bottom anchoring.
+                      if (index >= messages.length) {
+                        return const SizedBox.shrink();
                       }
+                      final msg = messages[index];
                       // Grouping: compare with the previous message in chronological order.
-                      final showHeader = msgIndex == 0 ||
+                      final showHeader = index == 0 ||
                           !shouldGroup(
                             currentIsMe: msg.isMe,
-                            previousIsMe: messages[msgIndex - 1].isMe,
+                            previousIsMe: messages[index - 1].isMe,
                             currentTime: msg.timestamp,
-                            previousTime: messages[msgIndex - 1].timestamp,
+                            previousTime: messages[index - 1].timestamp,
                             currentSenderId: msg.senderId,
-                            previousSenderId: messages[msgIndex - 1].senderId,
+                            previousSenderId: messages[index - 1].senderId,
                           );
                       final profiles = ref.watch(profileProvider);
                       final nicknames = ref.watch(serverNicknamesProvider(widget.serverId));
@@ -1446,12 +1456,13 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                           String? replySender;
                           String? replyText;
                           String? replyImagePath;
-                          String? replyMessageId;
+                          int? replyIndex;
                           if (msg.replyToMid != null) {
-                            final original = messages.where(
-                                (m) => m.messageId == msg.replyToMid).firstOrNull;
-                            if (original != null) {
-                              replyMessageId = original.messageId;
+                            final idx = messages.indexWhere(
+                                (m) => m.messageId == msg.replyToMid);
+                            if (idx != -1) {
+                              replyIndex = idx;
+                              final original = messages[idx];
                               replyText = original.fileAttachment != null
                                   ? (original.fileAttachment!.isImage ? '📷 Image' : '📎 ${original.fileAttachment!.fileName}')
                                   : original.text;
@@ -1472,9 +1483,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                             replyToSenderName: replySender,
                             replyToText: replyText,
                             replyToImagePath: replyImagePath,
-                            isHighlighted: _highlightMessageId == msg.messageId,
-                            onReplyTap: replyMessageId != null
-                                ? () => _scrollToMessage(replyMessageId!)
+                            isHighlighted: _highlightIndex == index,
+                            onReplyTap: replyIndex != null
+                                ? () => _scrollToMessage(replyIndex!)
                                 : null,
                             onToggleReaction: msg.messageId != null
                                 ? (emoji) {
@@ -1493,22 +1504,17 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                           );
                         }),
                       );
-                      // Date separator: in reversed list, the date separator goes BELOW
-                      // the first message of a new day (which renders above it visually).
                       final showDate = shouldShowDateSeparator(
                         msg.timestamp,
-                        msgIndex > 0 ? messages[msgIndex - 1].timestamp : null,
+                        index > 0 ? messages[index - 1].timestamp : null,
                       );
 
-                      final messageWidget = KeyedSubtree(
-                        key: msg.messageId != null ? _messageKeys[msg.messageId!] : null,
-                        child: showHeader
-                            ? Padding(
-                                padding: const EdgeInsets.only(top: HollowSpacing.sm + 2),
-                                child: wrapper,
-                              )
-                            : wrapper,
-                      );
+                      final messageWidget = showHeader
+                          ? Padding(
+                              padding: const EdgeInsets.only(top: HollowSpacing.sm + 2),
+                              child: wrapper,
+                            )
+                          : wrapper;
 
                       if (showDate) {
                         return Column(

@@ -19,6 +19,16 @@ pub struct ArchiveVerifyResult {
     pub server_id: Option<String>,
     pub channel_id: Option<String>,
     pub channel_name: Option<String>,
+    pub server_name: Option<String>,
+    pub channels: Vec<ArchiveChannelInfoFfi>,
+}
+
+/// Channel info for multi-channel (server) archives.
+#[derive(Clone)]
+pub struct ArchiveChannelInfoFfi {
+    pub channel_id: String,
+    pub channel_name: String,
+    pub message_count: u32,
 }
 
 /// A single message from an imported archive.
@@ -33,6 +43,8 @@ pub struct ArchiveMessageFfi {
     pub hidden_at: Option<i64>,
     pub reply_to_mid: Option<String>,
     pub file_id: Option<String>,
+    /// Channel ID — populated only in server (multi-channel) archives.
+    pub channel_id: Option<String>,
     pub reactions: Vec<ArchiveReactionFfi>,
     /// Whether this message's signature is valid (None if not yet verified).
     pub signature_valid: Option<bool>,
@@ -106,6 +118,8 @@ pub struct ArchiveData {
     pub server_id: Option<String>,
     pub channel_id: Option<String>,
     pub channel_name: Option<String>,
+    pub server_name: Option<String>,
+    pub channels: Vec<ArchiveChannelInfoFfi>,
     pub participants: Vec<String>,
     pub messages: Vec<ArchiveMessageFfi>,
     pub edits: Vec<ArchiveEditFfi>,
@@ -186,6 +200,55 @@ pub fn export_channel_archive(
     Ok(size)
 }
 
+/// Export all text channels of a server as a single `.hollow-archive` file.
+/// `channels_json`: JSON array of `[{"channel_id": "...", "channel_name": "..."}]`.
+/// `file_mode`: "full", "images_only", or "placeholder".
+/// Returns the file size in bytes on success.
+#[frb]
+pub fn export_server_archive(
+    server_id: String,
+    server_name: String,
+    channels_json: String,
+    output_path: String,
+    file_mode: String,
+) -> Result<u64, String> {
+    let store = crate::api::storage::get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+
+    let id_data = crate::identity::load_or_create_identity()?;
+    let data_dir = crate::identity::data_dir()?;
+
+    // Parse channels JSON.
+    let channels_raw: Vec<serde_json::Value> = serde_json::from_str(&channels_json)
+        .map_err(|e| format!("Invalid channels_json: {e}"))?;
+    let channels: Vec<(String, String)> = channels_raw
+        .into_iter()
+        .map(|v| {
+            let ch_id = v["channel_id"].as_str().unwrap_or("").to_string();
+            let ch_name = v["channel_name"].as_str().unwrap_or("").to_string();
+            (ch_id, ch_name)
+        })
+        .collect();
+
+    let zip_bytes = crate::archive::exporter::export_archive(
+        ms,
+        &id_data.keypair,
+        at::ArchiveTarget::Server {
+            server_id,
+            server_name,
+            channels,
+        },
+        at::FileMode::from_str(&file_mode),
+        &data_dir,
+    )?;
+
+    let size = zip_bytes.len() as u64;
+    std::fs::write(&output_path, &zip_bytes)
+        .map_err(|e| format!("Failed to write archive: {e}"))?;
+    Ok(size)
+}
+
 /// Verify a `.hollow-archive` file. Quick check — parses manifest + signatures,
 /// reports validity summary without loading full message data.
 #[frb]
@@ -209,6 +272,12 @@ pub fn verify_archive(archive_path: String) -> Result<ArchiveVerifyResult, Strin
         server_id: result.server_id,
         channel_id: result.channel_id,
         channel_name: result.channel_name,
+        server_name: result.server_name,
+        channels: result.channels.into_iter().map(|c| ArchiveChannelInfoFfi {
+            channel_id: c.channel_id,
+            channel_name: c.channel_name,
+            message_count: c.message_count,
+        }).collect(),
     })
 }
 
@@ -245,6 +314,7 @@ pub fn load_archive(archive_path: String) -> Result<ArchiveData, String> {
                 hidden_at: m.hidden_at,
                 reply_to_mid: m.reply_to_mid,
                 file_id: m.file_id,
+                channel_id: m.channel_id,
                 reactions: m
                     .reactions
                     .into_iter()
@@ -339,6 +409,14 @@ pub fn load_archive(archive_path: String) -> Result<ArchiveData, String> {
         }
     }
 
+    let channels_ffi: Vec<ArchiveChannelInfoFfi> = loaded.manifest.channels.iter().map(|c| {
+        ArchiveChannelInfoFfi {
+            channel_id: c.channel_id.clone(),
+            channel_name: c.channel_name.clone(),
+            message_count: c.message_count,
+        }
+    }).collect();
+
     let verification = ArchiveVerifyResult {
         archive_type: loaded.manifest.archive_type.clone(),
         exporter_peer_id: loaded.manifest.exporter_peer_id.clone(),
@@ -353,6 +431,8 @@ pub fn load_archive(archive_path: String) -> Result<ArchiveData, String> {
         server_id: loaded.manifest.server_id.clone(),
         channel_id: loaded.manifest.channel_id.clone(),
         channel_name: loaded.manifest.channel_name.clone(),
+        server_name: loaded.manifest.server_name.clone(),
+        channels: channels_ffi.clone(),
     };
 
     Ok(ArchiveData {
@@ -364,6 +444,12 @@ pub fn load_archive(archive_path: String) -> Result<ArchiveData, String> {
         server_id: loaded.manifest.server_id,
         channel_id: loaded.manifest.channel_id,
         channel_name: loaded.manifest.channel_name,
+        server_name: loaded.manifest.server_name,
+        channels: loaded.manifest.channels.into_iter().map(|c| ArchiveChannelInfoFfi {
+            channel_id: c.channel_id,
+            channel_name: c.channel_name,
+            message_count: c.message_count,
+        }).collect(),
         participants: loaded.manifest.participants,
         messages,
         edits,

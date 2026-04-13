@@ -56,6 +56,14 @@ Future<List<StoredChannelMessage>> loadAllChannelMessages({
   channelId: channelId,
 );
 
+/// Load edit history for a batch of message IDs.
+/// Returns a flat list of edits sorted by edited_at ASC.
+Future<List<StoredMessageEdit>> loadMessageEdits({
+  required List<String> messageIds,
+}) => RustLib.instance.api.crateApiStorageLoadMessageEdits(
+  messageIds: messageIds,
+);
+
 /// Count all DM messages for a peer (including hidden/deleted).
 Future<int> countDmMessages({required String peerId}) =>
     RustLib.instance.api.crateApiStorageCountDmMessages(peerId: peerId);
@@ -562,6 +570,46 @@ class StoredMessage {
           replyToMid == other.replyToMid &&
           fileId == other.fileId &&
           linkPreview == other.linkPreview;
+}
+
+/// A single edit history entry.
+class StoredMessageEdit {
+  final String messageId;
+  final String oldText;
+  final String newText;
+  final PlatformInt64 editedAt;
+  final String? signature;
+  final String? publicKey;
+
+  const StoredMessageEdit({
+    required this.messageId,
+    required this.oldText,
+    required this.newText,
+    required this.editedAt,
+    this.signature,
+    this.publicKey,
+  });
+
+  @override
+  int get hashCode =>
+      messageId.hashCode ^
+      oldText.hashCode ^
+      newText.hashCode ^
+      editedAt.hashCode ^
+      signature.hashCode ^
+      publicKey.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is StoredMessageEdit &&
+          runtimeType == other.runtimeType &&
+          messageId == other.messageId &&
+          oldText == other.oldText &&
+          newText == other.newText &&
+          editedAt == other.editedAt &&
+          signature == other.signature &&
+          publicKey == other.publicKey;
 }
 
 class StoredReaction {

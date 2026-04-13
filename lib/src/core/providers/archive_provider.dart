@@ -34,6 +34,99 @@ final archiveSelectedChannelProvider = StateProvider<String?>((ref) => null);
 /// Search query for filtering the conversation list.
 final archiveSearchProvider = StateProvider<String>((ref) => '');
 
+/// Selected sender ID for filtering channel messages in archive (null = show all).
+final archiveFilterSenderProvider = StateProvider<String?>((ref) => null);
+
+/// Whether the in-message search bar is open in the archive viewer.
+final archiveMessageSearchOpenProvider = StateProvider<bool>((ref) => false);
+
+/// The current in-message search query text.
+final archiveMessageSearchQueryProvider = StateProvider<String>((ref) => '');
+
+/// Current match index (0-based) for navigating between search results.
+final archiveSearchMatchIndexProvider = StateProvider<int>((ref) => 0);
+
+/// Target date for jump-to-date in archive viewers (null = no jump pending).
+final archiveJumpToDateProvider = StateProvider<DateTime?>((ref) => null);
+
+/// Selected channel within an imported server archive (null = first channel).
+final importedArchiveSelectedChannelProvider = StateProvider<String?>((ref) => null);
+
+// ── Edit history for My Data archive viewers ───────────────────
+
+/// A single edit history entry.
+class ArchiveEditEntry {
+  final String messageId;
+  final String oldText;
+  final String newText;
+  final DateTime editedAt;
+  final String? signature;
+  final String? publicKey;
+
+  const ArchiveEditEntry({
+    required this.messageId,
+    required this.oldText,
+    required this.newText,
+    required this.editedAt,
+    this.signature,
+    this.publicKey,
+  });
+}
+
+/// Loads edit history for a DM conversation (keyed by peerId).
+/// Returns a map of messageId -> list of edits.
+final archiveDmEditsProvider = FutureProvider.autoDispose
+    .family<Map<String, List<ArchiveEditEntry>>, String>((ref, peerId) async {
+  final messages = await storage_api.loadAllDmMessages(peerId: peerId);
+  final editedIds = messages
+      .where((m) => m.messageId != null && m.editedAt != null)
+      .map((m) => m.messageId!)
+      .toList();
+  if (editedIds.isEmpty) return {};
+  final edits = await storage_api.loadMessageEdits(messageIds: editedIds);
+  final map = <String, List<ArchiveEditEntry>>{};
+  for (final e in edits) {
+    map.putIfAbsent(e.messageId, () => []).add(ArchiveEditEntry(
+      messageId: e.messageId,
+      oldText: e.oldText,
+      newText: e.newText,
+      editedAt: DateTime.fromMillisecondsSinceEpoch(e.editedAt),
+      signature: e.signature,
+      publicKey: e.publicKey,
+    ));
+  }
+  return map;
+});
+
+/// Loads edit history for a channel conversation (keyed by "serverId:channelId").
+final archiveChannelEditsProvider = FutureProvider.autoDispose
+    .family<Map<String, List<ArchiveEditEntry>>, String>((ref, key) async {
+  final parts = key.split(':');
+  if (parts.length < 2) return {};
+  final serverId = parts[0];
+  final channelId = parts.sublist(1).join(':');
+  final messages = await storage_api.loadAllChannelMessages(
+    serverId: serverId, channelId: channelId);
+  final editedIds = messages
+      .where((m) => m.messageId != null && m.editedAt != null)
+      .map((m) => m.messageId!)
+      .toList();
+  if (editedIds.isEmpty) return {};
+  final edits = await storage_api.loadMessageEdits(messageIds: editedIds);
+  final map = <String, List<ArchiveEditEntry>>{};
+  for (final e in edits) {
+    map.putIfAbsent(e.messageId, () => []).add(ArchiveEditEntry(
+      messageId: e.messageId,
+      oldText: e.oldText,
+      newText: e.newText,
+      editedAt: DateTime.fromMillisecondsSinceEpoch(e.editedAt),
+      signature: e.signature,
+      publicKey: e.publicKey,
+    ));
+  }
+  return map;
+});
+
 // ── Conversation list providers ─────────────────────────────────
 
 /// All DM peers with message counts.

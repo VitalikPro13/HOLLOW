@@ -174,6 +174,42 @@ pub fn load_all_channel_messages(server_id: String, channel_id: String) -> Resul
         .collect())
 }
 
+/// Load edit history for a batch of message IDs.
+/// Returns a flat list of edits sorted by edited_at ASC.
+#[frb]
+pub fn load_message_edits(message_ids: Vec<String>) -> Result<Vec<StoredMessageEdit>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+
+    let edits_map = ms.load_edits_for_messages(&message_ids)?;
+    let mut all_edits: Vec<StoredMessageEdit> = Vec::new();
+    for (mid, rows) in edits_map {
+        for (old_text, new_text, edited_at, signature, public_key) in rows {
+            all_edits.push(StoredMessageEdit {
+                message_id: mid.clone(),
+                old_text,
+                new_text,
+                edited_at,
+                signature,
+                public_key,
+            });
+        }
+    }
+    all_edits.sort_by_key(|e| e.edited_at);
+    Ok(all_edits)
+}
+
+/// A single edit history entry.
+pub struct StoredMessageEdit {
+    pub message_id: String,
+    pub old_text: String,
+    pub new_text: String,
+    pub edited_at: i64,
+    pub signature: Option<String>,
+    pub public_key: Option<String>,
+}
+
 /// Count all DM messages for a peer (including hidden/deleted).
 #[frb]
 pub fn count_dm_messages(peer_id: String) -> Result<u32, String> {

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/rust/api/archive.dart' as archive_api;
@@ -10,14 +12,17 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
-/// Show the export archive dialog for a DM or channel conversation.
+/// Show the export archive dialog for a DM, channel, or server.
 void showExportArchiveDialog(
   BuildContext context, {
   required bool isDm,
+  bool isServer = false,
   String? peerId,
   String? serverId,
   String? channelId,
   String? channelName,
+  String? serverName,
+  List<Map<String, String>>? channels,
   required String name,
   required int messageCount,
 }) {
@@ -25,10 +30,13 @@ void showExportArchiveDialog(
     context: context,
     builder: (dialogContext) => _ExportArchiveDialogContent(
       isDm: isDm,
+      isServer: isServer,
       peerId: peerId,
       serverId: serverId,
       channelId: channelId,
       channelName: channelName,
+      serverName: serverName,
+      channels: channels,
       name: name,
       messageCount: messageCount,
     ),
@@ -37,19 +45,25 @@ void showExportArchiveDialog(
 
 class _ExportArchiveDialogContent extends StatefulWidget {
   final bool isDm;
+  final bool isServer;
   final String? peerId;
   final String? serverId;
   final String? channelId;
   final String? channelName;
+  final String? serverName;
+  final List<Map<String, String>>? channels;
   final String name;
   final int messageCount;
 
   const _ExportArchiveDialogContent({
     required this.isDm,
+    this.isServer = false,
     this.peerId,
     this.serverId,
     this.channelId,
     this.channelName,
+    this.serverName,
+    this.channels,
     required this.name,
     required this.messageCount,
   });
@@ -84,7 +98,15 @@ class _ExportArchiveDialogContentState
 
     try {
       final BigInt sizeBytes;
-      if (widget.isDm) {
+      if (widget.isServer) {
+        sizeBytes = await archive_api.exportServerArchive(
+          serverId: widget.serverId!,
+          serverName: widget.serverName ?? widget.name,
+          channelsJson: jsonEncode(widget.channels ?? []),
+          outputPath: savePath,
+          fileMode: _fileMode,
+        );
+      } else if (widget.isDm) {
         sizeBytes = await archive_api.exportDmArchive(
           peerId: widget.peerId!,
           outputPath: savePath,
@@ -128,8 +150,11 @@ class _ExportArchiveDialogContentState
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final typeIcon =
-        widget.isDm ? LucideIcons.messageSquare : LucideIcons.hash;
+    final typeIcon = widget.isServer
+        ? LucideIcons.server
+        : widget.isDm
+            ? LucideIcons.messageSquare
+            : LucideIcons.hash;
 
     return HollowDialog(
       title: 'Export Archive',
