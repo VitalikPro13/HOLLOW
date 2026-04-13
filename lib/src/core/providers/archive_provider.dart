@@ -62,6 +62,9 @@ class ArchiveEditEntry {
   final DateTime editedAt;
   final String? signature;
   final String? publicKey;
+  final String? prevSignature;
+  final String? prevPublicKey;
+  final int? prevTimestampMs;
 
   const ArchiveEditEntry({
     required this.messageId,
@@ -70,6 +73,9 @@ class ArchiveEditEntry {
     required this.editedAt,
     this.signature,
     this.publicKey,
+    this.prevSignature,
+    this.prevPublicKey,
+    this.prevTimestampMs,
   });
 }
 
@@ -93,6 +99,9 @@ final archiveDmEditsProvider = FutureProvider.autoDispose
       editedAt: DateTime.fromMillisecondsSinceEpoch(e.editedAt),
       signature: e.signature,
       publicKey: e.publicKey,
+      prevSignature: e.prevSignature,
+      prevPublicKey: e.prevPublicKey,
+      prevTimestampMs: e.prevTimestamp,
     ));
   }
   return map;
@@ -122,6 +131,9 @@ final archiveChannelEditsProvider = FutureProvider.autoDispose
       editedAt: DateTime.fromMillisecondsSinceEpoch(e.editedAt),
       signature: e.signature,
       publicKey: e.publicKey,
+      prevSignature: e.prevSignature,
+      prevPublicKey: e.prevPublicKey,
+      prevTimestampMs: e.prevTimestamp,
     ));
   }
   return map;

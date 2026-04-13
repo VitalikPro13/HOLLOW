@@ -580,6 +580,9 @@ class StoredMessageEdit {
   final PlatformInt64 editedAt;
   final String? signature;
   final String? publicKey;
+  final String? prevSignature;
+  final String? prevPublicKey;
+  final PlatformInt64? prevTimestamp;
 
   const StoredMessageEdit({
     required this.messageId,
@@ -588,6 +591,9 @@ class StoredMessageEdit {
     required this.editedAt,
     this.signature,
     this.publicKey,
+    this.prevSignature,
+    this.prevPublicKey,
+    this.prevTimestamp,
   });
 
   @override
@@ -597,7 +603,10 @@ class StoredMessageEdit {
       newText.hashCode ^
       editedAt.hashCode ^
       signature.hashCode ^
-      publicKey.hashCode;
+      publicKey.hashCode ^
+      prevSignature.hashCode ^
+      prevPublicKey.hashCode ^
+      prevTimestamp.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -609,7 +618,10 @@ class StoredMessageEdit {
           newText == other.newText &&
           editedAt == other.editedAt &&
           signature == other.signature &&
-          publicKey == other.publicKey;
+          publicKey == other.publicKey &&
+          prevSignature == other.prevSignature &&
+          prevPublicKey == other.prevPublicKey &&
+          prevTimestamp == other.prevTimestamp;
 }
 
 class StoredReaction {

@@ -5003,8 +5003,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ArchiveEditFfi dco_decode_archive_edit_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 6)
-      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return ArchiveEditFfi(
       messageId: dco_decode_String(arr[0]),
       oldText: dco_decode_String(arr[1]),
@@ -5012,6 +5012,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       editedAt: dco_decode_i_64(arr[3]),
       signature: dco_decode_opt_String(arr[4]),
       publicKey: dco_decode_opt_String(arr[5]),
+      prevSignature: dco_decode_opt_String(arr[6]),
+      prevPublicKey: dco_decode_opt_String(arr[7]),
+      prevTimestamp: dco_decode_opt_box_autoadd_i_64(arr[8]),
     );
   }
 
@@ -6101,8 +6104,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   StoredMessageEdit dco_decode_stored_message_edit(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 6)
-      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return StoredMessageEdit(
       messageId: dco_decode_String(arr[0]),
       oldText: dco_decode_String(arr[1]),
@@ -6110,6 +6113,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       editedAt: dco_decode_i_64(arr[3]),
       signature: dco_decode_opt_String(arr[4]),
       publicKey: dco_decode_opt_String(arr[5]),
+      prevSignature: dco_decode_opt_String(arr[6]),
+      prevPublicKey: dco_decode_opt_String(arr[7]),
+      prevTimestamp: dco_decode_opt_box_autoadd_i_64(arr[8]),
     );
   }
 
@@ -6307,6 +6313,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_editedAt = sse_decode_i_64(deserializer);
     var var_signature = sse_decode_opt_String(deserializer);
     var var_publicKey = sse_decode_opt_String(deserializer);
+    var var_prevSignature = sse_decode_opt_String(deserializer);
+    var var_prevPublicKey = sse_decode_opt_String(deserializer);
+    var var_prevTimestamp = sse_decode_opt_box_autoadd_i_64(deserializer);
     return ArchiveEditFfi(
       messageId: var_messageId,
       oldText: var_oldText,
@@ -6314,6 +6323,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       editedAt: var_editedAt,
       signature: var_signature,
       publicKey: var_publicKey,
+      prevSignature: var_prevSignature,
+      prevPublicKey: var_prevPublicKey,
+      prevTimestamp: var_prevTimestamp,
     );
   }
 
@@ -7949,6 +7961,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_editedAt = sse_decode_i_64(deserializer);
     var var_signature = sse_decode_opt_String(deserializer);
     var var_publicKey = sse_decode_opt_String(deserializer);
+    var var_prevSignature = sse_decode_opt_String(deserializer);
+    var var_prevPublicKey = sse_decode_opt_String(deserializer);
+    var var_prevTimestamp = sse_decode_opt_box_autoadd_i_64(deserializer);
     return StoredMessageEdit(
       messageId: var_messageId,
       oldText: var_oldText,
@@ -7956,6 +7971,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       editedAt: var_editedAt,
       signature: var_signature,
       publicKey: var_publicKey,
+      prevSignature: var_prevSignature,
+      prevPublicKey: var_prevPublicKey,
+      prevTimestamp: var_prevTimestamp,
     );
   }
 
@@ -8142,6 +8160,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_64(self.editedAt, serializer);
     sse_encode_opt_String(self.signature, serializer);
     sse_encode_opt_String(self.publicKey, serializer);
+    sse_encode_opt_String(self.prevSignature, serializer);
+    sse_encode_opt_String(self.prevPublicKey, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.prevTimestamp, serializer);
   }
 
   @protected
@@ -9619,6 +9640,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_64(self.editedAt, serializer);
     sse_encode_opt_String(self.signature, serializer);
     sse_encode_opt_String(self.publicKey, serializer);
+    sse_encode_opt_String(self.prevSignature, serializer);
+    sse_encode_opt_String(self.prevPublicKey, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.prevTimestamp, serializer);
   }
 
   @protected

@@ -185,7 +185,7 @@ pub fn load_message_edits(message_ids: Vec<String>) -> Result<Vec<StoredMessageE
     let edits_map = ms.load_edits_for_messages(&message_ids)?;
     let mut all_edits: Vec<StoredMessageEdit> = Vec::new();
     for (mid, rows) in edits_map {
-        for (old_text, new_text, edited_at, signature, public_key) in rows {
+        for (old_text, new_text, edited_at, signature, public_key, prev_signature, prev_public_key, prev_timestamp) in rows {
             all_edits.push(StoredMessageEdit {
                 message_id: mid.clone(),
                 old_text,
@@ -193,6 +193,9 @@ pub fn load_message_edits(message_ids: Vec<String>) -> Result<Vec<StoredMessageE
                 edited_at,
                 signature,
                 public_key,
+                prev_signature,
+                prev_public_key,
+                prev_timestamp,
             });
         }
     }
@@ -208,6 +211,9 @@ pub struct StoredMessageEdit {
     pub edited_at: i64,
     pub signature: Option<String>,
     pub public_key: Option<String>,
+    pub prev_signature: Option<String>,
+    pub prev_public_key: Option<String>,
+    pub prev_timestamp: Option<i64>,
 }
 
 /// Count all DM messages for a peer (including hidden/deleted).

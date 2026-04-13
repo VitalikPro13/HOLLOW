@@ -1669,9 +1669,9 @@ class _EditHistoryIndicatorState extends State<EditHistoryIndicator> {
                 final String? proofPk;
                 final int? proofTs;
                 if (i == 0) {
-                  proofSig = widget.originalSignature;
-                  proofPk = widget.originalPublicKey;
-                  proofTs = widget.originalTimestampMs;
+                  proofSig = e.prevSignature ?? widget.originalSignature;
+                  proofPk = e.prevPublicKey ?? widget.originalPublicKey;
+                  proofTs = e.prevTimestampMs ?? widget.originalTimestampMs;
                 } else {
                   final prev = widget.edits[i - 1];
                   proofSig = prev.signature;

@@ -4669,6 +4669,9 @@ impl SseDecode for crate::api::archive::ArchiveEditFfi {
         let mut var_editedAt = <i64>::sse_decode(deserializer);
         let mut var_signature = <Option<String>>::sse_decode(deserializer);
         let mut var_publicKey = <Option<String>>::sse_decode(deserializer);
+        let mut var_prevSignature = <Option<String>>::sse_decode(deserializer);
+        let mut var_prevPublicKey = <Option<String>>::sse_decode(deserializer);
+        let mut var_prevTimestamp = <Option<i64>>::sse_decode(deserializer);
         return crate::api::archive::ArchiveEditFfi {
             message_id: var_messageId,
             old_text: var_oldText,
@@ -4676,6 +4679,9 @@ impl SseDecode for crate::api::archive::ArchiveEditFfi {
             edited_at: var_editedAt,
             signature: var_signature,
             public_key: var_publicKey,
+            prev_signature: var_prevSignature,
+            prev_public_key: var_prevPublicKey,
+            prev_timestamp: var_prevTimestamp,
         };
     }
 }
@@ -6361,6 +6367,9 @@ impl SseDecode for crate::api::storage::StoredMessageEdit {
         let mut var_editedAt = <i64>::sse_decode(deserializer);
         let mut var_signature = <Option<String>>::sse_decode(deserializer);
         let mut var_publicKey = <Option<String>>::sse_decode(deserializer);
+        let mut var_prevSignature = <Option<String>>::sse_decode(deserializer);
+        let mut var_prevPublicKey = <Option<String>>::sse_decode(deserializer);
+        let mut var_prevTimestamp = <Option<i64>>::sse_decode(deserializer);
         return crate::api::storage::StoredMessageEdit {
             message_id: var_messageId,
             old_text: var_oldText,
@@ -6368,6 +6377,9 @@ impl SseDecode for crate::api::storage::StoredMessageEdit {
             edited_at: var_editedAt,
             signature: var_signature,
             public_key: var_publicKey,
+            prev_signature: var_prevSignature,
+            prev_public_key: var_prevPublicKey,
+            prev_timestamp: var_prevTimestamp,
         };
     }
 }
@@ -6865,6 +6877,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::archive::ArchiveEditFfi {
             self.edited_at.into_into_dart().into_dart(),
             self.signature.into_into_dart().into_dart(),
             self.public_key.into_into_dart().into_dart(),
+            self.prev_signature.into_into_dart().into_dart(),
+            self.prev_public_key.into_into_dart().into_dart(),
+            self.prev_timestamp.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -8141,6 +8156,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::storage::StoredMessageEdit {
             self.edited_at.into_into_dart().into_dart(),
             self.signature.into_into_dart().into_dart(),
             self.public_key.into_into_dart().into_dart(),
+            self.prev_signature.into_into_dart().into_dart(),
+            self.prev_public_key.into_into_dart().into_dart(),
+            self.prev_timestamp.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -8310,6 +8328,9 @@ impl SseEncode for crate::api::archive::ArchiveEditFfi {
         <i64>::sse_encode(self.edited_at, serializer);
         <Option<String>>::sse_encode(self.signature, serializer);
         <Option<String>>::sse_encode(self.public_key, serializer);
+        <Option<String>>::sse_encode(self.prev_signature, serializer);
+        <Option<String>>::sse_encode(self.prev_public_key, serializer);
+        <Option<i64>>::sse_encode(self.prev_timestamp, serializer);
     }
 }
 
@@ -9666,6 +9687,9 @@ impl SseEncode for crate::api::storage::StoredMessageEdit {
         <i64>::sse_encode(self.edited_at, serializer);
         <Option<String>>::sse_encode(self.signature, serializer);
         <Option<String>>::sse_encode(self.public_key, serializer);
+        <Option<String>>::sse_encode(self.prev_signature, serializer);
+        <Option<String>>::sse_encode(self.prev_public_key, serializer);
+        <Option<i64>>::sse_encode(self.prev_timestamp, serializer);
     }
 }
 

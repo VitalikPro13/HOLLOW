@@ -67,6 +67,9 @@ pub struct ArchiveEditFfi {
     pub edited_at: i64,
     pub signature: Option<String>,
     pub public_key: Option<String>,
+    pub prev_signature: Option<String>,
+    pub prev_public_key: Option<String>,
+    pub prev_timestamp: Option<i64>,
 }
 
 /// A deletion evidence entry.
@@ -341,6 +344,9 @@ pub fn load_archive(archive_path: String) -> Result<ArchiveData, String> {
             edited_at: e.edited_at,
             signature: e.signature,
             public_key: e.public_key,
+            prev_signature: e.prev_signature,
+            prev_public_key: e.prev_public_key,
+            prev_timestamp: e.prev_timestamp,
         })
         .collect();
 

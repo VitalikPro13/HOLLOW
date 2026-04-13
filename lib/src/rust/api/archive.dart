@@ -230,6 +230,9 @@ class ArchiveEditFfi {
   final PlatformInt64 editedAt;
   final String? signature;
   final String? publicKey;
+  final String? prevSignature;
+  final String? prevPublicKey;
+  final PlatformInt64? prevTimestamp;
 
   const ArchiveEditFfi({
     required this.messageId,
@@ -238,6 +241,9 @@ class ArchiveEditFfi {
     required this.editedAt,
     this.signature,
     this.publicKey,
+    this.prevSignature,
+    this.prevPublicKey,
+    this.prevTimestamp,
   });
 
   @override
@@ -247,7 +253,10 @@ class ArchiveEditFfi {
       newText.hashCode ^
       editedAt.hashCode ^
       signature.hashCode ^
-      publicKey.hashCode;
+      publicKey.hashCode ^
+      prevSignature.hashCode ^
+      prevPublicKey.hashCode ^
+      prevTimestamp.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -259,7 +268,10 @@ class ArchiveEditFfi {
           newText == other.newText &&
           editedAt == other.editedAt &&
           signature == other.signature &&
-          publicKey == other.publicKey;
+          publicKey == other.publicKey &&
+          prevSignature == other.prevSignature &&
+          prevPublicKey == other.prevPublicKey &&
+          prevTimestamp == other.prevTimestamp;
 }
 
 /// File metadata from an archive.

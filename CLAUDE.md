@@ -65,7 +65,7 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 
 ## Current Phase — Phase 6.75: Polish & Launch Prep
 Most items shipped (see memory topic files for details). Remaining TODO:
-- **Archive tab + `.hollow-archive` format (DONE)** — Full pipeline shipped Apr 12 2026. Enhancements shipped Apr 13: server-wide export (`ArchiveTarget::Server`, multi-channel archives with channel selector in imported viewer), jump-to-date (date picker + binary search + `ScrollablePositionedList`), peer filter (searchable overlay card), in-archive text search (collapsible bar + match navigation), edit history timeline (expandable per-message with per-edit signature verification). `scrollable_positioned_list` restored for live chat too (reply-tap + search-result scrolling fixed). See `HOLLOW_PLAN.md:1661`.
+- **Archive tab + `.hollow-archive` format (DONE)** — Full pipeline shipped Apr 12 2026. Enhancements shipped Apr 13: server-wide export (`ArchiveTarget::Server`, multi-channel archives with channel selector in imported viewer), jump-to-date (date picker + binary search + `ScrollablePositionedList`), peer filter (searchable overlay card), in-archive text search (collapsible bar + match navigation), edit history timeline (expandable per-message with per-edit signature verification), original message signature preservation through edits (`prev_signature`/`prev_public_key`/`prev_timestamp` in `message_edits` table). `scrollable_positioned_list` restored for live chat too (reply-tap + search-result scrolling fixed). See `HOLLOW_PLAN.md:1661`.
 - **6+ server vault video testing** — blocked (no 6-peer testbed).
 - **FFmpeg binary strip/minimize** — deferred to Phase 7.
 

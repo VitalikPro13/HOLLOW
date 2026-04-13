@@ -134,6 +134,12 @@ pub(crate) struct ArchiveEdit {
     pub signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_timestamp: Option<i64>,
 }
 
 /// Deletion evidence (`deletions/{message_id}.json`).

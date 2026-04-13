@@ -652,6 +652,9 @@ class _ArchivePovViewerState extends ConsumerState<_ArchivePovViewer> {
         editedAt: DateTime.fromMillisecondsSinceEpoch(e.editedAt),
         signature: e.signature,
         publicKey: e.publicKey,
+        prevSignature: e.prevSignature,
+        prevPublicKey: e.prevPublicKey,
+        prevTimestampMs: e.prevTimestamp,
       ));
     }
 

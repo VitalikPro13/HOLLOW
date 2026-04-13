@@ -188,13 +188,16 @@ pub(crate) fn export_archive(
     for (mid, rows) in &edits_map {
         let entries: Vec<ArchiveEdit> = rows
             .iter()
-            .map(|(old_text, new_text, edited_at, sig, pk)| ArchiveEdit {
+            .map(|(old_text, new_text, edited_at, sig, pk, prev_sig, prev_pk, prev_ts)| ArchiveEdit {
                 message_id: mid.clone(),
                 old_text: old_text.clone(),
                 new_text: new_text.clone(),
                 edited_at: *edited_at,
                 signature: sig.clone(),
                 public_key: pk.clone(),
+                prev_signature: prev_sig.clone(),
+                prev_public_key: prev_pk.clone(),
+                prev_timestamp: *prev_ts,
             })
             .collect();
         all_edits.extend(entries.iter().cloned());

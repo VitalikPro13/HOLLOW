@@ -308,6 +308,17 @@ impl MessageStore {
         )
         .map_err(|e| format!("Failed to create message_edits index: {e}"))?;
 
+        // -- Migration: prev_signature/prev_public_key/prev_timestamp for edit chain provenance --
+        conn.execute_batch(
+            "ALTER TABLE message_edits ADD COLUMN prev_signature TEXT;"
+        ).unwrap_or(());
+        conn.execute_batch(
+            "ALTER TABLE message_edits ADD COLUMN prev_public_key TEXT;"
+        ).unwrap_or(());
+        conn.execute_batch(
+            "ALTER TABLE message_edits ADD COLUMN prev_timestamp INTEGER;"
+        ).unwrap_or(());
+
         // -- Migration: hidden_at column for message deletion/hiding (Phase 3.5) --
         conn.execute_batch(
             "ALTER TABLE messages ADD COLUMN hidden_at INTEGER;"
@@ -1584,17 +1595,17 @@ impl MessageStore {
         signature: Option<&str>,
         public_key: Option<&str>,
     ) -> Result<bool, String> {
-        // 1. Read the current text before overwriting.
-        let old_text: Option<String> = self
+        // 1. Read the current text + signature/public_key/timestamp before overwriting.
+        let row: Option<(String, Option<String>, Option<String>, i64)> = self
             .conn
             .query_row(
-                "SELECT text FROM channel_messages WHERE message_id = ?1",
+                "SELECT text, signature, public_key, COALESCE(edited_at, timestamp) FROM channel_messages WHERE message_id = ?1",
                 params![message_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .ok();
 
-        let Some(old_text) = old_text else {
+        let Some((old_text, prev_sig, prev_pk, prev_ts)) = row else {
             return Ok(false); // Message not found.
         };
 
@@ -1602,12 +1613,12 @@ impl MessageStore {
             return Ok(false); // No change.
         }
 
-        // 2. Preserve the old text in message_edits.
+        // 2. Preserve the old text + previous signature in message_edits.
         self.conn
             .execute(
-                "INSERT INTO message_edits (message_id, old_text, new_text, edited_at, signature, public_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![message_id, old_text, new_text, edited_at, signature, public_key],
+                "INSERT INTO message_edits (message_id, old_text, new_text, edited_at, signature, public_key, prev_signature, prev_public_key, prev_timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![message_id, old_text, new_text, edited_at, signature, public_key, prev_sig, prev_pk, prev_ts],
             )
             .map_err(|e| format!("Failed to insert edit history: {e}"))?;
 
@@ -1636,17 +1647,17 @@ impl MessageStore {
         signature: Option<&str>,
         public_key: Option<&str>,
     ) -> Result<bool, String> {
-        // 1. Read the current text.
-        let old_text: Option<String> = self
+        // 1. Read the current text + signature/public_key/timestamp before overwriting.
+        let row: Option<(String, Option<String>, Option<String>, i64)> = self
             .conn
             .query_row(
-                "SELECT text FROM messages WHERE message_id = ?1",
+                "SELECT text, signature, public_key, COALESCE(edited_at, timestamp) FROM messages WHERE message_id = ?1",
                 params![message_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .ok();
 
-        let Some(old_text) = old_text else {
+        let Some((old_text, prev_sig, prev_pk, prev_ts)) = row else {
             return Ok(false);
         };
 
@@ -1654,12 +1665,12 @@ impl MessageStore {
             return Ok(false);
         }
 
-        // 2. Preserve old text.
+        // 2. Preserve old text + previous signature.
         self.conn
             .execute(
-                "INSERT INTO message_edits (message_id, old_text, new_text, edited_at, signature, public_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![message_id, old_text, new_text, edited_at, signature, public_key],
+                "INSERT INTO message_edits (message_id, old_text, new_text, edited_at, signature, public_key, prev_signature, prev_public_key, prev_timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![message_id, old_text, new_text, edited_at, signature, public_key, prev_sig, prev_pk, prev_ts],
             )
             .map_err(|e| format!("Failed to insert edit history: {e}"))?;
 
@@ -2040,14 +2051,14 @@ impl MessageStore {
     pub fn load_edits_for_messages(
         &self,
         message_ids: &[String],
-    ) -> Result<HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>)>>, String> {
+    ) -> Result<HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>)>>, String> {
         if message_ids.is_empty() {
             return Ok(HashMap::new());
         }
 
         let placeholders: Vec<String> = message_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
         let sql = format!(
-            "SELECT message_id, old_text, new_text, edited_at, signature, public_key FROM message_edits WHERE message_id IN ({}) ORDER BY edited_at ASC",
+            "SELECT message_id, old_text, new_text, edited_at, signature, public_key, prev_signature, prev_public_key, prev_timestamp FROM message_edits WHERE message_id IN ({}) ORDER BY edited_at ASC",
             placeholders.join(", ")
         );
 
@@ -2062,14 +2073,17 @@ impl MessageStore {
                     row.get::<_, i64>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
                 ))
             })
             .map_err(|e| format!("Failed to query edits: {e}"))?;
 
-        let mut result: HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>)>> = HashMap::new();
+        let mut result: HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>)>> = HashMap::new();
         for row in rows {
-            let (mid, old_text, new_text, edited_at, sig, pk) = row.map_err(|e| format!("Failed to read edit row: {e}"))?;
-            result.entry(mid).or_default().push((old_text, new_text, edited_at, sig, pk));
+            let (mid, old_text, new_text, edited_at, sig, pk, prev_sig, prev_pk, prev_ts) = row.map_err(|e| format!("Failed to read edit row: {e}"))?;
+            result.entry(mid).or_default().push((old_text, new_text, edited_at, sig, pk, prev_sig, prev_pk, prev_ts));
         }
         Ok(result)
     }
