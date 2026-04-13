@@ -16,13 +16,24 @@ abstract final class HollowCurves {
 }
 
 /// Standard animation durations for Hollow UI.
+///
+/// When [animationsDisabled] is true, all durations return [Duration.zero]
+/// so every animated widget snaps instantly.
 abstract final class HollowDurations {
+  static bool _disabled = false;
+
+  static set animationsDisabled(bool value) => _disabled = value;
+  static bool get animationsDisabled => _disabled;
+
   /// Quick transitions (hover, focus, status changes).
-  static const fast = Duration(milliseconds: 150);
+  static Duration get fast =>
+      _disabled ? Duration.zero : const Duration(milliseconds: 150);
 
   /// Standard transitions (panels, dialogs).
-  static const normal = Duration(milliseconds: 250);
+  static Duration get normal =>
+      _disabled ? Duration.zero : const Duration(milliseconds: 250);
 
   /// Longer transitions (page changes, layout shifts).
-  static const slow = Duration(milliseconds: 400);
+  static Duration get slow =>
+      _disabled ? Duration.zero : const Duration(milliseconds: 400);
 }

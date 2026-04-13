@@ -52,8 +52,8 @@ class _HollowPressableState extends State<HollowPressable>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 120),
-      reverseDuration: const Duration(milliseconds: 200),
+      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 120),
+      reverseDuration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 200),
     );
 
     _scaleAnimation = Tween<double>(begin: 1.0, end: 0.98).animate(

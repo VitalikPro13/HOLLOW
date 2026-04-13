@@ -208,7 +208,7 @@ class FriendsBar extends ConsumerWidget {
       barrierDismissible: true,
       barrierLabel: 'Friends',
       barrierColor: Colors.black.withValues(alpha: 0.5),
-      transitionDuration: const Duration(milliseconds: 200),
+      transitionDuration: HollowDurations.normal,
       pageBuilder: (context, anim1, anim2) {
         return const Center(child: _FriendsManager());
       },

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 
 /// Hollow-styled tooltip — dark, compact, fast.
 ///
@@ -42,7 +43,7 @@ class _HollowTooltipState extends State<HollowTooltip>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 100),
+      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 100),
     );
     _opacity = CurvedAnimation(
       parent: _controller,

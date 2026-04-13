@@ -2711,6 +2711,19 @@ impl MessageStore {
         Ok(result.max(0) as u64)
     }
 
+    /// Sum the byte-length of all message text for a server (across all channels).
+    pub fn total_message_storage_for_server(&self, server_id: &str) -> Result<u64, String> {
+        let result: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(text)), 0) FROM channel_messages WHERE server_id = ?1",
+                params![server_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to sum message storage: {e}"))?;
+        Ok(result.max(0) as u64)
+    }
+
     /// Get missing chunk indices for a file.
     pub fn get_missing_chunks(&self, file_id: &str) -> Result<Vec<u32>, String> {
         let file = self.get_file_metadata(file_id)?;

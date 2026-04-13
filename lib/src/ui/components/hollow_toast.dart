@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
@@ -89,8 +90,8 @@ class _HollowToastWidgetState extends State<_HollowToastWidget>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 200),
-      reverseDuration: const Duration(milliseconds: 150),
+      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 200),
+      reverseDuration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 150),
     );
     _opacity = CurvedAnimation(
       parent: _controller,

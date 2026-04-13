@@ -18,6 +18,8 @@ import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
+import 'package:hollow/src/core/shared_tickers.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -136,6 +138,9 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   bool _pendingDockMode = true;
   bool _initialDockMode = true;
   bool _layoutInitialized = false;
+  bool _pendingDisableAnimations = false;
+  bool _initialDisableAnimations = false;
+  bool _animInitialized = false;
   double _initialAccentHue = defaultAccentHue;
 
   @override
@@ -171,6 +176,13 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       _pendingDockMode = layoutAsync.value! == LayoutMode.dock;
       _initialDockMode = _pendingDockMode;
       _layoutInitialized = true;
+    }
+
+    final animAsync = ref.read(disableAnimationsProvider);
+    if (animAsync.hasValue) {
+      _pendingDisableAnimations = animAsync.value!;
+      _initialDisableAnimations = _pendingDisableAnimations;
+      _animInitialized = true;
     }
   }
 
@@ -315,6 +327,22 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
           );
     }
 
+    // Apply animation toggle.
+    if (_pendingDisableAnimations != _initialDisableAnimations) {
+      await ref
+          .read(disableAnimationsProvider.notifier)
+          .setEnabled(_pendingDisableAnimations);
+      HollowDurations.animationsDisabled = _pendingDisableAnimations;
+      SharedTickers.instance.disabled = _pendingDisableAnimations;
+      if (_pendingDisableAnimations) {
+        SharedTickers.instance.pause();
+      } else {
+        // Re-enable: start tickers if they were never started, else resume.
+        SharedTickers.instance.start();
+        SharedTickers.instance.resume();
+      }
+    }
+
     // Save profile.
     await ref.read(profileProvider.notifier).updateMyProfile(
           displayName: displayName,
@@ -376,6 +404,19 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
             _pendingDockMode = next.value! == LayoutMode.dock;
             _initialDockMode = _pendingDockMode;
             _layoutInitialized = true;
+          });
+        }
+      });
+    }
+
+    // Update pending disable-animations once the async value resolves.
+    if (!_animInitialized) {
+      ref.listen(disableAnimationsProvider, (prev, next) {
+        if (next.hasValue && !_animInitialized) {
+          setState(() {
+            _pendingDisableAnimations = next.value!;
+            _initialDisableAnimations = _pendingDisableAnimations;
+            _animInitialized = true;
           });
         }
       });
@@ -848,6 +889,15 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
             value: _pendingDockMode,
             onChanged: (value) =>
                 setState(() => _pendingDockMode = value),
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          _ToggleRow(
+            icon: LucideIcons.zap,
+            label: 'Disable Animations',
+            subtitle: 'Turn off UI transitions and effects',
+            value: _pendingDisableAnimations,
+            onChanged: (value) =>
+                setState(() => _pendingDisableAnimations = value),
           ),
 
           const SizedBox(height: HollowSpacing.xl),

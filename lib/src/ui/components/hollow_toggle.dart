@@ -30,7 +30,7 @@ class _HollowToggleState extends State<HollowToggle>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 200),
+      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 200),
       value: widget.value ? 1.0 : 0.0,
     );
     _thumbPosition = CurvedAnimation(

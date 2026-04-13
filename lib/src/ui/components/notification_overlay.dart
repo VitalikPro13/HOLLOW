@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -39,7 +40,7 @@ class NotificationOverlay extends ConsumerWidget {
         for (int i = 0; i < cards.length; i++)
           AnimatedPositioned(
             key: ValueKey(cards[i].sourceKey),
-            duration: const Duration(milliseconds: 250),
+            duration: HollowDurations.normal,
             curve: Curves.easeOutCubic,
             right: HollowSpacing.lg,
             bottom: HollowSpacing.lg +
@@ -84,8 +85,8 @@ class _NotificationCardWidgetState
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 250),
-      reverseDuration: const Duration(milliseconds: 200),
+      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 250),
+      reverseDuration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 200),
     );
     _opacity = CurvedAnimation(
       parent: _controller,

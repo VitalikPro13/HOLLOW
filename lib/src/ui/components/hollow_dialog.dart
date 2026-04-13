@@ -21,7 +21,7 @@ Future<T?> showHollowDialog<T>({
     barrierDismissible: barrierDismissible,
     barrierLabel: 'Dismiss',
     barrierColor: Colors.black.withValues(alpha: 0.08),
-    transitionDuration: const Duration(milliseconds: 200),
+    transitionDuration: HollowDurations.normal,
     transitionBuilder: (context, animation, secondaryAnimation, child) {
       final curvedAnimation = CurvedAnimation(
         parent: animation,

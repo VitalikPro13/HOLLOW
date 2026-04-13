@@ -449,7 +449,7 @@ class _AnimatedChannelTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedSize(
-      duration: const Duration(milliseconds: 150),
+      duration: HollowDurations.fast,
       curve: Curves.easeOutCubic,
       alignment: Alignment.topCenter,
       child: SizedBox(
@@ -1039,7 +1039,7 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
         children: [
           channelRow,
           AnimatedSize(
-            duration: const Duration(milliseconds: 200),
+            duration: HollowDurations.normal,
             curve: Curves.easeOutCubic,
             alignment: Alignment.topCenter,
             child: Padding(
@@ -1098,7 +1098,7 @@ class _AnimatedParticipantRowState extends State<_AnimatedParticipantRow>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 180),
+      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 180),
     );
     if (widget.leaving) {
       _controller.value = 1.0;
@@ -1336,7 +1336,7 @@ class _SpeakingDot extends StatelessWidget {
   Widget build(BuildContext context) {
     return AnimatedOpacity(
       opacity: visible ? 1.0 : 0.0,
-      duration: const Duration(milliseconds: 150),
+      duration: HollowDurations.fast,
       child: Padding(
         padding: const EdgeInsets.only(left: 2),
         child: Container(

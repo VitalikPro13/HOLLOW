@@ -60,6 +60,11 @@ class SharedTickers with WidgetsBindingObserver {
   bool _running = false;
   bool _paused = false;
 
+  /// When true, [start] and [resume] are no-ops — all decorative animations
+  /// stay frozen. Set before [start] on app launch, or toggled at runtime
+  /// from the "Disable Animations" setting.
+  bool disabled = false;
+
   // Cycle durations in microseconds for precision.
   static const _shimmerCycleUs = 4000000; // 4s
   static const _pulseCycleUs = 6000000; // 3s × 2 (ping-pong)
@@ -67,8 +72,9 @@ class SharedTickers with WidgetsBindingObserver {
   static const _ambientCycleUs = 45000000; // 45s
 
   /// Start the shared ticker. Call once at app startup.
+  /// No-ops if [disabled] is true.
   void start() {
-    if (_running) return;
+    if (_running || disabled) return;
     _running = true;
 
     // Register for lifecycle events (app pause/resume on mobile).
@@ -130,8 +136,9 @@ class SharedTickers with WidgetsBindingObserver {
   }
 
   /// Resume all decorative animations (window shown / focused).
+  /// No-ops if [disabled] is true.
   void resume() {
-    if (!_paused) return;
+    if (!_paused || disabled) return;
     _paused = false;
     // Recreate ticker (Ticker can't restart once stopped).
     _ticker?.dispose();

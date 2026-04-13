@@ -12,6 +12,7 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/app.dart';
 import 'package:hollow/src/ui/shader_warmup.dart';
 import 'package:tray_manager/tray_manager.dart';
@@ -187,7 +188,17 @@ Future<void> main() async {
   // Set up crash dump logging to hollow_crash.log.
   _initCrashLogging();
 
+  // Check if user disabled animations.
+  try {
+    final disableAnim = await storage_api.loadSetting(key: 'disable_animations');
+    if (disableAnim == 'true') {
+      HollowDurations.animationsDisabled = true;
+      SharedTickers.instance.disabled = true;
+    }
+  } catch (_) {}
+
   // Start shared animation tickers (one ticker drives all decorative anims).
+  // No-ops if disabled above.
   SharedTickers.instance.start();
 
   runApp(UncontrolledProviderScope(

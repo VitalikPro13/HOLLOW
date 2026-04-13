@@ -691,15 +691,19 @@ pub fn get_storage_stats(server_id: String) -> Result<StorageStatsFfi, String> {
     // Also count completed files stored locally for this server (P2P file sharing).
     let file_used = store.total_file_storage_for_server(&server_id).unwrap_or(0);
 
+    // Count message text sizes (always fully replicated to all members).
+    let msg_used = store.total_message_storage_for_server(&server_id).unwrap_or(0);
+
     // Server Storage: use manifest total if vault has data, otherwise P2P file total.
     // Don't double-count (manifests already represent the file sizes).
-    let total_server = if server_total > 0 { server_total } else { file_used };
+    // Message text is always added on top (not part of vault manifests or P2P files).
+    let total_server = if server_total > 0 { server_total + msg_used } else { file_used + msg_used };
 
     Ok(StorageStatsFfi {
         total_pledged_bytes,
         total_used_bytes: total_server,
         my_pledge_bytes,
-        my_used_bytes: my_local + file_used,
+        my_used_bytes: my_local + file_used + msg_used,
         member_count,
         min_pledge_mb,
     })

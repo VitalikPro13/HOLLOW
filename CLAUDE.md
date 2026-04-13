@@ -66,6 +66,9 @@ ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl 
 ## Current Phase — Phase 6.75: Polish & Launch Prep
 Most items shipped (see memory topic files for details). Remaining TODO:
 - **Archive tab + `.hollow-archive` format (DONE)** — Full pipeline shipped Apr 12 2026. Enhancements shipped Apr 13: server-wide export (`ArchiveTarget::Server`, multi-channel archives with channel selector in imported viewer), jump-to-date (date picker + binary search + `ScrollablePositionedList`), peer filter (searchable overlay card), in-archive text search (collapsible bar + match navigation), edit history timeline (expandable per-message with per-edit signature verification), original message signature preservation through edits (`prev_signature`/`prev_public_key`/`prev_timestamp` in `message_edits` table). `scrollable_positioned_list` restored for live chat too (reply-tap + search-result scrolling fixed). See `HOLLOW_PLAN.md:1661`.
+- **Icon padding fix (DONE)** — Settings gear icon on bottom bar had `HollowSpacing.sm` (8px) padding vs `xs` (4px) for Archive/Downloads. Fixed to match.
+- **Server Storage message counting (DONE)** — `get_storage_stats()` now includes `SUM(LENGTH(text))` from `channel_messages` in both `total_used_bytes` and `my_used_bytes`. Servers with messages but no files no longer show "0 B".
+- **Disable animations toggle (DONE)** — `disableAnimationsProvider` persisted to `app_settings`, `HollowDurations` returns `Duration.zero` when disabled, `SharedTickers` respects `disabled` flag. Toggle in User Settings → LAYOUT section. Core components (dialog, pressable, button, toggle, toast, tooltip), shell (sidebar, popups, notifications, dialog transitions) all respect the flag.
 - **6+ server vault video testing** — blocked (no 6-peer testbed).
 - **FFmpeg binary strip/minimize** — deferred to Phase 7.
 

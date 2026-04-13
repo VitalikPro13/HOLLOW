@@ -23,6 +23,28 @@ class MinimizeToTrayNotifier extends AsyncNotifier<bool> {
   }
 }
 
+/// Whether all UI animations are disabled (instant transitions, no effects).
+/// Default: false (animations enabled).
+final disableAnimationsProvider =
+    AsyncNotifierProvider<DisableAnimationsNotifier, bool>(
+        DisableAnimationsNotifier.new);
+
+class DisableAnimationsNotifier extends AsyncNotifier<bool> {
+  @override
+  Future<bool> build() async {
+    final val = await storage_api.loadSetting(key: 'disable_animations');
+    return val == 'true';
+  }
+
+  Future<void> setEnabled(bool value) async {
+    await storage_api.saveSetting(
+      key: 'disable_animations',
+      value: value.toString(),
+    );
+    state = AsyncData(value);
+  }
+}
+
 /// Preferred audio input device ID. Null/empty = system default.
 final audioInputDeviceProvider =
     AsyncNotifierProvider<AudioInputDeviceNotifier, String?>(

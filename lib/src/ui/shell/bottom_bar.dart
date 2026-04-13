@@ -311,7 +311,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                     onTap: () => showUserSettingsDialog(context, ref, openSystemTab: true),
                     borderRadius:
                         BorderRadius.circular(hollow.radiusSm),
-                    padding: const EdgeInsets.all(HollowSpacing.sm),
+                    padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(
                       LucideIcons.settings,
                       size: 18,
