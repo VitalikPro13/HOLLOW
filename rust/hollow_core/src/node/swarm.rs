@@ -6005,13 +6005,17 @@ async fn run_event_loop(
                         let invite_link = format!("hollow://recovery?server={}&token={}", server_id, token);
 
                         // Initialize pool state.
-                        let pool = crate::node::recovery_pool::RecoveryPoolState::new(
+                        let mut pool = crate::node::recovery_pool::RecoveryPoolState::new(
                             server_id.clone(),
                             token.clone(),
                             true,
                             local_peer_str.clone(),
                             inventory,
                         );
+                        // Populate manifest metadata for transfer plan computation.
+                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                            pool.populate_from_content_store(&cs);
+                        }
                         recovery_pool_state = Some(pool);
 
                         let _ = event_tx.send(NetworkEvent::RecoveryPoolCreated {
@@ -6053,13 +6057,16 @@ async fn run_event_loop(
                         }
 
                         // Initialize pool state (not initiator).
-                        let pool = crate::node::recovery_pool::RecoveryPoolState::new(
+                        let mut pool = crate::node::recovery_pool::RecoveryPoolState::new(
                             server_id.clone(),
                             token.clone(),
                             false,
                             local_peer_str.clone(),
                             inventory,
                         );
+                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                            pool.populate_from_content_store(&cs);
+                        }
                         recovery_pool_state = Some(pool);
 
                         let _ = event_tx.send(NetworkEvent::RecoveryPoolJoined {
@@ -6815,6 +6822,22 @@ async fn run_event_loop(
                                                             no_shards: status.no_shards,
                                                             progress_pct: status.progress_pct,
                                                         }).await;
+
+                                                        // Coordinator election: if we're the lowest peer_id, compute and broadcast transfer plan.
+                                                        if pool.is_coordinator() && pool.members.len() >= 2 {
+                                                            let plan = pool.compute_transfer_plan();
+                                                            if !plan.is_empty() {
+                                                                hollow_log!("[RECOVERY-POOL] Coordinator: broadcasting transfer plan with {} assignments", plan.len());
+                                                                let plan_json = serde_json::to_string(&plan).unwrap_or_default();
+                                                                let msg = HavenMessage::RecoveryTransferPlan { plan_json };
+                                                                if let Ok(bytes) = serde_json::to_vec(&msg) {
+                                                                    let _ = ws_cmd_tx.send(crate::node::ws_client::WsCommand::SendToRoom {
+                                                                        room_code: pool.room_code(),
+                                                                        data: bytes,
+                                                                    });
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                                 HavenMessage::RecoveryWelcome { manifest_ids, shard_inventory_json } => {
@@ -6842,6 +6865,22 @@ async fn run_event_loop(
                                                         no_shards: status.no_shards,
                                                         progress_pct: status.progress_pct,
                                                     }).await;
+
+                                                    // Coordinator election after welcome.
+                                                    if pool.is_coordinator() && pool.members.len() >= 2 {
+                                                        let plan = pool.compute_transfer_plan();
+                                                        if !plan.is_empty() {
+                                                            hollow_log!("[RECOVERY-POOL] Coordinator: broadcasting transfer plan with {} assignments", plan.len());
+                                                            let plan_json = serde_json::to_string(&plan).unwrap_or_default();
+                                                            let msg = HavenMessage::RecoveryTransferPlan { plan_json };
+                                                            if let Ok(bytes) = serde_json::to_vec(&msg) {
+                                                                let _ = ws_cmd_tx.send(crate::node::ws_client::WsCommand::SendToRoom {
+                                                                    room_code: pool.room_code(),
+                                                                    data: bytes,
+                                                                });
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                                 HavenMessage::RecoveryShardReceived { content_id, shard_index } => {
                                                     hollow_log!("[RECOVERY-POOL] ShardReceived: {content_id}:{shard_index} from {from}");
@@ -6877,13 +6916,105 @@ async fn run_event_loop(
                                                         server_id: sid,
                                                     }).await;
                                                 }
-                                                // ManifestSync and TransferPlan are coordinator broadcasts —
-                                                // log for now, full shard transfer implementation follows.
-                                                HavenMessage::RecoveryManifestSync { .. } => {
+                                                HavenMessage::RecoveryManifestSync { manifests_json } => {
                                                     hollow_log!("[RECOVERY-POOL] ManifestSync from {from}");
+                                                    // Parse and merge manifests from coordinator.
+                                                    if let Ok(manifests) = serde_json::from_str::<Vec<crate::vault::pipeline::VaultManifest>>(&manifests_json) {
+                                                        for m in manifests {
+                                                            if m.k > 0 || m.m > 0 {
+                                                                pool.all_manifest_ids.insert(m.content_id.clone());
+                                                                pool.file_k_values.insert(m.content_id.clone(), m.k);
+                                                                pool.manifest_meta.insert(m.content_id.clone(), crate::node::recovery_pool::ManifestMeta {
+                                                                    k: m.k,
+                                                                    m: m.m,
+                                                                    total_data_size: m.original_size,
+                                                                    storage_tier: m.storage_tier.clone(),
+                                                                    file_name: m.file_name.clone(),
+                                                                });
+                                                            }
+                                                        }
+                                                    }
                                                 }
-                                                HavenMessage::RecoveryTransferPlan { .. } => {
+                                                HavenMessage::RecoveryTransferPlan { plan_json } => {
                                                     hollow_log!("[RECOVERY-POOL] TransferPlan from {from}");
+                                                    if let Ok(plan) = serde_json::from_str::<Vec<crate::node::recovery_pool::TransferAssignment>>(&plan_json) {
+                                                        hollow_log!("[RECOVERY-POOL] Processing {} transfer assignments", plan.len());
+
+                                                        // Open ContentStore for shard I/O.
+                                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
+                                                        let db_path_r = data_dir.join("messages.db").to_string_lossy().to_string();
+                                                        let proto_r = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+                                                        let passphrase_r = hex::encode(&proto_r[..32.min(proto_r.len())]);
+                                                        let vault_dir_r = data_dir.join("vault");
+
+                                                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path_r, &passphrase_r, &vault_dir_r) {
+                                                            for assignment in &plan {
+                                                                // Register incoming shards we're expecting to receive.
+                                                                if assignment.dest_peer == local_peer_str {
+                                                                    if let Some(meta) = pool.manifest_meta.get(&assignment.content_id) {
+                                                                        let key = format!("{}:{}", assignment.content_id, assignment.shard_index);
+                                                                        let sk = crate::vault::content_store::shard_key(&assignment.content_id, assignment.shard_index);
+                                                                        // Skip if we already have this shard locally.
+                                                                        if cs.has_shard(&sk).unwrap_or(false) {
+                                                                            continue;
+                                                                        }
+                                                                        pending_shard_streams.insert(key, PendingShardStream {
+                                                                            server_id: pool.server_id.clone(),
+                                                                            content_id: assignment.content_id.clone(),
+                                                                            shard_index: assignment.shard_index,
+                                                                            shard_key: sk,
+                                                                            k: meta.k,
+                                                                            m: meta.m,
+                                                                            total_size: meta.total_data_size,
+                                                                            tier: meta.storage_tier.clone(),
+                                                                        });
+                                                                        // Register for auto-reconstruction after shard arrives.
+                                                                        pending_vault_downloads.entry(assignment.content_id.clone())
+                                                                            .or_insert((pool.server_id.clone(), meta.k as usize, 0));
+                                                                    }
+                                                                }
+
+                                                                // Send shards we have to peers that need them.
+                                                                if assignment.source_peer == local_peer_str {
+                                                                    let sk = crate::vault::content_store::shard_key(&assignment.content_id, assignment.shard_index);
+                                                                    if let Ok(shard_bytes) = cs.read_shard_unchecked(&pool.server_id, &sk) {
+                                                                        let temp_dir = std::env::temp_dir().join("hollow_recovery");
+                                                                        let _ = std::fs::create_dir_all(&temp_dir);
+                                                                        let temp_path = temp_dir.join(format!("{}_{}.shard",
+                                                                            &assignment.content_id[..8.min(assignment.content_id.len())],
+                                                                            assignment.shard_index));
+                                                                        if std::fs::write(&temp_path, &shard_bytes).is_ok() {
+                                                                            let total_size = shard_bytes.len() as u64;
+                                                                            hollow_log!("[RECOVERY-POOL] Sending shard {}:{} ({} bytes) to {}",
+                                                                                assignment.content_id, assignment.shard_index, total_size, assignment.dest_peer);
+                                                                            crate::node::ws_stream_transfer::ws_stream_send(
+                                                                                &ws_cmd_tx,
+                                                                                &pool.room_code(),
+                                                                                &assignment.dest_peer,
+                                                                                &crate::node::ws_stream_transfer::StreamKind::Shard { shard_index: assignment.shard_index },
+                                                                                &assignment.content_id,
+                                                                                &temp_path,
+                                                                                total_size,
+                                                                            ).await;
+                                                                            let _ = std::fs::remove_file(&temp_path);
+
+                                                                            // Broadcast that this shard was sent.
+                                                                            let received_msg = HavenMessage::RecoveryShardReceived {
+                                                                                content_id: assignment.content_id.clone(),
+                                                                                shard_index: assignment.shard_index,
+                                                                            };
+                                                                            if let Ok(bytes) = serde_json::to_vec(&received_msg) {
+                                                                                let _ = ws_cmd_tx.send(crate::node::ws_client::WsCommand::SendToRoom {
+                                                                                    room_code: pool.room_code(),
+                                                                                    data: bytes,
+                                                                                });
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                                 _ => {}
                                             }

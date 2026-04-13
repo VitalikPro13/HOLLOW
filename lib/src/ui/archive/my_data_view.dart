@@ -22,7 +22,7 @@ class MyDataView extends ConsumerWidget {
     // Right panel: recovery pool dashboard when active,
     // otherwise vault files or message viewer.
     final Widget rightPanel;
-    if (innerTab == MyDataInnerTab.vaultFiles && recoveryPool != null && recoveryPool.isActive) {
+    if (innerTab == MyDataInnerTab.vaultFiles && recoveryPool != null && recoveryPool.isActive && !recoveryPool.isPending) {
       rightPanel = const RecoveryPoolDashboard();
     } else if (innerTab == MyDataInnerTab.vaultFiles) {
       rightPanel = const VaultFilesView();

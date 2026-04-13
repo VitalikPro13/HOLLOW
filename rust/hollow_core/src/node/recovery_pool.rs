@@ -45,6 +45,16 @@ pub struct PoolStatus {
     pub progress_pct: f32,
 }
 
+/// Manifest metadata for a vault file, used for shard transfer registration.
+#[derive(Debug, Clone)]
+pub struct ManifestMeta {
+    pub k: u16,
+    pub m: u16,
+    pub total_data_size: u64,
+    pub storage_tier: String,
+    pub file_name: String,
+}
+
 /// State of an active recovery pool.
 pub struct RecoveryPoolState {
     pub server_id: String,
@@ -57,6 +67,8 @@ pub struct RecoveryPoolState {
     pub all_manifest_ids: HashSet<String>,
     /// Per content_id: k value needed for reconstruction.
     pub file_k_values: HashMap<String, u16>,
+    /// Per content_id: full manifest metadata (k, m, size, tier, name).
+    pub manifest_meta: HashMap<String, ManifestMeta>,
     /// Shards received during this pool session (content_id, shard_index).
     pub received_shards: HashSet<(String, u16)>,
     /// Files that have been fully reconstructed.
@@ -87,6 +99,7 @@ impl RecoveryPoolState {
             members,
             all_manifest_ids,
             file_k_values: HashMap::new(),
+            manifest_meta: HashMap::new(),
             received_shards: HashSet::new(),
             reconstructed: HashSet::new(),
         }
@@ -236,6 +249,37 @@ impl RecoveryPoolState {
     /// Get list of member peer IDs.
     pub fn member_ids(&self) -> Vec<String> {
         self.members.keys().cloned().collect()
+    }
+
+    /// Whether this peer is the coordinator (lowest peer_id among all members).
+    pub fn is_coordinator(&self) -> bool {
+        self.members.keys().min().map_or(false, |min| min == &self.local_peer_id)
+    }
+
+    /// Populate manifest metadata from the local ContentStore.
+    /// Fills `manifest_meta` and `file_k_values` for all erasure-coded files.
+    pub fn populate_from_content_store(
+        &mut self,
+        cs: &crate::vault::content_store::ContentStore,
+    ) {
+        let manifests = cs.list_manifests(&self.server_id).unwrap_or_default();
+        for manifest in manifests {
+            if manifest.k == 0 && manifest.m == 0 {
+                continue; // Skip full-replication files.
+            }
+            self.file_k_values
+                .insert(manifest.content_id.clone(), manifest.k);
+            self.manifest_meta.insert(
+                manifest.content_id.clone(),
+                ManifestMeta {
+                    k: manifest.k,
+                    m: manifest.m,
+                    total_data_size: manifest.original_size,
+                    storage_tier: manifest.storage_tier.clone(),
+                    file_name: manifest.file_name.clone(),
+                },
+            );
+        }
     }
 }
 

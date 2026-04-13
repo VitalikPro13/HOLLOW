@@ -277,6 +277,8 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
       if (!mounted) return;
 
       if (welcomed) {
+        // Confirm the join — clears pending flag so dashboard shows.
+        ref.read(recoveryPoolProvider.notifier).confirmJoin();
         Navigator.of(context).pop();
         HollowToast.show(
           context,

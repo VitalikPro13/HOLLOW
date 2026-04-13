@@ -12,6 +12,9 @@ class RecoveryPoolState {
   final double overallProgress;
   final bool isInitiator;
   final bool isActive;
+  /// True while waiting for welcome confirmation (join dialog still polling).
+  /// Dashboard should NOT show while pending.
+  final bool isPending;
   final List<RecoveredFile> recoveredFiles;
 
   const RecoveryPoolState({
@@ -25,6 +28,7 @@ class RecoveryPoolState {
     this.overallProgress = 0.0,
     this.isInitiator = false,
     this.isActive = false,
+    this.isPending = false,
     this.recoveredFiles = const [],
   });
 
@@ -38,6 +42,7 @@ class RecoveryPoolState {
     double? overallProgress,
     bool? isInitiator,
     bool? isActive,
+    bool? isPending,
     List<RecoveredFile>? recoveredFiles,
   }) {
     return RecoveryPoolState(
@@ -51,6 +56,7 @@ class RecoveryPoolState {
       overallProgress: overallProgress ?? this.overallProgress,
       isInitiator: isInitiator ?? this.isInitiator,
       isActive: isActive ?? this.isActive,
+      isPending: isPending ?? this.isPending,
       recoveredFiles: recoveredFiles ?? this.recoveredFiles,
     );
   }
@@ -76,6 +82,25 @@ class RecoveryPoolNotifier extends Notifier<RecoveryPoolState?> {
       isInitiator: true,
       isActive: true,
     );
+  }
+
+  /// Called immediately when JoinRecoveryPool command fires — creates state
+  /// in pending mode so member events can accumulate, but dashboard won't show.
+  void onPoolJoinedPending(String serverId) {
+    state = RecoveryPoolState(
+      serverId: serverId,
+      isInitiator: false,
+      isActive: true,
+      isPending: true,
+    );
+  }
+
+  /// Called by the join dialog after welcome confirmation — clears pending flag
+  /// so the dashboard becomes visible.
+  void confirmJoin() {
+    final s = state;
+    if (s == null) return;
+    state = s.copyWith(isPending: false);
   }
 
   void onPoolJoined(String serverId) {

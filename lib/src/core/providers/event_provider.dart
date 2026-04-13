@@ -650,6 +650,13 @@ class EventStreamNotifier extends Notifier<bool> {
               serverId, contentId);
         ref.read(fileTransferProvider.notifier).onVaultDownloadComplete(
               contentId, diskPath);
+        // Bridge to recovery pool: if pool is active for this server,
+        // this reconstruction was triggered by recovery shard transfer.
+        final activePool = ref.read(recoveryPoolProvider);
+        if (activePool != null && activePool.isActive && activePool.serverId == serverId) {
+          ref.read(recoveryPoolProvider.notifier).onFileRecovered(
+                serverId, contentId, diskPath);
+        }
       case NetworkEvent_VaultDownloadFailed(:final serverId,
             :final contentId, :final error):
         ref.read(vaultStatusProvider.notifier).onDownloadFailed(
@@ -791,7 +798,8 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_RecoveryPoolCreated(:final serverId, :final inviteLink):
         ref.read(recoveryPoolProvider.notifier).onPoolCreated(serverId, inviteLink);
       case NetworkEvent_RecoveryPoolJoined(:final serverId):
-        ref.read(recoveryPoolProvider.notifier).onPoolJoined(serverId);
+        // Create pool state in pending mode — dashboard won't show until confirmed.
+        ref.read(recoveryPoolProvider.notifier).onPoolJoinedPending(serverId);
       case NetworkEvent_RecoveryPoolJoinFailed(:final serverId, :final reason):
         debugPrint('[RECOVERY-POOL] Join failed for $serverId: $reason');
       case NetworkEvent_RecoveryPoolMemberJoined(:final serverId, :final peerId):
