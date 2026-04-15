@@ -9,7 +9,7 @@ use super::types::*;
 // -- Per-message Ed25519 signing helpers --
 
 /// Build canonical payload for message signing.
-/// Format: "haven-msg:{type}:{context}:{sender}:{ts}:{text}"
+/// Format: "hollow-msg:{type}:{context}:{sender}:{ts}:{text}"
 /// - Channel: type="ch", context="{sid}:{cid}"
 /// - DM:      type="dm", context="{recipient_peer_id}"
 pub(crate) fn message_signing_payload(
@@ -19,7 +19,7 @@ pub(crate) fn message_signing_payload(
     ts: i64,
     text: &str,
 ) -> String {
-    format!("haven-msg:{msg_type}:{context}:{sender}:{ts}:{text}")
+    format!("hollow-msg:{msg_type}:{context}:{sender}:{ts}:{text}")
 }
 
 /// Sign a message payload with the local keypair.

@@ -50,7 +50,7 @@ Future<String> getLocalPublicKey() =>
 /// - `sender_peer_id`: the sender's PeerId (Base58btc)
 /// - `signature_b64`: base64-encoded Ed25519 signature
 /// - `public_key_b64`: base64-encoded protobuf public key
-/// - `canonical_payload`: the signing payload string (e.g. "haven-msg:dm:...")
+/// - `canonical_payload`: the signing payload string (e.g. "hollow-msg:dm:...")
 Future<bool> verifyMessageProof({
   required String senderPeerId,
   required String signatureB64,

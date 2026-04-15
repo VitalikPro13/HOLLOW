@@ -1805,7 +1805,7 @@ class _VerifyProofSectionState extends State<_VerifyProofSection> {
               ? 'ch'
               : contextType; // pass through delete types as-is
       final reconstructed =
-          'haven-msg:$msgType:$contextId:$peerId:$timestampMs:$text';
+          'hollow-msg:$msgType:$contextId:$peerId:$timestampMs:$text';
       if (reconstructed != canonicalPayload) {
         setState(() {
           _verifying = false;
@@ -1814,8 +1814,8 @@ class _VerifyProofSectionState extends State<_VerifyProofSection> {
             error:
                 'Payload mismatch — the message fields do not match the '
                 'canonical payload. The proof JSON may have been tampered with.\n\n'
-                'Expected: $reconstructed\n'
-                'Got: $canonicalPayload',
+                'Expected: $canonicalPayload\n'
+                'Got: $reconstructed',
           );
         });
         _scrollToResult();

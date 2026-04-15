@@ -1,7 +1,3 @@
-# Multi-instance test data (local only)
-test_instances/instance_*/
-test_instances/data_*/
-
 # Miscellaneous
 *.class
 *.log
@@ -52,6 +48,7 @@ app.*.map.json
 rust/hollow_core/target/
 rust/target/
 relay/target/
+loadtest/target/
 
 # Bundled native binaries (fetched via scripts/fetch_ffmpeg.{ps1,sh})
 vendor/ffmpeg/
@@ -75,7 +72,7 @@ main_debug.txt
 snow_leopard_chat_mockup.html
 macOS_SnowLeopard.txt
 discord_migration_plan.md
-important.txt
+important/
 
 # Claude Code
 .claude/

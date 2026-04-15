@@ -46,7 +46,7 @@ class MessageProofData {
   /// Reconstruct the canonical signing payload (must match Rust's
   /// `message_signing_payload` in swarm.rs).
   String get canonicalPayload =>
-      'haven-msg:$msgType:$context:$senderPeerId:$timestampMs:$text';
+      'hollow-msg:$msgType:$context:$senderPeerId:$timestampMs:$text';
 
   /// Derive a short fingerprint from the public key for display.
   String? get publicKeyFingerprint {
