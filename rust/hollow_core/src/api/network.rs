@@ -277,10 +277,10 @@ pub enum NetworkEvent {
     RecoveryPoolStopped { server_id: String },
     // -- Hollow Share (Phase 7A) --
     ShareManifestReady { root_hash: String, file_name: String, total_size: u64, chunk_count: u32 },
-    ShareProgress { root_hash: String, chunks_have: u32, chunks_total: u32, peers: u8, bytes_per_sec: u64 },
+    ShareProgress { root_hash: String, chunks_have: u32, chunks_total: u32, seeders: u8, leechers: u8, bytes_per_sec: u64 },
     ShareCompleted { root_hash: String, disk_path: String },
     ShareFailed { root_hash: String, error: String },
-    ShareSeedingChanged { root_hash: String, seeding: bool, peers: u8, bytes_uploaded: u64 },
+    ShareSeedingChanged { root_hash: String, seeding: bool, seeders: u8, leechers: u8, bytes_uploaded: u64 },
     ShareCreated { root_hash: String, link: String, file_name: String, total_size: u64 },
     ShareList { entries: Vec<ShareEntry> },
     ShareNeedWebRtc { peer_id: String },
@@ -756,8 +756,8 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::ShareManifestReady { root_hash, file_name, total_size, chunk_count } => {
             NetworkEvent::ShareManifestReady { root_hash, file_name, total_size, chunk_count }
         }
-        node::NetworkEvent::ShareProgress { root_hash, chunks_have, chunks_total, peers, bytes_per_sec } => {
-            NetworkEvent::ShareProgress { root_hash, chunks_have, chunks_total, peers, bytes_per_sec }
+        node::NetworkEvent::ShareProgress { root_hash, chunks_have, chunks_total, seeders, leechers, bytes_per_sec } => {
+            NetworkEvent::ShareProgress { root_hash, chunks_have, chunks_total, seeders, leechers, bytes_per_sec }
         }
         node::NetworkEvent::ShareCompleted { root_hash, disk_path } => {
             NetworkEvent::ShareCompleted { root_hash, disk_path }
@@ -765,8 +765,8 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::ShareFailed { root_hash, error } => {
             NetworkEvent::ShareFailed { root_hash, error }
         }
-        node::NetworkEvent::ShareSeedingChanged { root_hash, seeding, peers, bytes_uploaded } => {
-            NetworkEvent::ShareSeedingChanged { root_hash, seeding, peers, bytes_uploaded }
+        node::NetworkEvent::ShareSeedingChanged { root_hash, seeding, seeders, leechers, bytes_uploaded } => {
+            NetworkEvent::ShareSeedingChanged { root_hash, seeding, seeders, leechers, bytes_uploaded }
         }
         node::NetworkEvent::ShareCreated { root_hash, link, file_name, total_size } => {
             NetworkEvent::ShareCreated { root_hash, link, file_name, total_size }

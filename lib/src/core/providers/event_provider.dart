@@ -832,9 +832,9 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW-SHARE] manifest ready: $fileName ($totalSize bytes, $chunkCount chunks) root=$rootHash');
         ref.read(shareTabProvider.notifier).handleShareManifestReady(rootHash, fileName, totalSize.toInt(), chunkCount);
       case NetworkEvent_ShareProgress(
-            :final rootHash, :final chunksHave, :final chunksTotal, :final peers, :final bytesPerSec):
-        debugPrint('[HOLLOW-SHARE] progress $rootHash: $chunksHave/$chunksTotal chunks, $peers peers, $bytesPerSec B/s');
-        ref.read(shareTabProvider.notifier).handleShareProgress(rootHash, chunksHave, chunksTotal, peers, bytesPerSec.toInt());
+            :final rootHash, :final chunksHave, :final chunksTotal, :final seeders, :final leechers, :final bytesPerSec):
+        debugPrint('[HOLLOW-SHARE] progress $rootHash: $chunksHave/$chunksTotal chunks, $seeders seeders, $leechers leechers, $bytesPerSec B/s');
+        ref.read(shareTabProvider.notifier).handleShareProgress(rootHash, chunksHave, chunksTotal, seeders, leechers, bytesPerSec.toInt());
       case NetworkEvent_ShareCompleted(:final rootHash, :final diskPath):
         debugPrint('[HOLLOW-SHARE] completed $rootHash → $diskPath');
         ref.read(shareTabProvider.notifier).handleShareCompleted(rootHash, diskPath);
@@ -842,9 +842,9 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW-SHARE] failed $rootHash: $error');
         ref.read(shareTabProvider.notifier).handleShareFailed(rootHash, error);
       case NetworkEvent_ShareSeedingChanged(
-            :final rootHash, :final seeding, :final peers, :final bytesUploaded):
-        debugPrint('[HOLLOW-SHARE] seeding changed $rootHash: seeding=$seeding peers=$peers uploaded=$bytesUploaded');
-        ref.read(shareTabProvider.notifier).handleShareSeedingChanged(rootHash, seeding, peers, bytesUploaded.toInt());
+            :final rootHash, :final seeding, :final seeders, :final leechers, :final bytesUploaded):
+        debugPrint('[HOLLOW-SHARE] seeding changed $rootHash: seeding=$seeding seeders=$seeders leechers=$leechers uploaded=$bytesUploaded');
+        ref.read(shareTabProvider.notifier).handleShareSeedingChanged(rootHash, seeding, seeders, leechers, bytesUploaded.toInt());
       case NetworkEvent_ShareCreated(
             :final rootHash, :final link, :final fileName, :final totalSize):
         debugPrint('[HOLLOW-SHARE] created $fileName ($totalSize bytes) root=$rootHash link=$link');

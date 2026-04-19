@@ -31,8 +31,9 @@ class ArchiveDashboard extends ConsumerWidget {
               border: Border(bottom: BorderSide(color: hollow.border)),
             ),
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                Text('Archive', style: HollowTypography.heading.copyWith(color: hollow.textPrimary)),
+                const Spacer(),
                 _SubTabPill(
                   label: 'My Data',
                   isSelected: subTab == ArchiveSubTab.myData,
@@ -46,6 +47,7 @@ class ArchiveDashboard extends ConsumerWidget {
                   onTap: () => ref.read(archiveSubTabProvider.notifier).state =
                       ArchiveSubTab.importedArchives,
                 ),
+                const Spacer(),
               ],
             ),
           ),

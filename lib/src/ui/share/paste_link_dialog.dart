@@ -226,6 +226,11 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
 
     try {
       final info = await share_api.shareDecodeLink(link: link);
+      final existing = ref.read(shareTabProvider);
+      if (existing.any((s) => s.rootHash == info.rootHash)) {
+        setState(() => _errorText = 'You already have this file');
+        return;
+      }
       _rootHash = info.rootHash;
       _shareLink = link;
       _loadingStartMs = DateTime.now().millisecondsSinceEpoch;
@@ -247,7 +252,7 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
     if (_rootHash == null) return;
     final saveDir = ref.read(shareDownloadPathProvider).valueOrNull ?? '';
     ref.read(shareTabProvider.notifier).startDownload(_rootHash!, _shareLink ?? '');
-    await share_api.shareStartDownload(rootHash: _rootHash!, saveDir: saveDir);
+    await share_api.shareStartDownload(rootHash: _rootHash!, saveDir: saveDir, link: _shareLink ?? '');
     if (mounted) Navigator.pop(context);
   }
 

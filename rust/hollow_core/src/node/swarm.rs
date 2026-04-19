@@ -872,9 +872,9 @@ async fn run_event_loop(
                             &mut share_registry, &bundle_keypair, &ws_cmd_tx, &event_tx, link,
                         ).await;
                     }
-                    NodeCommand::ShareStart { root_hash, save_dir } => {
+                    NodeCommand::ShareStart { root_hash, save_dir, link } => {
                         super::share_handler::handle_command_share_start(
-                            &mut share_registry, &bundle_keypair, &ws_cmd_tx, &event_tx, root_hash, save_dir,
+                            &mut share_registry, &bundle_keypair, &ws_cmd_tx, &event_tx, root_hash, save_dir, link,
                         ).await;
                     }
                     NodeCommand::ShareCancel { root_hash } => {

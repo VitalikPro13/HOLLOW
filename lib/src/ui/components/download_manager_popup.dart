@@ -3,12 +3,14 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
+import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/share/share_card.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -88,6 +90,13 @@ class _DownloadManagerOverlayState
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final entries = ref.watch(downloadManagerEntriesProvider);
+    final allShares = ref.watch(shareTabProvider);
+    final dismissed = ref.watch(dismissedShareDownloadsProvider);
+    final activeShareDownloads = downloadingShares(allShares);
+    final completedShareDownloads = seedingShares(allShares)
+        .where((s) => !dismissed.contains(s.rootHash))
+        .toList();
+    final shareItems = [...activeShareDownloads, ...completedShareDownloads];
 
     const cardWidth = 340.0;
     const maxHeight = 420.0;
@@ -182,11 +191,15 @@ class _DownloadManagerOverlayState
                               ),
                             ),
                             const Spacer(),
-                            if (entries.isNotEmpty)
+                            if (entries.isNotEmpty || shareItems.isNotEmpty)
                               HollowPressable(
-                                onTap: () => ref
-                                    .read(downloadManagerStateProvider.notifier)
-                                    .clearAll(),
+                                onTap: () {
+                                  ref.read(downloadManagerStateProvider.notifier).clearAll();
+                                  final allRoots = completedShareDownloads.map((s) => s.rootHash).toSet();
+                                  ref.read(dismissedShareDownloadsProvider.notifier).state = {
+                                    ...ref.read(dismissedShareDownloadsProvider), ...allRoots,
+                                  };
+                                },
                                 borderRadius:
                                     BorderRadius.circular(hollow.radiusSm),
                                 padding: const EdgeInsets.symmetric(
@@ -208,7 +221,7 @@ class _DownloadManagerOverlayState
                       Container(height: 1, color: hollow.border),
 
                       // ── Entry list or empty state ──
-                      if (entries.isEmpty)
+                      if (entries.isEmpty && shareItems.isEmpty)
                         Padding(
                           padding: const EdgeInsets.symmetric(
                             vertical: HollowSpacing.xl + HollowSpacing.md,
@@ -252,7 +265,7 @@ class _DownloadManagerOverlayState
                             padding: const EdgeInsets.symmetric(
                               vertical: HollowSpacing.xs,
                             ),
-                            itemCount: entries.length,
+                            itemCount: shareItems.length + entries.length,
                             separatorBuilder: (_, _) => Padding(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: HollowSpacing.md,
@@ -263,7 +276,10 @@ class _DownloadManagerOverlayState
                               ),
                             ),
                             itemBuilder: (context, index) {
-                              final entry = entries[index];
+                              if (index < shareItems.length) {
+                                return _ShareDownloadTile(item: shareItems[index]);
+                              }
+                              final entry = entries[index - shareItems.length];
                               if (entry.type == DownloadEntryType.rebalance) {
                                 return _RebalanceTile(entry: entry);
                               }
@@ -464,6 +480,110 @@ if ($p) {
             : (entry.isImage ? LucideIcons.image : LucideIcons.file),
         size: 18,
         color: hollow.textSecondary,
+      ),
+    );
+  }
+}
+
+// ── Share download tile ─────────────────────────────────────
+
+class _ShareDownloadTile extends StatelessWidget {
+  final ShareItemState item;
+
+  const _ShareDownloadTile({required this.item});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final completed = item.state == 'completed';
+    final failed = item.state == 'failed';
+    final progress = item.chunksTotal > 0
+        ? item.chunksHave / item.chunksTotal
+        : 0.0;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.md,
+        vertical: HollowSpacing.sm,
+      ),
+      child: Row(
+        children: [
+          if (completed)
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: hollow.success.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+              ),
+              alignment: Alignment.center,
+              child: Icon(LucideIcons.check, size: 16, color: hollow.success),
+            )
+          else
+            SizedBox(
+              width: 40,
+              height: 40,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  SizedBox(
+                    width: 32,
+                    height: 32,
+                    child: CircularProgressIndicator(
+                      value: progress,
+                      strokeWidth: 2.5,
+                      backgroundColor: hollow.border,
+                      valueColor: AlwaysStoppedAnimation(
+                        failed ? hollow.error : hollow.accent,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '${(progress * 100).round()}%',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                      fontSize: 8,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  item.fileName,
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textPrimary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  completed
+                      ? ShareCard.formatSize(item.totalSize)
+                      : failed
+                          ? item.error ?? 'Failed'
+                          : '${item.chunksHave}/${item.chunksTotal} chunks  ·  ${ShareCard.formatSpeed(item.bytesPerSec)}/s',
+                  style: HollowTypography.caption.copyWith(
+                    color: completed ? hollow.success
+                        : failed ? hollow.error
+                        : hollow.textSecondary,
+                    fontSize: 10,
+                  ),
+                  maxLines: 1,
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

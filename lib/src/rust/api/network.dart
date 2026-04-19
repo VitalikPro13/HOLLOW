@@ -1025,7 +1025,8 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String rootHash,
     required int chunksHave,
     required int chunksTotal,
-    required int peers,
+    required int seeders,
+    required int leechers,
     required BigInt bytesPerSec,
   }) = NetworkEvent_ShareProgress;
   const factory NetworkEvent.shareCompleted({
@@ -1039,7 +1040,8 @@ sealed class NetworkEvent with _$NetworkEvent {
   const factory NetworkEvent.shareSeedingChanged({
     required String rootHash,
     required bool seeding,
-    required int peers,
+    required int seeders,
+    required int leechers,
     required BigInt bytesUploaded,
   }) = NetworkEvent_ShareSeedingChanged;
   const factory NetworkEvent.shareCreated({

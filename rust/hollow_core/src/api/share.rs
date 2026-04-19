@@ -53,16 +53,14 @@ pub fn share_open_link(link: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Begin downloading after ShareManifestReady. `save_dir` is currently ignored
-/// (Phase 7A always writes to ~/.hollow/shares/); reserved for the file-picker
-/// flow in Phase 7B.
+/// Begin downloading after ShareManifestReady.
 #[frb]
-pub fn share_start_download(root_hash: String, save_dir: String) -> Result<(), String> {
+pub fn share_start_download(root_hash: String, save_dir: String, link: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::ShareStart { root_hash, save_dir }))
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::ShareStart { root_hash, save_dir, link }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }

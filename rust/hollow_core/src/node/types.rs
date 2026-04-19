@@ -206,13 +206,13 @@ pub(crate) enum NetworkEvent {
     /// Manifest for a share has been fetched and verified; download can be started.
     ShareManifestReady { root_hash: String, file_name: String, total_size: u64, chunk_count: u32 },
     /// Periodic progress update for an active share download or seed.
-    ShareProgress { root_hash: String, chunks_have: u32, chunks_total: u32, peers: u8, bytes_per_sec: u64 },
+    ShareProgress { root_hash: String, chunks_have: u32, chunks_total: u32, seeders: u8, leechers: u8, bytes_per_sec: u64 },
     /// Download finished, file written to disk_path.
     ShareCompleted { root_hash: String, disk_path: String },
     /// Download/seed encountered a fatal error; swarm state has been dropped.
     ShareFailed { root_hash: String, error: String },
     /// Seeding flag toggled (manually or by completion auto-seed).
-    ShareSeedingChanged { root_hash: String, seeding: bool, peers: u8, bytes_uploaded: u64 },
+    ShareSeedingChanged { root_hash: String, seeding: bool, seeders: u8, leechers: u8, bytes_uploaded: u64 },
     /// share_create_from_file finished; link is ready to share.
     ShareCreated { root_hash: String, link: String, file_name: String, total_size: u64 },
     /// Result of share_list (returned via stream so it stays uniform with other queries).
@@ -387,7 +387,7 @@ pub(crate) enum NodeCommand {
     /// Emits ShareManifestReady or ShareFailed.
     ShareOpenLink { link: String },
     /// After ShareManifestReady, begin downloading chunks into save_dir.
-    ShareStart { root_hash: String, save_dir: String },
+    ShareStart { root_hash: String, save_dir: String, link: String },
     /// Stop an in-flight download (keeps partial file + bitmap for resume).
     ShareCancel { root_hash: String },
     /// Toggle seeding for a completed share (joins/leaves the swarm room).

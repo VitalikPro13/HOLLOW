@@ -545,6 +545,7 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiShareShareStartDownload({
     required String rootHash,
     required String saveDir,
+    required String link,
   });
 
   Future<String> crateApiNetworkStartNode();
@@ -4526,6 +4527,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<void> crateApiShareShareStartDownload({
     required String rootHash,
     required String saveDir,
+    required String link,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -4533,6 +4535,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(rootHash, serializer);
           sse_encode_String(saveDir, serializer);
+          sse_encode_String(link, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -4545,7 +4548,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiShareShareStartDownloadConstMeta,
-        argValues: [rootHash, saveDir],
+        argValues: [rootHash, saveDir, link],
         apiImpl: this,
       ),
     );
@@ -4554,7 +4557,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiShareShareStartDownloadConstMeta =>
       const TaskConstMeta(
         debugName: "share_start_download",
-        argNames: ["rootHash", "saveDir"],
+        argNames: ["rootHash", "saveDir", "link"],
       );
 
   @override
@@ -6525,8 +6528,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           rootHash: dco_decode_String(raw[1]),
           chunksHave: dco_decode_u_32(raw[2]),
           chunksTotal: dco_decode_u_32(raw[3]),
-          peers: dco_decode_u_8(raw[4]),
-          bytesPerSec: dco_decode_u_64(raw[5]),
+          seeders: dco_decode_u_8(raw[4]),
+          leechers: dco_decode_u_8(raw[5]),
+          bytesPerSec: dco_decode_u_64(raw[6]),
         );
       case 89:
         return NetworkEvent_ShareCompleted(
@@ -6542,8 +6546,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         return NetworkEvent_ShareSeedingChanged(
           rootHash: dco_decode_String(raw[1]),
           seeding: dco_decode_bool(raw[2]),
-          peers: dco_decode_u_8(raw[3]),
-          bytesUploaded: dco_decode_u_64(raw[4]),
+          seeders: dco_decode_u_8(raw[3]),
+          leechers: dco_decode_u_8(raw[4]),
+          bytesUploaded: dco_decode_u_64(raw[5]),
         );
       case 92:
         return NetworkEvent_ShareCreated(
@@ -8475,13 +8480,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         var var_rootHash = sse_decode_String(deserializer);
         var var_chunksHave = sse_decode_u_32(deserializer);
         var var_chunksTotal = sse_decode_u_32(deserializer);
-        var var_peers = sse_decode_u_8(deserializer);
+        var var_seeders = sse_decode_u_8(deserializer);
+        var var_leechers = sse_decode_u_8(deserializer);
         var var_bytesPerSec = sse_decode_u_64(deserializer);
         return NetworkEvent_ShareProgress(
           rootHash: var_rootHash,
           chunksHave: var_chunksHave,
           chunksTotal: var_chunksTotal,
-          peers: var_peers,
+          seeders: var_seeders,
+          leechers: var_leechers,
           bytesPerSec: var_bytesPerSec,
         );
       case 89:
@@ -8501,12 +8508,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 91:
         var var_rootHash = sse_decode_String(deserializer);
         var var_seeding = sse_decode_bool(deserializer);
-        var var_peers = sse_decode_u_8(deserializer);
+        var var_seeders = sse_decode_u_8(deserializer);
+        var var_leechers = sse_decode_u_8(deserializer);
         var var_bytesUploaded = sse_decode_u_64(deserializer);
         return NetworkEvent_ShareSeedingChanged(
           rootHash: var_rootHash,
           seeding: var_seeding,
-          peers: var_peers,
+          seeders: var_seeders,
+          leechers: var_leechers,
           bytesUploaded: var_bytesUploaded,
         );
       case 92:
@@ -10462,14 +10471,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         rootHash: final rootHash,
         chunksHave: final chunksHave,
         chunksTotal: final chunksTotal,
-        peers: final peers,
+        seeders: final seeders,
+        leechers: final leechers,
         bytesPerSec: final bytesPerSec,
       ):
         sse_encode_i_32(88, serializer);
         sse_encode_String(rootHash, serializer);
         sse_encode_u_32(chunksHave, serializer);
         sse_encode_u_32(chunksTotal, serializer);
-        sse_encode_u_8(peers, serializer);
+        sse_encode_u_8(seeders, serializer);
+        sse_encode_u_8(leechers, serializer);
         sse_encode_u_64(bytesPerSec, serializer);
       case NetworkEvent_ShareCompleted(
         rootHash: final rootHash,
@@ -10488,13 +10499,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case NetworkEvent_ShareSeedingChanged(
         rootHash: final rootHash,
         seeding: final seeding,
-        peers: final peers,
+        seeders: final seeders,
+        leechers: final leechers,
         bytesUploaded: final bytesUploaded,
       ):
         sse_encode_i_32(91, serializer);
         sse_encode_String(rootHash, serializer);
         sse_encode_bool(seeding, serializer);
-        sse_encode_u_8(peers, serializer);
+        sse_encode_u_8(seeders, serializer);
+        sse_encode_u_8(leechers, serializer);
         sse_encode_u_64(bytesUploaded, serializer);
       case NetworkEvent_ShareCreated(
         rootHash: final rootHash,

@@ -4147,11 +4147,15 @@ fn wire__crate__api__share__share_start_download_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_root_hash = <String>::sse_decode(&mut deserializer);
             let api_save_dir = <String>::sse_decode(&mut deserializer);
+            let api_link = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
-                    let output_ok =
-                        crate::api::share::share_start_download(api_root_hash, api_save_dir)?;
+                    let output_ok = crate::api::share::share_start_download(
+                        api_root_hash,
+                        api_save_dir,
+                        api_link,
+                    )?;
                     Ok(output_ok)
                 })())
             }
@@ -6701,13 +6705,15 @@ impl SseDecode for crate::api::network::NetworkEvent {
                 let mut var_rootHash = <String>::sse_decode(deserializer);
                 let mut var_chunksHave = <u32>::sse_decode(deserializer);
                 let mut var_chunksTotal = <u32>::sse_decode(deserializer);
-                let mut var_peers = <u8>::sse_decode(deserializer);
+                let mut var_seeders = <u8>::sse_decode(deserializer);
+                let mut var_leechers = <u8>::sse_decode(deserializer);
                 let mut var_bytesPerSec = <u64>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::ShareProgress {
                     root_hash: var_rootHash,
                     chunks_have: var_chunksHave,
                     chunks_total: var_chunksTotal,
-                    peers: var_peers,
+                    seeders: var_seeders,
+                    leechers: var_leechers,
                     bytes_per_sec: var_bytesPerSec,
                 };
             }
@@ -6730,12 +6736,14 @@ impl SseDecode for crate::api::network::NetworkEvent {
             91 => {
                 let mut var_rootHash = <String>::sse_decode(deserializer);
                 let mut var_seeding = <bool>::sse_decode(deserializer);
-                let mut var_peers = <u8>::sse_decode(deserializer);
+                let mut var_seeders = <u8>::sse_decode(deserializer);
+                let mut var_leechers = <u8>::sse_decode(deserializer);
                 let mut var_bytesUploaded = <u64>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::ShareSeedingChanged {
                     root_hash: var_rootHash,
                     seeding: var_seeding,
-                    peers: var_peers,
+                    seeders: var_seeders,
+                    leechers: var_leechers,
                     bytes_uploaded: var_bytesUploaded,
                 };
             }
@@ -8888,14 +8896,16 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 root_hash,
                 chunks_have,
                 chunks_total,
-                peers,
+                seeders,
+                leechers,
                 bytes_per_sec,
             } => [
                 88.into_dart(),
                 root_hash.into_into_dart().into_dart(),
                 chunks_have.into_into_dart().into_dart(),
                 chunks_total.into_into_dart().into_dart(),
-                peers.into_into_dart().into_dart(),
+                seeders.into_into_dart().into_dart(),
+                leechers.into_into_dart().into_dart(),
                 bytes_per_sec.into_into_dart().into_dart(),
             ]
             .into_dart(),
@@ -8917,13 +8927,15 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
             crate::api::network::NetworkEvent::ShareSeedingChanged {
                 root_hash,
                 seeding,
-                peers,
+                seeders,
+                leechers,
                 bytes_uploaded,
             } => [
                 91.into_dart(),
                 root_hash.into_into_dart().into_dart(),
                 seeding.into_into_dart().into_dart(),
-                peers.into_into_dart().into_dart(),
+                seeders.into_into_dart().into_dart(),
+                leechers.into_into_dart().into_dart(),
                 bytes_uploaded.into_into_dart().into_dart(),
             ]
             .into_dart(),
@@ -10650,14 +10662,16 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 root_hash,
                 chunks_have,
                 chunks_total,
-                peers,
+                seeders,
+                leechers,
                 bytes_per_sec,
             } => {
                 <i32>::sse_encode(88, serializer);
                 <String>::sse_encode(root_hash, serializer);
                 <u32>::sse_encode(chunks_have, serializer);
                 <u32>::sse_encode(chunks_total, serializer);
-                <u8>::sse_encode(peers, serializer);
+                <u8>::sse_encode(seeders, serializer);
+                <u8>::sse_encode(leechers, serializer);
                 <u64>::sse_encode(bytes_per_sec, serializer);
             }
             crate::api::network::NetworkEvent::ShareCompleted {
@@ -10676,13 +10690,15 @@ impl SseEncode for crate::api::network::NetworkEvent {
             crate::api::network::NetworkEvent::ShareSeedingChanged {
                 root_hash,
                 seeding,
-                peers,
+                seeders,
+                leechers,
                 bytes_uploaded,
             } => {
                 <i32>::sse_encode(91, serializer);
                 <String>::sse_encode(root_hash, serializer);
                 <bool>::sse_encode(seeding, serializer);
-                <u8>::sse_encode(peers, serializer);
+                <u8>::sse_encode(seeders, serializer);
+                <u8>::sse_encode(leechers, serializer);
                 <u64>::sse_encode(bytes_uploaded, serializer);
             }
             crate::api::network::NetworkEvent::ShareCreated {

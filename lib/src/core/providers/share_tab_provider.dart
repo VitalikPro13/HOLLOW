@@ -12,7 +12,8 @@ class ShareItemState {
   final int totalSize;
   final int chunksHave;
   final int chunksTotal;
-  final int peers;
+  final int seeders;
+  final int leechers;
   final int bytesPerSec;
   final bool seeding;
   final int bytesUploaded;
@@ -28,7 +29,8 @@ class ShareItemState {
     required this.totalSize,
     this.chunksHave = 0,
     this.chunksTotal = 0,
-    this.peers = 0,
+    this.seeders = 0,
+    this.leechers = 0,
     this.bytesPerSec = 0,
     this.seeding = false,
     this.bytesUploaded = 0,
@@ -42,7 +44,8 @@ class ShareItemState {
   ShareItemState copyWith({
     int? chunksHave,
     int? chunksTotal,
-    int? peers,
+    int? seeders,
+    int? leechers,
     int? bytesPerSec,
     bool? seeding,
     int? bytesUploaded,
@@ -57,7 +60,8 @@ class ShareItemState {
       totalSize: totalSize,
       chunksHave: chunksHave ?? this.chunksHave,
       chunksTotal: chunksTotal ?? this.chunksTotal,
-      peers: peers ?? this.peers,
+      seeders: seeders ?? this.seeders,
+      leechers: leechers ?? this.leechers,
       bytesPerSec: bytesPerSec ?? this.bytesPerSec,
       seeding: seeding ?? this.seeding,
       bytesUploaded: bytesUploaded ?? this.bytesUploaded,
@@ -94,7 +98,8 @@ class ShareTabNotifier extends Notifier<List<ShareItemState>> {
         chunksTotal: prev?.chunksTotal ?? e.chunksTotal,
         state: e.state,
         seeding: prev?.seeding ?? e.seeding,
-        peers: prev?.peers ?? 0,
+        seeders: prev?.seeders ?? 0,
+        leechers: prev?.leechers ?? 0,
         bytesPerSec: prev?.bytesPerSec ?? 0,
         diskPath: e.diskPath,
         bytesUploaded: prev?.bytesUploaded ?? e.bytesUploaded.toInt(),
@@ -105,7 +110,7 @@ class ShareTabNotifier extends Notifier<List<ShareItemState>> {
   }
 
   void handleShareProgress(
-    String rootHash, int chunksHave, int chunksTotal, int peers, int bytesPerSec,
+    String rootHash, int chunksHave, int chunksTotal, int seeders, int leechers, int bytesPerSec,
   ) {
     state = [
       for (final item in state)
@@ -113,7 +118,8 @@ class ShareTabNotifier extends Notifier<List<ShareItemState>> {
           item.copyWith(
             chunksHave: chunksHave,
             chunksTotal: chunksTotal,
-            peers: peers,
+            seeders: seeders,
+            leechers: leechers,
             bytesPerSec: bytesPerSec,
           )
         else
@@ -219,12 +225,12 @@ class ShareTabNotifier extends Notifier<List<ShareItemState>> {
   }
 
   void handleShareSeedingChanged(
-    String rootHash, bool seeding, int peers, int bytesUploaded,
+    String rootHash, bool seeding, int seeders, int leechers, int bytesUploaded,
   ) {
     state = [
       for (final item in state)
         if (item.rootHash == rootHash)
-          item.copyWith(seeding: seeding, peers: peers, bytesUploaded: bytesUploaded)
+          item.copyWith(seeding: seeding, seeders: seeders, leechers: leechers, bytesUploaded: bytesUploaded)
         else
           item,
     ];

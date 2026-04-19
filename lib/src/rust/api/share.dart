@@ -26,15 +26,15 @@ Future<void> shareCreateFromFile({required String sourcePath}) => RustLib
 Future<void> shareOpenLink({required String link}) =>
     RustLib.instance.api.crateApiShareShareOpenLink(link: link);
 
-/// Begin downloading after ShareManifestReady. `save_dir` is currently ignored
-/// (Phase 7A always writes to ~/.hollow/shares/); reserved for the file-picker
-/// flow in Phase 7B.
+/// Begin downloading after ShareManifestReady.
 Future<void> shareStartDownload({
   required String rootHash,
   required String saveDir,
+  required String link,
 }) => RustLib.instance.api.crateApiShareShareStartDownload(
   rootHash: rootHash,
   saveDir: saveDir,
+  link: link,
 );
 
 /// Stop an in-flight download. Keeps the partial file + bitmap so the next

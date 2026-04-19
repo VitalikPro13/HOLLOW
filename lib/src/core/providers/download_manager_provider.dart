@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/share_tab_provider.dart';
 
 // ── Data model ───────────────────────────────────────────────
 
@@ -245,9 +246,15 @@ final downloadManagerEntriesProvider =
   return entries;
 });
 
-/// Badge count — only active rebalances show a dot on the icon.
+/// Share downloads dismissed from the Downloads popup (session-only).
+final dismissedShareDownloadsProvider = StateProvider<Set<String>>((ref) => {});
+
+/// Badge count — active rebalances + share downloads show a dot on the icon.
 /// Saved files don't pulse the badge (they're passive history).
 final activeTransferCountProvider = Provider<int>((ref) {
   final owned = ref.watch(downloadManagerStateProvider);
-  return owned.rebalances.values.where((r) => !r.completed).length;
+  final shares = ref.watch(shareTabProvider);
+  final activeRebalances = owned.rebalances.values.where((r) => !r.completed).length;
+  final activeShares = shares.where((s) => s.state == 'downloading').length;
+  return activeRebalances + activeShares;
 });

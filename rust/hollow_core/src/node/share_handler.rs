@@ -297,6 +297,15 @@ pub struct ShareSwarmState {
 impl ShareSwarmState {
     pub fn root_hash_hex(&self) -> String { hex::encode(self.root_hash) }
     pub fn room_id(&self) -> String { format!("{SHARE_ROOM_PREFIX}{}", self.root_hash_hex()) }
+
+    pub fn seeder_leecher_counts(&self) -> (u8, u8) {
+        let mut seeders = 0u16;
+        let mut leechers = 0u16;
+        for bm in self.peer_have.values() {
+            if bm.is_complete() { seeders += 1; } else { leechers += 1; }
+        }
+        (seeders.min(u8::MAX as u16) as u8, leechers.min(u8::MAX as u16) as u8)
+    }
 }
 
 /// Registry of active share swarms keyed by root_hash hex. Owned by the
@@ -663,8 +672,11 @@ pub async fn handle_command_share_set_seeding(
     } else {
         return;
     };
+    let (seeders, leechers) = registry.get(&root_hash)
+        .map(|s| s.seeder_leecher_counts())
+        .unwrap_or((0, 0));
     let _ = event_tx.send(NetworkEvent::ShareSeedingChanged {
-        root_hash, seeding, peers: 0, bytes_uploaded,
+        root_hash, seeding, seeders, leechers, bytes_uploaded,
     }).await;
 }
 
@@ -742,6 +754,7 @@ pub async fn handle_command_share_start(
     event_tx: &mpsc::Sender<NetworkEvent>,
     root_hash: String,
     save_dir: String,
+    link: String,
 ) {
     // The probe (ShareOpenLink) already cached the manifest in the registry.
     let Some(state) = registry.get(&root_hash) else {
@@ -792,7 +805,7 @@ pub async fn handle_command_share_start(
             manifest.chunk_count,
             &manifest_json,
             &key,
-            "",
+            &link,
             "downloading",
             false,
             None,
@@ -1018,7 +1031,8 @@ pub async fn tick(
             let _ = event_tx.send(NetworkEvent::ShareSeedingChanged {
                 root_hash: rh.clone(),
                 seeding: false,
-                peers: 0,
+                seeders: 0,
+                leechers: 0,
                 bytes_uploaded: state.bytes_uploaded,
             }).await;
             continue;
@@ -1027,11 +1041,12 @@ pub async fn tick(
         // Periodic seeding progress emit (~every 2s).
         if state.seeding && now.duration_since(state.last_seeding_emit) >= Duration::from_secs(2) {
             state.last_seeding_emit = now;
-            let peers = state.peer_have.len().min(u8::MAX as usize) as u8;
+            let (seeders, leechers) = state.seeder_leecher_counts();
             let _ = event_tx.send(NetworkEvent::ShareSeedingChanged {
                 root_hash: rh.clone(),
                 seeding: true,
-                peers,
+                seeders,
+                leechers,
                 bytes_uploaded: state.bytes_uploaded,
             }).await;
         }
@@ -1242,12 +1257,16 @@ pub async fn handle_envelope_share_have(
     state.peer_have.insert(sender_peer_id.to_string(), bitmap);
 }
 
-/// Reset any in-flight requests a peer owed us (so the scheduler retries them
-/// when the peer reconnects). Keeps peer_have intact — the bitmap is still
-/// valid and lets the tick resume immediately after WebRTC re-establishes.
+/// Clean up a peer that left a share room. For active downloads, keeps
+/// peer_have intact so the tick resumes immediately after WebRTC
+/// re-establishes. For completed/seeding shares, removes the peer
+/// so the seeder count stays accurate.
 pub fn forget_peer(registry: &mut ShareRegistry, peer_id: &str) {
     for state in registry.values_mut() {
         state.inflight.retain(|_, (p, _)| p != peer_id);
+        if state.have.is_complete() {
+            state.peer_have.remove(peer_id);
+        }
     }
 }
 
@@ -1336,7 +1355,7 @@ async fn finalize_completed_download(
     bundle_keypair: &NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
     root_hash: &str,
-    file_ext: &str,
+    file_name: &str,
     save_dir: Option<&PathBuf>,
 ) {
     let dir = match save_dir {
@@ -1344,7 +1363,22 @@ async fn finalize_completed_download(
         None => match shares_dir() { Ok(d) => d, Err(_) => return },
     };
     let partial = partial_path_in(&dir, root_hash);
-    let final_p = final_path_in(&dir, root_hash, file_ext);
+    let mut final_p = dir.join(file_name);
+    // Avoid collisions: append (1), (2), ... if file already exists.
+    if final_p.exists() {
+        let stem = std::path::Path::new(file_name)
+            .file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let ext = std::path::Path::new(file_name)
+            .extension().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        for i in 1..1000 {
+            final_p = if ext.is_empty() {
+                dir.join(format!("{stem} ({i})"))
+            } else {
+                dir.join(format!("{stem} ({i}).{ext}"))
+            };
+            if !final_p.exists() { break; }
+        }
+    }
     if let Some(s) = registry.get_mut(root_hash) { s.data_file = None; }
     if let Err(e) = std::fs::rename(&partial, &final_p) {
         hollow_log!("[SHARE] rename .partial -> final failed: {e}");
@@ -1430,8 +1464,8 @@ pub async fn handle_envelope_share_chunk_response(
     let chunks_total = state.have.chunk_count;
     let complete = state.have.is_complete();
     let bytes_per_sec = state.speed_bps;
-    let peers = state.peer_have.len().min(u8::MAX as usize) as u8;
-    let file_ext = state.file_ext.clone();
+    let (seeders, leechers) = state.seeder_leecher_counts();
+    let file_name = state.manifest.as_ref().map(|m| m.file_name.clone()).unwrap_or_default();
     let save_dir = state.save_dir.clone();
     let bitmap_snapshot = state.have.as_bytes().to_vec();
 
@@ -1443,13 +1477,13 @@ pub async fn handle_envelope_share_chunk_response(
     let _ = event_tx.send(NetworkEvent::ShareProgress {
         root_hash: root_hash.clone(),
         chunks_have, chunks_total,
-        peers, bytes_per_sec,
+        seeders, leechers, bytes_per_sec,
     }).await;
 
     if complete {
         finalize_completed_download(
             registry, bundle_keypair, event_tx,
-            &root_hash, &file_ext, save_dir.as_ref(),
+            &root_hash, &file_name, save_dir.as_ref(),
         ).await;
     }
 }
@@ -1546,8 +1580,8 @@ pub async fn handle_webrtc_share_chunk_complete(
     let chunks_total = state.have.chunk_count;
     let complete = state.have.is_complete();
     let bytes_per_sec = state.speed_bps;
-    let peers = state.peer_have.len().min(u8::MAX as usize) as u8;
-    let file_ext = state.file_ext.clone();
+    let (seeders, leechers) = state.seeder_leecher_counts();
+    let file_name = state.manifest.as_ref().map(|m| m.file_name.clone()).unwrap_or_default();
     let save_dir = state.save_dir.clone();
     let bitmap_snapshot = state.have.as_bytes().to_vec();
 
@@ -1558,13 +1592,13 @@ pub async fn handle_webrtc_share_chunk_complete(
     let _ = event_tx.send(NetworkEvent::ShareProgress {
         root_hash: root_hash.clone(),
         chunks_have, chunks_total,
-        peers, bytes_per_sec,
+        seeders, leechers, bytes_per_sec,
     }).await;
 
     if complete {
         finalize_completed_download(
             registry, bundle_keypair, event_tx,
-            &root_hash, &file_ext, save_dir.as_ref(),
+            &root_hash, &file_name, save_dir.as_ref(),
         ).await;
     }
 }

@@ -82,15 +82,9 @@ class ShareCard extends ConsumerWidget {
         Row(
           children: [
             Text(
-              '${item.chunksHave}/${item.chunksTotal} chunks',
+              '${item.chunksHave}/${item.chunksTotal} chunks  ·  ${item.seeders} ${item.seeders == 1 ? 'seed' : 'seeds'}  ·  ${item.leechers} ${item.leechers == 1 ? 'peer' : 'peers'}  ·  ',
               style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
             ),
-            const SizedBox(width: HollowSpacing.md),
-            Text(
-              '${item.peers} ${item.peers == 1 ? 'seed' : 'seeds'}',
-              style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
-            ),
-            const SizedBox(width: HollowSpacing.md),
             Text(
               '${formatSpeed(item.bytesPerSec)}/s',
               style: HollowTypography.caption.copyWith(color: hollow.accent),
@@ -116,12 +110,7 @@ class ShareCard extends ConsumerWidget {
             Icon(LucideIcons.arrowUp, size: 12, color: hollow.textSecondary),
             const SizedBox(width: HollowSpacing.xs),
             Text(
-              '${formatSize(item.bytesUploaded)} uploaded',
-              style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
-            ),
-            const SizedBox(width: HollowSpacing.md),
-            Text(
-              '${item.peers} ${item.peers == 1 ? 'peer' : 'peers'}',
+              '${formatSize(item.bytesUploaded)} uploaded  ·  ${item.seeders} ${item.seeders == 1 ? 'seed' : 'seeds'}  ·  ${item.leechers} ${item.leechers == 1 ? 'peer' : 'peers'}',
               style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
             ),
           ],
