@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/share.dart' as share_api;
+import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 final shareTabOpenProvider = StateProvider<bool>((ref) => false);
 
@@ -132,7 +133,8 @@ class ShareTabNotifier extends Notifier<List<ShareItemState>> {
 
   void handleShareFailed(String rootHash, String error) {
     if (error == 'Cancelled' || error == 'No seeders found') {
-      state = state.where((s) => s.rootHash != rootHash).toList();
+      state = state.where((s) =>
+          s.rootHash != rootHash || s.state == 'completed').toList();
     } else {
       state = [
         for (final item in state)
@@ -242,3 +244,24 @@ List<ShareItemState> downloadingShares(List<ShareItemState> shares) =>
 
 List<ShareItemState> seedingShares(List<ShareItemState> shares) =>
     shares.where((s) => s.state == 'completed').toList();
+
+// ── Download path preference ────────────────────────────────────────────
+
+const _shareDownloadPathKey = 'share_download_path';
+
+final shareDownloadPathProvider =
+    AsyncNotifierProvider<ShareDownloadPathNotifier, String>(
+        ShareDownloadPathNotifier.new);
+
+class ShareDownloadPathNotifier extends AsyncNotifier<String> {
+  @override
+  Future<String> build() async {
+    final val = await storage_api.loadSetting(key: _shareDownloadPathKey);
+    return val ?? '';
+  }
+
+  Future<void> setPath(String path) async {
+    await storage_api.saveSetting(key: _shareDownloadPathKey, value: path);
+    state = AsyncData(path);
+  }
+}

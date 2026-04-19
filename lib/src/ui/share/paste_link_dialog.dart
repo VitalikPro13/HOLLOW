@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
@@ -10,6 +11,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/share/share_card.dart';
+import 'package:lucide_icons/lucide_icons.dart';
 
 enum _DialogState { input, loading, confirm }
 
@@ -80,10 +82,7 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
 
     return HollowDialog(
       title: 'Open Share Link',
-      content: SizedBox(
-        width: 400,
-        child: _buildContent(hollow),
-      ),
+      content: _buildContent(hollow),
       actions: _buildActions(),
     );
   }
@@ -107,7 +106,9 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
       case _DialogState.loading:
         final elapsed = DateTime.now().millisecondsSinceEpoch - _loadingStartMs;
         final remaining = ((10000 - elapsed) / 1000).ceil().clamp(0, 10);
-        return Column(
+        return SizedBox(
+          width: double.infinity,
+          child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             const SizedBox(height: HollowSpacing.lg),
@@ -126,8 +127,12 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
             ),
             const SizedBox(height: HollowSpacing.lg),
           ],
-        );
+        ));
       case _DialogState.confirm:
+        final downloadPath = ref.watch(shareDownloadPathProvider).valueOrNull ?? '';
+        final displayPath = downloadPath.isEmpty
+            ? 'Default Shares folder'
+            : downloadPath;
         return Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -150,6 +155,28 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
             Text(
               '${ShareCard.formatSize(_totalSize)}  ·  $_chunkCount chunks',
               style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
+            ),
+            const SizedBox(height: HollowSpacing.md),
+            Row(
+              children: [
+                Icon(LucideIcons.folderOpen, size: 14, color: hollow.textSecondary),
+                const SizedBox(width: HollowSpacing.xs),
+                Expanded(
+                  child: Text(
+                    displayPath,
+                    style: HollowTypography.bodySmall.copyWith(
+                      color: hollow.textSecondary,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                HollowButton.ghost(
+                  compact: true,
+                  onPressed: _pickSaveDir,
+                  child: const Text('Change'),
+                ),
+              ],
             ),
           ],
         );
@@ -218,9 +245,17 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
 
   Future<void> _onDownload() async {
     if (_rootHash == null) return;
+    final saveDir = ref.read(shareDownloadPathProvider).valueOrNull ?? '';
     ref.read(shareTabProvider.notifier).startDownload(_rootHash!, _shareLink ?? '');
-    await share_api.shareStartDownload(rootHash: _rootHash!, saveDir: '');
+    await share_api.shareStartDownload(rootHash: _rootHash!, saveDir: saveDir);
     if (mounted) Navigator.pop(context);
+  }
+
+  Future<void> _pickSaveDir() async {
+    final result = await FilePicker.platform.getDirectoryPath();
+    if (result != null) {
+      await ref.read(shareDownloadPathProvider.notifier).setPath(result);
+    }
   }
 
   void _onCancel() {

@@ -1050,6 +1050,15 @@ async fn run_event_loop(
                             }
                         }
 
+                        // Hollow Share: when a peer joins, immediately send our Have
+                        // bitmap so they know we have chunks available.
+                        if room.starts_with("share:") && peer_id != local_peer_str {
+                            let root_hash = room.trim_start_matches("share:");
+                            super::share_handler::broadcast_have(
+                                &mut share_registry, &ws_cmd_tx, root_hash,
+                            ).await;
+                        }
+
                         // Trigger event-driven vault rebalance for this server room.
                         if server_states.contains_key(&room) {
                             rebalance_pending.insert(room.clone());

@@ -670,6 +670,8 @@ pub async fn handle_command_share_set_seeding(
 
 /// Handle NodeCommand::ShareCancel — leaves the room, drops swarm state,
 /// deletes the .partial file, removes the DB entry, and notifies the UI.
+/// If the share is already seeding (user opened their own link), only dismiss
+/// the probe without destroying the active seed.
 pub async fn handle_command_share_cancel(
     registry: &mut ShareRegistry,
     bundle_keypair: &NativeKeypair,
@@ -677,6 +679,14 @@ pub async fn handle_command_share_cancel(
     event_tx: &mpsc::Sender<NetworkEvent>,
     root_hash: String,
 ) {
+    if let Some(state) = registry.get(&root_hash) {
+        if state.seeding {
+            let _ = event_tx.send(NetworkEvent::ShareFailed {
+                root_hash, error: "Cancelled".to_string(),
+            }).await;
+            return;
+        }
+    }
     let room = format!("{SHARE_ROOM_PREFIX}{root_hash}");
     let _ = ws_cmd_tx.send(WsCommand::LeaveRoom { room_code: room });
     if let Some(mut state) = registry.remove(&root_hash) {
@@ -900,7 +910,7 @@ pub fn auto_rejoin_seeders(
             bytes_downloaded: 0,
             peer_have: HashMap::new(),
             inflight: HashMap::new(),
-            last_have_broadcast: now_inst,
+            last_have_broadcast: now_inst.checked_sub(HAVE_REBROADCAST_INTERVAL).unwrap_or(now_inst),
             speed_samples: Vec::new(),
             speed_bps: 0,
             manifest_requested_at: None,
@@ -1051,11 +1061,12 @@ pub async fn tick(
         }
 
         // 3. Schedule new chunk requests (skip if messaging is busy or share is
-        // a pure seed with nothing to fetch).
+        // a pure seed with nothing to fetch, or download hasn't started yet).
         if messaging_active { continue; }
         let Some(state) = registry.get(&root_hash) else { continue; };
         if state.have.is_complete() { continue; }
         let Some(ref manifest) = state.manifest else { continue; };
+        if state.data_file.is_none() { continue; }
         if state.peer_have.is_empty() { continue; }
 
         // Request WebRTC connections for peers we know about but aren't connected to.
@@ -1231,11 +1242,11 @@ pub async fn handle_envelope_share_have(
     state.peer_have.insert(sender_peer_id.to_string(), bitmap);
 }
 
-/// Drop a peer from every share's peer_have + reset any in-flight requests it
-/// owed us (so the scheduler retries them via a different peer).
+/// Reset any in-flight requests a peer owed us (so the scheduler retries them
+/// when the peer reconnects). Keeps peer_have intact — the bitmap is still
+/// valid and lets the tick resume immediately after WebRTC re-establishes.
 pub fn forget_peer(registry: &mut ShareRegistry, peer_id: &str) {
     for state in registry.values_mut() {
-        state.peer_have.remove(peer_id);
         state.inflight.retain(|_, (p, _)| p != peer_id);
     }
 }

@@ -68,6 +68,9 @@ class WebRtcService {
   /// Prevents triggering reconnect for intentional disconnects.
   final Set<String> _intentionalClose = {};
 
+  /// Guards against concurrent connectToPeer calls for the same peer.
+  final Set<String> _connecting = {};
+
   /// Timestamp of last keepalive ping sent per peer (for RTT measurement).
   final Map<String, DateTime> _pingSentAt = {};
 
@@ -96,58 +99,76 @@ class WebRtcService {
   Future<void> connectToPeer(String peerId) async {
     // Already connected or connecting.
     if (_connections.containsKey(peerId)) return;
+    if (!_connecting.add(peerId)) return;
 
     final connId = _generateConnId();
     _log('[HOLLOW-WEBRTC-DART] Connecting to $peerId (conn=$connId, local=$localPeerId)');
 
-    final pc = await createPeerConnection(iceServers);
-    final conn = _PeerConn(
-      pc: pc,
-      connId: connId,
-      peerId: peerId,
-      isOfferer: true,
-    );
-    _connections[peerId] = conn;
-
-    // Create data channel (offerer creates it).
-    final dcInit = RTCDataChannelInit()
-      ..ordered = true;
-    final dc = await pc.createDataChannel('hollow-data', dcInit);
-    conn.dataChannel = dc;
-    _setupDataChannel(dc, peerId);
-
-    // ICE candidate handler.
-    pc.onIceCandidate = (candidate) {
-      if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
-      final payload = jsonEncode({
-        'candidate': candidate.candidate,
-        'sdpMid': candidate.sdpMid,
-        'sdpMLineIndex': candidate.sdpMLineIndex,
-      });
-      network_api.webrtcSendSignal(
+    try {
+      final pc = await createPeerConnection(iceServers);
+      final conn = _PeerConn(
+        pc: pc,
+        connId: connId,
         peerId: peerId,
-        signalType: 'ice',
-        payload: payload,
-        connId: conn.connId, // Use current connId (may change on glare)
+        isOfferer: true,
       );
-    };
+      _connections[peerId] = conn;
+      _connecting.remove(peerId);
 
-    // Connection state handler.
-    pc.onConnectionState = (state) {
-      _handleConnectionState(peerId, state);
-    };
+      // Create data channel (offerer creates it).
+      final dcInit = RTCDataChannelInit()
+        ..ordered = true;
+      final dc = await pc.createDataChannel('hollow-data', dcInit);
+      conn.dataChannel = dc;
+      _setupDataChannel(dc, peerId);
 
-    // Create and send offer.
-    final offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+      // ICE candidate handler.
+      pc.onIceCandidate = (candidate) {
+        if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
+        final payload = jsonEncode({
+          'candidate': candidate.candidate,
+          'sdpMid': candidate.sdpMid,
+          'sdpMLineIndex': candidate.sdpMLineIndex,
+        });
+        network_api.webrtcSendSignal(
+          peerId: peerId,
+          signalType: 'ice',
+          payload: payload,
+          connId: conn.connId, // Use current connId (may change on glare)
+        );
+      };
 
-    // Send raw SDP string (not JSON-wrapped — Rust puts it directly in HavenMessage::RtcOffer.sdp).
-    await network_api.webrtcSendSignal(
-      peerId: peerId,
-      signalType: 'offer',
-      payload: offer.sdp!,
-      connId: connId,
-    );
+      // Connection state handler.
+      pc.onConnectionState = (state) {
+        _handleConnectionState(peerId, state);
+      };
+
+      // Create and send offer.
+      final offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      // Send raw SDP string (not JSON-wrapped — Rust puts it directly in HavenMessage::RtcOffer.sdp).
+      await network_api.webrtcSendSignal(
+        peerId: peerId,
+        signalType: 'offer',
+        payload: offer.sdp!,
+        connId: connId,
+      );
+
+      // If the data channel doesn't open within 10s, tear down the stale
+      // connection so incoming offers or fresh attempts aren't blocked.
+      Future.delayed(const Duration(seconds: 10), () {
+        final current = _connections[peerId];
+        if (current != null && current.connId == connId && !hasPeerChannel(peerId)) {
+          _log('[HOLLOW-WEBRTC-DART] Connection timeout for $peerId (conn=$connId) — no data channel opened');
+          _cleanupConnection(peerId);
+          network_api.webrtcPeerDisconnected(peerId: peerId);
+        }
+      });
+    } catch (e) {
+      _connecting.remove(peerId);
+      _log('[HOLLOW-WEBRTC-DART] connectToPeer failed for $peerId: $e');
+    }
   }
 
   /// Handle an incoming signaling message from Rust.
@@ -318,6 +339,12 @@ class WebRtcService {
   /// Close connection to a peer (intentional — no reconnect).
   Future<void> disconnectPeer(String peerId) async {
     _intentionalClose.add(peerId);
+    await _cleanupConnection(peerId);
+  }
+
+  /// Remove and close a peer connection without marking intentional.
+  Future<void> _cleanupConnection(String peerId) async {
+    _connecting.remove(peerId);
     final conn = _connections.remove(peerId);
     if (conn != null) {
       conn.idleTimer?.cancel();
@@ -340,6 +367,7 @@ class WebRtcService {
     }
     _transfers.clear();
     _pendingIceCandidates.clear(); // Phase 6.25 leak fix
+    _connecting.clear();
   }
 
   // --- Private ---
@@ -460,12 +488,14 @@ class WebRtcService {
       return;
     }
 
-    // payload is the raw SDP string.
-    final sdp = payload;
-
     _log('[HOLLOW-WEBRTC-DART] Handling answer from $peerId (conn=$connId, ours=${conn.connId})');
 
-    await conn.pc.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
+    if (conn.connId != connId) {
+      _log('[HOLLOW-WEBRTC-DART] Ignoring stale answer from $peerId (conn=$connId, current=${conn.connId})');
+      return;
+    }
+
+    await conn.pc.setRemoteDescription(RTCSessionDescription(payload, 'answer'));
   }
 
   Future<void> _handleIce(
@@ -565,11 +595,8 @@ class WebRtcService {
 
     network_api.webrtcPeerDisconnected(peerId: peerId);
 
-    // If unexpected close (not idle timeout or manual), request reconnect
-    // so subsequent files can use WebRTC again.
     if (!wasIntentional) {
-      _log('[HOLLOW-WEBRTC-DART] Unexpected close — requesting reconnect to $peerId');
-      onReconnectNeeded?.call(peerId);
+      _log('[HOLLOW-WEBRTC-DART] Unexpected close with $peerId — Rust will drive reconnect if needed');
     }
   }
 
@@ -578,8 +605,10 @@ class WebRtcService {
     _log('[HOLLOW-WEBRTC-DART] PC state: $peerId -> $state');
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
       _log('[HOLLOW-WEBRTC-DART] Connection FAILED with $peerId — closing');
-      disconnectPeer(peerId);
+      _cleanupConnection(peerId);
       network_api.webrtcPeerDisconnected(peerId: peerId);
+      // Don't force reconnect here — let _onDataChannelClosed or the share
+      // tick (ShareNeedWebRtc) drive reconnection when actually needed.
     }
     // Note: don't close on RTCPeerConnectionStateDisconnected — it can recover.
   }

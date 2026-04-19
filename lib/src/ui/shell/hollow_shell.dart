@@ -803,7 +803,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
                           },
                           child: Container(
                             key: ValueKey(
-                                ref.watch(archiveTabOpenProvider) ? 'archive'
+                                ref.watch(shareTabOpenProvider) ? 'share'
+                                    : ref.watch(archiveTabOpenProvider) ? 'archive'
                                     : settingsOpen && selectedServer != null
                                     ? 'settings-${selectedServer.serverId}'
                                     : selectedChannelId ?? selectedPeerId ?? 'empty'),
@@ -988,7 +989,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
                                     );
                                   },
                                   child: Container(
-                                    key: ValueKey(ref.watch(archiveTabOpenProvider)
+                                    key: ValueKey(ref.watch(shareTabOpenProvider)
+                                        ? 'share'
+                                        : ref.watch(archiveTabOpenProvider)
                                         ? 'archive'
                                         : settingsOpen &&
                                             selectedServer != null
