@@ -46,6 +46,8 @@ pub enum WsEvent {
     DirectMessage { room: String, from: String, data: Vec<u8> },
     /// Binary data from a specific peer (file/shard streaming chunks).
     BinaryDirect { room: String, from: String, data: Vec<u8> },
+    /// License key validation failed — do not auto-reconnect.
+    LicenseError { reason: String },
 }
 
 // -- Wire protocol (matches relay/src/ws_router.rs) --
@@ -59,6 +61,8 @@ enum ClientMsg {
         public_key: String,
         timestamp: u64,
         signature: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        license_key: Option<String>,
     },
     Join { room: String },
     Leave { room: String },
@@ -96,11 +100,12 @@ pub fn spawn_ws_client(
     peer_id: String,
     keypair_proto: Vec<u8>,
     pub_key_b64: String,
+    license_key: Option<String>,
     cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
     event_tx: mpsc::UnboundedSender<WsEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        ws_client_loop(relay_url, peer_id, keypair_proto, pub_key_b64, cmd_rx, event_tx).await;
+        ws_client_loop(relay_url, peer_id, keypair_proto, pub_key_b64, license_key, cmd_rx, event_tx).await;
     })
 }
 
@@ -109,6 +114,7 @@ async fn ws_client_loop(
     peer_id: String,
     keypair_proto: Vec<u8>,
     pub_key_b64: String,
+    license_key: Option<String>,
     mut cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
     event_tx: mpsc::UnboundedSender<WsEvent>,
 ) {
@@ -122,7 +128,7 @@ async fn ws_client_loop(
     loop {
         hollow_log!("[HOLLOW-WS] Connecting to {relay_url}...");
 
-        match connect_and_auth(&relay_url, &peer_id, &keypair_proto, &pub_key_b64).await {
+        match connect_and_auth(&relay_url, &peer_id, &keypair_proto, &pub_key_b64, license_key.as_deref()).await {
             Ok(ws_stream) => {
                 backoff_secs = 1; // Reset backoff on successful connect.
                 let _ = event_tx.send(WsEvent::Connected);
@@ -215,6 +221,11 @@ async fn ws_client_loop(
             }
             Err(e) => {
                 hollow_log!("[HOLLOW-WS] Connection failed: {e}");
+                if e.contains("license_key") || e.contains("license key") {
+                    hollow_log!("[HOLLOW-WS] License error — not retrying");
+                    let _ = event_tx.send(WsEvent::LicenseError { reason: e });
+                    return;
+                }
             }
         }
 
@@ -245,6 +256,7 @@ async fn connect_and_auth(
     peer_id: &str,
     keypair_proto: &[u8],
     pub_key_b64: &str,
+    license_key: Option<&str>,
 ) -> Result<WsStream, String> {
     // Connect.
     let (ws_stream, _response) = tokio_tungstenite::connect_async(url)
@@ -272,6 +284,7 @@ async fn connect_and_auth(
         public_key: pub_key_b64.to_string(),
         timestamp,
         signature: sig_b64,
+        license_key: license_key.map(|s| s.to_string()),
     };
     let auth_json = serde_json::to_string(&auth).map_err(|e| format!("JSON error: {e}"))?;
     write.send(Message::Text(auth_json.into()))
@@ -287,11 +300,14 @@ async fn connect_and_auth(
 
     match response {
         Message::Text(text) => {
-            if let Ok(ServerMsg::AuthOk) = serde_json::from_str::<ServerMsg>(&text) {
-                // Re-assemble the stream from split halves.
-                Ok(read.reunite(write).map_err(|e| format!("Reunite error: {e}"))?)
-            } else {
-                Err(format!("Auth rejected: {text}"))
+            match serde_json::from_str::<ServerMsg>(&text) {
+                Ok(ServerMsg::AuthOk) => {
+                    Ok(read.reunite(write).map_err(|e| format!("Reunite error: {e}"))?)
+                }
+                Ok(ServerMsg::AuthFailed { error }) => {
+                    Err(error)
+                }
+                _ => Err(format!("Auth rejected: {text}"))
             }
         }
         _ => Err("Unexpected auth response".to_string()),

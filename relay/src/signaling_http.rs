@@ -480,10 +480,25 @@ pub fn spawn_cleanup_task(rooms: RoomMap) {
     });
 }
 
+// -- Relay status --
+
+async fn handle_relay_status(
+    State(license): State<crate::license::SharedLicenseState>,
+) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "license_required": license.is_enabled().await,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
 // -- Router --
 
 /// Build the axum router with CORS support.
-pub fn build_router(rooms: RoomMap, ws_state: crate::ws_router::SharedWsState) -> Router {
+pub fn build_router(
+    rooms: RoomMap,
+    ws_state: crate::ws_router::SharedWsState,
+    license: crate::license::SharedLicenseState,
+) -> Router {
     use axum::http::header;
     use tower_http::cors::CorsLayer;
 
@@ -511,18 +526,24 @@ pub fn build_router(rooms: RoomMap, ws_state: crate::ws_router::SharedWsState) -
         .route("/server-stats", get(handle_server_stats))
         .with_state(ws_state);
 
-    signaling.merge(ws).merge(turn).layer(cors)
+    // Relay status route (license state).
+    let status = Router::new()
+        .route("/relay-status", get(handle_relay_status))
+        .with_state(license);
+
+    signaling.merge(ws).merge(turn).merge(status).layer(cors)
 }
 
 /// Run the HTTP + WebSocket signaling server.
 pub async fn run_signaling_http(
     rooms: RoomMap,
     ws_state: crate::ws_router::SharedWsState,
+    license: crate::license::SharedLicenseState,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     spawn_cleanup_task(rooms.clone());
 
-    let app = build_router(rooms, ws_state);
+    let app = build_router(rooms, ws_state, license);
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!("Signaling + WebSocket server listening on port {port}");
     axum::serve(listener, app).await?;

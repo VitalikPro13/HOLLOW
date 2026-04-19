@@ -14,4 +14,8 @@ pub struct Config {
     /// Domain name for WSS (used in external address advertisement)
     #[arg(long, default_value = "relay.anonlisten.com")]
     pub domain: String,
+
+    /// Path to license keys JSON file (optional, keys disabled if missing)
+    #[arg(long, default_value = "keys.json")]
+    pub keys_file: String,
 }

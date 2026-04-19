@@ -33,6 +33,7 @@ import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/recovery_pool_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/core/providers/license_key_provider.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -854,6 +855,9 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(shareTabProvider.notifier).handleShareList(entries);
       case NetworkEvent_ShareNeedWebRtc(:final peerId):
         ref.read(webRtcProvider.notifier).ensureConnection(peerId);
+
+      case NetworkEvent_LicenseError(:final reason):
+        ref.read(licenseErrorProvider.notifier).state = reason;
 
     }
     } catch (e, st) {

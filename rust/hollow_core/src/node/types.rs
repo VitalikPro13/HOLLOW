@@ -219,6 +219,8 @@ pub(crate) enum NetworkEvent {
     ShareList { entries: Vec<ShareEntryRef> },
     /// A share peer needs a WebRTC connection — Dart should call ensureConnection.
     ShareNeedWebRtc { peer_id: String },
+    // -- License key events --
+    LicenseError { reason: String },
 }
 
 /// Lightweight ShareEntry for streaming lists to Dart. The persisted row is wider

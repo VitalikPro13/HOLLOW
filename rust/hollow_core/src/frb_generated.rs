@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -18825199;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -617168922;
 
 // Section: executor
 
@@ -3750,6 +3750,39 @@ fn wire__crate__api__network__send_typing_indicator_impl(
         },
     )
 }
+fn wire__crate__api__network__set_license_key_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_license_key",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_key = <Option<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::network::set_license_key(api_key)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__crdt__set_nickname_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -6772,6 +6805,10 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     peer_id: var_peerId,
                 };
             }
+            95 => {
+                let mut var_reason = <String>::sse_decode(deserializer);
+                return crate::api::network::NetworkEvent::LicenseError { reason: var_reason };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -7499,91 +7536,92 @@ fn pde_ffi_dispatcher_primary_impl(
         105 => {
             wire__crate__api__network__send_typing_indicator_impl(port, ptr, rust_vec_len, data_len)
         }
-        106 => wire__crate__api__crdt__set_nickname_impl(port, ptr, rust_vec_len, data_len),
-        107 => wire__crate__api__storage__set_peer_verified_impl(port, ptr, rust_vec_len, data_len),
-        108 => wire__crate__api__crdt__set_server_avatar_impl(port, ptr, rust_vec_len, data_len),
-        109 => wire__crate__api__crdt__set_storage_pledge_impl(port, ptr, rust_vec_len, data_len),
-        110 => wire__crate__api__share__share_cancel_impl(port, ptr, rust_vec_len, data_len),
-        111 => {
+        106 => wire__crate__api__network__set_license_key_impl(port, ptr, rust_vec_len, data_len),
+        107 => wire__crate__api__crdt__set_nickname_impl(port, ptr, rust_vec_len, data_len),
+        108 => wire__crate__api__storage__set_peer_verified_impl(port, ptr, rust_vec_len, data_len),
+        109 => wire__crate__api__crdt__set_server_avatar_impl(port, ptr, rust_vec_len, data_len),
+        110 => wire__crate__api__crdt__set_storage_pledge_impl(port, ptr, rust_vec_len, data_len),
+        111 => wire__crate__api__share__share_cancel_impl(port, ptr, rust_vec_len, data_len),
+        112 => {
             wire__crate__api__share__share_create_from_file_impl(port, ptr, rust_vec_len, data_len)
         }
-        112 => wire__crate__api__share__share_decode_link_impl(port, ptr, rust_vec_len, data_len),
-        113 => wire__crate__api__share__share_list_impl(port, ptr, rust_vec_len, data_len),
-        114 => wire__crate__api__share__share_open_link_impl(port, ptr, rust_vec_len, data_len),
-        115 => wire__crate__api__share__share_remove_impl(port, ptr, rust_vec_len, data_len),
-        116 => wire__crate__api__share__share_set_seeding_impl(port, ptr, rust_vec_len, data_len),
-        117 => {
+        113 => wire__crate__api__share__share_decode_link_impl(port, ptr, rust_vec_len, data_len),
+        114 => wire__crate__api__share__share_list_impl(port, ptr, rust_vec_len, data_len),
+        115 => wire__crate__api__share__share_open_link_impl(port, ptr, rust_vec_len, data_len),
+        116 => wire__crate__api__share__share_remove_impl(port, ptr, rust_vec_len, data_len),
+        117 => wire__crate__api__share__share_set_seeding_impl(port, ptr, rust_vec_len, data_len),
+        118 => {
             wire__crate__api__share__share_start_download_impl(port, ptr, rust_vec_len, data_len)
         }
-        118 => wire__crate__api__network__start_node_impl(port, ptr, rust_vec_len, data_len),
-        119 => wire__crate__api__network__stop_node_impl(port, ptr, rust_vec_len, data_len),
-        120 => wire__crate__api__crdt__stop_recovery_pool_impl(port, ptr, rust_vec_len, data_len),
-        121 => wire__crate__api__crdt__unpin_message_impl(port, ptr, rust_vec_len, data_len),
-        122 => {
+        119 => wire__crate__api__network__start_node_impl(port, ptr, rust_vec_len, data_len),
+        120 => wire__crate__api__network__stop_node_impl(port, ptr, rust_vec_len, data_len),
+        121 => wire__crate__api__crdt__stop_recovery_pool_impl(port, ptr, rust_vec_len, data_len),
+        122 => wire__crate__api__crdt__unpin_message_impl(port, ptr, rust_vec_len, data_len),
+        123 => {
             wire__crate__api__crdt__update_channel_layout_impl(port, ptr, rust_vec_len, data_len)
         }
-        123 => wire__crate__api__network__update_profile_impl(port, ptr, rust_vec_len, data_len),
-        124 => {
+        124 => wire__crate__api__network__update_profile_impl(port, ptr, rust_vec_len, data_len),
+        125 => {
             wire__crate__api__crdt__update_server_setting_impl(port, ptr, rust_vec_len, data_len)
         }
-        125 => wire__crate__api__crdt__vault_download_file_impl(port, ptr, rust_vec_len, data_len),
-        126 => wire__crate__api__crdt__vault_upload_file_impl(port, ptr, rust_vec_len, data_len),
-        127 => wire__crate__api__archive__verify_archive_impl(port, ptr, rust_vec_len, data_len),
-        128 => {
+        126 => wire__crate__api__crdt__vault_download_file_impl(port, ptr, rust_vec_len, data_len),
+        127 => wire__crate__api__crdt__vault_upload_file_impl(port, ptr, rust_vec_len, data_len),
+        128 => wire__crate__api__archive__verify_archive_impl(port, ptr, rust_vec_len, data_len),
+        129 => {
             wire__crate__api__network__verify_message_proof_impl(port, ptr, rust_vec_len, data_len)
         }
-        129 => {
+        130 => {
             wire__crate__api__network__voice_channel_join_impl(port, ptr, rust_vec_len, data_len)
         }
-        130 => {
+        131 => {
             wire__crate__api__network__voice_channel_leave_impl(port, ptr, rust_vec_len, data_len)
         }
-        131 => wire__crate__api__network__voice_channel_send_signal_impl(
+        132 => wire__crate__api__network__voice_channel_send_signal_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        132 => {
+        133 => {
             wire__crate__api__network__watch_network_events_impl(port, ptr, rust_vec_len, data_len)
         }
-        133 => wire__crate__api__network__webrtc_broadcast_received_impl(
+        134 => wire__crate__api__network__webrtc_broadcast_received_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        134 => {
+        135 => {
             wire__crate__api__network__webrtc_peer_connected_impl(port, ptr, rust_vec_len, data_len)
         }
-        135 => wire__crate__api__network__webrtc_peer_disconnected_impl(
+        136 => wire__crate__api__network__webrtc_peer_disconnected_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        136 => {
+        137 => {
             wire__crate__api__network__webrtc_ping_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        137 => {
+        138 => {
             wire__crate__api__network__webrtc_send_complete_impl(port, ptr, rust_vec_len, data_len)
         }
-        138 => {
+        139 => {
             wire__crate__api__network__webrtc_send_signal_impl(port, ptr, rust_vec_len, data_len)
         }
-        139 => wire__crate__api__network__webrtc_share_chunk_complete_impl(
+        140 => wire__crate__api__network__webrtc_share_chunk_complete_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        140 => wire__crate__api__network__webrtc_transfer_complete_impl(
+        141 => wire__crate__api__network__webrtc_transfer_complete_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        141 => wire__crate__api__network__webrtc_transfer_failed_impl(
+        142 => wire__crate__api__network__webrtc_transfer_failed_impl(
             port,
             ptr,
             rust_vec_len,
@@ -8957,6 +8995,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
             }
             crate::api::network::NetworkEvent::ShareNeedWebRtc { peer_id } => {
                 [94.into_dart(), peer_id.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::network::NetworkEvent::LicenseError { reason } => {
+                [95.into_dart(), reason.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -10720,6 +10761,10 @@ impl SseEncode for crate::api::network::NetworkEvent {
             crate::api::network::NetworkEvent::ShareNeedWebRtc { peer_id } => {
                 <i32>::sse_encode(94, serializer);
                 <String>::sse_encode(peer_id, serializer);
+            }
+            crate::api::network::NetworkEvent::LicenseError { reason } => {
+                <i32>::sse_encode(95, serializer);
+                <String>::sse_encode(reason, serializer);
             }
             _ => {
                 unimplemented!("");

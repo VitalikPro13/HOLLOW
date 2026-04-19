@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
@@ -7,6 +9,7 @@ import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/shell/hollow_shell.dart';
+import 'package:hollow/src/ui/shell/window_title_bar.dart';
 
 /// Global navigator key for showing toasts from providers (no BuildContext).
 final hollowNavigatorKey = GlobalKey<NavigatorState>();
@@ -45,12 +48,28 @@ class HollowApp extends ConsumerWidget {
       );
     }
 
+    final isDesktop =
+        Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+
     return MaterialApp(
       navigatorKey: hollowNavigatorKey,
       title: 'Hollow',
       debugShowCheckedModeBanner: false,
       theme: themeData,
       home: const HollowShell(),
+      builder: isDesktop
+          ? (context, child) => Material(
+                type: MaterialType.transparency,
+                child: Column(
+                  children: [
+                    const WindowTitleBar(),
+                    Expanded(
+                      child: ClipRect(child: child ?? const SizedBox.shrink()),
+                    ),
+                  ],
+                ),
+              )
+          : null,
     );
   }
 }

@@ -48,6 +48,10 @@ import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:hollow/src/ui/dialogs/welcome_dialog.dart';
+import 'package:hollow/src/ui/dialogs/license_key_dialog.dart';
+import 'package:hollow/src/core/providers/license_key_provider.dart';
+import 'package:hollow/src/core/providers/relay_status_provider.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/ui/settings/server_settings_panel.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
@@ -64,7 +68,6 @@ import 'package:hollow/src/ui/shell/home_dashboard.dart';
 import 'package:hollow/src/ui/shell/member_panel.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/ui/shell/server_strip.dart';
-import 'package:hollow/src/ui/shell/window_title_bar.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -141,6 +144,40 @@ class _HollowShellState extends ConsumerState<HollowShell>
       _revealController.forward();
     });
     _bootstrap();
+    _listenForLicenseErrors();
+  }
+
+  void _listenForLicenseErrors() {
+    ref.listenManual(licenseErrorProvider, (prev, next) {
+      if (next != null && mounted) {
+        _handleLicenseError(next);
+      }
+    });
+  }
+
+  Future<void> _handleLicenseError(String reason) async {
+    // Stop the node so we don't keep retrying.
+    ref.read(nodeProvider.notifier).stop();
+    await ref.read(licenseKeyProvider.notifier).clearKey();
+    ref.read(licenseErrorProvider.notifier).state = null;
+
+    final friendlyMessage = switch (reason) {
+      'invalid_license_key' => 'Invalid license key',
+      'license_key_in_use' =>
+        'This key is already in use on another device',
+      'license_key_required' => 'A license key is required to connect',
+      _ => 'License error: $reason',
+    };
+
+    if (!mounted) return;
+    final newKey =
+        await showLicenseKeyDialog(context, error: friendlyMessage);
+    if (!mounted) return;
+    if (newKey != null) {
+      await ref.read(licenseKeyProvider.notifier).setKey(newKey);
+      await network_api.setLicenseKey(key: newKey);
+      await ref.read(nodeProvider.notifier).start();
+    }
   }
 
   Future<void> _bootstrap() async {
@@ -187,6 +224,26 @@ class _HollowShellState extends ConsumerState<HollowShell>
       await storage_api.saveMnemonic(mnemonic: identity.mnemonic!);
       if (!mounted) return;
       showMnemonicDialog(context, identity.mnemonic!);
+    }
+
+    // License key gate — check relay status and prompt if required.
+    await ref.read(licenseKeyProvider.notifier).loadCached();
+    final relayStatus = await fetchRelayStatus();
+    if (relayStatus.licenseRequired) {
+      var cachedKey = ref.read(licenseKeyProvider);
+      if (cachedKey == null && mounted) {
+        final enteredKey = await showLicenseKeyDialog(context);
+        if (!mounted) return;
+        if (enteredKey != null) {
+          await ref.read(licenseKeyProvider.notifier).setKey(enteredKey);
+          cachedKey = enteredKey;
+        } else {
+          return;
+        }
+      }
+      if (cachedKey != null) {
+        await network_api.setLicenseKey(key: cachedKey);
+      }
     }
 
     // Load servers from local DB (needed for unread computation).
@@ -767,7 +824,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
       isComplete: _revealComplete,
       child: Column(
         children: [
-          if (isDesktopPlatform) const WindowTitleBar(),
           Expanded(
             child: Row(
               children: [
@@ -903,7 +959,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
       isComplete: _revealComplete,
       child: Column(
         children: [
-          if (isDesktopPlatform) const WindowTitleBar(),
 
           // Friends bar (top) — slides down from top
           ClipRect(

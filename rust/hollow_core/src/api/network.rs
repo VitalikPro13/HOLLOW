@@ -284,6 +284,8 @@ pub enum NetworkEvent {
     ShareCreated { root_hash: String, link: String, file_name: String, total_size: u64 },
     ShareList { entries: Vec<ShareEntry> },
     ShareNeedWebRtc { peer_id: String },
+    // -- License key events --
+    LicenseError { reason: String },
 }
 
 /// Lightweight FFI mirror of node::types::ShareEntryRef.
@@ -315,6 +317,13 @@ static TOKIO_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 // Event receiver — stored separately so watch_network_events() can take ownership.
 static EVENT_RX: OnceLock<Mutex<Option<mpsc::Receiver<node::NetworkEvent>>>> = OnceLock::new();
+
+// License key — set from Dart before start_node().
+static LICENSE_KEY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn get_license_key() -> &'static Mutex<Option<String>> {
+    LICENSE_KEY.get_or_init(|| Mutex::new(None))
+}
 
 fn get_event_rx() -> &'static Mutex<Option<mpsc::Receiver<node::NetworkEvent>>> {
     EVENT_RX.get_or_init(|| Mutex::new(None))
@@ -791,7 +800,18 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::ShareNeedWebRtc { peer_id } => {
             NetworkEvent::ShareNeedWebRtc { peer_id }
         }
+        node::NetworkEvent::LicenseError { reason } => {
+            NetworkEvent::LicenseError { reason }
+        }
     }
+}
+
+#[frb]
+pub fn set_license_key(key: Option<String>) -> Result<(), String> {
+    let lk = get_license_key();
+    let mut guard = lk.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    *guard = key;
+    Ok(())
 }
 
 /// Start the libp2p node with mDNS peer discovery and E2EE.
@@ -858,12 +878,17 @@ pub fn start_node() -> Result<String, String> {
         CryptoStore::open(db_path, passphrase)
     })?;
 
+    let license_key = get_license_key()
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?
+        .clone();
+
     let (event_tx, event_rx) = mpsc::channel::<node::NetworkEvent>(100);
     let (cmd_tx, cmd_rx) = mpsc::channel::<node::NodeCommand>(100);
 
     let cmd_tx_clone = cmd_tx.clone();
     let (peer_id_str, handle) = rt
-        .block_on(node::spawn_node(id.keypair, event_tx, cmd_rx, cmd_tx_clone, olm, crypto_store))
+        .block_on(node::spawn_node(id.keypair, event_tx, cmd_rx, cmd_tx_clone, olm, crypto_store, license_key))
         .map_err(|e| format!("Failed to start node: {e}"))?;
 
     // Store event receiver separately so watch_network_events() can take it.

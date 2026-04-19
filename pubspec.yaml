@@ -32,6 +32,8 @@ dependencies:
     sdk: flutter
 
   lucide_icons: ^0.257.0
+  simple_icons: ^14.6.1
+  flutter_svg: ^2.0.17
   hollow_core:
     path: rust_builder
   flutter_rust_bridge: 2.11.1
@@ -83,6 +85,9 @@ flutter:
 
   assets:
     - assets/app_icon.ico
+    - assets/hollow_logo_rounded.png
+    - assets/kickbot-logo.svg
+    - assets/tiktok-solo-icon.svg
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

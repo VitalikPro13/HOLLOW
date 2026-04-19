@@ -24,21 +24,40 @@ struct Room {
 pub struct WsState {
     rooms: RwLock<HashMap<String, Room>>,
     peers: RwLock<HashMap<String, HashSet<String>>>,
+    /// Direct sender per peer (for license revocation kicks).
+    peer_senders: RwLock<HashMap<String, mpsc::UnboundedSender<Message>>>,
+    pub license: crate::license::SharedLicenseState,
 }
 
 pub type SharedWsState = Arc<WsState>;
 
 impl WsState {
-    pub fn new() -> Self {
+    pub fn new(license: crate::license::SharedLicenseState) -> Self {
         Self {
             rooms: RwLock::new(HashMap::new()),
             peers: RwLock::new(HashMap::new()),
+            peer_senders: RwLock::new(HashMap::new()),
+            license,
         }
     }
 
     /// Count unique authenticated peers with active WS connections.
     pub async fn peer_count(&self) -> usize {
         self.peers.read().await.len()
+    }
+
+    /// Kick peers whose license keys were revoked.
+    pub async fn kick_peers(&self, peer_ids: &[String]) {
+        let senders = self.peer_senders.read().await;
+        for pid in peer_ids {
+            if let Some(tx) = senders.get(pid) {
+                let error_msg = msg_json(&ServerMessage::AuthFailed {
+                    error: "invalid_license_key".into(),
+                });
+                let _ = tx.send(error_msg);
+                let _ = tx.send(Message::Close(None));
+            }
+        }
     }
 }
 
@@ -53,6 +72,8 @@ enum ClientMessage {
         public_key: String,
         timestamp: u64,
         signature: String,
+        #[serde(default)]
+        license_key: Option<String>,
     },
     Join { room: String },
     Leave { room: String },
@@ -88,15 +109,13 @@ async fn handle_ws(mut socket: WebSocket, state: SharedWsState) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
 
     // Wait for auth message first (10 second timeout).
-    let peer_id = match authenticate(&mut socket).await {
-        Some(pid) => {
+    let peer_id = match authenticate(&mut socket, &state.license).await {
+        Ok(pid) => {
             let _ = socket.send(msg_json(&ServerMessage::AuthOk)).await;
             pid
         }
-        None => {
-            let _ = socket.send(msg_json(&ServerMessage::AuthFailed {
-                error: "Authentication failed".into(),
-            })).await;
+        Err(error) => {
+            let _ = socket.send(msg_json(&ServerMessage::AuthFailed { error })).await;
             return;
         }
     };
@@ -107,6 +126,10 @@ async fn handle_ws(mut socket: WebSocket, state: SharedWsState) {
     {
         let mut peers = state.peers.write().await;
         peers.insert(peer_id.clone(), HashSet::new());
+    }
+    {
+        let mut senders = state.peer_senders.write().await;
+        senders.insert(peer_id.clone(), tx.clone());
     }
 
     let peer_id_clone = peer_id.clone();
@@ -196,28 +219,48 @@ async fn handle_ws(mut socket: WebSocket, state: SharedWsState) {
     cleanup_peer(&state, &peer_id).await;
 }
 
-async fn authenticate(socket: &mut WebSocket) -> Option<String> {
+async fn authenticate(
+    socket: &mut WebSocket,
+    license: &crate::license::SharedLicenseState,
+) -> Result<String, String> {
     let timeout = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         socket.recv(),
     ).await;
 
     if let Ok(Some(Ok(Message::Text(text)))) = timeout {
-        if let Ok(ClientMessage::Auth { peer_id, public_key, timestamp, signature }) =
+        if let Ok(ClientMessage::Auth { peer_id, public_key, timestamp, signature, license_key }) =
             serde_json::from_str::<ClientMessage>(&text)
         {
             let now = now_unix_secs();
             let diff = if now > timestamp { now - timestamp } else { timestamp - now };
             if diff > TIMESTAMP_SKEW_SECS {
-                return None;
+                return Err("Authentication failed".into());
             }
             let signed_msg = format!("hollow-ws-auth:{}:{}", peer_id, timestamp);
-            if verify_signature(&public_key, &signature, &signed_msg) {
-                return Some(peer_id);
+            if !verify_signature(&public_key, &signature, &signed_msg) {
+                return Err("Authentication failed".into());
             }
+
+            // Validate license key (if enabled).
+            match license.validate_key(license_key.as_deref(), &peer_id).await {
+                crate::license::LicenseResult::Ok
+                | crate::license::LicenseResult::NotRequired => {}
+                crate::license::LicenseResult::InvalidKey => {
+                    return Err("invalid_license_key".into());
+                }
+                crate::license::LicenseResult::KeyInUse => {
+                    return Err("license_key_in_use".into());
+                }
+                crate::license::LicenseResult::KeyRequired => {
+                    return Err("license_key_required".into());
+                }
+            }
+
+            return Ok(peer_id);
         }
     }
-    None
+    Err("Authentication failed".into())
 }
 
 // -- Message handling --
@@ -385,6 +428,11 @@ async fn leave_room(state: &SharedWsState, peer_id: &str, room: &str) {
 }
 
 async fn cleanup_peer(state: &SharedWsState, peer_id: &str) {
+    state.license.release_key(peer_id).await;
+    {
+        let mut senders = state.peer_senders.write().await;
+        senders.remove(peer_id);
+    }
     let rooms_to_leave = {
         let mut peers = state.peers.write().await;
         peers.remove(peer_id).unwrap_or_default()

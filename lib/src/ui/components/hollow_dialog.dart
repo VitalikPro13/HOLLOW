@@ -29,10 +29,6 @@ Future<T?> showHollowDialog<T>({
         reverseCurve: Curves.easeIn,
       );
 
-      // Blur stays at full sigma (no per-frame sigma animation — too GPU-heavy).
-      // Instead, the blur layer fades in/out via AnimatedOpacity on the
-      // BackdropFilter itself. This gives a smooth exit without the cost
-      // of animating gaussian blur sigma every frame.
       return AnimatedBuilder(
         animation: curvedAnimation,
         builder: (context, dialogChild) {
@@ -41,7 +37,7 @@ Future<T?> showHollowDialog<T>({
               // Blur layer — fades with dialog.
               AnimatedOpacity(
                 opacity: animation.value,
-                duration: Duration.zero, // driven by animation, not independent
+                duration: Duration.zero,
                 child: BackdropFilter(
                   filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
                   child: const SizedBox.expand(),

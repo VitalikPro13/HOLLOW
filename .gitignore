@@ -60,6 +60,7 @@ vendor/ffmpeg/
 .env
 *.key
 *.pem
+alpha_keys.txt
 
 # Deprecated (replaced by relay/)
 signaling/

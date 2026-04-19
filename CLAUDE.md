@@ -103,7 +103,9 @@ All UI uses custom Hollow widgets — no Material defaults.
   - Responsive: mobile uses bottom nav with single-panel views.
 - **Window chrome:** `window_manager` ^0.5.1, `setAsFrameless()`, custom 32px title bar. Known issue: drag-from-maximized doesn't live-redraw until drop (Flutter engine limitation).
 - **Theme:** Dark primary + light secondary. `HollowTheme.dark()`/`.light()` + `darkWithHue()`/`lightWithHue()` for custom accent.
-- **Icons:** `lucide_icons: ^0.257.0`. All `LucideIcons.*` (camelCase). v0.257.0 uses `alertTriangle`/`alertCircle`. No `cloudCheck` — uses `cloud`.
+- **Icons:** `lucide_icons: ^0.257.0`. All `LucideIcons.*` (camelCase). v0.257.0 uses `alertTriangle`/`alertCircle`. No `cloudCheck` — uses `cloud`. Brand icons use `simple_icons: ^14.6.1` (`SimpleIcons.*`, `SimpleIconColors.*`).
+- **License key system:** Relay loads `keys.json` (enabled toggle + key list), validates during WS auth, hot-reloads every 30s with active connection revocation. App checks `/relay-status` on startup, shows key dialog if required, caches key in SQLCipher via `set_license_key()` FFI.
+- **Window title bar:** `WindowTitleBar` lives in `MaterialApp.builder` (above Navigator), NOT inside `HollowShell`. Navigator child wrapped in `ClipRect` to prevent `BackdropFilter` blur bleed. Never move the title bar back inside the shell.
 - **Logging:** `hollow_log!` macro → stderr + `hollow_debug.log` (release-safe, 10MB rotation). `hollow_crash.log` captures Flutter/platform errors (5MB rotation).
 - **Relay:** OVH VPS 141.227.186.209, Nginx TLS on 443 → Axum HTTP+WS on 127.0.0.1:8080. Domain: `relay.anonlisten.com`.
 - **TURN:** Coturn on VPS (141.227.186.209:3478 UDP/TCP + 5349 TLS). Relay `/turn-credentials` generates HMAC-SHA1 creds. `IceConfigProvider` in Dart fetches + auto-refreshes every 50 min.

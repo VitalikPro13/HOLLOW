@@ -35,6 +35,7 @@ pub(crate) async fn spawn_node(
     cmd_tx: mpsc::Sender<NodeCommand>,
     olm: OlmManager,
     crypto_store: CryptoStore,
+    license_key: Option<String>,
 ) -> Result<(String, tokio::task::JoinHandle<()>), String> {
     // Clone keypair for signaling task (it needs to sign register requests).
     let sig_keypair = native_keypair.clone();
@@ -57,7 +58,7 @@ pub(crate) async fn spawn_node(
     let ws_relay_url = "wss://relay.anonlisten.com/ws".to_string();
     let _ws_handle = super::ws_client::spawn_ws_client(
         ws_relay_url, peer_id_str.clone(), ws_proto, ws_pub_b64,
-        ws_cmd_rx, ws_event_tx,
+        license_key, ws_cmd_rx, ws_event_tx,
     );
 
     let handle = tokio::spawn(run_event_loop(
@@ -1558,6 +1559,10 @@ async fn run_event_loop(
                                 &event_tx,
                             ).await;
                         }
+                    }
+                    WsEvent::LicenseError { reason } => {
+                        hollow_log!("[HOLLOW-WS] License error: {reason}");
+                        let _ = event_tx.send(NetworkEvent::LicenseError { reason }).await;
                     }
                     WsEvent::Message { room, from, data } | WsEvent::DirectMessage { room, from, data } => {
                         // Route incoming WS messages through the same handler as libp2p.

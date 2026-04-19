@@ -36,6 +36,9 @@ import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:lucide_icons/lucide_icons.dart';
+import 'package:flutter_svg/flutter_svg.dart';
+import 'package:simple_icons/simple_icons.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 /// Tracks whether the settings dialog is currently open.
 bool _settingsDialogOpen = false;
@@ -91,7 +94,7 @@ Color _bannerColorFromId(String id) {
 }
 
 /// Settings tab enum.
-enum _SettingsTab { profile, system, security }
+enum _SettingsTab { profile, system, security, about }
 
 class _UserSettingsContent extends ConsumerStatefulWidget {
   final String localPeerId;
@@ -515,6 +518,15 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                                   onTap: () => setState(() =>
                                       _activeTab = _SettingsTab.security),
                                 ),
+                                const SizedBox(height: HollowSpacing.xxs),
+                                _TabItem(
+                                  icon: LucideIcons.info,
+                                  label: 'About',
+                                  isActive:
+                                      _activeTab == _SettingsTab.about,
+                                  onTap: () => setState(() =>
+                                      _activeTab = _SettingsTab.about),
+                                ),
                               ],
                             ),
                           ),
@@ -535,6 +547,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                               _SettingsTab.profile => _buildProfileTab(hollow),
                               _SettingsTab.system => _buildSystemTab(hollow),
                               _SettingsTab.security => _SecurityTab(),
+                              _SettingsTab.about => const _AboutTab(),
                             },
                           ),
                         ],
@@ -3635,6 +3648,430 @@ class _RingtoneClipEditorDialogState
           ),
         ],
       ],
+    );
+  }
+}
+
+class _AboutTab extends StatelessWidget {
+  const _AboutTab();
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(bottom: HollowSpacing.xl),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // App identity row
+          Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: Image.asset(
+                  'assets/hollow_logo_rounded.png',
+                  width: 72,
+                  height: 72,
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.lg),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Hollow',
+                    style: HollowTypography.heading.copyWith(
+                      color: hollow.textPrimary,
+                      fontSize: 24,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Alpha Version',
+                    style: HollowTypography.body.copyWith(
+                      color: hollow.accent,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'by AnonListen',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+
+          const SizedBox(height: HollowSpacing.xl),
+          _aboutDivider(hollow),
+          const SizedBox(height: HollowSpacing.lg),
+
+          // Contact
+          _aboutSectionLabel('Contact', hollow),
+          const SizedBox(height: HollowSpacing.sm),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: HollowButton.ghost(
+              onPressed: () {
+                Clipboard.setData(
+                    const ClipboardData(text: 'feedback@anonlisten.com'));
+                HollowToast.show(context, 'Email copied to clipboard',
+                    type: HollowToastType.success);
+              },
+              icon: Icon(LucideIcons.mail, size: 16),
+              child: const Text('feedback@anonlisten.com'),
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.xs),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: HollowButton.ghost(
+              onPressed: () => launchUrl(
+                Uri.parse('https://anonlisten.com'),
+                mode: LaunchMode.externalApplication,
+              ),
+              icon: Icon(LucideIcons.globe, size: 16),
+              child: const Text('anonlisten.com'),
+            ),
+          ),
+
+          const SizedBox(height: HollowSpacing.lg),
+          _aboutDivider(hollow),
+          const SizedBox(height: HollowSpacing.lg),
+
+          // Follow & Support — header with shimmer line
+          _aboutShimmerLabel('Follow', 'Support', hollow),
+          const SizedBox(height: HollowSpacing.md),
+
+          // Follow & Support — icons with shimmer separator
+          Row(
+            children: [
+              _BrandIcon(
+                icon: SimpleIcons.youtube,
+                color: SimpleIconColors.youtube,
+                tooltip: 'YouTube',
+                url: 'https://youtube.com/@Anon_Listen',
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              _BrandIcon(
+                icon: SimpleIcons.x,
+                color: hollow.textPrimary,
+                tooltip: 'X',
+                url: 'https://x.com/Anon_Listen',
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              _SvgBrandIcon(
+                asset: 'assets/tiktok-solo-icon.svg',
+                tooltip: 'TikTok',
+                url: 'https://tiktok.com/@AnonListen',
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              _BrandIcon(
+                icon: SimpleIcons.twitch,
+                color: SimpleIconColors.twitch,
+                tooltip: 'Twitch',
+                url: 'https://twitch.tv/AnonListen',
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              _BrandIcon(
+                icon: SimpleIcons.kick,
+                color: SimpleIconColors.kick,
+                tooltip: 'Kick',
+                url: 'https://kick.com/AnonListen',
+              ),
+
+              const SizedBox(width: HollowSpacing.sm),
+              Expanded(child: _AboutShimmerLine(hollow: hollow)),
+              const SizedBox(width: HollowSpacing.sm),
+
+              _BrandIcon(
+                icon: SimpleIcons.patreon,
+                color: hollow.textPrimary,
+                tooltip: 'Patreon',
+                url: 'https://patreon.com/AnonListen',
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              _KickBotIcon(
+                tooltip: 'Tip via KickBot',
+                url: 'https://kick.com/AnonListen',
+              ),
+            ],
+          ),
+
+          const SizedBox(height: HollowSpacing.lg),
+          _aboutDivider(hollow),
+          const SizedBox(height: HollowSpacing.lg),
+
+          // Licenses
+          HollowButton.ghost(
+            onPressed: () {
+              showLicensePage(
+                context: context,
+                applicationName: 'Hollow',
+                applicationVersion: 'Alpha',
+                applicationIcon: Padding(
+                  padding: const EdgeInsets.all(HollowSpacing.md),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.asset(
+                      'assets/hollow_logo_rounded.png',
+                      width: 48,
+                      height: 48,
+                    ),
+                  ),
+                ),
+              );
+            },
+            icon: Icon(LucideIcons.fileText, size: 16),
+            child: const Text('Open-Source Licenses'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static Widget _aboutSectionLabel(String text, HollowTheme hollow) {
+    return Text(
+      text,
+      style: HollowTypography.label.copyWith(
+        color: hollow.textSecondary,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 0.5,
+      ),
+    );
+  }
+
+  static Widget _aboutDivider(HollowTheme hollow) {
+    return Container(height: 1, color: hollow.border.withValues(alpha: 0.5));
+  }
+
+  static Widget _aboutShimmerLabel(
+      String left, String right, HollowTheme hollow) {
+    final style = HollowTypography.label.copyWith(
+      color: hollow.textSecondary,
+      fontWeight: FontWeight.w600,
+      letterSpacing: 0.5,
+    );
+    return Row(
+      children: [
+        Text(left, style: style),
+        const SizedBox(width: HollowSpacing.sm),
+        Expanded(child: _AboutShimmerLine(hollow: hollow)),
+        const SizedBox(width: HollowSpacing.sm),
+        Text(right, style: style),
+      ],
+    );
+  }
+}
+
+class _AboutShimmerLine extends StatelessWidget {
+  final HollowTheme hollow;
+  const _AboutShimmerLine({required this.hollow});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<double>(
+      valueListenable: SharedTickers.instance.shimmer,
+      builder: (context, value, _) {
+        final pos = value * 4.0 - 1.5;
+        return Container(
+          height: 1,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment(pos - 0.5, 0),
+              end: Alignment(pos + 0.5, 0),
+              colors: [
+                hollow.border,
+                hollow.accent.withValues(alpha: 0.6),
+                hollow.border,
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _BrandIcon extends StatefulWidget {
+  final IconData icon;
+  final Color color;
+  final String tooltip;
+  final String url;
+
+  const _BrandIcon({
+    required this.icon,
+    required this.color,
+    required this.tooltip,
+    required this.url,
+  });
+
+  @override
+  State<_BrandIcon> createState() => _BrandIconState();
+}
+
+class _BrandIconState extends State<_BrandIcon> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+
+    return HollowTooltip(
+      message: widget.tooltip,
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hovering = true),
+        onExit: (_) => setState(() => _hovering = false),
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () => launchUrl(
+            Uri.parse(widget.url),
+            mode: LaunchMode.externalApplication,
+          ),
+          child: AnimatedContainer(
+            duration: HollowDurations.fast,
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: _hovering
+                  ? hollow.elevated
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+            ),
+            child: AnimatedScale(
+              scale: _hovering ? 1.15 : 1.0,
+              duration: HollowDurations.fast,
+              child: Icon(
+                widget.icon,
+                size: 20,
+                color: _hovering
+                    ? widget.color
+                    : hollow.textSecondary,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SvgBrandIcon extends StatefulWidget {
+  final String asset;
+  final String tooltip;
+  final String url;
+
+  const _SvgBrandIcon({
+    required this.asset,
+    required this.tooltip,
+    required this.url,
+  });
+
+  @override
+  State<_SvgBrandIcon> createState() => _SvgBrandIconState();
+}
+
+class _SvgBrandIconState extends State<_SvgBrandIcon> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+
+    return HollowTooltip(
+      message: widget.tooltip,
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hovering = true),
+        onExit: (_) => setState(() => _hovering = false),
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () => launchUrl(
+            Uri.parse(widget.url),
+            mode: LaunchMode.externalApplication,
+          ),
+          child: AnimatedContainer(
+            duration: HollowDurations.fast,
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: _hovering ? hollow.elevated : Colors.transparent,
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+            ),
+            child: AnimatedScale(
+              scale: _hovering ? 1.15 : 1.0,
+              duration: HollowDurations.fast,
+              child: SvgPicture.asset(
+                widget.asset,
+                width: 20,
+                height: 20,
+                colorFilter: _hovering
+                    ? null
+                    : ColorFilter.mode(
+                        hollow.textSecondary, BlendMode.srcIn),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _KickBotIcon extends StatefulWidget {
+  final String tooltip;
+  final String url;
+
+  const _KickBotIcon({required this.tooltip, required this.url});
+
+  @override
+  State<_KickBotIcon> createState() => _KickBotIconState();
+}
+
+class _KickBotIconState extends State<_KickBotIcon> {
+  bool _hovering = false;
+
+  static const _kickBotGreen = Color(0xFFC0FF00);
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+
+    return HollowTooltip(
+      message: widget.tooltip,
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hovering = true),
+        onExit: (_) => setState(() => _hovering = false),
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () => launchUrl(
+            Uri.parse(widget.url),
+            mode: LaunchMode.externalApplication,
+          ),
+          child: AnimatedContainer(
+            duration: HollowDurations.fast,
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: _hovering ? hollow.elevated : Colors.transparent,
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+            ),
+            child: AnimatedScale(
+              scale: _hovering ? 1.15 : 1.0,
+              duration: HollowDurations.fast,
+              child: SvgPicture.asset(
+                'assets/kickbot-logo.svg',
+                width: 20,
+                height: 20,
+                colorFilter: ColorFilter.mode(
+                  _hovering ? _kickBotGreen : hollow.textSecondary,
+                  BlendMode.srcIn,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
