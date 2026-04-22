@@ -240,6 +240,7 @@ final archiveDmMessagesProvider = FutureProvider.autoDispose
           isComplete: info.completedAt != null,
           diskPath: info.diskPath,
           videoThumb: info.videoThumb,
+          expiredAt: info.expiredAt?.toInt(),
         );
       }
     } catch (_) {}
@@ -323,6 +324,7 @@ final archiveChannelMessagesProvider = FutureProvider.autoDispose
           isComplete: info.completedAt != null,
           diskPath: info.diskPath,
           videoThumb: info.videoThumb,
+          expiredAt: info.expiredAt?.toInt(),
         );
       }
     } catch (_) {}

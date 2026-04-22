@@ -2120,20 +2120,30 @@ async fn run_event_loop(
                                 }
                         }
 
-                        // 2. Retention enforcement: delete expired manifests
-                        for tier in [crate::vault::content_store::StorageTier::Standard, crate::vault::content_store::StorageTier::Low] {
-                            let policy = crate::vault::adaptive::retention_for_tier(tier, &state.settings);
-                            if let Some(days) = crate::vault::adaptive::parse_retention_days(&policy) {
-                                let cutoff = now_ts - (days as i64 * 86400);
-                                if let Ok(expired) = cs.find_expired_manifests(server_id, cutoff) {
-                                    for manifest in &expired {
-                                        if manifest.storage_tier == tier.as_str() {
-                                            hollow_log!("[HOLLOW-VAULT] Retention: deleting expired content {} (tier: {})", manifest.content_id, manifest.storage_tier);
-                                            let _ = cs.delete_content(server_id, &manifest.content_id);
-                                            let _ = cs.delete_placements(&manifest.content_id);
-                                            let _ = cs.delete_manifest(&manifest.content_id);
-                                        }
+                        // 2. Retention enforcement: delete expired vault manifests
+                        let policy = crate::vault::adaptive::retention_for_tier(
+                            crate::vault::content_store::StorageTier::Standard, &state.settings);
+                        if let Some(days) = crate::vault::adaptive::parse_retention_days(&policy) {
+                            let cutoff = now_ts - (days as i64 * 86400);
+                            if let Ok(expired) = cs.find_expired_manifests(server_id, cutoff) {
+                                for manifest in &expired {
+                                    hollow_log!("[HOLLOW-VAULT] Retention: deleting expired content {} (tier: {})", manifest.content_id, manifest.storage_tier);
+                                    let _ = cs.delete_content(server_id, &manifest.content_id);
+                                    let _ = cs.delete_placements(&manifest.content_id);
+                                    let _ = cs.delete_manifest(&manifest.content_id);
+                                }
+                            }
+
+                            // 2b. Retention for channel files not tracked by vault manifests
+                            // (full-replication <6 member servers, or any channel files in ~/.hollow/files/)
+                            let prefix = format!("{}:", server_id);
+                            if let Ok(files) = cs.find_expirable_channel_files(&prefix, cutoff) {
+                                for (file_id, disk_path) in &files {
+                                    hollow_log!("[HOLLOW-VAULT] Retention: expiring channel file {}", file_id);
+                                    if let Some(path) = disk_path {
+                                        let _ = std::fs::remove_file(path);
                                     }
+                                    let _ = cs.mark_file_expired(file_id, now_ts);
                                 }
                             }
                         }

@@ -19,6 +19,7 @@ class FileAttachment {
   /// identified by [videoThumb.cid]. The UI renders a play button overlay and
   /// triggers a vault download on tap.
   final network_api.VideoThumbRef? videoThumb;
+  final int? expiredAt;
 
   const FileAttachment({
     required this.fileId,
@@ -34,7 +35,10 @@ class FileAttachment {
     this.isComplete = false,
     this.diskPath,
     this.videoThumb,
+    this.expiredAt,
   });
+
+  bool get isExpired => expiredAt != null;
 
   double get progress =>
       totalChunks > 0 ? chunksReceived / totalChunks : 0;
@@ -52,6 +56,7 @@ class FileAttachment {
     bool? isComplete,
     String? diskPath,
     network_api.VideoThumbRef? videoThumb,
+    int? expiredAt,
   }) {
     return FileAttachment(
       fileId: fileId,
@@ -67,6 +72,7 @@ class FileAttachment {
       isComplete: isComplete ?? this.isComplete,
       diskPath: diskPath ?? this.diskPath,
       videoThumb: videoThumb ?? this.videoThumb,
+      expiredAt: expiredAt ?? this.expiredAt,
     );
   }
 }

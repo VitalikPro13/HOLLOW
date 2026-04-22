@@ -37,12 +37,10 @@ class _StorageDashboardContentState
   // Static cache — persists across dialog open/close so it shows instantly on reopen.
   static final Map<String, crdt_api.StorageStatsFfi> _statsCache = {};
   static final Map<String, String> _retentionFilesCache = {};
-  static final Map<String, String> _retentionVoiceCache = {};
   static int _diskFreeBytesCache = 0;
 
   crdt_api.StorageStatsFfi? _stats;
-  String _retentionFiles = 'permanent';
-  String _retentionVoice = '90d';
+  String _retentionFiles = '365d';
   int _diskFreeBytes = 0;
 
   @override
@@ -50,8 +48,7 @@ class _StorageDashboardContentState
     super.initState();
     // Load cached values immediately so UI appears instantly.
     _stats = _statsCache[widget.serverId];
-    _retentionFiles = _retentionFilesCache[widget.serverId] ?? 'permanent';
-    _retentionVoice = _retentionVoiceCache[widget.serverId] ?? '90d';
+    _retentionFiles = _retentionFilesCache[widget.serverId] ?? '365d';
     _diskFreeBytes = _diskFreeBytesCache;
     // Refresh in background — setState triggers smooth animation.
     _loadData();
@@ -62,26 +59,22 @@ class _StorageDashboardContentState
       final results = await Future.wait([
         crdt_api.getStorageStats(serverId: widget.serverId),
         crdt_api.getServerSetting(serverId: widget.serverId, key: 'retention_files'),
-        crdt_api.getServerSetting(serverId: widget.serverId, key: 'retention_voice'),
         _getDiskFreeBytes(),
       ]);
 
       final stats = results[0] as crdt_api.StorageStatsFfi;
       final retFiles = results[1] as String;
-      final retVoice = results[2] as String;
-      final diskFree = results[3] as int;
+      final diskFree = results[2] as int;
 
       // Update static cache for next open.
       _statsCache[widget.serverId] = stats;
-      _retentionFilesCache[widget.serverId] = retFiles.isNotEmpty ? retFiles : 'permanent';
-      _retentionVoiceCache[widget.serverId] = retVoice.isNotEmpty ? retVoice : '90d';
+      _retentionFilesCache[widget.serverId] = retFiles.isNotEmpty ? retFiles : '365d';
       _diskFreeBytesCache = diskFree;
 
       if (mounted) {
         setState(() {
           _stats = stats;
           _retentionFiles = _retentionFilesCache[widget.serverId]!;
-          _retentionVoice = _retentionVoiceCache[widget.serverId]!;
           _diskFreeBytes = diskFree;
         });
       }
@@ -594,8 +587,6 @@ class _StorageDashboardContentState
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _retentionRow(hollow, 'Files', 'retention_files', _retentionFiles, canEdit: canEdit),
-        const SizedBox(height: HollowSpacing.xs),
-        _retentionRow(hollow, 'Voice', 'retention_voice', _retentionVoice, canEdit: canEdit),
         const SizedBox(height: HollowSpacing.sm),
         Text(
           'Forward-only: changes affect new uploads only.',

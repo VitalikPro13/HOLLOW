@@ -319,6 +319,7 @@ class ChannelChatNotifier
                 isComplete: info.completedAt != null,
                 diskPath: info.diskPath,
                 videoThumb: info.videoThumb,
+                expiredAt: info.expiredAt?.toInt(),
               );
             }
           } catch (_) {}
@@ -469,6 +470,7 @@ class ChannelChatNotifier
               isComplete: info.completedAt != null,
               diskPath: info.diskPath,
               videoThumb: info.videoThumb,
+              expiredAt: info.expiredAt?.toInt(),
             );
           }
         } catch (_) {}

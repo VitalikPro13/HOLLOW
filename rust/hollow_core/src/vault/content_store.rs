@@ -809,6 +809,49 @@ impl ContentStore {
         Ok(result)
     }
 
+    // ── Channel file retention (files table, not vault shards) ──
+
+    /// Find channel files eligible for retention expiry.
+    /// `server_id_prefix` should be `"{server_id}:"` to match context_id patterns.
+    pub fn find_expirable_channel_files(
+        &self,
+        server_id_prefix: &str,
+        before_timestamp: i64,
+    ) -> Result<Vec<(String, Option<String>)>, String> {
+        let pattern = format!("{}%", server_id_prefix);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT file_id, disk_path FROM files
+                 WHERE context_type = 'channel'
+                   AND context_id LIKE ?1
+                   AND created_at < ?2
+                   AND expired_at IS NULL
+                   AND completed_at IS NOT NULL",
+            )
+            .map_err(|e| format!("Failed to prepare expirable files query: {e}"))?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![pattern, before_timestamp], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|e| format!("Failed to query expirable files: {e}"))?;
+
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Mark a file as expired by setting expired_at timestamp.
+    pub fn mark_file_expired(&self, file_id: &str, expired_at: i64) -> Result<bool, String> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE files SET expired_at = ?2 WHERE file_id = ?1 AND expired_at IS NULL",
+                rusqlite::params![file_id, expired_at],
+            )
+            .map_err(|e| format!("Failed to mark file expired: {e}"))?;
+        Ok(updated > 0)
+    }
+
     // ── Member status tracking ───────────────────────────────
 
     /// Update last-seen timestamp for a member in a server.

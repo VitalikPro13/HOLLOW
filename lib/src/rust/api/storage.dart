@@ -425,6 +425,7 @@ class StoredFileInfo {
   final PlatformInt64 createdAt;
   final PlatformInt64? completedAt;
   final String? diskPath;
+  final PlatformInt64? expiredAt;
 
   /// Video thumbnail back-reference (Phase 6.75 video preview).
   /// When non-null, this file is a thumbnail image for a vault-stored video.
@@ -451,6 +452,7 @@ class StoredFileInfo {
     required this.createdAt,
     this.completedAt,
     this.diskPath,
+    this.expiredAt,
     this.videoThumb,
   });
 
@@ -474,6 +476,7 @@ class StoredFileInfo {
       createdAt.hashCode ^
       completedAt.hashCode ^
       diskPath.hashCode ^
+      expiredAt.hashCode ^
       videoThumb.hashCode;
 
   @override
@@ -499,6 +502,7 @@ class StoredFileInfo {
           createdAt == other.createdAt &&
           completedAt == other.completedAt &&
           diskPath == other.diskPath &&
+          expiredAt == other.expiredAt &&
           videoThumb == other.videoThumb;
 }
 

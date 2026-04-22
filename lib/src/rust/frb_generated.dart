@@ -6777,8 +6777,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   StoredFileInfo dco_decode_stored_file_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 19)
-      throw Exception('unexpected arr length: expect 19 but see ${arr.length}');
+    if (arr.length != 20)
+      throw Exception('unexpected arr length: expect 20 but see ${arr.length}');
     return StoredFileInfo(
       fileId: dco_decode_String(arr[0]),
       fileName: dco_decode_String(arr[1]),
@@ -6798,7 +6798,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       createdAt: dco_decode_i_64(arr[15]),
       completedAt: dco_decode_opt_box_autoadd_i_64(arr[16]),
       diskPath: dco_decode_opt_String(arr[17]),
-      videoThumb: dco_decode_opt_box_autoadd_video_thumb_ref(arr[18]),
+      expiredAt: dco_decode_opt_box_autoadd_i_64(arr[18]),
+      videoThumb: dco_decode_opt_box_autoadd_video_thumb_ref(arr[19]),
     );
   }
 
@@ -8857,6 +8858,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_createdAt = sse_decode_i_64(deserializer);
     var var_completedAt = sse_decode_opt_box_autoadd_i_64(deserializer);
     var var_diskPath = sse_decode_opt_String(deserializer);
+    var var_expiredAt = sse_decode_opt_box_autoadd_i_64(deserializer);
     var var_videoThumb = sse_decode_opt_box_autoadd_video_thumb_ref(
       deserializer,
     );
@@ -8879,6 +8881,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       createdAt: var_createdAt,
       completedAt: var_completedAt,
       diskPath: var_diskPath,
+      expiredAt: var_expiredAt,
       videoThumb: var_videoThumb,
     );
   }
@@ -10807,6 +10810,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_64(self.createdAt, serializer);
     sse_encode_opt_box_autoadd_i_64(self.completedAt, serializer);
     sse_encode_opt_String(self.diskPath, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.expiredAt, serializer);
     sse_encode_opt_box_autoadd_video_thumb_ref(self.videoThumb, serializer);
   }
 

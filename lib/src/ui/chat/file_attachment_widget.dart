@@ -56,6 +56,10 @@ class FileAttachmentWidget extends ConsumerWidget {
         : attachment.sizeBytes;
     final bytesReceived = (progress * totalBytes).round();
 
+    if (attachment.isExpired) {
+      return _buildExpiredCard(hollow);
+    }
+
     // Phase 6.75: Video preview takes priority over generic file rendering.
     // Two cases handled by VideoMessageBubble:
     //  (a) vault video — videoThumb is set, attachment is the .webp thumbnail
@@ -89,6 +93,53 @@ class FileAttachmentWidget extends ConsumerWidget {
   bool _isAudioAttachment() {
     if (attachment.isImage) return false;
     return _audioExtensions.contains(attachment.fileExt.toLowerCase());
+  }
+
+  Widget _buildExpiredCard(HollowTheme hollow) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 280),
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        borderRadius: BorderRadius.circular(HollowSpacing.sm),
+        border: Border.all(color: hollow.border),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(HollowSpacing.md),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(LucideIcons.clock, size: 24, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.md),
+            Flexible(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    attachment.fileName,
+                    style: HollowTypography.body.copyWith(
+                      color: hollow.textSecondary,
+                      fontSize: 13,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: HollowSpacing.xxs),
+                  Text(
+                    'File expired · ${attachment.formattedSize}',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildImagePreview(

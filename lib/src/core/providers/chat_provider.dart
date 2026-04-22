@@ -300,6 +300,7 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
               isComplete: info.completedAt != null,
               diskPath: info.diskPath,
               videoThumb: info.videoThumb,
+              expiredAt: info.expiredAt?.toInt(),
             );
           }
         } catch (_) {}

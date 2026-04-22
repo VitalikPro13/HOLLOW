@@ -7099,6 +7099,7 @@ impl SseDecode for crate::api::storage::StoredFileInfo {
         let mut var_createdAt = <i64>::sse_decode(deserializer);
         let mut var_completedAt = <Option<i64>>::sse_decode(deserializer);
         let mut var_diskPath = <Option<String>>::sse_decode(deserializer);
+        let mut var_expiredAt = <Option<i64>>::sse_decode(deserializer);
         let mut var_videoThumb =
             <Option<crate::api::network::VideoThumbRef>>::sse_decode(deserializer);
         return crate::api::storage::StoredFileInfo {
@@ -7120,6 +7121,7 @@ impl SseDecode for crate::api::storage::StoredFileInfo {
             created_at: var_createdAt,
             completed_at: var_completedAt,
             disk_path: var_diskPath,
+            expired_at: var_expiredAt,
             video_thumb: var_videoThumb,
         };
     }
@@ -9192,6 +9194,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::storage::StoredFileInfo {
             self.created_at.into_into_dart().into_dart(),
             self.completed_at.into_into_dart().into_dart(),
             self.disk_path.into_into_dart().into_dart(),
+            self.expired_at.into_into_dart().into_dart(),
             self.video_thumb.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -10981,6 +10984,7 @@ impl SseEncode for crate::api::storage::StoredFileInfo {
         <i64>::sse_encode(self.created_at, serializer);
         <Option<i64>>::sse_encode(self.completed_at, serializer);
         <Option<String>>::sse_encode(self.disk_path, serializer);
+        <Option<i64>>::sse_encode(self.expired_at, serializer);
         <Option<crate::api::network::VideoThumbRef>>::sse_encode(self.video_thumb, serializer);
     }
 }

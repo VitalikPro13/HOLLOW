@@ -33,31 +33,21 @@ pub fn compute_adaptive_params(member_count: usize) -> VaultMode {
 
 /// Apply a storage tier multiplier to the parity shard count.
 ///
-/// - Standard (images, files): 1.0x m — no change.
-/// - Low (voice recordings): 0.6x m — rounded up, min 1.
+/// All tiers now use the same multiplier (1.0x — no change).
+/// `StorageTier::Low` is kept for backward compatibility with existing DB rows
+/// but behaves identically to Standard.
 ///
 /// k is never modified — only m changes.
-pub fn apply_tier_multiplier(k: usize, m: usize, tier: StorageTier) -> (usize, usize) {
-    let adjusted_m = match tier {
-        StorageTier::Standard => m,
-        StorageTier::Low => {
-            let reduced = ((m as f64) * 0.6).ceil() as usize;
-            reduced.max(1)
-        }
-    };
-    (k, adjusted_m)
+pub fn apply_tier_multiplier(k: usize, m: usize, _tier: StorageTier) -> (usize, usize) {
+    (k, m)
 }
 
 /// Determine the storage tier from a MIME type.
 ///
-/// audio/* → Low (less redundancy, shorter retention).
-/// Everything else → Standard.
-pub fn determine_tier(mime_type: &str) -> StorageTier {
-    if mime_type.starts_with("audio/") {
-        StorageTier::Low
-    } else {
-        StorageTier::Standard
-    }
+/// All files use Standard tier. `StorageTier::Low` is kept in the enum for
+/// backward compatibility with existing DB rows but is no longer produced.
+pub fn determine_tier(_mime_type: &str) -> StorageTier {
+    StorageTier::Standard
 }
 
 // ── Retention policy helpers ─────────────────────────────
@@ -75,23 +65,18 @@ pub fn parse_retention_days(policy: &str) -> Option<u32> {
     }
 }
 
-/// Get the retention policy string for a storage tier from server settings.
-/// Defaults: Standard → "365d", Low → "90d".
+/// Get the retention policy string from server settings.
+///
+/// All tiers use `retention_files` (default "365d"). The `tier` parameter is
+/// accepted for backward compatibility but ignored — Low is treated as Standard.
 pub fn retention_for_tier(
-    tier: StorageTier,
+    _tier: StorageTier,
     settings: &HashMap<String, AdminLwwReg<String>>,
 ) -> String {
-    let key = match tier {
-        StorageTier::Standard => "retention_files",
-        StorageTier::Low => "retention_voice",
-    };
     settings
-        .get(key)
+        .get("retention_files")
         .map(|r| r.read().clone())
-        .unwrap_or_else(|| match tier {
-            StorageTier::Standard => "365d".to_string(),
-            StorageTier::Low => "90d".to_string(),
-        })
+        .unwrap_or_else(|| "365d".to_string())
 }
 
 #[cfg(test)]
@@ -210,37 +195,19 @@ mod tests {
     }
 
     #[test]
-    fn low_reduces_m() {
-        // ceil(5 * 0.6) = ceil(3.0) = 3
-        assert_eq!(apply_tier_multiplier(10, 5, StorageTier::Low), (10, 3));
-    }
-
-    #[test]
-    fn low_rounds_up() {
-        // ceil(3 * 0.6) = ceil(1.8) = 2
-        assert_eq!(apply_tier_multiplier(5, 3, StorageTier::Low), (5, 2));
-        // ceil(4 * 0.6) = ceil(2.4) = 3
-        assert_eq!(apply_tier_multiplier(8, 4, StorageTier::Low), (8, 3));
-    }
-
-    #[test]
-    fn low_min_m_1() {
-        // ceil(1 * 0.6) = ceil(0.6) = 1
+    fn low_same_as_standard() {
+        assert_eq!(apply_tier_multiplier(10, 5, StorageTier::Low), (10, 5));
+        assert_eq!(apply_tier_multiplier(5, 3, StorageTier::Low), (5, 3));
+        assert_eq!(apply_tier_multiplier(8, 4, StorageTier::Low), (8, 4));
         assert_eq!(apply_tier_multiplier(3, 1, StorageTier::Low), (3, 1));
     }
 
     // ── determine_tier ───────────────────────────────────────
 
     #[test]
-    fn audio_is_low() {
-        assert_eq!(determine_tier("audio/mp3"), StorageTier::Low);
-        assert_eq!(determine_tier("audio/ogg"), StorageTier::Low);
-        assert_eq!(determine_tier("audio/wav"), StorageTier::Low);
-        assert_eq!(determine_tier("audio/webm"), StorageTier::Low);
-    }
-
-    #[test]
-    fn everything_else_standard() {
+    fn all_types_standard() {
+        assert_eq!(determine_tier("audio/mp3"), StorageTier::Standard);
+        assert_eq!(determine_tier("audio/ogg"), StorageTier::Standard);
         assert_eq!(determine_tier("image/webp"), StorageTier::Standard);
         assert_eq!(determine_tier("image/png"), StorageTier::Standard);
         assert_eq!(determine_tier("application/pdf"), StorageTier::Standard);
@@ -277,8 +244,8 @@ mod tests {
     }
 
     #[test]
-    fn default_retention_low() {
+    fn default_retention_low_same_as_standard() {
         let settings: HashMap<String, AdminLwwReg<String>> = HashMap::new();
-        assert_eq!(retention_for_tier(StorageTier::Low, &settings), "90d");
+        assert_eq!(retention_for_tier(StorageTier::Low, &settings), "365d");
     }
 }

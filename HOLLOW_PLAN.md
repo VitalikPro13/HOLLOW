@@ -1,6 +1,6 @@
 # Hollow — A Fully Distributed, Encrypted Discord Alternative
 
-> **Status:** Active Development — Phases 1-4 Complete. Phase 5 (WebSocket Relay) & Phase 6 (Pure MLS) Complete. Vault health system & libp2p removal next.
+> **Status:** Active Development — Phases 1 through 6.25 Complete. Phase 6.75 (Polish & Launch Prep) in progress. libp2p fully removed.
 > **Author:** Designed through technical discussion, February 2026.
 > **Philosophy:** No central servers. No Electron. No Node.js hosting. The members ARE the server.
 
@@ -123,11 +123,12 @@ A communication platform where **every member collectively hosts the server they
 | **Distributed Storage** | Adaptive Reed-Solomon erasure coding + full replication | <6 members: full replication (P2P streaming). 6+: adaptive erasure coding — k/m scale with member count (1.5x overhead). Files/media only. Vault shards distributed via MLS metadata + WS binary streaming. |
 | **E2EE (Servers)** | OpenMLS 0.8 (MLS RFC 9420) via Rust FFI | ALL server messages: MLS group encrypt → `SendToRoom` broadcast. One encrypt, relay fans out. Target filtering for peer-specific messages (all decrypt for ratchet sync, only target processes). Scales O(log n) on member changes. |
 | **E2EE (DMs)** | vodozemac (Olm/Double Ratchet) via Rust FFI | 1:1 DMs: Olm encryption with Double Ratchet. Key exchange via `KeyRequest`/`KeyBundle` over WS (no DHT). Forward secrecy + post-compromise security. |
-| **E2EE (Calls)** | DTLS-SRTP + SFrame | WebRTC native encryption + inner E2EE layer via SFrame for group calls. (Planned — not yet implemented.) |
-| **Voice/Video** | flutter_webrtc + LiveKit protocol | Mature WebRTC for Flutter. Mesh for small calls (2-4), SFU-like "super peer" for larger groups. (Planned — not yet implemented.) |
+| **E2EE (Calls)** | DTLS-SRTP + SFrame | WebRTC native encryption + inner SFrame E2EE layer for all calls (1:1 and group). DM calls: random key in Olm-encrypted invite. Voice channels: MLS `export_secret("sframe")` epoch key, auto-rotates on membership change. Applied to voice, video, and screen share tracks. |
+| **Voice/Video** | flutter_webrtc (forked 1.4.1) | 1:1 calls (direct P2P), small group mesh (2-5), gossip-tree forwarding (6+). No SFU — each peer forwards to ~6-12 neighbors. Scales to 1000+ with zero VPS bandwidth for media. TURN fallback for ~10-15% behind symmetric NAT. |
+| **Screen Share** | flutter_webrtc `getDisplayMedia()` | Screen/window capture with quality picker (360p–4K, 5–60fps). Separate RTCPeerConnection per peer. SFrame E2EE. System audio capture via WASAPI loopback (Windows, forked flutter_webrtc). |
 | **Local Database** | SQLite (encrypted via SQLCipher) | All local data encrypted at rest. Fast, embedded, no server needed. `rusqlite` with `bundled-sqlcipher` feature. |
-| **Identity** | Ed25519 keypairs (via libp2p, migrating to ed25519-dalek) | Public key = identity. PeerId derived as `base58btc(multihash(sha256(protobuf(pubkey))))`. BIP-39 mnemonic backup. No phone numbers, no email. |
-| **Legacy (being removed)** | libp2p 0.56 | Originally the core networking stack. Now fallback-only — all real traffic flows through WSS relay. Scheduled for full removal (see plan-libp2p-removal.md). |
+| **Identity** | Ed25519 keypairs via `ed25519-dalek` v2.2 | Public key = identity. PeerId derived as `base58btc(multihash(identity(protobuf(pubkey))))`. BIP-39 mnemonic backup. No phone numbers, no email. |
+| **P2P Data Transfer** | WebRTC data channels via flutter_webrtc | File/shard/Share chunk bytes flow over direct P2P connections (~9 MB/s). WSS relay fallback when WebRTC unavailable. ~85-90% of data transfer bandwidth is direct P2P. |
 
 ### Why Rust FFI Instead of Pure Dart
 
@@ -151,7 +152,7 @@ This is the core innovation. Every member donates storage. The server's files li
 - **DMs stay direct P2P.** No vault involvement — DMs are 1:1, erasure coding has no benefit. Full sync between the two peers as-is.
 - **Automatic mode selection:** Below 6 members → full replication (every member gets every file). 6+ members → erasure coding with adaptive k/m. No admin toggle needed — "just works."
 - **Manifests broadcast to all members** (like CRDT ops). Manifests are tiny (~200 bytes), full replication is simpler and more reliable than erasure coding them.
-- **Forward-only retention (Rat Files safe):** Retention settings only apply to files uploaded AFTER the setting is changed. Existing files stay permanent. This prevents malicious owners from retroactively deleting evidence. Default: permanent. If owner sets `retention_files: 90d`, only new uploads get the 90-day expiry. All existing data is untouched.
+- **Forward-only retention (Rat Files safe):** Retention settings only apply to files uploaded AFTER the setting is changed. Existing files keep their original retention. This prevents malicious owners from retroactively deleting evidence. Default: 365 days for files, 90 days for voice. If owner sets `retention_files: 90d`, only new uploads get the 90-day expiry. All existing data is untouched.
 
 ### How It Works
 
@@ -287,12 +288,13 @@ Client C ──WSS──► │                 │ ◄──WSS── Client D
                   └─────────────────┘
 ```
 
-**Why relay instead of direct P2P:**
+**Why relay instead of direct P2P for signaling:**
 - NAT traversal is unreliable (~80% success for hole punching, 0% behind symmetric NAT)
-- libp2p connection churn caused sync failures, prekey storms, transport cycling
+- Direct P2P connection churn caused sync failures, prekey storms, transport cycling
 - Single WSS connection is simpler, faster to establish, works through any firewall
 - TLS on port 443 looks like normal HTTPS traffic (harder to censor)
 - Relay sees only encrypted ciphertext — zero trust compromise
+- Heavy data (files, shards, voice, video) goes over WebRTC P2P connections established via relay signaling
 
 ### 5.2 Transport Details
 
@@ -344,9 +346,9 @@ A lightweight HTTP signaling service runs alongside the WS relay on the same VPS
 6. On disconnect → relay notifies room members via `PeerLeft`
 7. Client auto-reconnects and re-joins all rooms
 
-### 5.6 Legacy: libp2p (Being Removed)
+### 5.6 Legacy: libp2p (Removed)
 
-libp2p 0.56 still exists as a fallback transport but is scheduled for full removal. It was the original networking stack (QUIC, TCP, mDNS, Kademlia DHT, relay circuit, hole punching). All real traffic now flows through WSS. The libp2p components generate noise (failed dial attempts to stale peers) and add ~30-40% to binary size. See `plan-libp2p-removal.md` for the removal plan.
+libp2p 0.56 was the original networking stack (QUIC, TCP, mDNS, Kademlia DHT, relay circuit, hole punching). It was fully removed during Phase 6.75. All networking now uses WSS relay for signaling + WebRTC for P2P data/media. PeerId format is retained (base58-encoded identity multihash of the Ed25519 public key) for backward compatibility, but the underlying transport is entirely WSS + WebRTC.
 
 ---
 
@@ -433,9 +435,9 @@ send_mls_broadcast(mls, ws_cmd_tx, &server_id, &envelope, keypair);
 ┌──────────────────────────────────────────────────┐
 │ Layer 3: Application Encryption                   │
 │ (E2EE — only participants can decrypt)            │
-│ Messages: Signal Protocol / MLS                   │
+│ Messages: Olm (DMs) / MLS (servers)               │
 │ Files: AES-256-GCM with per-file keys             │
-│ Calls: SFrame inner encryption                    │
+│ Calls: SFrame inner encryption (AES-128-GCM)      │
 ├──────────────────────────────────────────────────┤
 │ Layer 2: Storage Encryption                       │
 │ (Data at rest on member devices)                  │
@@ -444,8 +446,8 @@ send_mls_broadcast(mls, ws_cmd_tx, &server_id, &envelope, keypair);
 ├──────────────────────────────────────────────────┤
 │ Layer 1: Transport Encryption                     │
 │ (Data in transit between peers)                   │
-│ QUIC: TLS 1.3 built-in                           │
-│ TCP: Noise Protocol Framework                     │
+│ WSS: TLS 1.3 (relay signaling)                    │
+│ WebRTC: DTLS-SRTP (P2P media + data channels)     │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -511,28 +513,34 @@ For group channels (the "server channels" feature), use MLS (RFC 9420) instead o
 
 Peers storing the file shards hold only encrypted data. They can't decrypt without the FEK, which is only available to channel members.
 
-### 7.5 Voice/Video Call Encryption
+### 7.5 Voice/Video/Screen Share Encryption
 
-- **Small calls (2-4 people):** Direct peer-to-peer WebRTC with DTLS-SRTP. E2EE is built into WebRTC itself. No relay needed.
+- **1:1 DM calls:** Direct peer-to-peer WebRTC with DTLS-SRTP + SFrame E2EE. Random 32-byte SFrame key transmitted in the Olm-encrypted `CallInvite` message.
 
-- **Larger calls (5+ people):** A "super peer" (member with best bandwidth) acts as an SFU (Selective Forwarding Unit):
-  - Each participant sends their media stream once to the super peer
-  - The super peer forwards streams to all participants
-  - **SFrame encryption** provides inner E2EE: each participant encrypts their media frames with a per-sender key before sending to the SFU
-  - The SFU forwards encrypted frames — it cannot see or hear the content
-  - Recipients decrypt using the sender's key (distributed via the MLS group)
+- **Server voice channels:** SFrame E2EE with MLS-derived keys. Key derivation: `MLS group.export_secret("sframe", context=[], key_length=32)`. Key rotates automatically on every MLS epoch change (member join/leave), providing forward secrecy for real-time media.
+
+- **Topology:** No SFU or "super peer." Instead, gossip-tree forwarding:
+  - **Small group (2-5):** Full mesh — everyone sends to everyone.
+  - **Larger group (6+):** Each peer forwards received audio/video to their connected gossip neighbors (~6-12 peers), minus the source. Covers 1000+ participants in 2-3 hops (~150-300ms). Zero VPS bandwidth for media.
+  - **Transition:** Automatic with hysteresis — gossip at 6+, back to mesh at 4.
+
+- **Screen sharing:** Separate RTCPeerConnection per peer direction. SFrame E2EE applied to screen share video and system audio tracks. Quality picker (360p–4K, 5–60fps). System audio via WASAPI loopback on Windows (forked flutter_webrtc).
+
+- **SFrame scope:** Applied to all media types — voice audio, video camera, screen share video, and screen share audio tracks.
 
 ### 7.6 Crypto Libraries (Actual Implementation)
 
 **DM E2EE:** `vodozemac` v0.9 (Rust, via FFI) — Matrix's audited Olm implementation. Double Ratchet for DMs. Key exchange via `KeyRequest`/`KeyBundle` over WS relay (no DHT). Two identity systems coexist: Ed25519 (transport/signing) and vodozemac Curve25519 (Olm sessions).
 
-**Server E2EE:** OpenMLS 0.8 (Rust, via FFI) — MLS (RFC 9420) group encryption for ALL server messages. Single-committer model (server owner processes KeyPackages). Batch member addition (2-second timer, dedup by peer_id). `send_mls_broadcast()` → one encrypt → `SendToRoom` → relay fans out. `send_mls_to_peer()` → targeted messages with `target` field (all decrypt for ratchet sync, only target processes). 183 tests passing.
+**Server E2EE:** OpenMLS 0.8 (Rust, via FFI) — MLS (RFC 9420) group encryption for ALL server messages. Distributed coordinator model (`is_mls_coordinator()` — lowest online peer_id in MLS group). Batch member addition (2-second timer, dedup by peer_id). `send_mls_broadcast()` → one encrypt → `SendToRoom` → relay fans out. `send_mls_to_peer()` → targeted messages with `target` field (all decrypt for ratchet sync, only target processes). 232 tests passing.
 
-**File encryption:** AES-256-GCM (via `aes-gcm` crate) — per-file random key. Key transmitted in MLS-encrypted `FileHeader` envelope. File bytes streamed separately via WS binary frames.
+**Voice/Video/Screen E2EE:** SFrame (AES-128-GCM via flutter_webrtc `FrameCryptor` + `KeyProvider`). DM calls: random 32-byte key in Olm-encrypted `CallInvite`. Server voice channels: MLS `export_secret("sframe")` epoch key, auto-rotates on membership change. Applied to all media tracks (voice, video, screen share, system audio).
+
+**File encryption:** AES-256-GCM (via `aes-gcm` crate) — per-file random key. Key transmitted in MLS-encrypted `FileHeader` envelope. File bytes streamed via WebRTC data channels (P2P) with WSS relay fallback.
 
 **Local storage encryption:** SQLCipher (AES-256-CBC) — via `rusqlite` with `bundled-sqlcipher` feature.
 
-**Identity:** `ed25519-dalek` v2.2 (currently via libp2p, migrating to direct dependency) — Ed25519 keypair generation, message signing, peer ID derivation. BIP-39 mnemonic for backup/restore.
+**Identity:** `ed25519-dalek` v2.2 (direct dependency) — Ed25519 keypair generation, message signing, peer ID derivation. BIP-39 mnemonic for backup/restore.
 
 **Flutter Web (future):** Web Crypto API via `webcrypto` package + WASM-compiled crypto primitives.
 
@@ -566,7 +574,7 @@ Adding a new device is done directly from an existing device — no server invol
 3. PC displays a QR code containing:
    - A one-time session token
    - A temporary X25519 public key for establishing an encrypted channel
-   - The PC's local network address (for LAN transfer) + libp2p peer ID
+   - The PC's local network address (for LAN transfer) + peer ID
 4. New device (e.g., phone) scans the QR code
 5. Devices establish a direct encrypted channel (using the ephemeral key from the QR)
 6. PC transfers to the phone:
@@ -697,37 +705,51 @@ Permission changes are LWW-Register CRDTs with a twist: writes from higher-ranke
 
 ### 9.1 Voice & Video Calls
 
-**Technology:** flutter_webrtc package
+**Technology:** flutter_webrtc 1.4.1 (forked, with WASAPI loopback for Windows screen share audio)
 
 **Topologies:**
-- **1:1 calls:** Direct P2P connection via WebRTC. DTLS-SRTP encryption. Lowest latency.
-- **Small group (2-5):** Mesh topology — each participant sends to all others. O(n^2) connections but minimal latency. Works well for small groups.
-- **Medium group (6-15):** "Super peer" SFU — the member with the best upload bandwidth acts as the forwarding unit. Others send to the super peer, which forwards to all. SFrame E2EE ensures the super peer can't decode media.
-- **Large group (16+):** Multiple super peers in a tree topology, or accept that one super peer with good bandwidth handles it. Simulcast support: senders encode at multiple quality levels, the SFU picks the right quality for each receiver.
+- **1:1 DM calls:** Direct P2P connection via WebRTC. DTLS-SRTP + SFrame E2EE (random key in Olm-encrypted `CallInvite`). Lowest latency.
+- **Small group voice channels (2-5):** Full mesh — each participant sends audio/video to all others. Glare prevention: lower peer_id creates the offer.
+- **Larger voice channels (6+):** Gossip-tree forwarding — each peer forwards received audio/video to their connected gossip neighbors (~6-12 peers), minus the source. No SFU, no "super peer." Covers 1000+ participants in 2-3 hops (~150-300ms latency). Each peer handles ~6 connections regardless of total participants. Zero VPS bandwidth for media.
+- **Topology transition:** Automatic with hysteresis — mesh below 6 participants, gossip at 6+, back to mesh at 4 (prevents thrashing).
 
-**Super peer selection:**
-1. Each member reports their available upload bandwidth (measured, not self-reported)
-2. The member with the highest stable upload becomes the super peer
-3. If the super peer disconnects, the next-best member takes over seamlessly
-4. Super peer rotation to prevent single-member burden
+**SFrame E2EE for voice channels:**
+- Key derived from MLS epoch: `export_secret("sframe", context=[], key_length=32)`
+- Key rotates on every membership change (MLS epoch advance)
+- Applied to all audio, video, and screen share tracks via `FrameCryptor` + `KeyProvider`
+
+**TURN fallback:**
+- Self-hosted coturn on VPS (UDP :3478, TCP :3478, TLS :5349)
+- HMAC-SHA1 credentials with 1-hour TTL, auto-refreshed every 50 minutes
+- ~10-15% of users need TURN (symmetric NAT). TURN sees only SFrame ciphertext.
 
 ### 9.2 Screen Sharing
 
-Supported natively by flutter_webrtc:
+Supported via flutter_webrtc `getDisplayMedia()`:
 
 | Platform | Method | Notes |
 |---|---|---|
-| Windows | DXGI Desktop Duplication / Windows.Graphics.Capture | Full screen or specific window |
-| macOS | ScreenCaptureKit (macOS 12.3+) | Full screen or specific window |
-| Linux | PipeWire (Wayland) / X11 capture | Varies by DE/display server |
+| Windows | DXGI Desktop Duplication / Windows.Graphics.Capture | Full screen or specific window. System audio via WASAPI loopback (forked flutter_webrtc) |
+| macOS | ScreenCaptureKit (macOS 12.3+) | Full screen or specific window. System audio capture deferred (no test hardware) |
+| Linux | PipeWire (Wayland) / X11 capture | Varies by DE/display server. System audio deferred |
 | Android | MediaProjection API | Requires foreground service + permission |
 | iOS | ReplayKit (Broadcast Upload Extension) | Separate target, 50 MB memory limit |
+
+**Implementation details:**
+- Separate RTCPeerConnection per peer per direction (not reusing the voice PC — different lifecycle)
+- Quality/FPS picker: 360p, 480p, 720p, 1080p (default), 1440p, 4K. FPS: 5, 15, 30, 60 (default)
+- SFrame E2EE on both video and audio tracks of the screen share
+- Both-sharing handled (stacked view: remote top, local banner bottom)
+- Late joiner support: sharer sends screen_state + screen_offer on remote peer join
+- Full-bleed layout with overlay chat + floating controls pill (auto-fade 1s)
 
 ### 9.3 Audio Processing
 
 - Echo cancellation, noise suppression, automatic gain control — handled by WebRTC's built-in audio processing
-- Push-to-talk and voice activation modes
-- Per-user volume control
+- Voice activity detection (VAD) — local via amplitude monitoring, remote via `getStats` audio energy delta. Teal dot indicator on participant rows
+- Per-peer volume control (0-200%) via right-click popup on participant rows
+- Audio quality presets: Voice (32 kbps mono), Music (128 kbps stereo), Hi-Fi (256 kbps stereo) — SDP munging on Opus fmtp line
+- Device selection: mic via `sourceId` constraint, speaker via `win32audio`. Persisted in SQLCipher
 
 ---
 
@@ -782,7 +804,7 @@ Step 7: Message history is attributed to "Discord Import: Username" until
 
 ### 11.2 Binary Size Target
 
-- Desktop: 50-80 MB installer (Flutter + Rust libs + libp2p + crypto)
+- Desktop: 50-80 MB installer (Flutter + Rust libs + crypto + bundled ffmpeg)
 - Mobile: 30-50 MB (ARM optimized)
 - Compare: Discord Electron is ~300 MB on desktop
 
@@ -854,10 +876,11 @@ Built entirely with Flutter widgets. No web embedding, no WebView. The UI should
 │   └── Import from Discord
 │
 ├── Voice/Video Channel
-│   ├── Grid view of participants
-│   ├── Screen share viewer
+│   ├── Grid view of participants (1-5 tiles, click-to-fullscreen)
+│   ├── Screen share viewer (full-bleed with overlay chat + controls)
 │   ├── Controls (mute, deafen, video, screen share, disconnect)
-│   └── Super peer indicator
+│   ├── Per-peer volume (right-click, 0-200%)
+│   └── Speaking indicator (VAD teal dot)
 │
 ├── User Settings
 │   ├── Profile (display name, avatar, status)
@@ -1819,6 +1842,11 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] **Fix file transfer progress bar (DM/channel file sends).** WebRTC streaming transfers (`total_chunks = 0`) have broken progress: Dart WebRTC receives bytes and updates `onProgress` every 512 KB (`webrtc_service.dart:624`), but Rust only learns about the transfer when the entire file finishes via `webrtcTransferComplete`. Rust then decrypts the whole blob and emits a single `FileCompleted` — no intermediate `FileProgress` events. Result: progress bar sits at ~10% then jumps to 100%. Fix: either (a) bridge Dart's byte-level progress directly to `fileTransferProvider` without waiting for Rust (pure Dart fix — progress = bytes received / total, skip Rust events for streaming transfers), or (b) convert streaming transfers to chunked transfers so Rust can emit `FileProgress` per chunk like Share does. Option (a) is simpler but progress won't account for decryption time at the end; (b) is a deeper refactor but gives honest progress. Key files: `webrtc_service.dart:620-631`, `webrtc_provider.dart:40-49`, `file_handler.rs:560-630`, `file_transfer_provider.dart:394-427` ------ NO NEED TO! It's this problem and it can't be changed! Deferred into unknown.
 - [X] 411 errors with -D warning on cargo clippy - wtf is that? — ~414 default-level warnings: 172 "ref immediately deref'd" + 104 "collapsible if" (auto-fixable), ~50 "too many args" (conscious SwarmContext-less design), misc. No bugs, no `-D` deny flags. Auto-fixable via `cargo clippy --fix` but noisy diff.
 - [X] **Closed alpha launch system:** (a) ~~About tab in User Settings — app icon, name, developer, website, socials, feedback email, Flutter OSS `LicensePage`.~~ ✅ (b) ~~License key system — relay-side UUID key table (`keys.json` hot-reload 30s), WS auth handshake check (one key = one active connection, reject duplicates + revocation kicks), `/relay-status` endpoint, Flutter first-launch key-entry dialog with cached key.~~ ✅ (c) Obfuscated release build (`--obfuscate --split-debug-info`). (d) Open-source relay + protocol whitepaper (2-3 pages: Olm for DMs, MLS for groups, AES-256-GCM per-chunk Share, CRDT sync, Ed25519 identity). Keep Flutter UI + networking proprietary.
+
+- [X] **Vault retention for <6 member servers (full-replication files).** Retention timer now also checks `files` table for channel files with `created_at < cutoff` and `expired_at IS NULL`. Deletes file from disk, sets `expired_at` timestamp on the DB row (keeps row as placeholder). Applied via `ContentStore.find_expirable_channel_files()` + `mark_file_expired()`. Covers all servers (not just <6) — catches any channel files not tracked by vault manifests.
+- [X] **Expired file placeholder in chat/archive.** Added `expired_at INTEGER` column to `files` table. Threaded through `StoredFile` → `StoredFileInfo` FFI → Dart `FileAttachment.expiredAt`. `FileAttachmentWidget` renders a placeholder card (clock icon + filename + "File expired · {size}") when `isExpired`. Archive tab uses the same widget — no separate handling needed.
+- [X] **Collapse storage tiers into one.** `determine_tier()` now always returns `Standard`. `apply_tier_multiplier()` and `retention_for_tier()` treat `Low` identically to `Standard` (backward compat with existing DB rows). Storage Dashboard shows single "Files" retention row. `retention_voice` setting ignored — everything uses `retention_files` (default 365d).
+
 - [ ] **Hollow link preview cards in chat:** Detect `hollow://share/...` and `hollow://server/...` links in message text, render rich inline cards (Share: filename, size, chunks, download button; Server: server name, member count, join button). Pure UI — parse the scheme in the message renderer, no protocol changes (same logic as if with the regular links).
 - [ ] **Share integration for server file uploads:** Large files in channels auto-create a Share instead of P2P streaming. Message contains the `hollow://share/...` link, renders as a card in chat, download uses Share's chunked P2P infrastructure (no TURN fallback, no 34MB limit, resumable). Regular files under 34MB keep current P2P stream path. Videos render inline after download completes.
 - [ ] **Broadcast channels (Telegram-style news):** One-to-many E2EE broadcast channels — owner publishes, subscribers read. MLS-encrypted (unlike Telegram which is plaintext for channels). Posts CRDT-synced to subscribers (full replication, not erasure coded — text is lightweight), no central storage. Ed25519-signed authorship on every post. Threaded comments under posts. Subscribe model (join for one channel without full server membership). Existing reaction system for engagement (no separate "likes"). Needs roles/permissions system first (read-only subscriber role). Unique vs Telegram: E2EE, no algorithm, no central server, verified authorship, survives relay downtime.
@@ -1945,7 +1973,7 @@ Phase 3 — Scale + Automate ($100–150/mo): Containerize relay, move to OVH ma
 
 **Explanation:**
 
-Russia's TSPU (DPI system) is one of the most advanced censorship systems in the world. It doesn't just look at port numbers — it analyzes traffic patterns, packet sizes, and timing. Even though our WSS goes through TLS on port 443, the libp2p protocol fingerprint inside the WebSocket frames is detectable. This is the same reason Tor needed pluggable transports (obfs4, meek, snowflake) — plain TLS wrapping isn't enough against sophisticated DPI.
+Russia's TSPU (DPI system) is one of the most advanced censorship systems in the world. It doesn't just look at port numbers — it analyzes traffic patterns, packet sizes, and timing. Even though our WSS goes through TLS on port 443, DPI can detect encapsulated traffic patterns. This is the same reason Tor needed pluggable transports (obfs4, meek, snowflake) — plain TLS wrapping isn't enough against sophisticated DPI.
 
 **Proven solutions exist (used by people in Russia/China/Iran right now):**
 - **VLESS + Reality (XRay):** Makes traffic indistinguishable from a real TLS connection to a legitimate website (e.g., google.com). Gold standard for DPI bypass.
@@ -1957,12 +1985,12 @@ Russia's TSPU (DPI system) is one of the most advanced censorship systems in the
 2. **Relay-side proxy** — Run XRay/Shadowsocks on our VPS alongside the relay. Censored users connect to the obfuscated proxy, which tunnels to the Hollow relay internally. Minimal Hollow code changes.
 3. **Built-in transport** — Integrate a Shadowsocks or VLESS client directly into Hollow's Rust backend. Auto-detect censorship (connection failures on WSS) and fall back to obfuscated tunnel. Best UX, most work.
 
-**Research findings:**
-- WSS on port 443 — TSPU detects libp2p fingerprint inside TLS, kills connections in ~10-20 seconds
+**Research findings (conducted when libp2p was still in use — libp2p has since been fully removed, eliminating the protocol fingerprint issue):**
+- WSS on port 443 — TSPU detected libp2p fingerprint inside TLS, killed connections in ~10-20 seconds (no longer applicable — libp2p removed)
 - VLESS+Reality over TCP — blocked by TSPU since Feb 2026 (~15-20KB payload threshold)
-- VLESS+Reality over XHTTP — proxy worked for HTTP traffic but libp2p bypasses system proxy (raw sockets), TUN mode still killed by TSPU
-- External proxy (SOCKS5/TUN mode) — doesn't work because libp2p opens raw TCP/UDP sockets, bypassing system proxies
-- Regular VPN — works, confirming the issue is protocol fingerprinting, not IP blocking
+- VLESS+Reality over XHTTP — proxy worked for HTTP traffic but libp2p bypassed system proxy (raw sockets), TUN mode still killed by TSPU (no longer applicable — libp2p removed)
+- External proxy (SOCKS5/TUN mode) — didn't work because libp2p opened raw TCP/UDP sockets, bypassing system proxies (no longer applicable — WSS goes through system proxy normally)
+- Regular VPN — works, confirming the issue was protocol fingerprinting, not IP blocking
 - **Shadowsocks-2022 (AEAD) — works on many ISPs, but TSPU on some ISPs detects it via encapsulated traffic fingerprinting (packet size/timing patterns) and kills connections after ~20 seconds**
 - Hysteria V2 — QUIC/UDP-based, Russia throttles UDP periodically, unreliable
 - WireGuard/OpenVPN/IKEv2 — all dead in Russia
@@ -1991,29 +2019,23 @@ Hollow app → local TCP tunnel (127.0.0.1:18080) → SS encrypt → VPS:443 →
 - [x] Research: evaluate Russian VPS — outbound international traffic still inspected by TSPU, doesn't solve the problem
 - [ ] Option 1: Write user-facing guide for external proxy setup — SKIPPED (external proxy doesn't work with libp2p)
 - [ ] Option 2: Deploy XRay/Shadowsocks proxy on relay VPS only — SKIPPED (went straight to Option 3)
-- [x] Option 3: Integrate obfuscated transport into Rust backend
-  - [x] Add `app_settings` key-value table to SQLCipher (`storage/messages.rs`)
-  - [x] Add `save_setting()`/`load_setting()` FFI functions (`api/storage.rs`)
-  - [x] Add `shadowsocks-service` crate dependency (`Cargo.toml`)
-  - [x] Create tunnel module with dual-port local tunnels (`node/tunnel.rs`)
-  - [x] Wire `proxy_enabled` through swarm startup — proxy-aware relay addresses, circuit building (`node/swarm.rs`)
-  - [x] Wire `proxy_enabled` through signaling — tunneled signaling URL (`node/signaling.rs`)
-  - [x] Load proxy setting in `start_node()` (`api/network.rs`)
-  - [x] Regenerate FFI bindings (`flutter_rust_bridge_codegen generate`)
-  - [x] Create Dart settings provider (`settings_provider.dart`)
-  - [x] Add "Use Proxy" toggle to User Settings dialog with restart prompt
-  - [x] Deploy ssserver on VPS (port 443, 2022-blake3-aes-256-gcm)
-  - [x] Hardcode generated key in `tunnel.rs`
-  - [x] Verify tunnels start and relay connects through localhost
+- [x] Option 3: Integrate obfuscated transport into Rust backend — **IMPLEMENTED THEN REMOVED**
+  - [x] Add `app_settings` key-value table to SQLCipher (`storage/messages.rs`) — **kept** (used by other settings)
+  - [x] Add `save_setting()`/`load_setting()` FFI functions (`api/storage.rs`) — **kept** (used by other settings)
+  - [x] ~~Add `shadowsocks-service` crate dependency (`Cargo.toml`)~~ — **removed** (crate removed during cleanup)
+  - [x] ~~Create tunnel module with dual-port local tunnels (`node/tunnel.rs`)~~ — **removed** (file deleted)
+  - [x] ~~Wire `proxy_enabled` through swarm startup~~ — **removed** (proxy code stripped from swarm.rs)
+  - [x] ~~Wire `proxy_enabled` through signaling~~ — **removed** (proxy code stripped from signaling.rs)
+  - [x] ~~Load proxy setting in `start_node()`~~ — **removed** (proxy code stripped from api/network.rs)
+  - [x] Regenerate FFI bindings
+  - [x] Create Dart settings provider (`settings_provider.dart`) — **kept** (dead code, provider exists but no UI toggle renders it)
+  - [x] ~~Add "Use Proxy" toggle to User Settings dialog~~ — **toggle removed from UI** (state plumbing remains as dead code)
+  - [x] ~~Deploy ssserver on VPS~~ — **removed** (ssserver no longer running)
+  - [x] ~~Hardcode generated key in `tunnel.rs`~~ — **removed** (tunnel.rs deleted)
   - [x] Test from Russia with friend — SS connections killed by TSPU after ~20s on friend's ISP (encapsulated traffic fingerprinting + active probing)
 
-**UI changes:**
-- [x] Toggles (Dark Mode, Proxy) now use local state — only applied on Save, reverted on Cancel
-- [x] "Restart Required" prompt after saving proxy change (Restart Later / Restart Now)
-- [x] Restart Now does graceful shutdown (notifyShutdown + 200ms) then relaunches hollow.exe
-
-**Status: Shadowsocks tunnel IMPLEMENTED and FUNCTIONAL, but defeated by TSPU on some Russian ISPs.**
-The proxy toggle remains in the app — Shadowsocks-2022 still works on many ISPs and in other censored countries. The toggle is not useless, it just doesn't beat the most aggressive DPI configurations.
+**Status: Shadowsocks tunnel was IMPLEMENTED, TESTED, and then REMOVED.**
+The Rust implementation (`tunnel.rs`, `shadowsocks-service` crate, proxy wiring in swarm/signaling/network) was stripped during the libp2p removal and codebase cleanup. The Dart settings provider (`proxyEnabledProvider`) and restart prompt code remain as dead code but no UI toggle is rendered. The `app_settings` table and `save_setting()`/`load_setting()` FFI functions were kept — they're used by other features (layout mode, theme, etc.).
 
 **Next step: TLS camouflage tunnel (REALITY-style)**
 DIY TLS camouflage using rustls — make tunnel traffic look like a real HTTPS connection to a popular domain (e.g., www.google.com). This is the approach that consistently beats TSPU with <5% detection rate. Requires implementing a custom TLS wrapper in Rust that generates browser-like ClientHello fingerprints. The existing proxy toggle UI and architecture (local tunnel → VPS → relay) would be reused — only the tunnel protocol changes from Shadowsocks to TLS camouflage.
@@ -2123,7 +2145,7 @@ Before public launch:
 | **Offline support** | Full (local cache + sync) | No (web client) | Partial (homeserver stores) | Yes (swarm stores 14 days) | Yes (local storage) | Yes (local storage) |
 | **Installation** | Single native installer | Download + Chromium | Download + Chromium | Download native | Download APK | Download + Qt |
 | **Resource usage** | Low (native binary) | High (Electron) | High (Electron) | Low | Low | Medium |
-| **Open source** | Planned (crypto + network layers) | No | Yes (Apache 2.0) | Yes (GPL) | Yes (GPL) | Yes (GPL) |
+| **Open source** | Relay server open-source; client proprietary | No | Yes (Apache 2.0) | Yes (GPL) | Yes (GPL) | Yes (GPL) |
 | **Data sovereignty** | Full — your data, your device, unforgeable evidence | None — Discord owns it | Partial (homeserver admin) | Partial (14-day swarm) | Full (local only) | Full (local only) |
 
 ### Hollow's Unique Differentiators
@@ -2339,30 +2361,28 @@ Everything that makes Hollow work — E2EE, Shared Vault, voice/video, screen sh
 
 ## Appendix A: Key Technical References
 
-- **libp2p:** https://libp2p.io / https://github.com/libp2p/rust-libp2p
-- **Automerge:** https://automerge.org / https://github.com/automerge/automerge
 - **MLS RFC 9420:** https://www.rfc-editor.org/rfc/rfc9420
 - **vodozemac (Olm):** https://github.com/matrix-org/vodozemac
+- **OpenMLS:** https://github.com/openmls/openmls
 - **Signal Protocol:** https://signal.org/docs/
 - **X3DH:** https://signal.org/docs/specifications/x3dh/
 - **Double Ratchet:** https://signal.org/docs/specifications/doubleratchet/
-- **OpenMLS:** https://github.com/openmls/openmls
+- **SFrame:** https://datatracker.ietf.org/doc/draft-ietf-sframe-enc/
 - **flutter_rust_bridge:** https://github.com/aspect-build/flutter_rust_bridge
 - **flutter_webrtc:** https://github.com/flutter-webrtc/flutter-webrtc
 - **Reed-Solomon coding:** https://en.wikipedia.org/wiki/Reed-Solomon_error_correction
-- **Kademlia DHT:** https://en.wikipedia.org/wiki/Kademlia
-- **SFrame:** https://datatracker.ietf.org/doc/draft-ietf-sframe-enc/
-- **LiveKit:** https://livekit.io
+- **ed25519-dalek:** https://github.com/dalek-cryptography/curve25519-dalek
 - **Shamir's Secret Sharing:** https://en.wikipedia.org/wiki/Shamir%27s_secret_sharing
 - **Argent Social Recovery:** https://www.argent.xyz/learn/what-is-social-recovery/
 - **Storj (erasure coding reference):** https://www.storj.io/blog/what-is-erasure-coding
+- **libp2p (historical):** https://libp2p.io — used in Phases 1-5, fully removed in Phase 6.75. PeerId format retained for identity compatibility.
 
 ## Appendix B: Glossary
 
 | Term | Definition |
 |---|---|
 | **CRDT** | Conflict-free Replicated Data Type — data structure that merges concurrent updates without conflicts |
-| **DHT** | Distributed Hash Table — decentralized key-value lookup across peers (Kademlia) |
+| **DHT** | Distributed Hash Table — decentralized key-value lookup. Used historically for peer discovery (Kademlia via libp2p), now replaced by relay room rendezvous. XOR-distance concept retained for vault shard placement |
 | **Double Ratchet** | Key derivation algorithm providing forward secrecy and self-healing after compromise |
 | **E2EE** | End-to-End Encryption — only sender and recipient can read the content |
 | **Erasure Coding** | Splitting data into n pieces where any k can reconstruct the original (Reed-Solomon) |
@@ -2370,9 +2390,9 @@ Everything that makes Hollow work — E2EE, Shared Vault, voice/video, screen sh
 | **HLC** | Hybrid Logical Clock — timestamp combining physical time + logical counter for ordering |
 | **MLS** | Messaging Layer Security — efficient group encryption protocol (RFC 9420) |
 | **NAT** | Network Address Translation — router feature that hides devices behind a single public IP |
-| **SFrame** | Secure Frame — encryption format for individual media frames in WebRTC group calls |
-| **SFU** | Selective Forwarding Unit — server/peer that forwards (but doesn't decode) media streams |
-| **Super Peer** | A member with good bandwidth that acts as a relay/SFU for the group |
+| **SFrame** | Secure Frame — encryption format for individual media frames in WebRTC calls (voice, video, screen share) |
+| **Gossip Tree** | Peer-to-peer forwarding topology where each node relays to ~6-12 neighbors. Replaces centralized SFU for voice/video/file broadcast |
+| **TURN** | Traversal Using Relays around NAT — relay server for peers behind symmetric NATs (~10-15% of users). Sees only encrypted ciphertext |
 | **Non-repudiation** | Property where the sender cannot deny authorship — their digital signature proves they sent it |
 | **Shamir's Secret Sharing** | Cryptographic scheme that splits a secret into n shares where any k can reconstruct it |
 | **Social Recovery** | Account recovery via trusted contacts (guardians) who each hold a share of the identity key |
@@ -2434,7 +2454,7 @@ Game streaming at 1080p 60fps is very doable — Discord Nitro-level quality, fo
 **What needs attention at scale:**
 - CRDT operation volume in busy channels — solved by channel-level sharding (each channel is its own CRDT document).
 - Peer connection management — you connect to a subset (6-12 peers), not all 30K.
-- Super peer selection for large voice channels — more candidates = better quality.
+- Gossip-tree topology for large voice channels — more peers = more forwarding paths = better redundancy.
 
 **Bottom line:** If the system works well at 100 members (because it's properly designed with correct shard spreading, storage optimization, and efficient sync), it works at 30K. The architecture doesn't change — the numbers just get more favorable.
 

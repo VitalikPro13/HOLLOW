@@ -78,6 +78,7 @@ pub(crate) struct StoredFile {
     pub completed_at: Option<i64>,
     pub disk_path: Option<String>,
     pub hidden_at: Option<i64>,
+    pub expired_at: Option<i64>,
     /// Video thumbnail back-reference (Phase 6.75 video preview).
     /// When this file is a thumbnail image for a vault-stored video, this field
     /// holds the link back to the underlying video. Persisted as JSON in the
@@ -470,6 +471,12 @@ impl MessageStore {
         // for a vault-stored video. Wrapped in unwrap_or to handle re-runs.
         conn.execute_batch(
             "ALTER TABLE files ADD COLUMN video_thumb_json TEXT;"
+        ).unwrap_or(());
+
+        // Timestamp when the file was expired by the retention timer.
+        // NULL = not expired. Non-null = file data deleted from disk, row kept as placeholder.
+        conn.execute_batch(
+            "ALTER TABLE files ADD COLUMN expired_at INTEGER;"
         ).unwrap_or(());
 
         conn.execute(
@@ -2615,7 +2622,7 @@ impl MessageStore {
                         chunk_count, chunks_received, is_image, width, height,
                         message_id, context_type, context_id, sender_id, is_mine,
                         created_at, completed_at, disk_path, hidden_at,
-                        video_thumb_json
+                        video_thumb_json, expired_at
                  FROM files WHERE file_id = ?1",
             )
             .map_err(|e| format!("Failed to prepare file query: {e}"))?;
@@ -2642,6 +2649,7 @@ impl MessageStore {
                     completed_at: row.get(16)?,
                     disk_path: row.get(17)?,
                     hidden_at: row.get(18)?,
+                    expired_at: row.get(20)?,
                     video_thumb: Self::parse_video_thumb_json(row.get::<_, Option<String>>(19)?),
                 })
             })
@@ -2659,7 +2667,7 @@ impl MessageStore {
                         chunk_count, chunks_received, is_image, width, height,
                         message_id, context_type, context_id, sender_id, is_mine,
                         created_at, completed_at, disk_path, hidden_at,
-                        video_thumb_json
+                        video_thumb_json, expired_at
                  FROM files WHERE message_id = ?1",
             )
             .map_err(|e| format!("Failed to prepare files query: {e}"))?;
@@ -2686,6 +2694,7 @@ impl MessageStore {
                     completed_at: row.get(16)?,
                     disk_path: row.get(17)?,
                     hidden_at: row.get(18)?,
+                    expired_at: row.get(20)?,
                     video_thumb: Self::parse_video_thumb_json(row.get::<_, Option<String>>(19)?),
                 })
             })
@@ -2707,7 +2716,7 @@ impl MessageStore {
                         chunk_count, chunks_received, is_image, width, height,
                         message_id, context_type, context_id, sender_id, is_mine,
                         created_at, completed_at, disk_path, hidden_at,
-                        video_thumb_json
+                        video_thumb_json, expired_at
                  FROM files WHERE completed_at IS NULL AND hidden_at IS NULL",
             )
             .map_err(|e| format!("Failed to prepare incomplete files query: {e}"))?;
@@ -2734,6 +2743,7 @@ impl MessageStore {
                     completed_at: row.get(16)?,
                     disk_path: row.get(17)?,
                     hidden_at: row.get(18)?,
+                    expired_at: row.get(20)?,
                     video_thumb: Self::parse_video_thumb_json(row.get::<_, Option<String>>(19)?),
                 })
             })
