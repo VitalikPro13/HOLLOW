@@ -7,7 +7,7 @@ Hollow is a fully distributed, encrypted Discord alternative. No central servers
 - **UI:** Flutter (Dart) — all platforms (Windows, macOS, Linux, Android, iOS, Web)
 - **Backend:** Rust via `flutter_rust_bridge` v2.11.1 FFI
 - **Networking:** WSS relay (signaling + text/CRDT/MLS) + WebRTC data channels (files/shards P2P) + WebRTC media (voice/video P2P). libp2p fully removed.
-- **E2EE:** vodozemac (Olm/Double Ratchet) for DMs, OpenMLS 0.8 for servers, SFrame (AES-128-GCM) for voice/video
+- **E2EE:** vodozemac (Olm/Double Ratchet) for DMs, OpenMLS 0.8 for servers, SFrame (AES-128-GCM) for voice/video/screen share
 - **Local DB:** SQLCipher (encrypted SQLite)
 - **Identity:** Ed25519 keypairs via BIP-39 mnemonic (ed25519-dalek, NativeKeypair)
 - **Org ID:** com.anonlisten

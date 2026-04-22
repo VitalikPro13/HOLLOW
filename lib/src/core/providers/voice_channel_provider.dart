@@ -9,6 +9,7 @@ import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/voice_channel_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -884,6 +885,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       maxHeight: _screenShareMaxHeight,
     );
 
+    // Enable SFrame E2EE on the outgoing screen share PC.
+    if (service.pc != null && _service?.frameCryptor != null) {
+      await _enableSframeOnScreenSharePc(
+          service.pc!, _service!.frameCryptor!, peerId, isSender: true);
+    }
+
     // Flush any ICE candidates that arrived before this service was created.
     final earlyKey = 'outgoing:$peerId';
     final early = _earlyScreenIce.remove(earlyKey);
@@ -976,6 +983,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _incomingScreenShares[peerId] = service;
 
     final answerSdp = await service.handleOffer(sdp);
+
+    // Enable SFrame E2EE on the incoming screen share PC.
+    if (service.pc != null && _service?.frameCryptor != null) {
+      await _enableSframeOnScreenSharePc(
+          service.pc!, _service!.frameCryptor!, peerId, isSender: false);
+    }
 
     // Flush any ICE candidates that arrived before this service was created.
     final earlyKey = 'incoming:$peerId';
@@ -1301,6 +1314,31 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         ),
       ),
     );
+  }
+
+  Future<void> _enableSframeOnScreenSharePc(
+      RTCPeerConnection pc, FrameCryptorService frameCryptor,
+      String peerId, {required bool isSender}) async {
+    try {
+      if (isSender) {
+        final senders = await pc.getSenders();
+        for (final sender in senders) {
+          final kind = sender.track?.kind ?? 'video';
+          await frameCryptor.enableForSender(
+              'screen:$peerId', sender, kind: 'screen_$kind');
+        }
+      } else {
+        final receivers = await pc.getReceivers();
+        for (final receiver in receivers) {
+          final kind = receiver.track?.kind ?? 'video';
+          await frameCryptor.enableForReceiver(
+              'screen:$peerId', receiver, kind: 'screen_$kind');
+        }
+      }
+      debugPrint('[HOLLOW-VC] SFrame enabled on screen share (sender=$isSender, peer=$peerId)');
+    } catch (e) {
+      debugPrint('[HOLLOW-VC] Failed to enable SFrame on screen share: $e');
+    }
   }
 }
 

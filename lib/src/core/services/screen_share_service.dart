@@ -42,6 +42,7 @@ class ScreenShareService {
 
   RTCVideoRenderer? get remoteRenderer => _remoteRenderer;
   RTCVideoRenderer? get localRenderer => _localRenderer;
+  RTCPeerConnection? get pc => _pc;
   bool get isActive => _pc != null;
 
   /// Preferred audio output device — set by CallNotifier before handleOffer.

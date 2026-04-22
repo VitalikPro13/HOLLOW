@@ -447,6 +447,12 @@ class CallNotifier extends Notifier<CallState> {
         shareAudio: shareAudio,
       );
 
+      // Enable SFrame E2EE on the screen share PC.
+      if (_outgoingScreenShare!.pc != null) {
+        await _enableSframeOnScreenShare(
+            _outgoingScreenShare!.pc!, peerId, isSender: true);
+      }
+
       // Build quality label (e.g. "1080p60", "4K30").
       const resLabels = {360: '360p', 480: '480p', 720: '720p', 1080: '1080p', 1440: '1440p', 2160: '4K'};
       final qualityLabel = '${resLabels[height] ?? '${height}p'}$fps';
@@ -884,6 +890,13 @@ class CallNotifier extends Notifier<CallState> {
 
     // Handle the offer and send answer.
     final answerSdp = await _incomingScreenShare!.handleOffer(sdp);
+
+    // Enable SFrame E2EE on the incoming screen share PC.
+    if (_incomingScreenShare!.pc != null) {
+      await _enableSframeOnScreenShare(
+          _incomingScreenShare!.pc!, peerId, isSender: false);
+    }
+
     _sendSignal(peerId, 'screen_answer',
         jsonEncode({'call_id': callId, 'sdp': answerSdp}));
   }
@@ -965,6 +978,36 @@ class CallNotifier extends Notifier<CallState> {
     return List.generate(
             32, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0'))
         .join();
+  }
+
+  /// Enable SFrame E2EE on a screen share RTCPeerConnection's tracks.
+  Future<void> _enableSframeOnScreenShare(
+      RTCPeerConnection pc, String peerId, {required bool isSender}) async {
+    final keyHex = state.sframeKey;
+    if (keyHex.isEmpty) return;
+    final frameCryptor = _service.frameCryptor;
+    if (frameCryptor == null || !frameCryptor.isEnabled) return;
+
+    try {
+      if (isSender) {
+        final senders = await pc.getSenders();
+        for (final sender in senders) {
+          final kind = sender.track?.kind ?? 'video';
+          await frameCryptor.enableForSender(
+              'screen:$peerId', sender, kind: 'screen_$kind');
+        }
+      } else {
+        final receivers = await pc.getReceivers();
+        for (final receiver in receivers) {
+          final kind = receiver.track?.kind ?? 'video';
+          await frameCryptor.enableForReceiver(
+              'screen:$peerId', receiver, kind: 'screen_$kind');
+        }
+      }
+      debugPrint('[HOLLOW-CALL] SFrame enabled on screen share (sender=$isSender)');
+    } catch (e) {
+      debugPrint('[HOLLOW-CALL] Failed to enable SFrame on screen share: $e');
+    }
   }
 
   /// Convert hex string to Uint8List.

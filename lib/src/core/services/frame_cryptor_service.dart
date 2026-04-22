@@ -138,9 +138,9 @@ class FrameCryptorService {
     _fcLog('[HOLLOW-SFRAME] Key rotated to index $newIndex');
   }
 
-  /// Disable and clean up cryptors for a specific peer (both audio and video).
+  /// Disable and clean up cryptors for a specific peer (audio, video, and screen share).
   Future<void> disableForPeer(String peerId) async {
-    for (final kind in ['audio', 'video']) {
+    for (final kind in ['audio', 'video', 'screen_audio', 'screen_video']) {
       final key = '$peerId:$kind';
       final sender = _senderCryptors.remove(key);
       if (sender != null) {

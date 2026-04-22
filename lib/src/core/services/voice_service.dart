@@ -59,6 +59,7 @@ class VoiceService {
 
   /// SFrame encryption service for DM call E2EE.
   FrameCryptorService? _frameCryptor;
+  FrameCryptorService? get frameCryptor => _frameCryptor;
 
   VoiceService({required this.localPeerId, Map<String, dynamic>? iceServers})
       : iceServers = iceServers ?? _defaultIceServers;
