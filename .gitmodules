@@ -1,0 +1,6 @@
+[submodule "relay-uws/uWebSockets"]
+	path = relay-uws/uWebSockets
+	url = https://github.com/uNetworking/uWebSockets.git
+[submodule "relay-uws/uSockets"]
+	path = relay-uws/uSockets
+	url = https://github.com/uNetworking/uSockets.git

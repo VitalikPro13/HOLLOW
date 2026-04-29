@@ -54,7 +54,8 @@ HOLLOW/
 │       ├── crypto/       # Olm encryption + MLS + persistence
 │       ├── identity/     # Ed25519 keypair management (native_identity.rs, keys.rs)
 │       └── storage/      # SQLCipher message store
-├── relay/                # Signaling HTTP + WebSocket room router (standalone binary, deployed on OVH VPS)
+├── relay/                # Signaling HTTP + WS room router (Rust, legacy — superseded by relay-uws)
+├── relay-uws/            # Production relay (uWebSockets C++, native TLS, deployed on OVH VPS)
 ├── rust_builder/         # flutter_rust_bridge build system (cargokit)
 ├── vendor/ffmpeg/        # Bundled native binaries (gitignored, see fetch_ffmpeg.ps1)
 ├── HOLLOW_PLAN.md         # Full architecture & design document (authoritative for all phase details)
@@ -76,9 +77,9 @@ cd rust/hollow_core && cargo clippy
 # Regenerate FFI bindings after Rust API changes (run from project root)
 flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"
 
-# Deploy relay server updates to VPS
-scp relay/src/*.rs ubuntu@141.227.186.209:/home/ubuntu/relay/src/
-ssh ubuntu@141.227.186.209 "cd relay && cargo build --release && sudo systemctl restart hollow-relay"
+# Deploy relay server updates to VPS (uWebSockets C++ relay)
+scp relay-uws/src/*.cpp relay-uws/src/*.h relay-uws/CMakeLists.txt ubuntu@141.227.186.209:/home/ubuntu/relay-uws/src/
+ssh ubuntu@141.227.186.209 "cd /home/ubuntu/relay-uws/build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j2 && sudo setcap cap_net_bind_service=+ep hollow-relay && sudo systemctl restart hollow-relay"
 ```
 
 ## Hollow Design System (Phase 2.75)
@@ -107,7 +108,7 @@ All UI uses custom Hollow widgets — no Material defaults.
 - **License key system:** Relay loads `keys.json` (enabled toggle + key list), validates during WS auth, hot-reloads every 30s with active connection revocation. App checks `/relay-status` on startup, shows key dialog if required, caches key in SQLCipher via `set_license_key()` FFI.
 - **Window title bar:** `WindowTitleBar` lives in `MaterialApp.builder` (above Navigator), NOT inside `HollowShell`. Navigator child wrapped in `ClipRect` to prevent `BackdropFilter` blur bleed. Never move the title bar back inside the shell.
 - **Logging:** `hollow_log!` macro → stderr + `hollow_debug.log` (release-safe, 10MB rotation). `hollow_crash.log` captures Flutter/platform errors (5MB rotation).
-- **Relay:** OVH VPS 141.227.186.209, Nginx TLS on 443 → Axum HTTP+WS on 127.0.0.1:8080. Domain: `relay.anonlisten.com`.
+- **Relay:** OVH VPS 141.227.186.209, uWebSockets C++ relay (`relay-uws/`) with native OpenSSL TLS on port 443. Nginx removed. Domain: `relay.anonlisten.com`. ~14.5 KB/conn, ~480k capacity on 8 GB VPS.
 - **TURN:** Coturn on VPS (141.227.186.209:3478 UDP/TCP + 5349 TLS). Relay `/turn-credentials` generates HMAC-SHA1 creds. `IceConfigProvider` in Dart fetches + auto-refreshes every 50 min.
 - **Storage layout:**
   - `~/.hollow/files/{file_id}.{ext}` — full-replication pool (DMs, <6 servers, all images). Persistent.

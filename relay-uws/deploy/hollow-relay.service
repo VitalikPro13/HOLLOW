@@ -1,0 +1,22 @@
+[Unit]
+Description=Hollow WebSocket Relay (uWebSockets)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/relay
+ExecStart=/home/ubuntu/relay-uws/build/hollow-relay \
+    --port 443 \
+    --public-ip 141.227.186.209 \
+    --domain relay.anonlisten.com \
+    --keys-file /home/ubuntu/relay/keys.json \
+    --cert-file /etc/letsencrypt/live/relay.anonlisten.com/fullchain.pem \
+    --key-file /etc/letsencrypt/live/relay.anonlisten.com/privkey.pem
+Environment=TURN_SECRET=0b934c02cd1c7f7cae7901e7e781590cbc96bd0e283dc84ccde45a63f9c825e5
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

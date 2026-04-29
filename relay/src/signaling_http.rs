@@ -544,7 +544,24 @@ pub async fn run_signaling_http(
     spawn_cleanup_task(rooms.clone());
 
     let app = build_router(rooms, ws_state, license);
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+
+    // Bind with tuned TCP socket buffers (8 KB recv/send).
+    // Accepted connections inherit these. Kernel doubles to ~16 KB.
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    let _ = socket.set_recv_buffer_size(8192);
+    let _ = socket.set_send_buffer_size(8192);
+    let addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse()?;
+    socket.bind(&addr.into())?;
+    socket.listen(4096)?;
+    let std_listener: std::net::TcpListener = socket.into();
+    let listener = tokio::net::TcpListener::from_std(std_listener)?;
+
     tracing::info!("Signaling + WebSocket server listening on port {port}");
     axum::serve(listener, app).await?;
     Ok(())

@@ -1908,57 +1908,52 @@ Tested at 10,000 concurrent loopback connections on current OVH VPS (4 vCPU / 8 
 - **~50 bytes/sec** sustained per idle connection (auth keepalive + occasional CRDT chatter)
 - **CPU:** 800 auths/sec per thread (3200/sec on 4 threads). CPU is ~13× over-provisioned vs RAM.
 
-**Current configuration (2026-04-29):** Nginx TLS on 443 → Axum relay on 8080. Baseline: ~186 KB/conn total system cost (relay 133 KB + Nginx 53 KB).
+**Current configuration (2026-04-29):** uWebSockets C++ relay with native OpenSSL TLS on port 443. Nginx removed. Measured: **~14.5 KB/conn** total system cost (with `SSL_MODE_RELEASE_BUFFERS`). Previous: Nginx TLS on 443 → Axum relay on 8080 = ~175 KB/conn (12× worse).
 
 Jemalloc tested and rejected (2026-04-28): ~149 KB/conn (worse due to arena pre-allocation overhead for long-lived connections).
 
-**Current capacity (186 KB/conn baseline, before relay-side optimizations):**
+**Current capacity (14.5 KB/conn, after Step 5 uWebSockets rewrite + SSL_MODE_RELEASE_BUFFERS):**
 | Box | Connections | $/mo |
 |---|---:|---:|
-| OVH VPS 8 GB (current) | **~37k** | $8.35 |
-| OVH VPS 12 GB | **~58k** | $12.75 |
-| 10× OVH VPS 12 GB swarm | **~580k aggregate** | $127.50 |
+| OVH VPS 8 GB (current) | **~480k** | $8.35 |
+| OVH VPS 12 GB | **~750k** | $12.75 |
+| 10× OVH VPS 12 GB swarm | **~7.5M aggregate** | $127.50 |
 
-Per-user cost: ~$0.000022/user/mo on 12 GB OVH at scale. Bandwidth ceiling (~50 B/sec × 58k = 2.9 MB/sec = 23 Mbps) is well under 1 Gbps.
+Per-user cost: ~$0.0000017/user/mo on 12 GB OVH at scale. Bandwidth ceiling (~50 B/sec × 750k = 37.5 MB/sec = 300 Mbps) is under 1 Gbps.
+
+Previous capacity (175 KB/conn, Steps 1-3): 40k / 62k / 620k. Step 5 achieved 12× density improvement.
 
 ---
 
 RELAY OPTIMIZATION PIPELINE (ordered — each step builds on the previous):
 
-- [ ] **Step 1: Bounded mpsc channels (stability fix).** Current code uses `mpsc::unbounded_channel::<Message>` for each peer’s outbound queue. If a client receives slowly (mobile on bad Wi-Fi, paused tab), broadcast traffic from active rooms piles up indefinitely — worst case MBs per stalled peer under fanout from a 50-person room. Switch to `mpsc::channel(32)`. When the channel fills, drop the slow peer’s WS connection (forces resync via gossip/CRDT on reconnect — resync is cheap, lying to the client about delivered state isn’t). Caps worst-case per-conn memory at ~16 KB even under broadcast storms. Also protects against malicious slow-loris-style buffer-bloat attacks. **Do this first — it’s a correctness/safety fix, not just an optimization.** Effort: ~1 hour.
+- [x] **Step 1: Bounded mpsc channels (stability fix, 2026-04-29).** Switched from `mpsc::unbounded_channel()` to `mpsc::channel(32)` with `try_send()`. Caps worst-case per-conn memory under broadcast storms. Slow consumers get dropped; client auto-resyncs via CRDT/gossip on reconnect.
 
-- [ ] **Step 2: TCP socket buffer tuning.** Listener socket sets 8 KB recv/send buffers via `socket2`; accepted connections inherit them. Kernel doubles to 16 KB. Expected ~2-4 KB/conn savings. Effort: ~30 min.
+- [x] **Step 2: TCP socket buffer tuning (2026-04-29).** Listener socket sets 8 KB recv/send buffers via `socket2`; accepted connections inherit them. Kernel doubles to ~16 KB.
 
-- [ ] **Step 3: Nginx tuning (reduce proxy overhead).** Nginx currently adds ~53 KB/conn overhead from default proxy buffering and TCP buffers. Optimize Nginx config for pure TLS-termination-only mode:
-    - `proxy_buffering off` — eliminates per-connection proxy buffer allocation
-    - `proxy_buffer_size 1k` — minimal header-only buffer
-    - `proxy_request_buffering off` — stream requests directly
-    - Tune `proxy_read_timeout`/`proxy_send_timeout` for WebSocket long-poll
-    - TCP buffer tuning on proxy upstream sockets
-    - Strip unnecessary Nginx modules if building from source
-    Target: reduce Nginx per-conn overhead from ~53 KB to ~15-25 KB. **Keep Nginx for TLS — do NOT attempt native TLS in the relay.**
+- [x] **Step 3: Nginx tuning (2026-04-29).** Reduced Nginx per-conn overhead from ~53 KB to ~39 KB:
+    - `proxy_buffering off`, `proxy_buffer_size 1k`, `proxy_request_buffering off` on `/ws`
+    - `ssl_session_cache shared:SSL:10m`, `ssl_session_timeout 1h`
+    - `gzip off`, `reset_timedout_connection on`
+    **Nginx remains required for TLS — do NOT attempt native TLS in the relay.**
 
-- [ ] **Step 4: Raw event loop rewrite (mio + custom WS parser, PLAINTEXT ONLY).** Replace the Axum/tokio/tungstenite relay with raw `mio` epoll + custom WS frame parser + slab-allocated connections. **Critical: the relay handles ONLY plaintext WebSocket (no TLS). Nginx remains the TLS terminator.** This avoids the rustls I/O complexity that caused the 2026-04-29 failed rewrite attempt.
-    **Architecture:**
-    - Single-threaded `mio::Poll` event loop (no tokio, no per-connection task allocation)
-    - `Slab<Connection>` for O(1) connection lookup by mio Token (no HashMap)
-    - Shared read buffer (one 64 KB buffer, reused each iteration — safe because single-threaded)
-    - Custom WS frame parser: relay only needs to read frame headers + forward payload bytes as-is
-    - Direct write to peer write buffers for broadcast (no mpsc channels, no cloning)
-    - Backpressure: if a connection’s write buffer exceeds 64 KB, disconnect (same policy as bounded channels)
-    - Plain TCP read/write only — no rustls, no TLS state, no ciphertext flush complexity
-    **Expected per-conn cost (relay process only): ~2-4 KB.** Combined with tuned Nginx (~15-25 KB): **~20-30 KB/conn total system cost.**
+- [x] **Step 4: Raw mio event loop rewrite — ATTEMPTED AND REVERTED (2026-04-29).** Full relay rewrite with `mio::Poll` + `Slab<Connection>` + custom WS frame parser, plaintext only behind Nginx. The WS handshake, auth, room routing, and binary protocol all worked correctly. However, the single-threaded event loop could not match tokio’s concurrent per-connection write draining:
+    - **Write buffer starvation:** In tokio, each connection has its own async task that independently flushes its socket. In mio’s single-threaded loop, while processing incoming messages from peer A, peer B’s write buffer fills up with queued broadcasts but never gets flushed until the next poll iteration. Under burst traffic (reconnect → room re-join → sync), write buffers overflow within ~1 second.
+    - **Eager flushing attempted:** Added inline `write()` calls after every queue operation. Still overflowed because a single `write()` may only drain a few KB (WouldBlock), while the burst queues tens of KB per frame across multiple rooms.
+    - **Conclusion:** A single-threaded relay that handles both reads AND writes in one loop fundamentally cannot match the concurrent write-drain behavior of tokio’s per-connection tasks. The mio approach would need multi-threaded work-stealing or dedicated writer threads — at which point you’re reimplementing tokio. **Do not re-attempt a from-scratch Rust WS relay.**
+
+- [x] **Step 5: uWebSockets (C++) relay rewrite (2026-04-29).** Replaced the entire Axum/tokio/tungstenite + Nginx stack with a standalone C++ binary using [uWebSockets](https://github.com/uNetworking/uWebSockets). Native TLS via OpenSSL — Nginx completely eliminated. Ed25519 verification via libsodium, HMAC-SHA1 TURN creds via OpenSSL, JSON via nlohmann/json.
+    **Architecture:** `relay-uws/` — standalone C++ binary (636 KB, 1,377 lines). Same wire protocol (JSON text + binary 0x01/0x02). Same HTTP endpoints. Same auth. Zero client code changes. Single-threaded epoll event loop. Backpressure via `getBufferedAmount()` (64 KB soft cap) replaces Rust’s `mpsc::channel(32)`.
+    **Measured per-conn cost: ~14.5 KB total** (with `ssl_prefer_low_memory_usage = 1` → `SSL_MODE_RELEASE_BUFFERS`).
+    Load tested at 10,000 concurrent connections on OVH VPS (4 vCPU / 8 GB). Zero handshake failures, zero auth failures. RSS grew from 10.5 MB (idle) to 155 MB (10k conns). Stable with no memory growth during 30s hold.
     | Box | Connections | $/mo |
     |---|---:|---:|
-    | OVH VPS 8 GB | **~230k-350k** | $8.35 |
-    | OVH VPS 12 GB | **~370k-550k** | $12.75 |
-    | 10× OVH VPS 12 GB swarm | **~3.7M-5.5M aggregate** | $127.50 |
-    Competitive with uWebSockets (C++, ~15-20 KB/conn) in total system cost — in memory-safe Rust + battle-tested Nginx TLS. Effort: 1-2 sessions. No client code changes needed — same wire protocol, same WSS connections via Nginx.
-    **Lessons from 2026-04-29 failed attempt (native TLS + mio):** A full mio rewrite was attempted with in-process rustls TLS. The plaintext WS routing logic worked correctly, but driving rustls manually over non-blocking sockets caused: (1) one-way message delivery due to TLS writer not flushing plaintext→ciphertext, (2) connection drops from mishandled TLS EOF vs. WouldBlock semantics, (3) intermittent slow TLS handshakes blocking the single-threaded loop. All bugs were TLS-layer specific. The fix: keep Nginx for TLS (battle-tested, 20+ years of production hardening) and only rewrite the plaintext relay logic. Plain TCP `read()`/`write()` in mio is trivial compared to the rustls state machine.
+    | OVH VPS 8 GB (current) | **~480k** | $8.35 |
+    | OVH VPS 12 GB | **~750k** | $12.75 |
+    | 10× OVH VPS 12 GB swarm | **~7.5M aggregate** | $127.50 |
+    **Improvement over previous stack:** 175 KB/conn → 14.5 KB/conn (12× density). Nginx removal freed ~400 MB idle RAM. Relay idle RSS: 10.5 MB (was 5.2 MB relay + 410 MB Nginx = 415 MB). Certbot switched to `--standalone` with deploy hook to restart relay on cert renewal.
 
-- [ ] **Step 5: Re-test with real numbers.** Run loadtest tool against the Nginx + raw-mio-relay stack. Measure total per-conn RSS (Nginx + relay combined). Target: <30 KB/conn. Verify all Hollow app functionality: DMs, server channels, voice signaling, file transfer, CRDT sync, vault shards.
-
-- [ ] **Step 6 (future): WebSocket permessage-deflate compression (RFC 7692).** Negotiate compression during WS handshake. The relay operates in **passthrough mode** — forward compressed frames without decompressing/recompressing (preserve `RSV1` bit). All CPU cost on clients (~10-50 µs/msg), zero on relay. Expected: ~50-60% wire bandwidth reduction. RAM/conn unchanged. Becomes important post-raw-rewrite when the bottleneck shifts from RAM to bandwidth at ~300k+ conns on a single box.
+- [ ] **Step 6 (future): WebSocket permessage-deflate compression (RFC 7692).** Negotiate compression during WS handshake. The relay operates in **passthrough mode** — forward compressed frames without decompressing/recompressing (preserve `RSV1` bit). All CPU cost on clients (~10-50 µs/msg), zero on relay. Expected: ~50-60% wire bandwidth reduction. RAM/conn unchanged.
 
 - [ ] **Step 7 (future): Binary message framing for text/MLS.** Replace JSON `Msg`/`Direct` envelopes with compact binary protocol (1-byte type tag + length-prefixed fields). Heartbeats shrink from ~50-byte JSON to 1 byte. Already partially done — `0x01` (binary broadcast) and `0x02` (binary direct) prefixes exist for file/voice traffic. Expected: ~30% additional bandwidth savings on top of compression. **Requires coordinated client+relay rollout with version negotiation** — plan as a wire-protocol bump. Can be built into the raw rewrite from the start.
 
@@ -1988,10 +1983,10 @@ SWARM IMPLEMENTATION CHECKLIST:
     - [ ] **Health probes.** Already have `GET /health`. Add mesh connectivity status (how many peer nodes connected) to `/server-stats` for K8s readiness checks and monitoring.
 
 SCALING ROADMAP:
-- **Phase A — current → ~25k concurrent users:** stay on the $8.35 VPS. Currently using <5% capacity. After Nginx tuning + raw relay rewrite: single box handles 230k-350k. Don’t upgrade.
-- **Phase B — 25k → 100k concurrent:** add a second OVH VPS in a different region for geo-redundancy + failover. ~$17-25/mo. Requires: inter-relay mesh working. After raw rewrite, a single 12 GB VPS handles 370k-550k — Phase B may not need a second box at all.
-- **Phase C — 100k → 500k concurrent:** 2-5 OVH VPSes across EU/NA/APAC regions. ~$25-64/mo. Coturn on a separate box if TURN traffic is measurable.
-- **Phase D — 500k+ concurrent:** grow the swarm. 10-20 OVH VPSes. ~$127-255/mo. Containerize + move to OVH managed K8s (free control plane) for orchestration.
+- **Phase A — current → ~200k concurrent users:** stay on the $8.35 VPS. Current capacity ~480k (14.5 KB/conn × 8 GB). Don’t upgrade.
+- **Phase B — 200k → 500k concurrent:** upgrade to OVH VPS 12 GB ($12.75/mo) OR add a second 8 GB VPS for geo-redundancy. Requires: inter-relay mesh working.
+- **Phase C — 500k → 2M concurrent:** 3-5 OVH VPSes across EU/NA/APAC regions. ~$25-64/mo. Coturn on a separate box if TURN traffic is measurable.
+- **Phase D — 2M+ concurrent:** grow the swarm. 5-10 OVH VPSes. ~$64-127/mo. Containerize + move to OVH managed K8s (free control plane) for orchestration.
 
 ---
 
@@ -2003,7 +1998,7 @@ SCALING ROADMAP:
     - **Kernel `net.core.somaxconn`:** default 4096. Fine for expected ramp rates; raise to 65535 if TCP connect storms observed.
     - **Swap:** 0 (OVH default). If relay OOMs, it OOMs hard. Consider a small 2 GB swapfile as safety net on boxes expected to run near capacity.
     - **Load-gen client side** (for re-tests): `ulimit -n 65536` before running load-gen binary (default FD limit caps at ~1000 connections). Windows: `netsh int ipv4 set dynamicport tcp start=10000 num=55000`.
-    - **Nginx: REQUIRED for TLS termination.** Do NOT remove or replace with native TLS — see Step 4 lessons learned (2026-04-29). Nginx on 443, relay on 8080.
+    - **~~Nginx~~ REMOVED (2026-04-29).** uWebSockets C++ relay handles TLS natively via OpenSSL on port 443. Nginx disabled. Certbot uses `--standalone` with deploy hook (`/etc/letsencrypt/renewal-hooks/deploy/reload-relay.sh`) to restart relay on cert renewal.
 - [ ] **Voice/video call STUN priority over TURN.** Audio/video calls sometimes pick TURN (relay) over STUN (direct P2P) while data channels, screen share, and Share consistently get STUN on the same networks. Root cause identified: `voice_service.dart` calls `await getUserMedia()` (100-500ms on Windows) between `createPeerConnection()` and `createOffer()`, blocking the critical ICE gathering window. By the time the offer fires at ~400ms, the TURN relay candidate has already won the connectivity check race. Every other connection type avoids this — voice_channel_service pre-captures audio once at channel entry, screen_share_service captures before creating the PC, data channels have no getUserMedia at all. Regular home networks (non-symmetric NAT, no CGNAT) support STUN ~100% of the time — TURN should be a last resort, not a race winner.
     **Fix plan (three layers, apply all):**
     1. **Pre-capture audio in voice_service.dart** (~10-line change): Move `getUserMedia(audio)` call **before** `createPeerConnection()` in both `createOffer()` (line ~100) and `handleOffer()` (line ~142). Store the MediaStream, then `addTrack()` immediately after PC creation — same pattern voice_channel_service already uses. This keeps the PC→offer window under ~15ms, matching data channel timing.
