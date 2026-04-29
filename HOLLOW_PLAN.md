@@ -1889,89 +1889,20 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [ ] **Theme system** — structured theme manifest (colors, fonts, spacing, radii, optional cosmetics like profile decorations/nickname accents), `.hollow-theme` bundle format (manifest + asset files, signed for integrity), in-app import/export UI with live preview, curated community gallery repo on GitHub. Per-user local only — themes never travel with messages. Data-only schema (no HTML/CSS/JS, no arbitrary code execution) so community-shared themes are provably safe to apply. Absorbs the old "hearts/sparkles on profiles + custom fonts" idea as one set of knobs among many. Build on existing `HollowTheme` ThemeExtension by making it loadable from a manifest instead of hardcoded.
 
 📋 INFRASTRUCTURE MASTER PLAN: "The Swarm"
+Core Philosophy:
+Abandon vertical scaling (buying massive $3,000/mo enterprise servers). Embrace horizontal scaling ("The Swarm"). By utilizing cheap, unmetered VPS instances powered by modern silicon, we can achieve enterprise-grade bandwidth and compute for pennies on the dollar.
 
-CORE PHILOSOPHY:
-Horizontal scaling with identical cheap VPS instances. No vertical scaling, no mega-servers, no single points of failure. A swarm of small OVH boxes combines CPU, RAM, and bandwidth into one logical network — mirrors Hollow’s own distributed architecture. Every box runs the same self-contained binary, same config. Need more capacity? Add another box. Box dies? Clients auto-failover to the next one.
+The Hardware Arbitrage: OVH’s $12/mo (or ~$10/mo annually) 1 Gbps unmetered VPSs (4 vCPU AMD EPYC Genoa / 12 GB RAM). With all relay optimizations applied, one VPS holds ~300k–400k concurrent users. 100x VPSs = $1,000/mo = 100 Gbps + 400 cores = ~40M users.
 
-THE HARDWARE: OVH unmetered VPS fleet. Current box: 4 vCPU AMD EPYC Genoa / 8 GB / 400 Mbps at $8.35/mo. Upgrade tier: 4 vCPU / 12 GB / 1 Gbps at $12.75/mo (~$10/mo annually). These are the only two SKUs that matter. N identical boxes = N× bandwidth + N× RAM. 10 boxes at $12.75 = $127.50/mo = 10 Gbps aggregate + 120 GB aggregate RAM. 50 boxes = $637/mo = 50 Gbps + 600 GB RAM. No Cloudflare, no load balancers, no third-party anything between users and the relay.
+Two layers make multiple boxes act as one app: (1) Client-side relay selection — the client pings all relays, picks the fastest with lowest load, caches the choice. No Cloudflare, no third-party DNS routing, no load balancers. (2) Rust inter-relay gossip mesh — relays forward messages between nodes so users on Node #14 can talk to users on Node #89. Orchestration (Kubernetes) deferred until 10+ nodes — manual deploy is fine for 2-5 boxes. OVH offers free managed K8s (100 nodes, 99.5% SLA) when the time comes.
 
-DNS: Hostinger (already hosting anonlisten.com). One A record per relay node. Round-robin distributes initial connections; client-side ping+load logic handles real routing after that.
+DNS: Hostinger (already hosting anonlisten.com). Add one A record per relay node. Round-robin distributes initial connections; the client’s own ping+load logic handles the real routing. No Cloudflare dependency, no load balancer, no third-party anything between users and the relay.
 
-STUN VS TURN BANDWIDTH REALITY: ~85-90% of home users connect via STUN (direct P2P) — zero bandwidth cost to us. Only ~10-15% need TURN (corporate/university symmetric NATs, some mobile carriers). At 100k concurrent users: ~5% in voice/video = 5,000 calls, ~10-15% need TURN = ~500-750 relayed calls, mostly audio (~100 kbps) = ~75 Mbps. Even 75 simultaneous 1080p screen shares through TURN = ~450 Mbps. Total worst-case TURN load for 100k users: ~525 Mbps — one $10 VPS handles it. The "bandwidth eating everything" fear only applies if ALL traffic goes through the relay, which it doesn’t — WebRTC is P2P by design.
-
----
-
-MEASURED BASELINE (2026-04-15, pre-optimization, Nginx TLS → Axum relay):
-Tested at 10,000 concurrent loopback connections on current OVH VPS (4 vCPU / 8 GB / 400 Mbps).
-- **133 KB RSS per connection** at the relay process alone
-- **186 KB per connection** through the full Nginx → relay path (+53 KB Nginx proxy overhead)
-- **~50 bytes/sec** sustained per idle connection (auth keepalive + occasional CRDT chatter)
-- **CPU:** 800 auths/sec per thread (3200/sec on 4 threads). CPU is ~13× over-provisioned vs RAM.
-
-MEASURED POST-OPTIMIZATION (2026-04-28, after Steps 1-3: bounded channels + TCP tuning + native TLS):
-
-Remote test (1,000 real TLS connections from laptop over internet, final config): **~142 KB/conn** relay RSS. TCP buffers: `rb16384` (8 KB setting, kernel doubles). Native TLS via `axum-server` + `tokio-rustls`. Nginx fully removed.
-
-Loopback test (10k conns): **137 KB/conn** — loopback skips real TCP buffer allocation, measures Rust process overhead only.
-
-Jemalloc tested and rejected: ~149 KB/conn (worse due to arena pre-allocation overhead for long-lived connections).
-
-**Before vs After (per-connection total system cost):**
-| Config | Per-conn cost | Breakdown |
-|---|---|---|
-| Old (Nginx TLS + relay) | ~405 KB | 139 KB relay + 213 KB Nginx TCP buffers + 53 KB proxy overhead |
-| Current (native TLS, all optimizations) | ~142 KB | ~130 KB Rust process + ~12 KB tuned TCP buffers + TLS state |
-| **Improvement** | **2.85× reduction** | Nginx eliminated, TCP buffers reduced from 213 KB → 16 KB |
-
-**Current measured capacity (142 KB/conn):**
-| Box | Connections | $/mo |
-|---|---:|---:|
-| OVH VPS 8 GB (current) | **~48k** | $8.35 |
-| OVH VPS 12 GB | **~76k** | $12.75 |
-| 10× OVH VPS 12 GB swarm | **~760k aggregate** | $127.50 |
-| 50× OVH VPS 12 GB swarm | **~3.8M aggregate** | $637.50 |
-
-Per-user cost: ~$0.000017/user/mo on 12 GB OVH at scale. Bandwidth ceiling (~50 B/sec × 76k = 3.8 MB/sec = 30 Mbps) is well under 1 Gbps.
-
-**The ~142 KB/conn floor is tokio + tungstenite + rustls overhead.** To go lower requires replacing these with raw primitives — see Step 5 below.
-
----
-
-RELAY OPTIMIZATION PIPELINE (ordered — each step builds on the previous):
-
-- [x] **Step 1: Bounded mpsc channels (stability fix).** ✅ Deployed 2026-04-28. Current code uses `mpsc::unbounded_channel::<Message>` for each peer’s outbound queue. If a client receives slowly (mobile on bad Wi-Fi, paused tab), broadcast traffic from active rooms piles up indefinitely — worst case MBs per stalled peer under fanout from a 50-person room. Switch to `mpsc::channel(64)`. When the channel fills, drop the slow peer’s WS connection (forces resync via gossip/CRDT on reconnect — resync is cheap, lying to the client about delivered state isn’t). Caps worst-case per-conn memory at ~32 KB even under broadcast storms. Also protects against malicious slow-loris-style buffer-bloat attacks. **Do this first — it’s a correctness/safety fix, not just an optimization.** Effort: ~2 hours.
-
-- [x] **Step 2: TCP socket buffer tuning.** ✅ Deployed 2026-04-28, refined to 8 KB. Listener socket sets 8 KB recv/send buffers via `socket2`; accepted connections inherit them. Kernel doubles to 16 KB (`ss -m` shows `rb16384,tb16384`). Measured ~2 KB/conn savings vs 16 KB setting on real internet connections.
-
-- [x] **Step 3: Native TLS migration (drop Nginx).** ✅ Deployed 2026-04-28. TLS terminated in-process via `axum-server` + `tokio-rustls`. Certbot still manages Let’s Encrypt certs (standalone mode on port 80); relay hot-reloads certs every 6 hours via `RustlsConfig::reload_from_pem_file`. Nginx stopped and disabled. Relay binds port 443 directly via `CAP_NET_BIND_SERVICE`. `--no-tls` flag available for local testing. Eliminated 53 KB/conn Nginx overhead. Single self-contained binary.
-
-- [x] **Step 4: Re-test with real numbers.** ✅ Completed 2026-04-28. Ran both loopback (10k conns) and remote (914 real TLS conns from laptop) tests. Results in the "Measured Post-Optimization" table above. The original extrapolation of 250k-350k conns per 8 GB VPS was wrong — it assumed TCP buffer tuning would reduce per-conn Rust process overhead, but the 137 KB/conn is dominated by Rust runtime (tokio task, WS codec, channel, room state), not TCP buffers. Actual measured: **144 KB/conn on real internet TLS connections**, giving **~48k conns on the 8 GB VPS**. Still a 2.8× improvement over the Nginx setup (~405 KB/conn → 144 KB/conn).
-
-- [ ] **Step 5: Raw event loop rewrite (mio + custom WS parser).** The current 142 KB/conn is dominated by tokio runtime overhead (~8-16 KB/task), tungstenite WS codec (~8-12 KB), and allocator fragmentation. Replace the entire relay networking stack with raw `mio` epoll + a custom zero-copy WS frame parser + slab-allocated connection state + `rustls` directly. Target: **~15-25 KB/conn with TLS**. This is a full relay rewrite preserving all existing logic (auth, rooms, broadcast, binary frames, rate limiting, license keys, TURN creds, health/stats endpoints) on a new foundation.
-    **Architecture:**
-    - Single-threaded `mio::Poll` event loop (no tokio, no per-connection task allocation)
-    - `Slab<Connection>` for O(1) connection lookup by mio Token (no HashMap)
-    - Pre-allocated buffer pool: reusable read/write buffers instead of per-conn allocations
-    - Custom WS frame parser: relay only needs to read frame headers + forward payload bytes as-is — no full WS codec needed
-    - `rustls::ServerConnection` per peer (~8-12 KB, irreducible — this is the TLS session state)
-    - Backpressure: if a connection's write buffer exceeds threshold, disconnect (same policy as current bounded channels)
-    **Expected capacity (15-25 KB/conn):**
-    | Box | Connections | $/mo |
-    |---|---:|---:|
-    | OVH VPS 8 GB | **~280k-450k** | $8.35 |
-    | OVH VPS 12 GB | **~440k-720k** | $12.75 |
-    | 10× OVH VPS 12 GB swarm | **~4.4M-7.2M aggregate** | $127.50 |
-    This puts Hollow's relay in the same performance tier as uWebSockets (C++, the industry gold standard at ~15-20 KB/conn with TLS) — but in memory-safe Rust. Effort: 2-3 sessions. No changes to client code needed — same wire protocol, same WSS connections.
-
-- [ ] **Step 6 (future): WebSocket permessage-deflate compression (RFC 7692).** Negotiate compression during WS handshake. The relay operates in **passthrough mode** — forward compressed frames without decompressing/recompressing (preserve `RSV1` bit). All CPU cost on clients (~10-50 µs/msg), zero on relay. Expected: ~50-60% wire bandwidth reduction. RAM/conn unchanged. Becomes important post-raw-rewrite when the bottleneck shifts from RAM to bandwidth at ~300k+ conns on a single box.
-
-- [ ] **Step 7 (future): Binary message framing for text/MLS.** Replace JSON `Msg`/`Direct` envelopes with compact binary protocol (1-byte type tag + length-prefixed fields). Heartbeats shrink from ~50-byte JSON to 1 byte. Already partially done — `0x01` (binary broadcast) and `0x02` (binary direct) prefixes exist for file/voice traffic. Expected: ~30% additional bandwidth savings on top of compression. **Requires coordinated client+relay rollout with version negotiation** — plan as a wire-protocol bump. Can be built into the raw rewrite from the start.
-
----
+STUN vs TURN bandwidth reality: ~85-90% of home users connect via STUN (direct P2P) — zero bandwidth cost to us. Only ~10-15% need TURN (corporate/university symmetric NATs, some mobile carriers). At 100k concurrent users: ~5% in voice/video = 5,000 calls, ~10-15% need TURN = ~500-750 relayed calls, mostly audio (~100 kbps) = ~75 Mbps. Even 75 simultaneous 1080p screen shares through TURN = ~450 Mbps. Total worst-case TURN load for 100k users: ~525 Mbps — one $10 VPS handles it. The "bandwidth eating everything" fear only applies if ALL traffic goes through the relay, which it doesn’t — WebRTC is P2P by design.
 
 SWARM IMPLEMENTATION CHECKLIST:
 
-- [ ] **Inter-relay gossip mesh (the core engineering work).** Each relay node maintains persistent TCP connections to every other relay node. When a `Msg` or `Direct` or binary frame arrives for a room, `ws_router.rs` checks if any room members are on remote nodes and forwards via the mesh. Requires:
+- [ ] **Inter-relay gossip mesh (the only hard engineering work).** Each relay node maintains persistent TCP connections to every other relay node. When a `Msg` or `Direct` or binary frame arrives for a room, `ws_router.rs` checks if any room members are on remote nodes and forwards via the mesh. Requires:
     - [ ] **Relay discovery config.** Each relay gets a `--peers` CLI arg or reads a `peers.json` file listing all other relay endpoints (IP:port pairs for the internal mesh, NOT the public WSS port). Hot-reload on file change so new nodes can join without restarting existing ones.
     - [ ] **Internal mesh connections.** On startup, each relay connects to all peers via persistent TCP (or internal WS) using `tokio`. Reconnect with exponential backoff on drop. Authenticate via shared secret or mutual TLS to prevent rogue nodes. At 100 nodes this is 99 connections per node — trivial.
     - [ ] **Room membership sync.** Each node tracks which peers are local vs. remote. On `Join`/`Leave`, broadcast membership deltas to all mesh peers: `{event: "join"|"leave", room, peer_id, node_id}`. Each node maintains a `remote_members: HashMap<room, HashMap<peer_id, node_id>>` so it knows where to forward.
@@ -1985,30 +1916,58 @@ SWARM IMPLEMENTATION CHECKLIST:
     - [ ] **Load reporting.** Extend `/health` or `/server-stats` to include current connection count and a "capacity percentage" so clients can avoid full relays. If a relay is at >90% capacity, client skips it and picks the next best.
     - [ ] **Failover.** If the current relay drops and reconnection fails after N attempts, re-ping the full list and pick the next best. Room membership and message state resync via existing gossip/CRDT on the new relay — no special migration needed.
     - [ ] **No relay pinning required.** Because the inter-relay mesh handles forwarding, a user can be on any relay and still reach any room. The client doesn’t need to know which relay other users are on.
-- [ ] **Coturn isolation.** TURN traffic (voice/video relay for peers behind symmetric NATs) competes for the same pipe as signaling. Deploy Coturn on a separate dedicated OVH VPS ($8-12/mo) — isolates bandwidth contention, separates abuse-complaint blast radius, allows independent scaling of media vs. signaling. Co-locating is fine while user count is low; separate once TURN bandwidth becomes measurable.
+- [ ] **Coturn isolation.** TURN traffic (voice/video relay for peers behind symmetric NATs) competes for the same 1 Gbps pipe as signaling. Deploy Coturn on separate dedicated VPSes ($10/mo each) — isolates bandwidth contention, separates abuse-complaint blast radius, and allows independent scaling of media vs. signaling. Co-locating is fine while user count is low; separate once TURN bandwidth becomes measurable.
 - [ ] **Containerization + Kubernetes (deferred to 10+ nodes).** Not needed for 2-5 boxes — manual `scp` + `cargo build` + `systemctl restart` works fine. When the time comes:
-    - [ ] **Dockerfile.** Multi-stage build: Rust builder stage (`cargo build --release`), minimal runtime stage (debian-slim or distroless). Expose port 443. Mount `keys.json`, `peers.json`, and TLS cert dir as volumes. Env vars: `TURN_SECRET`, `RUST_LOG`, `PUBLIC_IP`.
-    - [ ] **OVH Managed Kubernetes (free).** Free control plane, up to 100 nodes, 99.5% SLA. Only pay for the VPS worker nodes themselves.
+    - [ ] **Dockerfile.** Multi-stage build: Rust builder stage (`cargo build --release`), minimal runtime stage (debian-slim or distroless). Expose port 8080. Mount `keys.json` and `peers.json` as volumes. Env vars: `TURN_SECRET`, `RUST_LOG`, `PUBLIC_IP`.
+    - [ ] **OVH Managed Kubernetes (free).** Free control plane, up to 100 nodes, 99.5% SLA. Only pay for the VPS worker nodes themselves. No reason to self-host k3s — OVH’s managed offering costs nothing.
     - [ ] **K8s manifests.** Deployment + Service + ConfigMap. Rolling update strategy with `maxUnavailable: 1` so the mesh never loses more than one node at a time.
     - [ ] **Health probes.** Already have `GET /health`. Add mesh connectivity status (how many peer nodes connected) to `/server-stats` for K8s readiness checks and monitoring.
 
-SCALING ROADMAP:
-- **Phase A — current → ~25k concurrent users:** stay on the $8.35 VPS. Currently using <5% capacity (at 142 KB/conn — even less after raw rewrite). Don’t upgrade.
-- **Phase B — 25k → 100k concurrent:** add a second OVH VPS in a different region for geo-redundancy + failover. ~$17-25/mo. Requires: inter-relay mesh working. After raw rewrite, a single 12 GB VPS handles 440k-720k — Phase B may not need a second box at all.
-- **Phase C — 100k → 500k concurrent:** 2-5 OVH VPSes across EU/NA/APAC regions. ~$25-64/mo. Coturn on a separate box if TURN traffic is measurable.
-- **Phase D — 500k+ concurrent:** grow the swarm. 10-20 OVH VPSes. ~$127-255/mo. Containerize + move to OVH managed K8s (free control plane) for orchestration.
+EXECUTION ROADMAP:
 
----
+Phase 1 — Proof of Concept ($24/mo): Rent a second $12 OVH VPS. Build and verify the inter-relay gossip mesh. Success = a message sent by a user on Node A is delivered to a user on Node B. Add client-side relay list + ping selection. This is the only real engineering work.
 
-- [ ] **VPS tunable limits checklist.** Re-verify and set these on any new box before putting it into service:
-    - **systemd `hollow-relay.service` `LimitNOFILE`:** raise to 1048576. Default 65536 caps at ~32k connections (2 FDs each for TLS + internal state). Must be raised before any high-connection-count deployment.
-    - **systemd `hollow-relay.service` `MemoryMax`:** unset (infinity). Fine — no cap needed.
-    - **Kernel `fs.file-max`:** effectively unlimited on modern kernels. Verify with `sysctl fs.file-max`.
-    - **Kernel `net.ipv4.ip_local_port_range`:** default 32768-60999 (~28k ephemeral ports). Raise to 10000-65535 when inter-relay gossip mesh is deployed (relay becomes an outbound client to other relays).
-    - **Kernel `net.core.somaxconn`:** default 4096. Fine for expected ramp rates; raise to 65535 if TCP connect storms observed.
-    - **Swap:** 0 (OVH default). If relay OOMs, it OOMs hard. Consider a small 2 GB swapfile as safety net on boxes expected to run near capacity.
-    - **Load-gen client side** (for re-tests): `ulimit -n 65536` before running load-gen binary (default FD limit caps at ~1000 connections). Windows: `netsh int ipv4 set dynamicport tcp start=10000 num=55000`.
-    - **Nginx: REMOVED** (2026-04-28). Native TLS in relay binary. Nginx stopped, disabled, no longer needed.
+Phase 2 — Launch Swarm ($50–100/mo): 5–10 nodes, manual deploy via script. Handles launch + viral spikes with 5–10 Gbps of unmetered runway. Eliminates single-point-of-failure. Add Coturn on a separate box if TURN traffic is measurable.
+
+Phase 3 — Scale + Automate ($100–150/mo): Containerize relay, move to OVH managed K8s (free). Hetzner 256 GB auction box as the heavy-lifter node. OVH $10 VPSes as regional edge relays. See capacity table and scaling phases below for detailed numbers.
+
+- [ ] **Multi-relay support + scaling roadmap.** Load-tested current relay on 2026-04-15 (4 vCPU / 8 GB / 400 Mbps OVH VPS). Measured: **133 KB RSS per WebSocket connection** at the relay alone, **186 KB per connection through Nginx** (TLS terminator). Verified at 10,000 concurrent loopback connections — relay used 1.34 GB RSS, load avg 18.6 peak, 5.7 GB RAM still available. Bandwidth: ~50 B/sec per idle connection (heartbeat + occasional CRDT chatter), so even 100k users = ~5 MB/sec = 40 Mbps — well under any modern uplink. **Per-box capacity table (BASELINE — current code, no optimizations applied):**
+    - Current OVH VPS (8 GB / $8.35/mo): ~38k conns through Nginx, ~53k native TLS
+    - Future OVH VPS (12 GB / $12.75/mo): ~59k conns Nginx, ~83k native TLS
+    - **Hetzner auction (256 GB Xeon E5-1650v3 / 1 Gbps unmetered / €74.90/mo with 0% Ukraine VAT ≈ $74.90): ~1.32M conns Nginx, ~1.85M native TLS**
+    - Hetzner auction smaller (64 GB Ryzen 5 3600 / 1 Gbps / $43.90/mo): ~330k conns Nginx, ~470k native TLS
+    - DataPacket dedicated 256 GB ($790/mo): same RAM as Hetzner, 11× the price, only meaningful if 50 Gbps port is needed
+- [ ] **Per-box capacity table (POST-OPTIMIZATION — after TCP buffer tuning + native TLS + permessage-deflate + binary framing all applied):**
+    - Current OVH VPS (8 GB / $8.35/mo): ~250k-350k conns (RAM-bound)
+    - Future OVH VPS (12 GB / $12.75/mo): ~380k-550k conns (RAM-bound)
+    - **Hetzner 256 GB auction ($74.90/mo): ~3-4M conns realistic with active chat (BANDWIDTH-bound at ~3.5M on 1 Gbps), ~7.5M idle-only ceiling, ~8-12M RAM-only ceiling**
+    - Hetzner 64 GB Ryzen ($43.90/mo): ~2M-2.5M conns (likely bandwidth-bound before RAM)
+    - **Per-user cost at scale: ~$0.000021/user/mo on Hetzner 256 GB at 3.5M users.** For comparison: Discord's per-user infra cost is widely estimated at $0.04-$0.17/user/mo — so Hollow's optimized stack runs at ~2,000-8,000× cheaper per user.
+- [ ] **Scaling phases** (informed by load test):
+    - **Phase A — current → ~25k concurrent users:** stay on the $8.35 VPS. Using <5% of capacity. Don't upgrade.
+    - **Phase B — 25k → 100k concurrent:** add a second $8.35 VPS in a different OVH region for geo-redundancy + failover, OR jump straight to one Hetzner auction box ($75/mo) for 35× capacity at 10× cost.
+    - **Phase C — 100k → 500k concurrent:** one Hetzner 256 GB box + 2-3 small OVH VPSes as edge relays in geo-distant regions (Asia, Americas) for latency. Total ~$110-150/mo.
+    - **Phase D — 500k+:** migrate to a fleet of mixed Hetzner auction boxes (256 GB main + multiple 64 GB regional). After all optimizations applied, per-user cost drops to ~$0.000021/mo on Hetzner 256 GB at realistic scale — orders of magnitude cheaper than any commercial alternative. Single-box ceiling becomes bandwidth-bound, not RAM-bound: with permessage-deflate + binary framing reducing per-conn idle traffic from 50 B/sec → ~17 B/sec, 1 Gbps supports ~7.5M idle conns / ~3-4M with realistic chat activity. TURN traffic (voice/video for the ~5-10% of users behind symmetric NATs) competes for the same 1 Gbps — at 100 kbps per voice call and ~5% in-call rate, TURN budget caps simultaneous active calls at ~10k, which supports ~200k+ users on the call-mix angle. Beyond ~3M users per box, add boxes — don't try to scale a single one further.
+
+- [ ] **TCP socket buffer tuning (HIGHEST-IMPACT relay optimization).** Verified 2026-04-15: Linux kernel default `tcp_rmem` is 128 KB and `tcp_wmem` starts at 16 KB and grows to ~85 KB on active sockets. **~213 KB per connection is kernel TCP buffers alone** — the dominant cost, far above anything in our Rust process (which is ~5-13 KB per conn). For a chat/signaling relay where messages are almost always <1 KB, these buffers are wildly oversized. Action: in the relay's accept loop, after each `TcpStream` is accepted, call `socket.set_recv_buffer_size(16384)` and `socket.set_send_buffer_size(16384)` to lock both at 16 KB. Expected effect: drops per-conn RAM from current ~133 KB measured (idle, before send buffer grew) → **~20-30 KB**. Capacity multipliers: OVH 8 GB VPS goes from 38k → ~250k-350k conns, Hetzner 256 GB auction goes from 1.32M → **~8M-12M conns per box**. Risks: smaller buffers → more aggressive TCP flow control → may add ms-scale latency on burst traffic (large MLS welcome packets, file shard signaling) and slightly reduce single-stream throughput. For chat traffic (~99% messages <500 bytes) this is a non-issue. Do this BEFORE the native TLS migration so the new capacity numbers apply from the start. **Effort: ~30 minutes. Risk: low. Payoff: 6-10× capacity per box.**
+- [ ] **Bounded mpsc channels per connection (stability + worst-case RAM).** Current code uses `mpsc::unbounded_channel::<Message>` for each peer's outbound queue. If a client receives slowly (mobile on bad Wi-Fi, paused tab), broadcast traffic from active rooms piles up indefinitely — worst case MBs per stalled peer under fanout from a 50-person room. Switch to `mpsc::channel(64)`. When the channel fills, decide policy: either drop the slow peer's WS (forces resync via gossip on reconnect) or drop the queued message. Recommend the former — resync is cheap, lying to the client about delivered state isn't. Effort: ~2 hours. Wins: caps worst-case per-conn memory at ~32 KB even under broadcast storms; protects against malicious slow-loris-style buffer-bloat attacks. Pair with the TCP buffer tuning.
+- [ ] **Native TLS migration (relay).** Drop Nginx, terminate TLS in the relay using `tokio-rustls` + `instant-acme` for cert rotation. Wins: +40% per-VPS connection density (no double-socket overhead), eliminates Nginx access-log privacy concerns, halves the trusted computing base (one binary vs. nginx+openssl+relay), simpler ops. Cost: ~half-day of work. Should be done before Phase B kicks in so the capacity numbers above hold.
+- [ ] **WebSocket permessage-deflate compression (RFC 7692).** Negotiate compression during the WS handshake using tokio-tungstenite's built-in support. Critical implementation note: the relay should operate in **passthrough mode** — receive compressed frames from sender, forward them to all room members WITHOUT decompressing/recompressing (preserve `RSV1` bit unchanged). This puts ~all CPU cost on clients (~10-50 µs per message) and zero on the relay. Expected wins: ~50% bandwidth reduction on JSON envelopes, ~25% on already-encrypted base64 payloads, net ~50-60% wire reduction. RAM/conn unchanged (compression saves bytes-in-flight, not bytes-resident). Privacy: neutral in our threat model since payloads are E2EE ciphertext (compression ratio reveals nothing about content); fingerprinting concern is theoretical only with hostile relay+broken TLS combination. Pair this with the native TLS migration — natural rollout window since clients reconnect anyway.
+- [ ] **Binary message framing for text/MLS.** Today the relay's `Msg`/`Direct` envelopes are JSON wrapping base64 ciphertext (~40% wire overhead before compression). Heartbeats are `{"type":"msg","room":"...","data":"hb"}` ~50 bytes when they could be a 1-byte tag. Migrate to a compact binary protocol (1-byte type tag + length-prefixed fields, or `postcard`/`bincode`). Already partially done — `0x01` (binary broadcast) and `0x02` (binary direct) prefixes exist in `ws_router.rs` for file/voice traffic; extend the same pattern to text/MLS/heartbeat. Wins: ~30% additional bandwidth reduction on top of compression, ~10% RAM/conn (smaller TCP send buffers fit more pending messages), eliminates JSON parse CPU on relay. Cost: requires coordinated client+relay rollout with version negotiation so old clients don't break. Plan as a 6.x → 7.0 wire-protocol bump.
+- [ ] **Multi-relay client support.** Covered in Swarm checklist above — client-side relay selection + failover.
+- [ ] **Coturn isolation.** Covered in Swarm checklist above — separate VPS when TURN traffic becomes measurable.
+- [ ] **VPS tunable limits to remember for future scaling.** Current production relay VPS (OVH 8 GB) has the following resource ceilings — re-verify and raise these on any new box before putting it into service:
+    - **Nginx `worker_connections`:** set to 16384 (was default 768). Default would cap the entire box at ~380 real WS connections through the TLS proxy. Each WS through Nginx uses 2 FDs (client socket + upstream socket).
+    - **Nginx `worker_rlimit_nofile`:** set to 65535 (was unset, inheriting systemd's 1024 soft cap). Without this, workers run out of FDs long before they run out of connection slots.
+    - **Nginx `events { multi_accept on; use epoll; }`:** enabled. Marginal throughput win for high-connection accept bursts.
+    - **Nginx `/ws` location: `access_log off;`.** Privacy win — no per-connection logs of peer IDs or client IPs.
+    - **systemd `hollow-relay.service` `LimitNOFILE`:** 65536 (default was fine). For native-TLS migration, may need to raise to 1048576 to comfortably hold ~500k FDs on the Hetzner box.
+    - **systemd `hollow-relay.service` `MemoryMax`:** unset (infinity). Fine — no cap.
+    - **Kernel `fs.file-max`:** 9223372036854775807 (effectively unlimited). Fine.
+    - **Kernel `net.ipv4.ip_local_port_range`:** 32768-60999 (~28k ephemeral ports). Only matters for the relay as outbound client (e.g., if it ever connects to other relays for peering). Raise to 10000-65535 if multi-relay gossip between boxes is added.
+    - **Kernel `net.core.somaxconn`:** 4096. Fine for expected ramp rates; raise to 65535 if we ever see TCP connect storms.
+    - **Swap:** 0 (OVH default). If relay OOMs, it OOMs hard. Consider adding a small swapfile (~2 GB) on the Hetzner box purely as a safety net.
+    - **Load-gen client side** (for future re-tests): set `ulimit -n 65536` before running the load-gen binary, or it caps at ~1000 connections (its inherited FD limit). Windows: `netsh int ipv4 set dynamicport tcp start=10000 num=55000` to raise ephemeral port range from default 16384 to 55000.
 - [ ] **Voice/video call STUN priority over TURN.** Audio/video calls sometimes pick TURN (relay) over STUN (direct P2P) while data channels, screen share, and Share consistently get STUN on the same networks. Root cause identified: `voice_service.dart` calls `await getUserMedia()` (100-500ms on Windows) between `createPeerConnection()` and `createOffer()`, blocking the critical ICE gathering window. By the time the offer fires at ~400ms, the TURN relay candidate has already won the connectivity check race. Every other connection type avoids this — voice_channel_service pre-captures audio once at channel entry, screen_share_service captures before creating the PC, data channels have no getUserMedia at all. Regular home networks (non-symmetric NAT, no CGNAT) support STUN ~100% of the time — TURN should be a last resort, not a race winner.
     **Fix plan (three layers, apply all):**
     1. **Pre-capture audio in voice_service.dart** (~10-line change): Move `getUserMedia(audio)` call **before** `createPeerConnection()` in both `createOffer()` (line ~100) and `handleOffer()` (line ~142). Store the MediaStream, then `addTrack()` immediately after PC creation — same pattern voice_channel_service already uses. This keeps the PC→offer window under ~15ms, matching data channel timing.
@@ -2019,8 +1978,6 @@ SCALING ROADMAP:
 
 - [ ] **Post-quantum key exchange (ML-KEM / Kyber).** All current key exchanges use Curve25519. If quantum computers break elliptic curve crypto, intercepted ciphertext could be decrypted retroactively. **MLS side:** OpenMLS 0.8.x already ships an X-Wing ciphersuite (`MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`, ML-KEM + X25519 hybrid) via the `openmls_libcrux_crypto` provider — swap crypto backend + enable the ciphersuite. **DM side:** vodozemac has no PQ support; wrap Olm key exchange with a hybrid ML-KEM layer manually (use `ml-kem` crate). Key sizes grow (ML-KEM-768: ~1,184 B pubkey, ~1,088 B ciphertext vs 32 B for X25519) but only during session establishment — symmetric ratchet overhead unchanged after. Signal (PQXDH, 2023) and iMessage (PQ3, 2024) have shipped PQ for 1:1 chats, but no consumer app has shipped post-quantum MLS group ratcheting yet — Hollow would be first. Low priority, future consideration.
 - [ ] **Traffic analysis protection.** TLS (Nginx now, planned native `tokio-rustls`) protects message *content* but not *timing and size patterns*. An observer can infer who is chatting based on when messages appear. Mitigation: constant-rate padding (dummy traffic to hide real messages in noise). Impractical for a chat app at scale — significant bandwidth overhead for marginal benefit. Theoretical concern, not a launch blocker.
-
--[ ] Extract Rust tests into different file, not inside the main files
 
 **Deliverable:** Public release across all platforms.
 

@@ -14,6 +14,7 @@ use signaling_http::RoomMap;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize structured logging.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -25,9 +26,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("========================================");
     tracing::info!("Hollow Signaling + WebSocket Relay");
-    tracing::info!("Port: {} | TLS: {}", config.port, if config.no_tls { "off" } else { "on" });
+    tracing::info!("HTTP port: {}", config.http_port);
     tracing::info!("========================================");
 
+    // Load license keys (optional — disabled if file missing).
     let license_state = match license::LicenseState::load_from_file(
         std::path::Path::new(&config.keys_file),
     ) {
@@ -40,25 +42,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(license::LicenseState::disabled())
         }
     };
-
+    // Shared state for the signaling HTTP server.
     let rooms: RoomMap = Arc::new(RwLock::new(HashMap::new()));
+
+    // Shared state for the WebSocket room router.
     let ws_state = Arc::new(ws_router::WsState::new(license_state.clone()));
+
+    // Start license key hot-reload (needs ws_state for revocation kicks).
     license_state.clone().spawn_reload_task(ws_state.clone());
 
+    // Run the HTTP/WS server. Ctrl+C shuts down.
     tokio::select! {
-        result = async {
-            if config.no_tls {
-                signaling_http::run_signaling_http(
-                    rooms, ws_state, license_state, config.port,
-                ).await
-            } else {
-                signaling_http::run_signaling_tls(
-                    rooms, ws_state, license_state, config.port,
-                    config.tls_cert, config.tls_key,
-                ).await
-            }
-        } => {
-            tracing::error!("Server exited: {result:?}");
+        result = signaling_http::run_signaling_http(rooms, ws_state, license_state, config.http_port) => {
+            tracing::error!("HTTP/WS server exited: {result:?}");
         }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Received Ctrl+C, shutting down...");

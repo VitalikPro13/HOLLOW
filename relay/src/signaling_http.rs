@@ -534,58 +534,7 @@ pub fn build_router(
     signaling.merge(ws).merge(turn).merge(status).layer(cors)
 }
 
-fn create_tuned_listener(port: u16) -> Result<std::net::TcpListener, Box<dyn std::error::Error>> {
-    let sock = socket2::Socket::new(
-        socket2::Domain::IPV4,
-        socket2::Type::STREAM,
-        Some(socket2::Protocol::TCP),
-    )?;
-    sock.set_reuse_address(true)?;
-    sock.set_recv_buffer_size(8192)?;
-    sock.set_send_buffer_size(8192)?;
-    sock.set_nonblocking(true)?;
-    sock.bind(&format!("0.0.0.0:{port}").parse::<std::net::SocketAddr>()?.into())?;
-    sock.listen(4096)?;
-    Ok(sock.into())
-}
-
-/// Run the signaling server with native TLS.
-pub async fn run_signaling_tls(
-    rooms: RoomMap,
-    ws_state: crate::ws_router::SharedWsState,
-    license: crate::license::SharedLicenseState,
-    port: u16,
-    cert_path: String,
-    key_path: String,
-) -> Result<(), Box<dyn std::error::Error>> {
-    spawn_cleanup_task(rooms.clone());
-    let app = build_router(rooms, ws_state, license);
-
-    let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path).await?;
-
-    // Cert hot-reload: check every 6 hours, pick up certbot renewals automatically.
-    let reload_config = tls_config.clone();
-    let reload_cert = cert_path.clone();
-    let reload_key = key_path.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
-            match reload_config.reload_from_pem_file(&reload_cert, &reload_key).await {
-                Ok(()) => tracing::info!("TLS certs reloaded"),
-                Err(e) => tracing::error!("TLS cert reload failed: {e}"),
-            }
-        }
-    });
-
-    let listener = create_tuned_listener(port)?;
-    tracing::info!("TLS server listening on port {port} (TCP buffers: 8 KB rx/tx)");
-    axum_server::from_tcp_rustls(listener, tls_config)?
-        .serve(app.into_make_service())
-        .await?;
-    Ok(())
-}
-
-/// Run the signaling server in plain HTTP mode (local testing / behind reverse proxy).
+/// Run the HTTP + WebSocket signaling server.
 pub async fn run_signaling_http(
     rooms: RoomMap,
     ws_state: crate::ws_router::SharedWsState,
@@ -593,10 +542,10 @@ pub async fn run_signaling_http(
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     spawn_cleanup_task(rooms.clone());
-    let app = build_router(rooms, ws_state, license);
 
-    let listener = tokio::net::TcpListener::from_std(create_tuned_listener(port)?)?;
-    tracing::info!("HTTP server listening on port {port} (TCP buffers: 8 KB rx/tx, NO TLS)");
+    let app = build_router(rooms, ws_state, license);
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    tracing::info!("Signaling + WebSocket server listening on port {port}");
     axum::serve(listener, app).await?;
     Ok(())
 }

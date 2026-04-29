@@ -17,17 +17,15 @@ const MAX_WS_MESSAGE_SIZE: usize = 10 * 1024 * 1024; // 10 MB (Phase 6.25)
 
 // -- Data types --
 
-const CHANNEL_CAPACITY: usize = 32;
-
 struct Room {
-    peers: HashMap<String, mpsc::Sender<Message>>,
+    peers: HashMap<String, mpsc::UnboundedSender<Message>>,
 }
 
 pub struct WsState {
     rooms: RwLock<HashMap<String, Room>>,
     peers: RwLock<HashMap<String, HashSet<String>>>,
     /// Direct sender per peer (for license revocation kicks).
-    peer_senders: RwLock<HashMap<String, mpsc::Sender<Message>>>,
+    peer_senders: RwLock<HashMap<String, mpsc::UnboundedSender<Message>>>,
     pub license: crate::license::SharedLicenseState,
 }
 
@@ -56,8 +54,8 @@ impl WsState {
                 let error_msg = msg_json(&ServerMessage::AuthFailed {
                     error: "invalid_license_key".into(),
                 });
-                let _ = tx.try_send(error_msg);
-                let _ = tx.try_send(Message::Close(None));
+                let _ = tx.send(error_msg);
+                let _ = tx.send(Message::Close(None));
             }
         }
     }
@@ -107,8 +105,8 @@ pub async fn ws_upgrade(
 }
 
 async fn handle_ws(mut socket: WebSocket, state: SharedWsState) {
-    // Bounded channel: if a slow client can't keep up, we drop them (resync via CRDT on reconnect).
-    let (tx, mut rx) = mpsc::channel::<Message>(CHANNEL_CAPACITY);
+    // Create a channel for outgoing messages.
+    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
 
     // Wait for auth message first (10 second timeout).
     let peer_id = match authenticate(&mut socket, &state.license).await {
@@ -270,7 +268,7 @@ async fn authenticate(
 async fn handle_client_message(
     state: &SharedWsState,
     peer_id: &str,
-    tx: &mpsc::Sender<Message>,
+    tx: &mpsc::UnboundedSender<Message>,
     msg: ClientMessage,
 ) -> Vec<Message> {
     let mut responses = Vec::new();
@@ -338,7 +336,7 @@ async fn handle_client_message(
             if let Some(room_entry) = rooms.get(&room) {
                 for (pid, sender) in &room_entry.peers {
                     if pid != peer_id {
-                        let _ = sender.try_send(join_msg.clone());
+                        let _ = sender.send(join_msg.clone());
                     }
                 }
             }
@@ -362,7 +360,7 @@ async fn handle_client_message(
                 } else {
                     for (pid, sender) in &room_entry.peers {
                         if pid != peer_id {
-                            let _ = sender.try_send(broadcast.clone());
+                            let _ = sender.send(broadcast.clone());
                         }
                     }
                 }
@@ -381,7 +379,7 @@ async fn handle_client_message(
                 if !room_entry.peers.contains_key(peer_id) {
                     tracing::warn!("Direct from {peer_id} to room they haven't joined — dropping");
                 } else if let Some(sender) = room_entry.peers.get(&target) {
-                    let _ = sender.try_send(direct);
+                    let _ = sender.send(direct);
                 }
             }
         }
@@ -423,7 +421,7 @@ async fn leave_room(state: &SharedWsState, peer_id: &str, room: &str) {
         let rooms = state.rooms.read().await;
         if let Some(room_entry) = rooms.get(room) {
             for sender in room_entry.peers.values() {
-                let _ = sender.try_send(leave_msg.clone());
+                let _ = sender.send(leave_msg.clone());
             }
         }
     }
@@ -450,7 +448,7 @@ async fn broadcast_binary(state: &SharedWsState, room_hex: &str, sender_id: &str
         let msg = Message::Binary(data.to_vec().into());
         for (pid, sender) in &room_entry.peers {
             if pid != sender_id {
-                let _ = sender.try_send(msg.clone());
+                let _ = sender.send(msg.clone());
             }
         }
     }
@@ -500,7 +498,7 @@ async fn direct_binary(state: &SharedWsState, sender_id: &str, data: &[u8]) {
     let rooms = state.rooms.read().await;
     if let Some(room_entry) = rooms.get(room_code) {
         if let Some(sender) = room_entry.peers.get(target_peer) {
-            let _ = sender.try_send(Message::Binary(forwarded.into()));
+            let _ = sender.send(Message::Binary(forwarded.into()));
         }
     }
 }
