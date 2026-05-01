@@ -6,3 +6,4 @@ pub mod share;
 pub mod simple;
 pub mod storage;
 pub mod twitch;
+pub mod updater;

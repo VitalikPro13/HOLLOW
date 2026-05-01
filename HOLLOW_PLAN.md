@@ -1868,8 +1868,8 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
     **Files to modify:** `voice_service.dart` (primary fix — pre-capture), `ice_config_provider.dart` (two-phase config helper), `webrtc_service.dart` / `voice_channel_service.dart` / `screen_share_service.dart` (ICE restart fallback + TURN→STUN upgrade). No Rust changes needed.
     **Note:** Low priority at alpha scale — voice over TURN uses ~32kbps Opus, negligible bandwidth. But for principle: on regular home networks STUN should always win.
 - [ ] Windows installer (Inno Setup + portable ZIP)
-- [ ] Auto-updater with version picker (upgrade + downgrade support via hosted version manifest)
-- [ ] Update landing page / website (Svelte static site — fresh screenshots, download link, pitch)
+- [x] Auto-updater with version picker (upgrade + downgrade support via hosted version manifest) — `api/updater.rs` (Rust FFI), `updater_provider.dart` (Riverpod), Updates tab in Settings. Manifest at `anonlisten.com/hollow/releases/manifest.json`. Self-updating via .bat script with countdown
+- [x] Update landing page / website (Svelte static site — Hollow card with early access info, Ko-Fi/Patreon support, legal pages at /hollow/privacy and /hollow/terms)
 - [x] Privacy policy + Terms of Use (plain-language, covers: relay sees only transient metadata, E2EE, no telemetry, no message storage) — `legal/PRIVACY_POLICY.md`, `legal/TERMS_OF_USE.md`, viewable in-app via About tab
 - [ ] Streamer/YouTuber outreach (5-10 privacy/tech creators, 10k-100k subs, offer license keys + exclusive access)
 - [ ] **Share system for DMs (large file support).** Currently DMs cap at 34 MB (hard reject). Extend the hidden Share system to work in DMs so large files can be sent P2P with chunking, resume, and sequential download. Needs: DM-context share creation (`serverId=null`, `contextType="dm"`), auto-download on receiver side, vault_cache routing, no seeding after completion (1:1 only). Until then, 34 MB hard cap on DM files.

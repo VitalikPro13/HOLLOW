@@ -59,6 +59,7 @@ HOLLOW/
 ├── relay-uws/            # Production relay (uWebSockets C++, native TLS, deployed on OVH VPS)
 ├── rust_builder/         # flutter_rust_bridge build system (cargokit)
 ├── vendor/ffmpeg/        # Bundled native binaries (gitignored, see fetch_ffmpeg.ps1)
+├── legal/                # Privacy Policy, Terms of Use, version manifest (manifest.json)
 ├── HOLLOW_PLAN.md         # Full architecture & design document (authoritative for all phase details)
 └── CLAUDE.md             # This file
 ```

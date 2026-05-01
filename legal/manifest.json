@@ -1,0 +1,17 @@
+{
+  "latest": "0.2.0",
+  "versions": [
+    {
+      "version": "0.2.0",
+      "date": "May 1, 2026",
+      "url": "https://anonlisten.com/hollow/releases/hollow-0.2.0-win64.zip",
+      "notes": "Auto-updater, privacy policy, relay privacy hardening"
+    },
+    {
+      "version": "0.1.0",
+      "date": "May 1, 2026",
+      "url": "https://anonlisten.com/hollow/releases/hollow-0.1.0-win64.zip",
+      "notes": "Initial alpha release"
+    }
+  ]
+}

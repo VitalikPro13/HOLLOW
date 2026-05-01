@@ -14,6 +14,7 @@ import 'api/share.dart';
 import 'api/simple.dart';
 import 'api/storage.dart';
 import 'api/twitch.dart';
+import 'api/updater.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'frb_generated.dart';
@@ -29,6 +30,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
+  RustStreamSink<DownloadProgress> dco_decode_StreamSink_download_progress_Sse(
+    dynamic raw,
+  );
 
   @protected
   RustStreamSink<NetworkEvent> dco_decode_StreamSink_network_event_Sse(
@@ -105,6 +111,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DiscoveredPeer dco_decode_discovered_peer(dynamic raw);
+
+  @protected
+  DownloadProgress dco_decode_download_progress(dynamic raw);
 
   @protected
   double dco_decode_f_32(dynamic raw);
@@ -311,6 +320,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
 
   @protected
+  RustStreamSink<DownloadProgress> sse_decode_StreamSink_download_progress_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   RustStreamSink<NetworkEvent> sse_decode_StreamSink_network_event_Sse(
     SseDeserializer deserializer,
   );
@@ -405,6 +419,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DiscoveredPeer sse_decode_discovered_peer(SseDeserializer deserializer);
+
+  @protected
+  DownloadProgress sse_decode_download_progress(SseDeserializer deserializer);
 
   @protected
   double sse_decode_f_32(SseDeserializer deserializer);
@@ -660,6 +677,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_StreamSink_download_progress_Sse(
+    RustStreamSink<DownloadProgress> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_StreamSink_network_event_Sse(
     RustStreamSink<NetworkEvent> self,
     SseSerializer serializer,
@@ -782,6 +805,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_discovered_peer(
     DiscoveredPeer self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_download_progress(
+    DownloadProgress self,
     SseSerializer serializer,
   );
 

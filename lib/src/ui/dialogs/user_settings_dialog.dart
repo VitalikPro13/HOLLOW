@@ -8,6 +8,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:record/record.dart' as rec;
@@ -96,7 +97,7 @@ Color _bannerColorFromId(String id) {
 }
 
 /// Settings tab enum.
-enum _SettingsTab { profile, system, security, about }
+enum _SettingsTab { profile, system, security, updates, about }
 
 class _UserSettingsContent extends ConsumerStatefulWidget {
   final String localPeerId;
@@ -582,6 +583,15 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                                 ),
                                 const SizedBox(height: HollowSpacing.xxs),
                                 _TabItem(
+                                  icon: LucideIcons.download,
+                                  label: 'Updates',
+                                  isActive:
+                                      _activeTab == _SettingsTab.updates,
+                                  onTap: () => setState(() =>
+                                      _activeTab = _SettingsTab.updates),
+                                ),
+                                const SizedBox(height: HollowSpacing.xxs),
+                                _TabItem(
                                   icon: LucideIcons.info,
                                   label: 'About',
                                   isActive:
@@ -609,6 +619,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                               _SettingsTab.profile => _buildProfileTab(hollow),
                               _SettingsTab.system => _buildSystemTab(hollow),
                               _SettingsTab.security => _SecurityTab(),
+                              _SettingsTab.updates => _UpdatesTab(),
                               _SettingsTab.about => const _AboutTab(),
                             },
                           ),
@@ -3865,6 +3876,416 @@ class _RingtoneClipEditorDialogState
   }
 }
 
+class _UpdatesTab extends ConsumerStatefulWidget {
+  const _UpdatesTab();
+
+  @override
+  ConsumerState<_UpdatesTab> createState() => _UpdatesTabState();
+}
+
+class _UpdatesTabState extends ConsumerState<_UpdatesTab> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final status = ref.read(updaterProvider).status;
+      if (status == UpdateStatus.idle || status == UpdateStatus.error) {
+        ref.read(updaterProvider.notifier).checkForUpdates();
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final state = ref.watch(updaterProvider);
+    final notifier = ref.read(updaterProvider.notifier);
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(bottom: HollowSpacing.xl),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header — current version
+          Row(
+            children: [
+              Text(
+                'Updates',
+                style: HollowTypography.heading.copyWith(
+                  color: hollow.textPrimary,
+                  fontSize: 20,
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.md),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: hollow.accent.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  'v${state.currentVersion}',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.accent,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: HollowSpacing.lg),
+
+          // Check for updates button
+          Align(
+            alignment: Alignment.centerLeft,
+            child: HollowButton.filled(
+              onPressed: state.status == UpdateStatus.checking
+                  ? null
+                  : () => notifier.checkForUpdates(),
+              icon: Icon(
+                state.status == UpdateStatus.checking
+                    ? LucideIcons.loader
+                    : LucideIcons.refreshCw,
+                size: 16,
+              ),
+              child: Text(state.status == UpdateStatus.checking
+                  ? 'Checking...'
+                  : 'Check for Updates'),
+            ),
+          ),
+
+          // Error state
+          if (state.status == UpdateStatus.error && state.error != null) ...[
+            const SizedBox(height: HollowSpacing.md),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: hollow.error.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                    color: hollow.error.withValues(alpha: 0.3)),
+              ),
+              child: Row(
+                children: [
+                  Icon(LucideIcons.alertCircle,
+                      size: 16, color: hollow.error),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Expanded(
+                    child: Text(
+                      state.error!,
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.error,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+
+          // Download progress
+          if (state.status == UpdateStatus.downloading ||
+              state.status == UpdateStatus.extracting) ...[
+            const SizedBox(height: HollowSpacing.lg),
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: hollow.surface,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                    color: hollow.accent.withValues(alpha: 0.2)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        state.status == UpdateStatus.extracting
+                            ? LucideIcons.archive
+                            : LucideIcons.download,
+                        size: 16,
+                        color: hollow.accent,
+                      ),
+                      const SizedBox(width: HollowSpacing.sm),
+                      Text(
+                        state.status == UpdateStatus.extracting
+                            ? 'Extracting v${state.selectedVersion}...'
+                            : 'Downloading v${state.selectedVersion}...',
+                        style: HollowTypography.body.copyWith(
+                          color: hollow.textPrimary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const Spacer(),
+                      if (state.status == UpdateStatus.downloading)
+                        HollowPressable(
+                          onTap: () => notifier.cancelDownload(),
+                          child: Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Icon(LucideIcons.x,
+                                size: 14, color: hollow.textSecondary),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: HollowSpacing.md),
+                  SizedBox(
+                    height: 3,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(2),
+                      child: LinearProgressIndicator(
+                        value: state.status == UpdateStatus.extracting
+                            ? null
+                            : state.downloadProgress,
+                        backgroundColor: hollow.border,
+                        valueColor: AlwaysStoppedAnimation<Color>(
+                            hollow.accent),
+                      ),
+                    ),
+                  ),
+                  if (state.totalBytes > 0) ...[
+                    const SizedBox(height: HollowSpacing.sm),
+                    Text(
+                      '${_formatBytes(state.bytesDownloaded)} / ${_formatBytes(state.totalBytes)}',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+
+          // Ready to install
+          if (state.status == UpdateStatus.readyToInstall) ...[
+            const SizedBox(height: HollowSpacing.lg),
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: hollow.accent.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                    color: hollow.accent.withValues(alpha: 0.25)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(LucideIcons.checkCircle,
+                          size: 18, color: hollow.accent),
+                      const SizedBox(width: HollowSpacing.sm),
+                      Text(
+                        'Ready to install v${state.selectedVersion}',
+                        style: HollowTypography.body.copyWith(
+                          color: hollow.textPrimary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: HollowSpacing.md),
+                  HollowButton.filled(
+                    onPressed: () => notifier.installAndRestart(),
+                    icon: Icon(LucideIcons.rotateCcw, size: 16),
+                    child: const Text('Install & Restart'),
+                  ),
+                  const SizedBox(height: HollowSpacing.sm),
+                  Text(
+                    'Hollow will close and relaunch automatically.',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+
+          // Version list
+          if (state.manifest != null) ...[
+            const SizedBox(height: HollowSpacing.xl),
+            Text(
+              'Versions',
+              style: HollowTypography.label.copyWith(
+                color: hollow.textSecondary,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.5,
+              ),
+            ),
+            const SizedBox(height: HollowSpacing.md),
+            ...state.manifest!.versions.map((v) {
+              final isCurrent = v.version == state.currentVersion;
+              return Padding(
+                padding:
+                    const EdgeInsets.only(bottom: HollowSpacing.sm),
+                child: _VersionCard(
+                  version: v,
+                  isCurrent: isCurrent,
+                  isLatest: v.version == state.manifest!.latest,
+                  isDownloading:
+                      state.status == UpdateStatus.downloading &&
+                          state.selectedVersion == v.version,
+                  onInstall: !isCurrent &&
+                          (state.status == UpdateStatus.idle ||
+                              state.status == UpdateStatus.error)
+                      ? () => notifier.downloadVersion(v)
+                      : null,
+                ),
+              );
+            }),
+          ],
+
+          // Empty state
+          if (state.manifest == null &&
+              state.status == UpdateStatus.idle) ...[
+            const SizedBox(height: HollowSpacing.xl),
+            Center(
+              child: Text(
+                'Press "Check for Updates" to see available versions.',
+                style: HollowTypography.body.copyWith(
+                  color: hollow.textSecondary,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  static String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+}
+
+class _VersionCard extends StatelessWidget {
+  final VersionInfo version;
+  final bool isCurrent;
+  final bool isLatest;
+  final bool isDownloading;
+  final VoidCallback? onInstall;
+
+  const _VersionCard({
+    required this.version,
+    required this.isCurrent,
+    required this.isLatest,
+    required this.isDownloading,
+    this.onInstall,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: isCurrent
+            ? hollow.accent.withValues(alpha: 0.06)
+            : hollow.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isCurrent
+              ? hollow.accent.withValues(alpha: 0.2)
+              : hollow.border.withValues(alpha: 0.5),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      'v${version.version}',
+                      style: HollowTypography.body.copyWith(
+                        color: hollow.textPrimary,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    if (isLatest) ...[
+                      const SizedBox(width: HollowSpacing.sm),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: hollow.accent.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          'Latest',
+                          style: HollowTypography.caption.copyWith(
+                            color: hollow.accent,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (isCurrent) ...[
+                      const SizedBox(width: HollowSpacing.sm),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color:
+                              hollow.textSecondary.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          'Installed',
+                          style: HollowTypography.caption.copyWith(
+                            color: hollow.textSecondary,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  version.date,
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary,
+                  ),
+                ),
+                if (version.notes.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    version.notes,
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary.withValues(alpha: 0.8),
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ],
+            ),
+          ),
+          if (onInstall != null)
+            HollowButton.outline(
+              onPressed: onInstall,
+              compact: true,
+              child: const Text('Install'),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _AboutTab extends StatelessWidget {
   const _AboutTab();
 
@@ -4008,9 +4429,11 @@ class _AboutTab extends StatelessWidget {
                 url: 'https://patreon.com/AnonListen',
               ),
               const SizedBox(width: HollowSpacing.sm),
-              _KickBotIcon(
-                tooltip: 'Tip via KickBot',
-                url: 'https://kickbot.com/tips/AnonListen',
+              _BrandIcon(
+                icon: SimpleIcons.kofi,
+                color: SimpleIconColors.kofi,
+                tooltip: 'Ko-Fi',
+                url: 'https://ko-fi.com/AnonListen',
               ),
             ],
           ),
