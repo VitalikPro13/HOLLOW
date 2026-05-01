@@ -27,6 +27,9 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:lucide_icons/lucide_icons.dart';
+import 'package:simple_icons/simple_icons.dart';
+import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
+import 'package:url_launcher/url_launcher.dart';
 
 /// Home dashboard — shown when no server or DM is selected in dock mode.
 /// Three-column layout: Profile | Recent Conversations | Stats overview.
@@ -217,6 +220,50 @@ class _ProfileColumn extends ConsumerWidget {
               ),
             ),
           ],
+        ),
+
+        // Twitch badge
+        FutureBuilder<String?>(
+          future: twitch_api.twitchGetUsername(),
+          builder: (context, snap) {
+            final username = snap.data;
+            if (username == null || username.isEmpty) {
+              return const SizedBox.shrink();
+            }
+            return Padding(
+              padding: const EdgeInsets.only(top: HollowSpacing.sm),
+              child: GestureDetector(
+                onTap: () => launchUrl(
+                  Uri.parse('https://twitch.tv/$username'),
+                  mode: LaunchMode.externalApplication,
+                ),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: HollowSpacing.sm, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF9146FF).withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(SimpleIcons.twitch,
+                          size: 11, color: const Color(0xFF9146FF)),
+                      const SizedBox(width: 4),
+                      Text(
+                        username,
+                        style: HollowTypography.caption.copyWith(
+                          color: const Color(0xFF9146FF),
+                          fontWeight: FontWeight.w600,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
         ),
 
         // Custom status

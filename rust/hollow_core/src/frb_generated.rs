@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1829899838;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -425098158;
 
 // Section: executor
 
@@ -4133,6 +4133,45 @@ fn wire__crate__api__crdt__set_storage_pledge_impl(
         },
     )
 }
+fn wire__crate__api__crdt__set_twitch_username_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_twitch_username",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_server_id = <String>::sse_decode(&mut deserializer);
+            let api_peer_id = <String>::sse_decode(&mut deserializer);
+            let api_twitch_username = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::crdt::set_twitch_username(
+                        api_server_id,
+                        api_peer_id,
+                        api_twitch_username,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__share__share_cancel_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -4706,6 +4745,38 @@ fn wire__crate__api__twitch__twitch_get_user_id_impl(
             move |context| {
                 transform_result_sse::<_, String>((move || {
                     let output_ok = crate::api::twitch::twitch_get_user_id()?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__twitch__twitch_get_username_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "twitch_get_username",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::twitch::twitch_get_username()?;
                     Ok(output_ok)
                 })())
             }
@@ -6362,11 +6433,13 @@ impl SseDecode for crate::api::crdt::MemberFfi {
         let mut var_displayName = <String>::sse_decode(deserializer);
         let mut var_role = <String>::sse_decode(deserializer);
         let mut var_nickname = <String>::sse_decode(deserializer);
+        let mut var_twitchUsername = <String>::sse_decode(deserializer);
         return crate::api::crdt::MemberFfi {
             peer_id: var_peerId,
             display_name: var_displayName,
             role: var_role,
             nickname: var_nickname,
+            twitch_username: var_twitchUsername,
         };
     }
 }
@@ -8147,111 +8220,115 @@ fn pde_ffi_dispatcher_primary_impl(
         114 => wire__crate__api__storage__set_peer_verified_impl(port, ptr, rust_vec_len, data_len),
         115 => wire__crate__api__crdt__set_server_avatar_impl(port, ptr, rust_vec_len, data_len),
         116 => wire__crate__api__crdt__set_storage_pledge_impl(port, ptr, rust_vec_len, data_len),
-        117 => wire__crate__api__share__share_cancel_impl(port, ptr, rust_vec_len, data_len),
-        118 => {
+        117 => wire__crate__api__crdt__set_twitch_username_impl(port, ptr, rust_vec_len, data_len),
+        118 => wire__crate__api__share__share_cancel_impl(port, ptr, rust_vec_len, data_len),
+        119 => {
             wire__crate__api__share__share_create_from_file_impl(port, ptr, rust_vec_len, data_len)
         }
-        119 => wire__crate__api__share__share_decode_link_impl(port, ptr, rust_vec_len, data_len),
-        120 => wire__crate__api__share__share_keep_and_seed_impl(port, ptr, rust_vec_len, data_len),
-        121 => wire__crate__api__share__share_list_impl(port, ptr, rust_vec_len, data_len),
-        122 => wire__crate__api__share__share_open_link_impl(port, ptr, rust_vec_len, data_len),
-        123 => wire__crate__api__share__share_remove_impl(port, ptr, rust_vec_len, data_len),
-        124 => wire__crate__api__share__share_set_seeding_impl(port, ptr, rust_vec_len, data_len),
-        125 => {
+        120 => wire__crate__api__share__share_decode_link_impl(port, ptr, rust_vec_len, data_len),
+        121 => wire__crate__api__share__share_keep_and_seed_impl(port, ptr, rust_vec_len, data_len),
+        122 => wire__crate__api__share__share_list_impl(port, ptr, rust_vec_len, data_len),
+        123 => wire__crate__api__share__share_open_link_impl(port, ptr, rust_vec_len, data_len),
+        124 => wire__crate__api__share__share_remove_impl(port, ptr, rust_vec_len, data_len),
+        125 => wire__crate__api__share__share_set_seeding_impl(port, ptr, rust_vec_len, data_len),
+        126 => {
             wire__crate__api__share__share_start_download_impl(port, ptr, rust_vec_len, data_len)
         }
-        126 => {
+        127 => {
             wire__crate__api__share__share_start_from_ref_impl(port, ptr, rust_vec_len, data_len)
         }
-        127 => wire__crate__api__network__start_node_impl(port, ptr, rust_vec_len, data_len),
-        128 => wire__crate__api__network__stop_node_impl(port, ptr, rust_vec_len, data_len),
-        129 => wire__crate__api__crdt__stop_recovery_pool_impl(port, ptr, rust_vec_len, data_len),
-        130 => wire__crate__api__twitch__twitch_disconnect_impl(port, ptr, rust_vec_len, data_len),
-        131 => {
+        128 => wire__crate__api__network__start_node_impl(port, ptr, rust_vec_len, data_len),
+        129 => wire__crate__api__network__stop_node_impl(port, ptr, rust_vec_len, data_len),
+        130 => wire__crate__api__crdt__stop_recovery_pool_impl(port, ptr, rust_vec_len, data_len),
+        131 => wire__crate__api__twitch__twitch_disconnect_impl(port, ptr, rust_vec_len, data_len),
+        132 => {
             wire__crate__api__twitch__twitch_ensure_token_impl(port, ptr, rust_vec_len, data_len)
         }
-        132 => {
+        133 => {
             wire__crate__api__twitch__twitch_generate_proof_impl(port, ptr, rust_vec_len, data_len)
         }
-        133 => wire__crate__api__twitch__twitch_get_user_id_impl(port, ptr, rust_vec_len, data_len),
-        134 => {
+        134 => wire__crate__api__twitch__twitch_get_user_id_impl(port, ptr, rust_vec_len, data_len),
+        135 => {
+            wire__crate__api__twitch__twitch_get_username_impl(port, ptr, rust_vec_len, data_len)
+        }
+        136 => {
             wire__crate__api__twitch__twitch_is_connected_impl(port, ptr, rust_vec_len, data_len)
         }
-        135 => {
+        137 => {
             wire__crate__api__twitch__twitch_poll_for_token_impl(port, ptr, rust_vec_len, data_len)
         }
-        136 => wire__crate__api__twitch__twitch_start_device_flow_impl(
+        138 => wire__crate__api__twitch__twitch_start_device_flow_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        137 => wire__crate__api__crdt__unpin_message_impl(port, ptr, rust_vec_len, data_len),
-        138 => {
+        139 => wire__crate__api__crdt__unpin_message_impl(port, ptr, rust_vec_len, data_len),
+        140 => {
             wire__crate__api__crdt__update_channel_layout_impl(port, ptr, rust_vec_len, data_len)
         }
-        139 => wire__crate__api__network__update_profile_impl(port, ptr, rust_vec_len, data_len),
-        140 => {
+        141 => wire__crate__api__network__update_profile_impl(port, ptr, rust_vec_len, data_len),
+        142 => {
             wire__crate__api__crdt__update_server_setting_impl(port, ptr, rust_vec_len, data_len)
         }
-        141 => wire__crate__api__crdt__vault_download_file_impl(port, ptr, rust_vec_len, data_len),
-        142 => wire__crate__api__crdt__vault_upload_file_impl(port, ptr, rust_vec_len, data_len),
-        143 => wire__crate__api__archive__verify_archive_impl(port, ptr, rust_vec_len, data_len),
-        144 => {
+        143 => wire__crate__api__crdt__vault_download_file_impl(port, ptr, rust_vec_len, data_len),
+        144 => wire__crate__api__crdt__vault_upload_file_impl(port, ptr, rust_vec_len, data_len),
+        145 => wire__crate__api__archive__verify_archive_impl(port, ptr, rust_vec_len, data_len),
+        146 => {
             wire__crate__api__network__verify_message_proof_impl(port, ptr, rust_vec_len, data_len)
         }
-        145 => {
+        147 => {
             wire__crate__api__network__voice_channel_join_impl(port, ptr, rust_vec_len, data_len)
         }
-        146 => {
+        148 => {
             wire__crate__api__network__voice_channel_leave_impl(port, ptr, rust_vec_len, data_len)
         }
-        147 => wire__crate__api__network__voice_channel_send_signal_impl(
-            port,
-            ptr,
-            rust_vec_len,
-            data_len,
-        ),
-        148 => {
-            wire__crate__api__network__watch_network_events_impl(port, ptr, rust_vec_len, data_len)
-        }
-        149 => wire__crate__api__network__webrtc_broadcast_received_impl(
+        149 => wire__crate__api__network__voice_channel_send_signal_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
         150 => {
-            wire__crate__api__network__webrtc_peer_connected_impl(port, ptr, rust_vec_len, data_len)
+            wire__crate__api__network__watch_network_events_impl(port, ptr, rust_vec_len, data_len)
         }
-        151 => wire__crate__api__network__webrtc_peer_disconnected_impl(
+        151 => wire__crate__api__network__webrtc_broadcast_received_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
         152 => {
+            wire__crate__api__network__webrtc_peer_connected_impl(port, ptr, rust_vec_len, data_len)
+        }
+        153 => wire__crate__api__network__webrtc_peer_disconnected_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        154 => {
             wire__crate__api__network__webrtc_ping_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        153 => {
+        155 => {
             wire__crate__api__network__webrtc_send_complete_impl(port, ptr, rust_vec_len, data_len)
         }
-        154 => {
+        156 => {
             wire__crate__api__network__webrtc_send_signal_impl(port, ptr, rust_vec_len, data_len)
         }
-        155 => wire__crate__api__network__webrtc_share_chunk_complete_impl(
+        157 => wire__crate__api__network__webrtc_share_chunk_complete_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        156 => wire__crate__api__network__webrtc_transfer_complete_impl(
+        158 => wire__crate__api__network__webrtc_transfer_complete_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        157 => wire__crate__api__network__webrtc_transfer_failed_impl(
+        159 => wire__crate__api__network__webrtc_transfer_failed_impl(
             port,
             ptr,
             rust_vec_len,
@@ -8696,6 +8773,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::crdt::MemberFfi {
             self.display_name.into_into_dart().into_dart(),
             self.role.into_into_dart().into_dart(),
             self.nickname.into_into_dart().into_dart(),
+            self.twitch_username.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -10593,6 +10671,7 @@ impl SseEncode for crate::api::crdt::MemberFfi {
         <String>::sse_encode(self.display_name, serializer);
         <String>::sse_encode(self.role, serializer);
         <String>::sse_encode(self.nickname, serializer);
+        <String>::sse_encode(self.twitch_username, serializer);
     }
 }
 

@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:lucide_icons/lucide_icons.dart';
+import 'package:simple_icons/simple_icons.dart';
 
 /// Right-side member panel (240px) showing online peers or server members.
 class MemberPanel extends ConsumerWidget {
@@ -362,6 +363,7 @@ class _ServerMemberContent extends ConsumerWidget {
                       displayName: m.displayName,
                       role: m.role,
                       nickname: m.nickname,
+                      twitchUsername: m.twitchUsername,
                       isOnline: isOnline,
                       serverId: serverId,
                     ));
@@ -389,6 +391,7 @@ class _ServerMemberContent extends ConsumerWidget {
                       displayName: m.displayName,
                       role: m.role,
                       nickname: m.nickname,
+                      twitchUsername: m.twitchUsername,
                       isOnline: true,
                       serverId: serverId,
                     ));
@@ -410,6 +413,7 @@ class _ServerMemberContent extends ConsumerWidget {
                     displayName: m.displayName,
                     role: m.role,
                     nickname: m.nickname,
+                    twitchUsername: m.twitchUsername,
                     isOnline: false,
                     serverId: serverId,
                   ));
@@ -511,6 +515,7 @@ class _ServerMemberTile extends ConsumerWidget {
   final String displayName;
   final String role;
   final String nickname;
+  final String twitchUsername;
   final bool isOnline;
   final String? serverId;
 
@@ -519,6 +524,7 @@ class _ServerMemberTile extends ConsumerWidget {
     required this.displayName,
     required this.role,
     required this.nickname,
+    required this.twitchUsername,
     required this.isOnline,
     this.serverId,
   });
@@ -550,6 +556,7 @@ class _ServerMemberTile extends ConsumerWidget {
             peerId: peerId,
             nickname: nickname.isNotEmpty ? nickname : null,
             role: role,
+            twitchUsername: twitchUsername.isNotEmpty ? twitchUsername : null,
             anchor: Offset(pos.dx - 290, pos.dy - 100),
           );
         },
@@ -609,6 +616,21 @@ class _ServerMemberTile extends ConsumerWidget {
                         color: _roleLabelColor(role, hollow),
                         fontSize: 10,
                       ),
+                    ),
+                  if (twitchUsername.isNotEmpty)
+                    Row(
+                      children: [
+                        Icon(SimpleIcons.twitch,
+                            size: 10, color: const Color(0xFF9146FF)),
+                        const SizedBox(width: 3),
+                        Text(
+                          twitchUsername,
+                          style: HollowTypography.caption.copyWith(
+                            color: const Color(0xFF9146FF),
+                            fontSize: 9,
+                          ),
+                        ),
+                      ],
                     ),
                 ],
               ),

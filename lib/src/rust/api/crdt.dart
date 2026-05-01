@@ -149,6 +149,16 @@ Future<void> setNickname({
   nickname: nickname,
 );
 
+Future<void> setTwitchUsername({
+  required String serverId,
+  required String peerId,
+  required String twitchUsername,
+}) => RustLib.instance.api.crateApiCrdtSetTwitchUsername(
+  serverId: serverId,
+  peerId: peerId,
+  twitchUsername: twitchUsername,
+);
+
 /// Update the channel layout (ordering/categories) for a server.
 /// layout_json is a JSON array of ChannelLayoutItem objects.
 Future<void> updateChannelLayout({
@@ -307,12 +317,14 @@ class MemberFfi {
   final String displayName;
   final String role;
   final String nickname;
+  final String twitchUsername;
 
   const MemberFfi({
     required this.peerId,
     required this.displayName,
     required this.role,
     required this.nickname,
+    required this.twitchUsername,
   });
 
   @override
@@ -320,7 +332,8 @@ class MemberFfi {
       peerId.hashCode ^
       displayName.hashCode ^
       role.hashCode ^
-      nickname.hashCode;
+      nickname.hashCode ^
+      twitchUsername.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -330,7 +343,8 @@ class MemberFfi {
           peerId == other.peerId &&
           displayName == other.displayName &&
           role == other.role &&
-          nickname == other.nickname;
+          nickname == other.nickname &&
+          twitchUsername == other.twitchUsername;
 }
 
 /// Server info for FFI (Dart-visible).

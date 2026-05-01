@@ -64,6 +64,8 @@ pub struct ServerState {
     #[serde(default)]
     pub nicknames: HashMap<String, AdminLwwReg<String>>,
     #[serde(default)]
+    pub twitch_usernames: HashMap<String, AdminLwwReg<String>>,
+    #[serde(default)]
     pub pinned_messages: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub channel_layout: Vec<ChannelLayoutItem>,
@@ -116,6 +118,7 @@ impl ServerState {
             members,
             roles,
             nicknames: HashMap::new(),
+            twitch_usernames: HashMap::new(),
             pinned_messages: HashMap::new(),
             channel_layout: Vec::new(),
             storage_pledges: HashMap::new(),
@@ -266,6 +269,7 @@ impl ServerState {
                 self.members.remove(peer_id);
                 self.roles.remove(peer_id);
                 self.nicknames.remove(peer_id);
+                self.twitch_usernames.remove(peer_id);
                 self.storage_pledges.remove(peer_id);
             }
 
@@ -292,6 +296,15 @@ impl ServerState {
                     AdminLwwReg::new(nickname.clone(), op.hlc.clone(), priority)
                 });
                 let remote = AdminLwwReg::new(nickname.clone(), op.hlc.clone(), priority);
+                entry.merge(&remote);
+            }
+
+            CrdtPayload::TwitchUsernameChanged { peer_id, twitch_username } => {
+                let priority = self.author_priority(&op.author);
+                let entry = self.twitch_usernames.entry(peer_id.clone()).or_insert_with(|| {
+                    AdminLwwReg::new(twitch_username.clone(), op.hlc.clone(), priority)
+                });
+                let remote = AdminLwwReg::new(twitch_username.clone(), op.hlc.clone(), priority);
                 entry.merge(&remote);
             }
 
@@ -375,6 +388,13 @@ impl ServerState {
     /// Get a member's server nickname (empty string = no nickname set).
     pub fn get_nickname(&self, peer_id: &str) -> String {
         self.nicknames
+            .get(peer_id)
+            .map(|reg| reg.read().clone())
+            .unwrap_or_default()
+    }
+
+    pub fn get_twitch_username(&self, peer_id: &str) -> String {
+        self.twitch_usernames
             .get(peer_id)
             .map(|reg| reg.read().clone())
             .unwrap_or_default()

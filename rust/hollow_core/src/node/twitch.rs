@@ -41,6 +41,8 @@ pub(crate) struct TwitchValidateResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TwitchProof {
     pub twitch_user_id: String,
+    #[serde(default)]
+    pub twitch_username: String,
     pub followed_at: Option<String>,
     pub is_subscribed: bool,
     #[serde(default)]
@@ -314,6 +316,7 @@ pub(crate) async fn check_subscription(
 pub(crate) async fn generate_proof(
     access_token: &str,
     twitch_user_id: &str,
+    twitch_username: &str,
     broadcaster_id: &str,
 ) -> Result<TwitchProof, String> {
     let followed_at = check_follow(access_token, twitch_user_id, broadcaster_id).await?;
@@ -326,6 +329,7 @@ pub(crate) async fn generate_proof(
 
     Ok(TwitchProof {
         twitch_user_id: twitch_user_id.to_string(),
+        twitch_username: twitch_username.to_string(),
         followed_at,
         is_subscribed,
         sub_tier,

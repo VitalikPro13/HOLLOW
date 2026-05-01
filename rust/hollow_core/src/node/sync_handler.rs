@@ -912,6 +912,66 @@ pub(crate) async fn handle_set_nickname(
     false
 }
 
+// ── 11b. SetTwitchUsername ─────────────────────────────────────────────
+
+pub(crate) async fn handle_set_twitch_username(
+    server_states: &mut HashMap<String, ServerState>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    local_peer_str: &str,
+    server_id: String,
+    peer_id: String,
+    twitch_username: String,
+) -> bool {
+    if let Some(state) = server_states.get_mut(&server_id) {
+        let local_peer = local_peer_str.to_string();
+
+        if peer_id != local_peer && !state.has_permission(&local_peer, crate::crdt::operations::Permission::MANAGE_ROLES) {
+            return true;
+        }
+
+        let op = state.create_op(CrdtPayload::TwitchUsernameChanged {
+            peer_id: peer_id.clone(),
+            twitch_username: twitch_username.clone(),
+        });
+        let _ = state.apply_op(&op);
+
+        if let Ok(json) = serde_json::to_string(&state) {
+            let data_dir = crate::identity::data_dir().unwrap_or_default();
+            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                let _ = store.save_server_state(&server_id, &json);
+                let _ = store.insert_crdt_op(&op);
+            }
+        }
+
+        let _ = event_tx.send(NetworkEvent::MemberJoined {
+            server_id: server_id.clone(),
+            peer_id: peer_id.clone(),
+        }).await;
+
+        if let Ok(op_json) = serde_json::to_string(&op) {
+            for member_peer_str in state.members.keys() {
+                if member_peer_str == &local_peer { continue; }
+                    if peer_is_reachable(ws_room_peers, member_peer_str) {
+                        send_message_to_peer(
+                            ws_cmd_tx, ws_room_peers,
+                            member_peer_str, HavenMessage::CrdtOpBroadcast {
+                                server_id: server_id.clone(),
+                                op_json: op_json.clone(),
+                            },
+                        );
+                    }
+            }
+        }
+    }
+    false
+}
+
 // ── 12. RequestChannelSync ────────────────────────────────────────────
 
 pub(crate) async fn handle_request_channel_sync(
@@ -1399,6 +1459,9 @@ pub(crate) async fn handle_envelope_crdt_op(
                 state.members.contains_key(&op.author)
             }
             CrdtPayload::NicknameChanged { peer_id, .. } => {
+                peer_id == &op.author || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
+            }
+            CrdtPayload::TwitchUsernameChanged { peer_id, .. } => {
                 peer_id == &op.author || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
             }
             CrdtPayload::MessagePinned { .. }

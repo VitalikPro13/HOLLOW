@@ -17,6 +17,9 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:lucide_icons/lucide_icons.dart';
+import 'package:simple_icons/simple_icons.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:hollow/src/rust/api/twitch.dart';
 
 /// Deterministic banner color from peer ID (shifted hue from avatar).
 Color _bannerColorFromId(String id) {
@@ -32,6 +35,7 @@ void showProfileCardPopup({
   required String peerId,
   String? nickname,
   String? role,
+  String? twitchUsername,
   required Offset anchor,
   bool anchorBottom = false,
 }) {
@@ -43,6 +47,7 @@ void showProfileCardPopup({
       peerId: peerId,
       nickname: nickname,
       role: role,
+      twitchUsername: twitchUsername,
       anchor: anchor,
       anchorBottom: anchorBottom,
       onDismiss: () { entry.remove(); entry.dispose(); },
@@ -56,6 +61,7 @@ class _ProfileCardOverlay extends ConsumerStatefulWidget {
   final String peerId;
   final String? nickname;
   final String? role;
+  final String? twitchUsername;
   final Offset anchor;
   final bool anchorBottom;
   final VoidCallback onDismiss;
@@ -64,6 +70,7 @@ class _ProfileCardOverlay extends ConsumerStatefulWidget {
     required this.peerId,
     required this.nickname,
     required this.role,
+    this.twitchUsername,
     required this.anchor,
     this.anchorBottom = false,
     required this.onDismiss,
@@ -79,10 +86,12 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
   late final AnimationController _controller;
   late final Animation<double> _scaleAnim;
   late final Animation<double> _fadeAnim;
+  String? _resolvedTwitchUsername;
 
   @override
   void initState() {
     super.initState();
+    _resolvedTwitchUsername = _resolvedTwitchUsername;
     _controller = AnimationController(
       vsync: this,
       duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 180),
@@ -94,6 +103,22 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
       CurvedAnimation(parent: _controller, curve: Curves.easeOut),
     );
     _controller.forward();
+
+    if (_resolvedTwitchUsername == null || _resolvedTwitchUsername!.isEmpty) {
+      _resolveTwitchUsername();
+    }
+  }
+
+  Future<void> _resolveTwitchUsername() async {
+    try {
+      final localPeerId = ref.read(identityProvider).peerId;
+      if (widget.peerId == localPeerId) {
+        final username = await twitchGetUsername();
+        if (mounted && username != null && username.isNotEmpty) {
+          setState(() => _resolvedTwitchUsername = username);
+        }
+      }
+    } catch (_) {}
   }
 
   @override
@@ -322,6 +347,51 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
                                           _roleColor(widget.role!, hollow),
                                       fontWeight: FontWeight.w600,
                                       fontSize: 10,
+                                    ),
+                                  ),
+                                ),
+                              ],
+
+                              // Twitch badge
+                              if (_resolvedTwitchUsername != null &&
+                                  _resolvedTwitchUsername!.isNotEmpty) ...[
+                                const SizedBox(height: HollowSpacing.xs),
+                                GestureDetector(
+                                  onTap: () {
+                                    launchUrl(
+                                      Uri.parse(
+                                          'https://twitch.tv/${_resolvedTwitchUsername}'),
+                                      mode: LaunchMode.externalApplication,
+                                    );
+                                  },
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: HollowSpacing.sm,
+                                      vertical: 2,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF9146FF)
+                                          .withValues(alpha: 0.15),
+                                      borderRadius: BorderRadius.circular(
+                                          HollowRadius.sm),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(SimpleIcons.twitch,
+                                            size: 11,
+                                            color: const Color(0xFF9146FF)),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          _resolvedTwitchUsername!,
+                                          style: HollowTypography.caption
+                                              .copyWith(
+                                            color: const Color(0xFF9146FF),
+                                            fontWeight: FontWeight.w600,
+                                            fontSize: 10,
+                                          ),
+                                        ),
+                                      ],
                                     ),
                                   ),
                                 ),

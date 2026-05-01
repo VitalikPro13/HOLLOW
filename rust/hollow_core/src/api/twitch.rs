@@ -33,6 +33,7 @@ pub struct TwitchDeviceFlowResult {
 
 const KEY_REFRESH_TOKEN: &str = "twitch_refresh_token";
 const KEY_USER_ID: &str = "twitch_user_id";
+const KEY_TWITCH_USERNAME: &str = "twitch_username";
 
 fn save_tw_setting(key: &str, value: &str) -> Result<(), String> {
     let store = get_store();
@@ -73,6 +74,7 @@ pub fn twitch_poll_for_token(device_code: String, interval_secs: u64) -> Result<
     // Persist refresh token + user_id to SQLCipher.
     save_tw_setting(KEY_REFRESH_TOKEN, &token_resp.refresh_token)?;
     save_tw_setting(KEY_USER_ID, &validate.user_id)?;
+    save_tw_setting(KEY_TWITCH_USERNAME, &validate.login)?;
 
     // Cache access token in memory.
     let now = std::time::Instant::now();
@@ -126,9 +128,12 @@ pub fn twitch_ensure_token() -> Result<bool, String> {
     // Save new refresh token (one-time use — old one is now invalid).
     save_tw_setting(KEY_REFRESH_TOKEN, &token_resp.refresh_token)?;
 
-    // Validate to confirm token is good.
+    // Validate to confirm token is good + refresh stored username.
     let validate = rt.block_on(twitch::validate_token(&token_resp.access_token));
     let validated_now = validate.is_ok();
+    if let Ok(ref v) = validate {
+        let _ = save_tw_setting(KEY_TWITCH_USERNAME, &v.login);
+    }
 
     // Cache the new access token.
     let expires_at = now + std::time::Duration::from_secs(token_resp.expires_in.saturating_sub(60));
@@ -158,8 +163,11 @@ pub fn twitch_generate_proof(broadcaster_id: String) -> Result<String, String> {
         cache.as_ref().ok_or("Token cache empty")?.access_token.clone()
     };
 
+    let username = load_tw_setting(KEY_TWITCH_USERNAME)?
+        .unwrap_or_default();
+
     let rt = get_runtime();
-    let proof = rt.block_on(twitch::generate_proof(&access_token, &user_id, &broadcaster_id))?;
+    let proof = rt.block_on(twitch::generate_proof(&access_token, &user_id, &username, &broadcaster_id))?;
     serde_json::to_string(&proof).map_err(|e| format!("Failed to serialize proof: {e}"))
 }
 
@@ -167,6 +175,7 @@ pub fn twitch_generate_proof(broadcaster_id: String) -> Result<String, String> {
 pub fn twitch_disconnect() -> Result<(), String> {
     save_tw_setting(KEY_REFRESH_TOKEN, "")?;
     save_tw_setting(KEY_USER_ID, "")?;
+    save_tw_setting(KEY_TWITCH_USERNAME, "")?;
 
     let mut cache = get_token_cache().lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     *cache = None;
@@ -184,4 +193,10 @@ pub fn twitch_is_connected() -> Result<bool, String> {
 pub fn twitch_get_user_id() -> Result<Option<String>, String> {
     let user_id = load_tw_setting(KEY_USER_ID)?;
     Ok(user_id.filter(|id| !id.is_empty()))
+}
+
+#[frb]
+pub fn twitch_get_username() -> Result<Option<String>, String> {
+    let username = load_tw_setting(KEY_TWITCH_USERNAME)?;
+    Ok(username.filter(|u| !u.is_empty()))
 }

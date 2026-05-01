@@ -492,6 +492,14 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
+                    NodeCommand::SetTwitchUsername { server_id, peer_id, twitch_username } => {
+                        if sync_handler::handle_set_twitch_username(
+                            &mut server_states, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            server_id, peer_id, twitch_username,
+                        ).await { continue; }
+                    }
+
                     NodeCommand::RequestChannelSync { server_id, channel_id } => {
                         if sync_handler::handle_request_channel_sync(
                             &server_states, &event_tx, &ws_cmd_tx,
@@ -4465,6 +4473,9 @@ async fn handle_incoming_request(
                             // Members can change own pledge, admins can change anyone's
                             peer_id == &peer_str || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
                         }
+                        CrdtPayload::TwitchUsernameChanged { peer_id, .. } => {
+                            peer_id == &peer_str || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
+                        }
                         CrdtPayload::ServerCreated { .. } => true,
                     };
 
@@ -4550,6 +4561,13 @@ async fn handle_incoming_request(
                             }).await;
                         }
                         CrdtPayload::NicknameChanged { peer_id, .. } => {
+                            // Re-use MemberJoined to trigger member list refresh in Dart
+                            let _ = event_tx.send(NetworkEvent::MemberJoined {
+                                server_id: server_id.clone(),
+                                peer_id: peer_id.clone(),
+                            }).await;
+                        }
+                        CrdtPayload::TwitchUsernameChanged { peer_id, .. } => {
                             // Re-use MemberJoined to trigger member list refresh in Dart
                             let _ = event_tx.send(NetworkEvent::MemberJoined {
                                 server_id: server_id.clone(),
@@ -4668,6 +4686,19 @@ async fn handle_incoming_request(
                         display_name,
                     });
                     let _ = state.apply_op(&op);
+
+                    // If Twitch proof contains a username, also create a TwitchUsernameChanged op
+                    if let Some(ref proof_json) = twitch_proof_json {
+                        if let Ok(proof) = serde_json::from_str::<crate::node::twitch::TwitchProof>(proof_json) {
+                            if !proof.twitch_username.is_empty() {
+                                let tw_op = state.create_op(CrdtPayload::TwitchUsernameChanged {
+                                    peer_id: peer_str.to_string(),
+                                    twitch_username: proof.twitch_username.clone(),
+                                });
+                                let _ = state.apply_op(&tw_op);
+                            }
+                        }
+                    }
 
                     // Persist
                     if let Ok(json) = serde_json::to_string(&state) {

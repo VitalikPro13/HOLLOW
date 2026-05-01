@@ -37,6 +37,9 @@ Future<bool> twitchIsConnected() =>
 Future<String?> twitchGetUserId() =>
     RustLib.instance.api.crateApiTwitchTwitchGetUserId();
 
+Future<String?> twitchGetUsername() =>
+    RustLib.instance.api.crateApiTwitchTwitchGetUsername();
+
 class TwitchDeviceFlowResult {
   final String userCode;
   final String verificationUri;

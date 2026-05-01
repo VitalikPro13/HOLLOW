@@ -69,6 +69,12 @@ pub enum CrdtPayload {
         nickname: String,
     },
 
+    // Twitch username (set on Twitch-verified join)
+    TwitchUsernameChanged {
+        peer_id: String,
+        twitch_username: String,
+    },
+
     // Channel layout (ordering/categories)
     ChannelLayoutUpdated {
         layout_json: String,

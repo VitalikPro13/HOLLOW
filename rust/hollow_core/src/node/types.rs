@@ -268,6 +268,7 @@ pub(crate) enum NodeCommand {
     ChangeRole { server_id: String, peer_id: String, new_role: String },
     KickMember { server_id: String, peer_id: String },
     SetNickname { server_id: String, peer_id: String, nickname: String },
+    SetTwitchUsername { server_id: String, peer_id: String, twitch_username: String },
     NotifyShutdown,
     // -- Profile commands (Phase 3.5) --
     UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>> },

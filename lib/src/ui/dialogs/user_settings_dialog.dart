@@ -16,6 +16,8 @@ import 'package:win32audio/win32audio.dart' as win32audio;
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -4860,18 +4862,19 @@ class _KickBotIconState extends State<_KickBotIcon> {
 
 // ── Twitch Connection Widget ──────────────────────────────────────
 
-class _TwitchConnectionRow extends StatefulWidget {
+class _TwitchConnectionRow extends ConsumerStatefulWidget {
   final HollowTheme hollow;
 
   const _TwitchConnectionRow({required this.hollow});
 
   @override
-  State<_TwitchConnectionRow> createState() => _TwitchConnectionRowState();
+  ConsumerState<_TwitchConnectionRow> createState() => _TwitchConnectionRowState();
 }
 
-class _TwitchConnectionRowState extends State<_TwitchConnectionRow> {
+class _TwitchConnectionRowState extends ConsumerState<_TwitchConnectionRow> {
   bool _connected = false;
   String? _userId;
+  String? _username;
   bool _loading = true;
 
   @override
@@ -4884,10 +4887,12 @@ class _TwitchConnectionRowState extends State<_TwitchConnectionRow> {
     try {
       final connected = await twitch_api.twitchIsConnected();
       final userId = connected ? await twitch_api.twitchGetUserId() : null;
+      final username = connected ? await twitch_api.twitchGetUsername() : null;
       if (mounted) {
         setState(() {
           _connected = connected;
           _userId = userId;
+          _username = username;
           _loading = false;
         });
       }
@@ -4898,8 +4903,26 @@ class _TwitchConnectionRowState extends State<_TwitchConnectionRow> {
 
   Future<void> _connect() async {
     if (!mounted) return;
-    showTwitchDeviceCodeDialog(context, onSuccess: () {
+    showTwitchDeviceCodeDialog(context, onSuccess: () async {
       _checkConnection();
+      // Set Twitch badge on all Twitch-enabled servers
+      try {
+        final username = await twitch_api.twitchGetUsername();
+        final localPeerId = ref.read(identityProvider).peerId;
+        if (username != null && username.isNotEmpty && localPeerId != null) {
+          final servers = ref.read(serverListProvider);
+          for (final server in servers.values) {
+            final enabled = await crdt_api.getServerSetting(
+                serverId: server.serverId, key: 'twitch_verification_enabled');
+            if (enabled == 'true') {
+              await crdt_api.setTwitchUsername(
+                  serverId: server.serverId,
+                  peerId: localPeerId,
+                  twitchUsername: username);
+            }
+          }
+        }
+      } catch (_) {}
     });
   }
 
@@ -4910,6 +4933,7 @@ class _TwitchConnectionRowState extends State<_TwitchConnectionRow> {
         setState(() {
           _connected = false;
           _userId = null;
+          _username = null;
         });
         HollowToast.show(context, 'Twitch disconnected',
             type: HollowToastType.info);
@@ -4943,9 +4967,11 @@ class _TwitchConnectionRowState extends State<_TwitchConnectionRow> {
                 style: HollowTypography.body
                     .copyWith(color: hollow.textPrimary),
               ),
-              if (_connected && _userId != null)
+              if (_connected && (_username != null || _userId != null))
                 Text(
-                  'Connected (ID: ${_userId!.length > 12 ? '${_userId!.substring(0, 12)}...' : _userId!})',
+                  _username != null
+                      ? 'Connected as $_username'
+                      : 'Connected (ID: ${_userId!.length > 12 ? '${_userId!.substring(0, 12)}...' : _userId!})',
                   style: HollowTypography.caption.copyWith(
                     color: hollow.textSecondary,
                     fontSize: 10,

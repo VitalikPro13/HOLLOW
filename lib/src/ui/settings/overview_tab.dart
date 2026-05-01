@@ -242,11 +242,15 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
   Future<void> _fillTwitchFromAccount() async {
     try {
       final userId = await twitch_api.twitchGetUserId();
+      final username = await twitch_api.twitchGetUsername();
       if (userId != null && mounted) {
         setState(() {
           _twitchChannelIdController.text = userId;
+          if (username != null && _twitchChannelController.text.isEmpty) {
+            _twitchChannelController.text = username;
+          }
         });
-        HollowToast.show(context, 'Twitch ID filled from your account', type: HollowToastType.success);
+        HollowToast.show(context, 'Twitch ID and name filled from your account', type: HollowToastType.success);
       } else if (mounted) {
         HollowToast.show(context, 'Connect your Twitch account in user settings first', type: HollowToastType.error);
       }
@@ -267,6 +271,19 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       await crdt_api.updateServerSetting(serverId: sid, key: 'twitch_min_follow_days', value: _twitchMinDaysController.text.trim());
       await crdt_api.updateServerSetting(serverId: sid, key: 'twitch_require_sub', value: _twitchRequireSub ? 'true' : 'false');
       await crdt_api.updateServerSetting(serverId: sid, key: 'twitch_owner_verify', value: _twitchOwnerVerify ? 'true' : 'false');
+
+      // Set owner's Twitch username badge if they have a connected account
+      if (_twitchEnabled) {
+        final username = await twitch_api.twitchGetUsername();
+        if (username != null && username.isNotEmpty) {
+          final localPeerId = ref.read(identityProvider).peerId;
+          if (localPeerId != null) {
+            await crdt_api.setTwitchUsername(
+                serverId: sid, peerId: localPeerId, twitchUsername: username);
+          }
+        }
+      }
+
       if (mounted) {
         HollowToast.show(context, 'Twitch settings saved', type: HollowToastType.success);
       }

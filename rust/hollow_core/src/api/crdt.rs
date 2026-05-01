@@ -25,6 +25,7 @@ pub struct MemberFfi {
     pub display_name: String,
     pub role: String,
     pub nickname: String,
+    pub twitch_username: String,
 }
 
 /// Storage stats for a server, returned to Dart via FFI.
@@ -231,6 +232,7 @@ pub fn get_server_members(server_id: String) -> Result<Vec<MemberFfi>, String> {
             display_name: m.display_name.clone(),
             role: state.get_role(&m.peer_id).as_str().to_string(),
             nickname: state.get_nickname(&m.peer_id),
+            twitch_username: state.get_twitch_username(&m.peer_id),
         })
         .collect();
 
@@ -492,6 +494,25 @@ pub fn set_nickname(server_id: String, peer_id: String, nickname: String) -> Res
             server_id,
             peer_id,
             nickname,
+        }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+#[frb]
+pub fn set_twitch_username(server_id: String, peer_id: String, twitch_username: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(
+        state.cmd_tx.send(node::NodeCommand::SetTwitchUsername {
+            server_id,
+            peer_id,
+            twitch_username,
         }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;

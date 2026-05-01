@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `download_inner`
+// These functions are ignored because they are not marked as `pub`: `detect_common_prefix`, `download_inner`
 
 String getCurrentVersion() =>
     RustLib.instance.api.crateApiUpdaterGetCurrentVersion();
