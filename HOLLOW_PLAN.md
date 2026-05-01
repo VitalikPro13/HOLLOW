@@ -1920,18 +1920,18 @@ Tested at 10,000 concurrent loopback connections on current OVH VPS (4 vCPU / 8 
 - **~50 bytes/sec** sustained per idle connection (auth keepalive + occasional CRDT chatter)
 - **CPU:** 800 auths/sec per thread (3200/sec on 4 threads). CPU is ~13× over-provisioned vs RAM.
 
-**Current configuration (2026-04-29):** uWebSockets C++ relay with native OpenSSL TLS on port 443. Nginx removed. Measured: **~14.5 KB/conn** total system cost (with `SSL_MODE_RELEASE_BUFFERS`). Previous: Nginx TLS on 443 → Axum relay on 8080 = ~175 KB/conn (12× worse).
+**Current configuration (2026-05-01):** uWebSockets C++ relay with native OpenSSL TLS on port 443. Nginx removed. Measured: **~13.4 KB/conn** relay process RSS (with `SSL_MODE_RELEASE_BUFFERS`). Verified with 44,600 simultaneous authenticated connections — perfectly linear scaling, 0 failures, 0 drops. Previous: Nginx TLS on 443 → Axum relay on 8080 = ~175 KB/conn (13× worse). See `relay-uws/BENCHMARK.md` for full methodology and data.
 
 Jemalloc tested and rejected (2026-04-28): ~149 KB/conn (worse due to arena pre-allocation overhead for long-lived connections).
 
-**Current capacity (14.5 KB/conn, after Step 5 uWebSockets rewrite + SSL_MODE_RELEASE_BUFFERS):**
+**Current capacity (13.4 KB/conn, after Step 5 uWebSockets rewrite + SSL_MODE_RELEASE_BUFFERS, verified 2026-05-01):**
 | Box | Connections | $/mo |
 |---|---:|---:|
-| OVH VPS 8 GB (current) | **~480k** | $8.35 |
-| OVH VPS 12 GB | **~750k** | $12.75 |
-| 10× OVH VPS 12 GB swarm | **~7.5M aggregate** | $127.50 |
+| OVH VPS 8 GB (current) | **~572k** | $8.35 |
+| OVH VPS 12 GB | **~878k** | $12.75 |
+| 10× OVH VPS 12 GB swarm | **~8.78M aggregate** | $127.50 |
 
-Per-user cost: ~$0.0000017/user/mo on 12 GB OVH at scale. Bandwidth ceiling (~50 B/sec × 750k = 37.5 MB/sec = 300 Mbps) is under 1 Gbps.
+Per-user cost: ~$0.0000015/user/mo on 12 GB OVH at scale. Bandwidth ceiling (~50 B/sec × 878k = 43.9 MB/sec = 351 Mbps) is under 1 Gbps.
 
 Previous capacity (175 KB/conn, Steps 1-3): 40k / 62k / 620k. Step 5 achieved 12× density improvement.
 
@@ -1956,16 +1956,16 @@ RELAY OPTIMIZATION PIPELINE (ordered — each step builds on the previous):
 
 - [x] **Step 5: uWebSockets (C++) relay rewrite (2026-04-29).** Replaced the entire Axum/tokio/tungstenite + Nginx stack with a standalone C++ binary using [uWebSockets](https://github.com/uNetworking/uWebSockets). Native TLS via OpenSSL — Nginx completely eliminated. Ed25519 verification via libsodium, HMAC-SHA1 TURN creds via OpenSSL, JSON via nlohmann/json.
     **Architecture:** `relay-uws/` — standalone C++ binary (636 KB, 1,377 lines). Same wire protocol (JSON text + binary 0x01/0x02). Same HTTP endpoints. Same auth. Zero client code changes. Single-threaded epoll event loop. Backpressure via `getBufferedAmount()` (64 KB soft cap) replaces Rust’s `mpsc::channel(32)`.
-    **Measured per-conn cost: ~14.5 KB total** (with `ssl_prefer_low_memory_usage = 1` → `SSL_MODE_RELEASE_BUFFERS`).
-    Load tested at 10,000 concurrent connections on OVH VPS (4 vCPU / 8 GB). Zero handshake failures, zero auth failures. RSS grew from 10.5 MB (idle) to 155 MB (10k conns). Stable with no memory growth during 30s hold.
+    **Measured per-conn cost: ~13.4 KB relay RSS** (with `ssl_prefer_low_memory_usage = 1` → `SSL_MODE_RELEASE_BUFFERS`).
+    Load tested at 44,600 concurrent connections on OVH VPS (4 vCPU / 8 GB) on 2026-05-01. Zero failures, zero drops. Perfectly linear scaling from 0 to 44.6k (limited by client-side port exhaustion on same machine, not relay). RSS grew from 17 MB (idle) to 614 MB (44.6k conns). See `relay-uws/BENCHMARK.md`.
     | Box | Connections | $/mo |
     |---|---:|---:|
-    | OVH VPS 8 GB (current) | **~480k** | $8.35 |
-    | OVH VPS 12 GB | **~750k** | $12.75 |
-    | 10× OVH VPS 12 GB swarm | **~7.5M aggregate** | $127.50 |
-    **Improvement over previous stack:** 175 KB/conn → 14.5 KB/conn (12× density). Nginx removal freed ~400 MB idle RAM. Relay idle RSS: 10.5 MB (was 5.2 MB relay + 410 MB Nginx = 415 MB). Certbot switched to `--standalone` with deploy hook to restart relay on cert renewal.
+    | OVH VPS 8 GB (current) | **~572k** | $8.35 |
+    | OVH VPS 12 GB | **~878k** | $12.75 |
+    | 10× OVH VPS 12 GB swarm | **~8.78M aggregate** | $127.50 |
+    **Improvement over previous stack:** 175 KB/conn → 13.4 KB/conn (13× density). Nginx removal freed ~400 MB idle RAM. Relay idle RSS: 17 MB (was 5.2 MB relay + 410 MB Nginx = 415 MB). Certbot switched to `--standalone` with deploy hook to restart relay on cert renewal.
 
-- [ ] **Step 6 (future, low priority): WebSocket permessage-deflate compression (RFC 7692).** uWebSockets supports this natively — change `.compression = uWS::DISABLED` to `uWS::SHARED_COMPRESSOR` in `ws_handler.cpp`. However, `SHARED_COMPRESSOR` adds ~3-4 KB per connection for the compression context (bumps 14.5→~18 KB/conn, reducing capacity from ~480k to ~390k). Encrypted payloads (ciphertext) don't compress well, so the main benefit is on JSON control messages (join/leave/members) which are infrequent. **Probably not worth the RAM tradeoff** — binary framing (Step 7) already captured the big wins. Reconsider only if bandwidth becomes a bottleneck before RAM does.
+- [ ] **Step 6 (future, low priority): WebSocket permessage-deflate compression (RFC 7692).** uWebSockets supports this natively — change `.compression = uWS::DISABLED` to `uWS::SHARED_COMPRESSOR` in `ws_handler.cpp`. However, `SHARED_COMPRESSOR` adds ~3-4 KB per connection for the compression context (bumps 13.4→~17 KB/conn, reducing capacity from ~572k to ~451k). Encrypted payloads (ciphertext) don't compress well, so the main benefit is on JSON control messages (join/leave/members) which are infrequent. **Probably not worth the RAM tradeoff** — binary framing (Step 7) already captured the big wins. Reconsider only if bandwidth becomes a bottleneck before RAM does.
 
 - [x] **Step 7: Binary message framing for Msg/Direct (2026-04-30).** Replaced JSON `Msg`/`Direct` envelopes with compact binary frames. Client sends `0x03` (broadcast) and `0x04` (direct) with null-terminated room/peer strings and raw payload (no base64). Relay forwards as `0x05` (broadcast from) and `0x06` (direct from), inserting sender peer ID. JSON `Join`/`Leave`/`Members`/`PeerJoined`/`PeerLeft`/`Auth` kept as JSON for readability.
     **Measured savings:** 25-42% bandwidth reduction depending on payload size (42% for short messages, 25% for large payloads). Zero CPU/RAM cost. Backward compatible — relay still accepts JSON Msg/Direct from old clients.
@@ -1998,24 +1998,27 @@ SWARM IMPLEMENTATION CHECKLIST:
     - [ ] **Health probes.** Already have `GET /health`. Add mesh connectivity status (how many peer nodes connected) to `/server-stats` for K8s readiness checks and monitoring.
 
 SCALING ROADMAP:
-- **Phase A — current → ~200k concurrent users:** stay on the $8.35 VPS (4 vCPU / 8 GB / 400 Mbps). Current capacity ~480k. Don’t upgrade.
-- **Phase B — 200k → 750k concurrent:** upgrade to OVH VPS 12 GB / 6 vCPU / 1 Gbps ($12.75/mo). Single-process capacity: ~750k connections. With `SO_REUSEPORT` multi-process (requires mesh): auth throughput scales 6× but RAM remains the bottleneck. Alternatively add a second 8 GB VPS for geo-redundancy.
-- **Phase C — 750k → 3M concurrent:** 3-5 OVH VPSes across EU/NA/APAC regions. ~$25-64/mo. Each box runs multi-process with the mesh. Coturn on a separate box if TURN traffic is measurable.
+- **Phase A — current → ~500k concurrent users:** stay on the $8.35 VPS (4 vCPU / 8 GB / 400 Mbps). Current capacity ~572k at 13.4 KB/conn (verified with 44.6k simultaneous connections, perfectly linear scaling). Don’t upgrade.
+- **Phase B — 500k → 878k concurrent:** upgrade to OVH VPS 12 GB / 6 vCPU / 1 Gbps ($12.75/mo). Single-process capacity: ~878k connections. With `SO_REUSEPORT` multi-process (requires mesh): auth throughput scales 6× but RAM remains the bottleneck. Alternatively add a second 8 GB VPS for geo-redundancy.
+- **Phase C — 878k → 3M concurrent:** 3-5 OVH VPSes across EU/NA/APAC regions. ~$38-64/mo. Each box runs multi-process with the mesh. Coturn on a separate box if TURN traffic is measurable.
 - **Phase D — 3M+ concurrent:** grow the swarm. 5-10 OVH VPSes. ~$64-127/mo. Containerize + move to OVH managed K8s (free control plane) for orchestration.
 
 ---
 
-- [x] **VPS tunable limits checklist (verified 2026-04-30).** All verified on current OVH VPS:
+- [x] **VPS tunable limits checklist (verified 2026-05-01, updated after 44.6k stress test).** All verified on current OVH VPS:
     - **systemd `LimitNOFILE`:** ✅ set to 1048576 (supports ~524k connections at 2 FDs each).
     - **systemd `MemoryMax`:** ✅ unset (infinity).
     - **Kernel `fs.file-max`:** ✅ 9223372036854775807 (effectively unlimited).
-    - **Kernel `net.ipv4.ip_local_port_range`:** 32768-60999 (~28k). Fine — relay is inbound-only. Raise to 10000-65535 when inter-relay mesh is deployed (relay becomes an outbound client).
-    - **Kernel `net.core.somaxconn`:** 4096. Fine for expected ramp rates; raise to 65535 if TCP connect storms observed.
-    - **Swap:** 0. Consider a 2 GB swapfile when running near capacity to prevent hard OOM kills.
-    - **Load-gen client side** (for re-tests): `ulimit -n 65536` before running load-gen binary. Windows: `netsh int ipv4 set dynamicport tcp start=10000 num=55000`.
+    - **Kernel `net.ipv4.ip_local_port_range`:** 32768-60999 (~28k). Fine — relay is inbound-only (accept, not connect). Raise to 1024-65535 when inter-relay mesh is deployed (relay becomes an outbound client).
+    - **Kernel `net.core.somaxconn`:** ✅ raised to 65535 (was 4096, raised during 50k stress test).
+    - **Kernel `net.ipv4.tcp_max_syn_backlog`:** ✅ raised to 8192 (was 512, was dropping SYN packets under burst connections).
+    - **Kernel `net.core.netdev_max_backlog`:** ✅ raised to 5000 (was 1000).
+    - **Kernel `net.ipv4.tcp_tw_reuse`:** ✅ enabled (helps recycle TIME_WAIT sockets faster after stress tests).
+    - **Swap:** ✅ 2 GB swapfile at `/swapfile`, persisted in `/etc/fstab`. Safety net for near-capacity operation.
+    - **Load-gen client side** (for re-tests): `ulimit -n 500000` before running stress test. The bench tool is at `relay-uws/bench/stress_test/`. When running client on same machine as relay, widen port range: `sysctl -w net.ipv4.ip_local_port_range="1024 65535"` (restore to default after). For >64k connections, run client from a separate machine.
     - **~~Nginx~~ REMOVED (2026-04-29).** uWebSockets C++ relay handles TLS natively on port 443. Certbot uses `--standalone` with deploy hook.
 - [ ] **Post-quantum key exchange (ML-KEM / Kyber).** All current key exchanges use Curve25519. If quantum computers break elliptic curve crypto, intercepted ciphertext could be decrypted retroactively. **MLS side:** OpenMLS 0.8.x already ships an X-Wing ciphersuite (`MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`, ML-KEM + X25519 hybrid) via the `openmls_libcrux_crypto` provider — swap crypto backend + enable the ciphersuite. **DM side:** vodozemac has no PQ support; wrap Olm key exchange with a hybrid ML-KEM layer manually (use `ml-kem` crate). Key sizes grow (ML-KEM-768: ~1,184 B pubkey, ~1,088 B ciphertext vs 32 B for X25519) but only during session establishment — symmetric ratchet overhead unchanged after. Signal (PQXDH, 2023) and iMessage (PQ3, 2024) have shipped PQ for 1:1 chats, but no consumer app has shipped post-quantum MLS group ratcheting yet — Hollow would be first. Low priority, future consideration.
-- [ ] **Traffic analysis protection (theoretical, not planned).** TLS protects message *content* but not *timing and size patterns*. A network observer (ISP, state-level) watching both parties can correlate packet timing to infer who is chatting — even without decrypting. Mitigation would be constant-rate padding (dummy traffic), but at 480k connections even 1 pkt/sec padding = 480k pkt/sec of waste. No consumer chat app (Signal, WhatsApp, Telegram) implements this. **For censored regions, the proxy/tunnel approach (Phase ???) is the practical solution** — it hides *which service* you're using, which is a far more actionable threat than timing correlation. Not a launch blocker.
+- [ ] **Traffic analysis protection (theoretical, not planned).** TLS protects message *content* but not *timing and size patterns*. A network observer (ISP, state-level) watching both parties can correlate packet timing to infer who is chatting — even without decrypting. Mitigation would be constant-rate padding (dummy traffic), but at 572k connections even 1 pkt/sec padding = 572k pkt/sec of waste. No consumer chat app (Signal, WhatsApp, Telegram) implements this. **For censored regions, the proxy/tunnel approach (Phase ???) is the practical solution** — it hides *which service* you're using, which is a far more actionable threat than timing correlation. Not a launch blocker.
 
 -[ ] Extract Rust tests into different file, not inside the main files
 

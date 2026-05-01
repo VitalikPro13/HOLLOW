@@ -110,7 +110,7 @@ All UI uses custom Hollow widgets — no Material defaults.
 - **License key system:** Relay loads `keys.json` (enabled toggle + key list), validates during WS auth, hot-reloads every 30s with active connection revocation. App checks `/relay-status` on startup, shows key dialog if required, caches key in SQLCipher via `set_license_key()` FFI.
 - **Window title bar:** `WindowTitleBar` lives in `MaterialApp.builder` (above Navigator), NOT inside `HollowShell`. Navigator child wrapped in `ClipRect` to prevent `BackdropFilter` blur bleed. Never move the title bar back inside the shell.
 - **Logging:** `hollow_log!` macro → stderr + `hollow_debug.log` (release-safe, 10MB rotation). `hollow_crash.log` captures Flutter/platform errors (5MB rotation).
-- **Relay:** OVH VPS 141.227.186.209, uWebSockets C++ relay (`relay-uws/`) with native OpenSSL TLS on port 443. Nginx removed. Domain: `relay.anonlisten.com`. ~14.5 KB/conn, ~480k capacity on 8 GB VPS.
+- **Relay:** OVH VPS 141.227.186.209, uWebSockets C++ relay (`relay-uws/`) with native OpenSSL TLS on port 443. Nginx removed. Domain: `relay.anonlisten.com`. ~13.4 KB/conn, ~572k capacity on 8 GB VPS (verified with 44.6k simultaneous connections, see `relay-uws/BENCHMARK.md`).
 - **TURN:** Coturn on VPS (141.227.186.209:3478 UDP/TCP + 5349 TLS). Relay `/turn-credentials` generates HMAC-SHA1 creds. `IceConfigProvider` in Dart fetches + auto-refreshes every 50 min.
 - **Storage layout:**
   - `~/.hollow/files/{file_id}.{ext}` — full-replication pool (DMs, <6 servers, all images). Persistent.
