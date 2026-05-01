@@ -49,6 +49,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
 
   bool _twitchEnabled = false;
   bool _twitchRequireSub = false;
+  bool _twitchOwnerVerify = false;
   bool _savingTwitch = false;
 
   @override
@@ -224,6 +225,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       final channelId = await crdt_api.getServerSetting(serverId: sid, key: 'twitch_channel_id');
       final minDays = await crdt_api.getServerSetting(serverId: sid, key: 'twitch_min_follow_days');
       final requireSub = await crdt_api.getServerSetting(serverId: sid, key: 'twitch_require_sub');
+      final ownerVerify = await crdt_api.getServerSetting(serverId: sid, key: 'twitch_owner_verify');
       if (mounted) {
         setState(() {
           _twitchEnabled = enabled == 'true';
@@ -231,6 +233,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           _twitchChannelIdController.text = channelId;
           _twitchMinDaysController.text = minDays.isEmpty ? '0' : minDays;
           _twitchRequireSub = requireSub == 'true';
+          _twitchOwnerVerify = ownerVerify == 'true';
         });
       }
     } catch (_) {}
@@ -263,6 +266,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       await crdt_api.updateServerSetting(serverId: sid, key: 'twitch_channel_id', value: _twitchChannelIdController.text.trim());
       await crdt_api.updateServerSetting(serverId: sid, key: 'twitch_min_follow_days', value: _twitchMinDaysController.text.trim());
       await crdt_api.updateServerSetting(serverId: sid, key: 'twitch_require_sub', value: _twitchRequireSub ? 'true' : 'false');
+      await crdt_api.updateServerSetting(serverId: sid, key: 'twitch_owner_verify', value: _twitchOwnerVerify ? 'true' : 'false');
       if (mounted) {
         HollowToast.show(context, 'Twitch settings saved', type: HollowToastType.success);
       }
@@ -641,6 +645,38 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                 HollowToggle(
                   value: _twitchRequireSub,
                   onChanged: (v) => setState(() => _twitchRequireSub = v),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: HollowSpacing.lg),
+
+            // Owner-online verification toggle
+            Row(
+              children: [
+                Icon(LucideIcons.shield, size: 16, color: hollow.textSecondary),
+                const SizedBox(width: HollowSpacing.sm),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Owner-Online Verification',
+                        style: HollowTypography.body.copyWith(color: hollow.textPrimary),
+                      ),
+                      Text(
+                        'Only you (the owner) can accept join requests. Fully resistant to modified clients, but you must be online.',
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.textSecondary,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                HollowToggle(
+                  value: _twitchOwnerVerify,
+                  onChanged: (v) => setState(() => _twitchOwnerVerify = v),
                 ),
               ],
             ),

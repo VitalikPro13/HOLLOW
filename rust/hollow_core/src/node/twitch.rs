@@ -55,6 +55,7 @@ pub(crate) struct TwitchServerSettings {
     pub channel_name: String,
     pub min_follow_days: u32,
     pub require_sub: bool,
+    pub owner_verify: bool,
 }
 
 impl TwitchServerSettings {
@@ -85,7 +86,11 @@ impl TwitchServerSettings {
             .map(|reg| reg.read() == "true")
             .unwrap_or(false);
 
-        Some(Self { channel_id, channel_name, min_follow_days, require_sub })
+        let owner_verify = state.settings.get("twitch_owner_verify")
+            .map(|reg| reg.read() == "true")
+            .unwrap_or(false);
+
+        Some(Self { channel_id, channel_name, min_follow_days, require_sub, owner_verify })
     }
 }
 

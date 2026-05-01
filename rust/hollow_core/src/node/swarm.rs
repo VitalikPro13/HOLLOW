@@ -4627,6 +4627,36 @@ async fn handle_incoming_request(
                     }
                 }
 
+                // Owner-online verification: if enabled, only the owner accepts joins.
+                if let Some(ref twitch_settings) = twitch::TwitchServerSettings::from_server_state(state) {
+                    if twitch_settings.owner_verify {
+                        let owner_id = state.roles.iter()
+                            .find(|(_, reg)| *reg.read() == crate::crdt::operations::MemberRole::Owner)
+                            .map(|(pid, _)| pid.clone());
+
+                        if let Some(ref oid) = owner_id {
+                            if oid != local_peer_str {
+                                // We're not the owner — only the owner should accept.
+                                // Check if the owner is online; if not, reject so the joiner isn't stuck waiting.
+                                let owner_online = peer_is_reachable(ws_room_peers, oid);
+                                if !owner_online {
+                                    let server_name = state.name().to_string();
+                                    send_message_to_peer(
+                                        ws_cmd_tx, ws_room_peers,
+                                        peer_str, HavenMessage::ServerJoinRejected {
+                                            server_id,
+                                            reason: format!("twitch_owner_offline:{}", server_name),
+                                        },
+                                    );
+                                }
+                                // Either way, non-owner does not process the join.
+                                return;
+                            }
+                            // We ARE the owner — proceed to accept below.
+                        }
+                    }
+                }
+
                 // Check if peer is already a member
                 let already_member = state.members_list().iter().any(|m| m.peer_id == peer_str);
 

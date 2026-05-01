@@ -1001,6 +1001,13 @@ class EventStreamNotifier extends Notifier<bool> {
               failureReason: humanReason,
             );
           }
+        } else if (reason.startsWith('twitch_owner_offline:')) {
+          final serverName = reason.substring('twitch_owner_offline:'.length);
+          final msg = 'Server owner of $serverName is offline. Owner-verified servers require the owner to be online to accept joins. Try again later.';
+          final handled = handleTwitchJoinResult(success: false, error: msg);
+          if (!handled) {
+            HollowToast.show(ctx, msg, type: HollowToastType.error);
+          }
         } else {
           final handled = handleTwitchJoinResult(success: false, error: reason);
           if (!handled) {
