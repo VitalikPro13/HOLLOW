@@ -109,7 +109,7 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
     state.peer_sockets[peer_id] = ws;
 
     send_json(ws, {{"type", "auth_ok"}});
-    fprintf(stderr, "[ws] Authenticated: %s\n", peer_id.c_str());
+    // privacy: no connection logging
 }
 
 static void handle_join(SSLWebSocket* ws, PerSocketData* data,
@@ -202,8 +202,7 @@ static void handle_msg(PerSocketData* data, const std::string& room,
     if (rit == state.ws_rooms.end()) return;
 
     if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) {
-        fprintf(stderr, "[ws] Msg from %s to room they haven't joined — dropping\n",
-                data->peer_id.c_str());
+        // privacy: no connection logging
         return;
     }
 
@@ -228,8 +227,7 @@ static void handle_direct(PerSocketData* data, const std::string& room,
     if (rit == state.ws_rooms.end()) return;
 
     if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) {
-        fprintf(stderr, "[ws] Direct from %s to room they haven't joined — dropping\n",
-                data->peer_id.c_str());
+        // privacy: no connection logging
         return;
     }
 
@@ -515,7 +513,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state) {
                 data->auth_timer = nullptr;
             }
             if (data->authenticated) {
-                fprintf(stderr, "[ws] Disconnected: %s\n", data->peer_id.c_str());
+                // privacy: no connection logging
                 cleanup_peer(state, data->peer_id);
             }
         }

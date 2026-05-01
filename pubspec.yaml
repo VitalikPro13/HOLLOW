@@ -56,6 +56,7 @@ dependencies:
   fvp: ^0.35.2
   visibility_detector: ^0.4.0+2
   url_launcher: ^6.3.2
+  flutter_markdown: ^0.7.7+1
 
 dev_dependencies:
   flutter_test:
@@ -88,6 +89,8 @@ flutter:
     - assets/hollow_logo_rounded.png
     - assets/kickbot-logo.svg
     - assets/tiktok-solo-icon.svg
+    - legal/PRIVACY_POLICY.md
+    - legal/TERMS_OF_USE.md
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

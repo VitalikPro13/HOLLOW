@@ -7,6 +7,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:record/record.dart' as rec;
@@ -4018,28 +4019,59 @@ class _AboutTab extends StatelessWidget {
           _aboutDivider(hollow),
           const SizedBox(height: HollowSpacing.lg),
 
-          // Licenses
-          HollowButton.ghost(
-            onPressed: () {
-              showLicensePage(
-                context: context,
-                applicationName: 'Hollow',
-                applicationVersion: 'Alpha',
-                applicationIcon: Padding(
-                  padding: const EdgeInsets.all(HollowSpacing.md),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: Image.asset(
-                      'assets/hollow_logo_rounded.png',
-                      width: 48,
-                      height: 48,
+          // Legal
+          _aboutSectionLabel('Legal', hollow),
+          const SizedBox(height: HollowSpacing.sm),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: HollowButton.ghost(
+              onPressed: () => _showLegalDocument(
+                context,
+                title: 'Privacy Policy',
+                assetPath: 'legal/PRIVACY_POLICY.md',
+              ),
+              icon: Icon(LucideIcons.shield, size: 16),
+              child: const Text('Privacy Policy'),
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.xs),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: HollowButton.ghost(
+              onPressed: () => _showLegalDocument(
+                context,
+                title: 'Terms of Use',
+                assetPath: 'legal/TERMS_OF_USE.md',
+              ),
+              icon: Icon(LucideIcons.scroll, size: 16),
+              child: const Text('Terms of Use'),
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.xs),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: HollowButton.ghost(
+              onPressed: () {
+                showLicensePage(
+                  context: context,
+                  applicationName: 'Hollow',
+                  applicationVersion: 'Alpha',
+                  applicationIcon: Padding(
+                    padding: const EdgeInsets.all(HollowSpacing.md),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.asset(
+                        'assets/hollow_logo_rounded.png',
+                        width: 48,
+                        height: 48,
+                      ),
                     ),
                   ),
-                ),
-              );
-            },
-            icon: Icon(LucideIcons.fileText, size: 16),
-            child: const Text('Open-Source Licenses'),
+                );
+              },
+              icon: Icon(LucideIcons.fileText, size: 16),
+              child: const Text('Open-Source Licenses'),
+            ),
           ),
         ],
       ),
@@ -4078,6 +4110,121 @@ class _AboutTab extends StatelessWidget {
       ],
     );
   }
+}
+
+void _showLegalDocument(
+  BuildContext context, {
+  required String title,
+  required String assetPath,
+}) async {
+  final hollow = HollowTheme.of(context);
+  final text = await rootBundle.loadString(assetPath);
+
+  // Strip the top-level heading (# Title) — we show it in the dialog header
+  final lines = text.split('\n');
+  final body = lines
+      .skipWhile((l) => l.startsWith('# ') || l.trim().isEmpty)
+      .join('\n')
+      .trim();
+
+  if (!context.mounted) return;
+
+  showHollowDialog(
+    context: context,
+    builder: (ctx) => Material(
+      color: Colors.transparent,
+      child: Center(
+        child: Container(
+          width: 640,
+          height: 520,
+          decoration: BoxDecoration(
+            color: hollow.surface,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: hollow.border),
+          ),
+          child: Column(
+            children: [
+              // Header
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 20, 12, 0),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        title,
+                        style: HollowTypography.heading.copyWith(
+                          color: hollow.textPrimary,
+                          fontSize: 18,
+                        ),
+                      ),
+                    ),
+                    HollowPressable(
+                      onTap: () => Navigator.of(ctx).pop(),
+                      child: Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Icon(LucideIcons.x, size: 18,
+                            color: hollow.textSecondary),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              Container(height: 1, color: hollow.border.withValues(alpha: 0.5)),
+              // Body — rendered markdown
+              Expanded(
+                child: Markdown(
+                  data: body,
+                  selectable: true,
+                  padding: const EdgeInsets.all(24),
+                  onTapLink: (text, href, title) {
+                    if (href != null) {
+                      launchUrl(Uri.parse(href),
+                          mode: LaunchMode.externalApplication);
+                    }
+                  },
+                  styleSheet: MarkdownStyleSheet(
+                    h2: HollowTypography.heading.copyWith(
+                      color: hollow.textPrimary,
+                      fontSize: 16,
+                    ),
+                    h3: HollowTypography.heading.copyWith(
+                      color: hollow.textPrimary,
+                      fontSize: 14,
+                    ),
+                    p: HollowTypography.body.copyWith(
+                      color: hollow.textPrimary,
+                      height: 1.6,
+                    ),
+                    listBullet: HollowTypography.body.copyWith(
+                      color: hollow.textSecondary,
+                    ),
+                    strong: HollowTypography.body.copyWith(
+                      color: hollow.textPrimary,
+                      fontWeight: FontWeight.w700,
+                    ),
+                    a: HollowTypography.body.copyWith(
+                      color: hollow.accent,
+                      decoration: TextDecoration.underline,
+                      decorationColor: hollow.accent,
+                    ),
+                    blockSpacing: 12,
+                    horizontalRuleDecoration: BoxDecoration(
+                      border: Border(
+                        top: BorderSide(
+                          color: hollow.border.withValues(alpha: 0.5),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 class _AboutShimmerLine extends StatelessWidget {

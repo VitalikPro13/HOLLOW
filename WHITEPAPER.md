@@ -32,9 +32,10 @@ This document describes the Hollow protocol as implemented in the Alpha release.
 13. [The Rat Files (Cryptographic Evidence)](#13-the-rat-files-cryptographic-evidence)
 14. [Gossip Overlay Network](#14-gossip-overlay-network)
 15. [Anti-Censorship Transport](#15-anti-censorship-transport)
-16. [Summary of Cryptographic Primitives](#16-summary-of-cryptographic-primitives)
-17. [Threat Model](#17-threat-model)
-18. [Limitations and Future Work](#18-limitations-and-future-work)
+16. [Twitch Community Verification](#16-twitch-community-verification-optional)
+17. [Summary of Cryptographic Primitives](#17-summary-of-cryptographic-primitives)
+18. [Threat Model](#18-threat-model)
+19. [Limitations and Future Work](#19-limitations-and-future-work)
 
 ---
 
@@ -531,6 +532,10 @@ CRDT operations are validated on receipt:
 
 The relay is a **zero-knowledge message router**. It routes encrypted blobs between peers based on room membership. It has no knowledge of message semantics, encryption keys, or application state. The relay source code is open-source.
 
+**Implementation:** uWebSockets C++ with native OpenSSL TLS termination (no reverse proxy). Memory footprint: ~14.5 KB per connection. TLS session resumption is enabled for fast reconnects.
+
+**Privacy hardening:** The relay is configured with all logging disabled. No connection events, peer IDs, IP addresses, or timestamps are written to disk. System journal uses volatile (RAM-only) storage with 1-hour maximum retention. The TURN server (coturn) is configured with `log-file=/dev/null` and `no-stdout-log`. Rsyslog filters discard any relay or TURN messages from system log files.
+
 ### 10.2 Authentication
 
 Peers authenticate to the relay via Ed25519 signature:
@@ -552,12 +557,12 @@ The relay verifies the signature against the provided public key and checks that
 
 ### 10.4 Binary Protocol
 
-Two binary frame types for efficient transport:
+Four binary frame types for efficient transport:
 
-- **0x01 (Broadcast):** `[0x01][room_hash: 32 bytes][payload]` — forwarded to all room members.
-- **0x02 (Direct):** `[0x02][room\0][target_peer\0][payload]` — forwarded to a specific peer; relay replaces target with sender ID.
-
-Used for WebRTC signaling, file streaming, and shard transfers.
+- **0x01 (Broadcast):** `[0x01][room_hash: 32 bytes][payload]` — forwarded to all room members. Used for WebRTC signaling.
+- **0x02 (Direct):** `[0x02][room\0][target_peer\0][payload]` — forwarded to a specific peer; relay replaces target with sender ID. Used for file streaming, shard transfers.
+- **0x03 (Msg Broadcast):** `[0x03][room\0][payload]` — bandwidth-optimized broadcast; relay prepends sender peer ID to payload. Used for encrypted channel messages (~25-42% bandwidth savings vs JSON).
+- **0x04 (Direct Msg):** `[0x04][room\0][target\0][payload]` — bandwidth-optimized direct message; relay replaces target with sender and strips framing. Used for encrypted DMs.
 
 ### 10.5 Rate Limiting and Resource Protection
 
@@ -578,9 +583,9 @@ For peers behind symmetric NATs, the relay provides time-limited TURN credential
 
 | Data | Visible to Relay |
 |------|-----------------|
-| Peer IDs | Yes |
-| Room membership | Yes |
-| Connection timestamps | Yes |
+| Peer IDs (in memory) | Yes (not logged to disk) |
+| Room membership (in memory) | Yes (not logged to disk) |
+| Connection timestamps | **No** (relay logging is disabled; volatile journal with 1h retention) |
 | Message contents | **No** (encrypted) |
 | Encryption keys | **No** |
 | File contents | **No** (encrypted) |
@@ -588,6 +593,28 @@ For peers behind symmetric NATs, the relay provides time-limited TURN credential
 | User profiles | **No** (encrypted) |
 | Voice/video media | **No** (P2P, not relayed) |
 | File transfer bytes | **No** (P2P, not relayed) |
+| IP addresses | **No** (relay does not log IPs; TURN logging disabled) |
+
+### 10.8 License Key System
+
+The relay supports an optional license key system for controlling access during alpha/beta phases:
+
+- Keys are stored in a `keys.json` file loaded at startup. The system can be enabled or disabled via a toggle.
+- Keys are validated during WebSocket authentication. Invalid or already-in-use keys are rejected.
+- The key file is hot-reloaded every 30 seconds, allowing key revocation without relay restart.
+- Active connections using a revoked key are terminated on the next reload cycle.
+- License keys are cached client-side in the encrypted SQLCipher database.
+
+### 10.9 Server Statistics Endpoint
+
+The relay exposes a `/server-stats` endpoint returning real-time operational metrics:
+
+- Memory usage (total/used from `/proc/meminfo`)
+- Network throughput (Mbps, computed from `/proc/net/dev` deltas)
+- Online user count (connected authenticated peers)
+- Bandwidth cap
+
+Statistics are cached for 2 seconds to avoid excessive filesystem reads. This endpoint is used by the client's home dashboard to display relay health.
 
 ---
 
@@ -765,7 +792,40 @@ A TLS camouflage tunnel (REALITY-style) is planned to make tunnel traffic indist
 
 ---
 
-## 16. Summary of Cryptographic Primitives
+## 16. Twitch Community Verification (Optional)
+
+Server owners can optionally gate membership behind Twitch follow or subscription verification. This provides community identity verification without requiring any personal information.
+
+### 16.1 OAuth Flow
+
+Verification uses the **Device Code Grant** flow (OAuth 2.0 RFC 8628):
+
+1. The client requests a device code from Twitch via the relay's `/twitch/device-code` proxy endpoint.
+2. The user visits a Twitch URL in their browser and enters the code.
+3. The client polls for completion. On success, it receives an OAuth access token.
+4. The token is used once to verify follow/subscription status, then discarded.
+
+The relay proxies Twitch API requests to avoid exposing the Twitch Client ID to clients. The relay never sees or stores the user's OAuth token — only the verification proof is retained.
+
+### 16.2 Verification Proof
+
+After verification, a cryptographic proof is generated and broadcast to the server:
+
+- The proof contains the peer ID, Twitch username, verification type (follow/subscriber), and timestamp.
+- The proof is signed with the peer's Ed25519 key.
+- Server members verify the signature and store the proof locally.
+- The proof is re-verified on each server join if the owner requires "owner must be online" verification mode.
+
+### 16.3 Privacy Properties
+
+- No Twitch data is stored on the relay or any server infrastructure.
+- The OAuth token is ephemeral — used once and discarded.
+- Verification status is stored only in each peer's local encrypted database.
+- The server owner's Twitch channel name is the only Twitch-related data shared among members.
+
+---
+
+## 17. Summary of Cryptographic Primitives
 
 | Component | Algorithm | Key Size | Purpose |
 |-----------|-----------|----------|---------|
@@ -784,13 +844,14 @@ A TLS camouflage tunnel (REALITY-style) is planned to make tunnel traffic indist
 | CRDT ordering | Hybrid Logical Clock | 64-bit physical + 32-bit counter | Causal event ordering |
 | Local storage | SQLCipher (AES-256-CBC) | 256-bit | Database encryption at rest |
 | Backup encryption | Argon2id + AES-256-GCM | 256-bit (64 MB memory cost) | Brute-force resistant account backup |
+| Twitch verification | Ed25519-signed proof | 256-bit | Verifiable community membership proof |
 | Anti-censorship | Planned (TLS camouflage) | — | DPI-resistant transport tunnel (not yet implemented) |
 
 ---
 
-## 17. Threat Model
+## 18. Threat Model
 
-### 17.1 What Hollow Protects Against
+### 18.1 What Hollow Protects Against
 
 | Threat | Protection |
 |--------|------------|
@@ -808,7 +869,7 @@ A TLS camouflage tunnel (REALITY-style) is planned to make tunnel traffic indist
 | Resource exhaustion | Per-peer rate limiting, message size limits, SDP size limits, connection limits. |
 | Privilege escalation | Permission checks on all state-changing operations. CRDT author ≠ self-reported field — verified against actual sender. |
 
-### 17.2 What Hollow Does Not Currently Defend Against
+### 18.2 What Hollow Does Not Currently Defend Against
 
 - **Traffic analysis.** Message timing and size patterns are visible to the relay and network observers. Constant-rate padding is not implemented.
 - **Local device compromise.** If an attacker has access to an unlocked device with the decrypted database open, they can read everything. This is true of any E2EE system.
@@ -816,7 +877,7 @@ A TLS camouflage tunnel (REALITY-style) is planned to make tunnel traffic indist
 - **Quantum computing.** All key exchanges use Curve25519. Migration to ML-KEM (Kyber) is planned but not prioritized for the alpha.
 - **Trust-on-first-use (TOFU).** Peer identity verification relies on out-of-band fingerprint comparison. There is no certificate authority or web of trust.
 
-### 17.3 Relay Operator Trust Assumptions
+### 18.3 Relay Operator Trust Assumptions
 
 The relay operator is assumed to be **honest-but-curious**: the relay faithfully forwards messages but may attempt to read or log traffic. The protocol is designed so that curiosity yields nothing useful.
 
@@ -826,10 +887,10 @@ The relay operator is **not trusted** with: message contents, encryption keys, f
 
 ---
 
-## 18. Limitations and Future Work
+## 19. Limitations and Future Work
 
 - **No post-quantum cryptography.** All key exchanges use Curve25519. If quantum computers eventually break elliptic curve crypto, intercepted ciphertext could theoretically be decrypted retroactively. A future migration to ML-KEM (Kyber) is a consideration but not a priority — no consumer chat app has shipped this yet.
-- **No traffic analysis protection.** The relay uses TLS (currently via Nginx, planned migration to native `tokio-rustls`), which protects message *content* from network eavesdroppers. However, message *timing and size patterns* remain visible — an observer can infer who is chatting with whom based on when messages are sent, even without reading them. Defeating this would require constant-rate padding (sending dummy traffic to hide real messages), which is impractical for a chat app.
+- **No traffic analysis protection.** The relay uses native TLS via uWebSockets C++ with OpenSSL (direct TLS termination, no reverse proxy), which protects message *content* from network eavesdroppers. However, message *timing and size patterns* remain visible — an observer can infer who is chatting with whom based on when messages are sent, even without reading them. Defeating this would require constant-rate padding (sending dummy traffic to hide real messages), which is impractical for a chat app.
 - **Single relay dependency.** Multi-relay support with cross-relay room gossip is designed but not yet deployed. Horizontal scaling to millions of users via a swarm of relay nodes is the planned architecture.
 - **No device linking.** Each device has an independent identity. Multi-device sync (QR code linking) is planned.
 - **No social recovery.** Shamir's Secret Sharing for key recovery via trusted contacts is designed but not implemented.
