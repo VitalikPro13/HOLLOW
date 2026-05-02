@@ -1,0 +1,8 @@
+[
+  {
+    "id": "2026-05-02-public-alpha",
+    "date": "May 2, 2026",
+    "title": "Hollow is now in public alpha!",
+    "body": "Welcome to Hollow — a fully distributed, end-to-end encrypted communication platform.\n\n**What's included:**\n- End-to-end encrypted messaging (Olm + MLS)\n- Voice and video calls (WebRTC + SFrame)\n- File sharing with erasure-coded vault storage\n- Twitch-gated servers\n- Built-in auto-updater\n\nThis is the first public release. Everything is free, open-source relay, no account needed. Your identity lives on your device — back up your mnemonic phrase!\n\nFeedback and bugs: [GitHub Issues](https://github.com/VitalikPro13/hollow-relay/issues)"
+  }
+]

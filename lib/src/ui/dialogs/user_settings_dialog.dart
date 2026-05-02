@@ -49,7 +49,7 @@ import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 bool _settingsDialogOpen = false;
 
 /// Shows the user settings dialog, or closes it if already open (toggle).
-void showUserSettingsDialog(BuildContext context, WidgetRef ref, {bool openSystemTab = false}) {
+void showUserSettingsDialog(BuildContext context, WidgetRef ref, {bool openSystemTab = false, bool openUpdatesTab = false}) {
   // Toggle: if already open, close it.
   if (_settingsDialogOpen) {
     Navigator.of(context, rootNavigator: true).pop();
@@ -82,7 +82,7 @@ void showUserSettingsDialog(BuildContext context, WidgetRef ref, {bool openSyste
         displayNameController: displayNameController,
         statusController: statusController,
         aboutMeController: aboutMeController,
-        initialTab: openSystemTab ? _SettingsTab.system : _SettingsTab.profile,
+        initialTab: openUpdatesTab ? _SettingsTab.updates : openSystemTab ? _SettingsTab.system : _SettingsTab.profile,
       );
     },
   ).then((_) {

@@ -1892,7 +1892,7 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [ ] Android (Play Store + direct APK)
 - [ ] iOS (App Store)
 - [ ] **Deep linking / URL protocol handler:** Register `hollow://` scheme on Windows (registry + MSIX manifest), macOS (Info.plist), Linux (.desktop file). Flutter `app_links` package to receive launch URLs. Opens app and navigates to Share download or server invite when clicking `hollow://` links from browser or other apps.
-- [ ] Landing page / website
+- [x] Landing page / website (updated for public alpha — download button pulls from manifest.json, license key gating removed, Patreon/Ko-Fi as optional support)
 - [ ] Documentation (user guide, FAQ)
 - [ ] Beta testing program
 - [ ] Security audit (third-party review of E2EE implementation - OTF Security Lab funding)

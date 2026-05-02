@@ -25,7 +25,10 @@ pub fn get_current_version() -> String {
 pub fn fetch_version_manifest(manifest_url: String) -> Result<String, String> {
     let rt = get_runtime();
     rt.block_on(async {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
         let resp = client
             .get(&manifest_url)
             .header("Cache-Control", "no-cache")

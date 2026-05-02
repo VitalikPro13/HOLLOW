@@ -12,8 +12,10 @@ import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
+import 'package:hollow/src/core/providers/news_provider.dart';
 import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/models/node_status.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -26,6 +28,8 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
+import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 import 'package:simple_icons/simple_icons.dart';
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
@@ -890,7 +894,11 @@ class _NetworkColumn extends ConsumerWidget {
 
         _RelayStatsCard(hollow: hollow, stats: relayStats),
 
-        const Spacer(),
+        const SizedBox(height: HollowSpacing.lg),
+
+        Expanded(child: _NewsPanel(hollow: hollow)),
+
+        const SizedBox(height: HollowSpacing.sm),
 
         // ── Online Users (bottom) ──
         Padding(
@@ -952,6 +960,285 @@ class _SectionLabel extends StatelessWidget {
         letterSpacing: 0.8,
         fontSize: 10,
       ),
+    );
+  }
+}
+
+/// News panel — fetches developer posts from news.json, shows version + updates.
+class _NewsPanel extends ConsumerWidget {
+  final HollowTheme hollow;
+  const _NewsPanel({required this.hollow});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final news = ref.watch(newsProvider);
+    final updateState = ref.watch(updaterProvider);
+    final hasUpdate = ref.watch(hasUpdateProvider);
+
+    if (news.posts.isEmpty) return const SizedBox.shrink();
+
+    final posts = news.posts.take(2).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SectionLabel(hollow: hollow, label: 'NEWS'),
+        const SizedBox(height: HollowSpacing.sm),
+        Expanded(
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(HollowSpacing.sm + 2),
+            decoration: BoxDecoration(
+              color: hollow.surface,
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
+              border: Border.all(color: hollow.border),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (int i = 0; i < posts.length; i++) ...[
+                          _NewsPostEntry(hollow: hollow, post: posts[i]),
+                          if (i < posts.length - 1) ...[
+                            const SizedBox(height: HollowSpacing.sm),
+                            Container(
+                              height: 1,
+                              color: hollow.border.withValues(alpha: 0.2),
+                            ),
+                            const SizedBox(height: HollowSpacing.sm),
+                          ],
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: HollowSpacing.sm),
+                Container(
+                  height: 1,
+                  color: hollow.border.withValues(alpha: 0.3),
+                ),
+                const SizedBox(height: HollowSpacing.sm),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Text(
+                          'Installed',
+                          style: HollowTypography.caption.copyWith(
+                            color: hollow.textSecondary,
+                            fontSize: 9,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: HollowSpacing.xs + 2,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: hollow.textSecondary.withValues(alpha: 0.1),
+                            borderRadius:
+                                BorderRadius.circular(hollow.radiusSm),
+                            border: Border.all(
+                              color:
+                                  hollow.textSecondary.withValues(alpha: 0.25),
+                            ),
+                          ),
+                          child: Text(
+                            'v${updateState.currentVersion}',
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.textSecondary,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (hasUpdate && updateState.manifest != null) ...[
+                      Padding(
+                        padding: const EdgeInsets.only(
+                          left: HollowSpacing.xs,
+                          right: HollowSpacing.xs,
+                          top: 13,
+                        ),
+                        child: Icon(
+                          LucideIcons.arrowRight,
+                          size: 12,
+                          color: hollow.accent,
+                        ),
+                      ),
+                      GestureDetector(
+                        onTap: () => showUserSettingsDialog(
+                          context,
+                          ref,
+                          openUpdatesTab: true,
+                        ),
+                        child: MouseRegion(
+                          cursor: SystemMouseCursors.click,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              Text(
+                                'Latest',
+                                style: HollowTypography.caption.copyWith(
+                                  color: hollow.accent,
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: HollowSpacing.xs + 2,
+                                  vertical: 3,
+                                ),
+                                decoration: BoxDecoration(
+                                  color:
+                                      hollow.accent.withValues(alpha: 0.2),
+                                  borderRadius: BorderRadius.circular(
+                                      hollow.radiusSm),
+                                  border: Border.all(
+                                    color:
+                                        hollow.accent.withValues(alpha: 0.4),
+                                  ),
+                                ),
+                                child: Text(
+                                  'v${updateState.manifest!.latest}',
+                                  style: HollowTypography.caption.copyWith(
+                                    color: hollow.accent,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                    const Spacer(),
+                    GestureDetector(
+                      onTap: () async {
+                        final results = await Future.wait([
+                          ref.read(newsProvider.notifier).refresh(),
+                          ref
+                              .read(updaterProvider.notifier)
+                              .checkForUpdates()
+                              .then((_) => true)
+                              .catchError((_) => false),
+                        ]);
+                        if (context.mounted && results[0] == false) {
+                          HollowToast.show(
+                            context,
+                            'Failed to fetch news — check your connection',
+                            type: HollowToastType.error,
+                          );
+                        }
+                      },
+                      child: MouseRegion(
+                        cursor: SystemMouseCursors.click,
+                        child: Icon(
+                          LucideIcons.refreshCw,
+                          size: 12,
+                          color: hollow.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _NewsPostEntry extends StatelessWidget {
+  final HollowTheme hollow;
+  final NewsPost post;
+  const _NewsPostEntry({required this.hollow, required this.post});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          post.title,
+          style: HollowTypography.body.copyWith(
+            color: hollow.textPrimary,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          post.date,
+          style: HollowTypography.caption.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 10,
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        MarkdownBody(
+          data: post.body,
+          shrinkWrap: true,
+          selectable: true,
+          onTapLink: (text, href, title) {
+            if (href != null) {
+              launchUrl(Uri.parse(href),
+                  mode: LaunchMode.externalApplication);
+            }
+          },
+          styleSheet: MarkdownStyleSheet(
+            p: HollowTypography.body.copyWith(
+              color: hollow.textPrimary,
+              fontSize: 11,
+              height: 1.5,
+            ),
+            h2: HollowTypography.heading.copyWith(
+              color: hollow.textPrimary,
+              fontSize: 13,
+            ),
+            h3: HollowTypography.heading.copyWith(
+              color: hollow.textPrimary,
+              fontSize: 12,
+            ),
+            listBullet: HollowTypography.body.copyWith(
+              color: hollow.textSecondary,
+              fontSize: 11,
+            ),
+            strong: HollowTypography.body.copyWith(
+              color: hollow.textPrimary,
+              fontWeight: FontWeight.w700,
+              fontSize: 11,
+            ),
+            a: HollowTypography.body.copyWith(
+              color: hollow.accent,
+              fontSize: 11,
+              decoration: TextDecoration.underline,
+              decorationColor: hollow.accent,
+            ),
+            blockSpacing: 8,
+            horizontalRuleDecoration: BoxDecoration(
+              border: Border(
+                top: BorderSide(
+                  color: hollow.border.withValues(alpha: 0.5),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
