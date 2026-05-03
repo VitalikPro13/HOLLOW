@@ -37,3 +37,28 @@ class PeersNotifier extends Notifier<Map<String, PeerInfo>> {
 
 final peersProvider =
     NotifierProvider<PeersNotifier, Map<String, PeerInfo>>(PeersNotifier.new);
+
+class InvisiblePeersNotifier extends Notifier<Set<String>> {
+  @override
+  Set<String> build() => {};
+
+  void setInvisible(String peerId) {
+    state = {...state, peerId};
+  }
+
+  void setOnline(String peerId) {
+    if (state.contains(peerId)) {
+      state = Set.of(state)..remove(peerId);
+    }
+  }
+
+  void removePeer(String peerId) {
+    if (state.contains(peerId)) {
+      state = Set.of(state)..remove(peerId);
+    }
+  }
+}
+
+final invisiblePeersProvider =
+    NotifierProvider<InvisiblePeersNotifier, Set<String>>(
+        InvisiblePeersNotifier.new);

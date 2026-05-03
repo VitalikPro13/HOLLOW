@@ -4,6 +4,7 @@ import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
@@ -66,8 +67,14 @@ class _BottomBarState extends ConsumerState<BottomBar> {
         localPeerId != null ? displayNameFor(profiles, localPeerId) : '---';
 
     // Node status for user panel dot.
-    final statusColor = _statusColor(hollow, nodeState.status);
-    final statusPulse = nodeState.status == NodeStatus.connected;
+    final amInvisible =
+        ref.watch(invisibleModeProvider);
+    final statusColor = amInvisible
+        ? hollow.textSecondary
+        : _statusColor(hollow, nodeState.status);
+    final statusPulse = amInvisible
+        ? false
+        : nodeState.status == NodeStatus.connected;
 
     // DM unread count for Home button.
     int dmUnreadTotal = 0;

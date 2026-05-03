@@ -112,13 +112,16 @@ final serverMembersProvider =
 );
 
 /// Returns the set of online member peer IDs for a server.
+/// Excludes invisible peers.
 final onlineMembersProvider =
     Provider.family<Set<String>, String>((ref, serverId) {
   final connectedPeers = ref.watch(peersProvider);
+  final invisiblePeers = ref.watch(invisiblePeersProvider);
   final membersAsync = ref.watch(serverMembersProvider(serverId));
   return membersAsync.when(
     data: (members) => members
-        .where((m) => connectedPeers.containsKey(m.peerId))
+        .where((m) => connectedPeers.containsKey(m.peerId) &&
+            !invisiblePeers.contains(m.peerId))
         .map((m) => m.peerId)
         .toSet(),
     loading: () => {},

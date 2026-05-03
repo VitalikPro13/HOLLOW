@@ -7,6 +7,7 @@ import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/room_budget_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -43,7 +44,14 @@ class UserBar extends ConsumerWidget {
     Color statusColor;
     bool statusPulse;
 
-    if (selectedServerId != null) {
+    final amInvisible =
+        ref.watch(invisibleModeProvider);
+
+    if (amInvisible) {
+      statusText = 'Invisible';
+      statusColor = hollow.textSecondary;
+      statusPulse = false;
+    } else if (selectedServerId != null) {
       final syncStatus =
           ref.watch(serverSyncStatusProvider(selectedServerId));
       final connectedPeers = ref.watch(peersProvider);

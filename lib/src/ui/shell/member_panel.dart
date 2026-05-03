@@ -5,6 +5,7 @@ import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
@@ -249,6 +250,9 @@ class _ServerMemberContent extends ConsumerWidget {
     final membersAsync = ref.watch(serverMembersProvider(serverId));
     final connectedPeers = ref.watch(peersProvider);
     final localPeerId = ref.watch(identityProvider).peerId;
+    final invisiblePeers = ref.watch(invisiblePeersProvider);
+    final amInvisible =
+        ref.watch(invisibleModeProvider);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -316,16 +320,20 @@ class _ServerMemberContent extends ConsumerWidget {
                 );
               }
 
-              // Split into online/offline
+              // Split into online/offline (invisible peers appear offline)
               final online = members
-                  .where((m) =>
-                      m.peerId == localPeerId ||
-                      connectedPeers.containsKey(m.peerId))
+                  .where((m) {
+                    if (m.peerId == localPeerId) return !amInvisible;
+                    return connectedPeers.containsKey(m.peerId) &&
+                        !invisiblePeers.contains(m.peerId);
+                  })
                   .toList();
               final offline = members
-                  .where((m) =>
-                      m.peerId != localPeerId &&
-                      !connectedPeers.containsKey(m.peerId))
+                  .where((m) {
+                    if (m.peerId == localPeerId) return amInvisible;
+                    return !connectedPeers.containsKey(m.peerId) ||
+                        invisiblePeers.contains(m.peerId);
+                  })
                   .toList();
 
               // Group by role within each section
@@ -462,7 +470,10 @@ class _PeerMemberContent extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final peers = ref.watch(peersProvider);
+    final allPeers = ref.watch(peersProvider);
+    final invisPeers = ref.watch(invisiblePeersProvider);
+    final peers = Map.of(allPeers)
+      ..removeWhere((id, _) => invisPeers.contains(id));
     final memberListReveal =
         StartupRevealScope.interval(context, 0.60, 0.80);
 

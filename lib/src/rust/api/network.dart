@@ -232,6 +232,10 @@ Future<void> sendTypingIndicator({
   channelId: channelId,
 );
 
+/// Toggle invisible mode. Broadcasts StatusUpdate to all connected peers.
+Future<void> setInvisible({required bool invisible}) =>
+    RustLib.instance.api.crateApiNetworkSetInvisible(invisible: invisible);
+
 /// Request message sync for a specific channel from all connected server members.
 /// Called when the user opens a channel to catch up on missed messages.
 Future<void> requestChannelSync({
@@ -782,6 +786,10 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String serverId,
     required String channelId,
   }) = NetworkEvent_TypingStarted;
+  const factory NetworkEvent.peerStatusChanged({
+    required String peerId,
+    required String status,
+  }) = NetworkEvent_PeerStatusChanged;
   const factory NetworkEvent.messagePinned({
     required String serverId,
     required String channelId,

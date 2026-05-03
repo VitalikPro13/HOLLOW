@@ -51,6 +51,7 @@ import 'package:hollow/src/ui/dialogs/welcome_dialog.dart';
 import 'package:hollow/src/ui/dialogs/license_key_dialog.dart';
 import 'package:hollow/src/core/providers/license_key_provider.dart';
 import 'package:hollow/src/core/providers/relay_status_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/ui/settings/server_settings_panel.dart';
@@ -265,6 +266,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
 
     await ref.read(nodeProvider.notifier).start();
+
+    // Load invisible mode preference (non-blocking — Rust already loaded it
+    // from DB at node startup, this is just for the Dart UI to show the
+    // correct toggle/status).
+    ref.read(invisibleModeProvider.notifier).load();
 
     // Load server strip layout (folders + ordering).
     await ref.read(serverStripLayoutProvider.notifier).loadLayout();

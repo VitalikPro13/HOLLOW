@@ -104,12 +104,14 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_PeerExpired(:final peerId):
         ref.read(peersProvider.notifier).removePeer(peerId);
+        ref.read(invisiblePeersProvider.notifier).removePeer(peerId);
         ref.read(webRtcProvider.notifier).disconnectPeer(peerId);
         // Don't deselect — friends stay visible when offline.
 
       case NetworkEvent_PeerDisconnected(:final peerId):
         debugPrint('[HOLLOW] Peer disconnected: $peerId');
         ref.read(peersProvider.notifier).removePeer(peerId);
+        ref.read(invisiblePeersProvider.notifier).removePeer(peerId);
         ref.read(connectionStatusProvider.notifier).onPeerDisconnected(peerId);
         ref.read(webRtcProvider.notifier).disconnectPeer(peerId);
         ref.read(callProvider.notifier).handlePeerDisconnected(peerId);
@@ -175,13 +177,26 @@ class EventStreamNotifier extends Notifier<bool> {
             .effectiveChannelLevel(serverId, channelId);
         final isChannelMuted =
             channelNotifLevel == NotificationLevel.nothing;
-        if (!isChannelMuted) {
+        // For "mentions only", check if the message actually mentions us.
+        bool isMentionFiltered = false;
+        if (channelNotifLevel == NotificationLevel.mentions) {
+          final localPeerId = ref.read(identityProvider).peerId ?? '';
+          final localName = displayNameFor(
+              ref.read(profileProvider), localPeerId);
+          final localNick =
+              ref.read(serverNicknamesProvider(serverId))[localPeerId];
+          final isMentioned = text.contains('@everyone') ||
+              text.contains('@$localName') ||
+              (localNick != null && text.contains('@$localNick')) ||
+              replyToMid != null;
+          isMentionFiltered = !isMentioned;
+        }
+        if (!isChannelMuted && !isMentionFiltered) {
           ref.read(unreadProvider.notifier).onChannelMessage(
               serverId, channelId, messageId, isViewingChannel);
         }
         // System notification for channel message.
-        if (!isViewingChannel && !isChannelMuted) {
-          // Resolve channel name and notify (async, fire-and-forget).
+        if (!isViewingChannel && !isChannelMuted && !isMentionFiltered) {
           _notifyChannelWithName(
               serverId, channelId, fromPeer, text, replyToMid);
         }
@@ -577,6 +592,14 @@ class EventStreamNotifier extends Notifier<bool> {
             :final peerId, :final serverId, :final channelId):
         final key = serverId.isEmpty ? peerId : '$serverId:$channelId';
         ref.read(typingProvider.notifier).setTyping(key, peerId);
+
+      // -- Presence events (Phase 6.75) --
+      case NetworkEvent_PeerStatusChanged(:final peerId, :final status):
+        if (status == 'invisible') {
+          ref.read(invisiblePeersProvider.notifier).setInvisible(peerId);
+        } else {
+          ref.read(invisiblePeersProvider.notifier).setOnline(peerId);
+        }
 
       // -- Pinned message events (Phase 3.5) --
       case NetworkEvent_MessagePinned(

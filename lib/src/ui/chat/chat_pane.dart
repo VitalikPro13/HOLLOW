@@ -49,6 +49,7 @@ import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:lucide_icons/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
@@ -454,6 +455,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     _urlDebounce = Timer(const Duration(milliseconds: 600), _detectUrl);
 
     if (text.isEmpty) return;
+    // Don't send typing indicators when invisible.
+    final amInvisible =
+        ref.read(invisibleModeProvider);
+    if (amInvisible) return;
     final now = DateTime.now();
     if (_lastTypingSent != null &&
         now.difference(_lastTypingSent!).inSeconds < 3) {
@@ -846,7 +851,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               HollowAvatar(peerId: widget.peerId, size: 28, imageBytes: ref.watch(profileProvider)[widget.peerId]?.avatarBytes),
               const SizedBox(width: HollowSpacing.sm),
               Builder(builder: (_) {
-                final isOnline = ref.watch(peersProvider).containsKey(widget.peerId);
+                final isOnline = ref.watch(peersProvider).containsKey(widget.peerId) &&
+                    !ref.watch(invisiblePeersProvider).contains(widget.peerId);
                 return StatusDot(
                   color: isOnline ? hollow.success : hollow.textSecondary,
                   size: 8,
@@ -882,7 +888,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               ),
               Builder(builder: (_) {
                 final peer = ref.watch(peersProvider)[widget.peerId];
-                final stage = (peer != null && peer.isEncrypted)
+                final isInvisible = ref.watch(invisiblePeersProvider).contains(widget.peerId);
+                final stage = (peer != null && peer.isEncrypted && !isInvisible)
                     ? ConnectionStage.encrypted
                     : ConnectionStage.offline;
                 return ConnectionProgress(
@@ -3573,7 +3580,8 @@ class _DmProfilePanel extends ConsumerWidget {
     final profile = profiles[peerId];
     final localNicknames = ref.watch(localNicknameProvider);
     final localNick = localNicknames[peerId];
-    final isOnline = ref.watch(peersProvider).containsKey(peerId);
+    final isOnline = ref.watch(peersProvider).containsKey(peerId) &&
+        !ref.watch(invisiblePeersProvider).contains(peerId);
     final friends = ref.watch(friendsProvider);
     final friendInfo = friends[peerId];
 

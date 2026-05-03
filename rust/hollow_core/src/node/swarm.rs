@@ -37,6 +37,7 @@ pub(crate) async fn spawn_node(
     olm: OlmManager,
     crypto_store: CryptoStore,
     license_key: Option<String>,
+    initial_invisible: bool,
 ) -> Result<(String, tokio::task::JoinHandle<()>), String> {
     // Clone keypair for signaling task (it needs to sign register requests).
     let sig_keypair = native_keypair.clone();
@@ -65,6 +66,7 @@ pub(crate) async fn spawn_node(
     let handle = tokio::spawn(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, sig_cmd_tx, sig_event_rx,
         bundle_keypair, ws_cmd_tx, ws_event_rx, peer_id_str.clone(),
+        initial_invisible,
     ));
 
     Ok((peer_id_str, handle))
@@ -83,6 +85,7 @@ async fn run_event_loop(
     ws_cmd_tx: tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     mut ws_event_rx: tokio::sync::mpsc::UnboundedReceiver<super::ws_client::WsEvent>,
     local_peer_str: String,
+    initial_invisible: bool,
 ) {
     // Precompute public key base64 for prekey bundle signing.
     let pub_key_proto = bundle_keypair.public_key_protobuf();
@@ -124,6 +127,11 @@ async fn run_event_loop(
 
     // Peers we've already triggered sync for this session.
     let mut synced_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let mut is_invisible = initial_invisible;
+    if initial_invisible {
+        hollow_log!("[HOLLOW-STATUS] Node starting in invisible mode (persisted preference)");
+    }
 
     // -- WebRTC peer tracking (Phase 5A) --
     // Peers with active WebRTC data channels (Dart notifies us via NodeCommand).
@@ -605,7 +613,7 @@ async fn run_event_loop(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut mls, &server_states, &bundle_keypair,
                             &local_peer_str, display_name, status, about_me,
-                            avatar_bytes, banner_bytes,
+                            avatar_bytes, banner_bytes, is_invisible,
                         ).await;
                     }
 
@@ -707,10 +715,19 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::SendTypingIndicator { server_id, channel_id } => {
-                        social::handle_send_typing_indicator(
-                            &ws_cmd_tx, &ws_room_peers, &mut mls,
-                            &server_states, &bundle_keypair, &local_peer_str,
-                            server_id, channel_id,
+                        if !is_invisible {
+                            social::handle_send_typing_indicator(
+                                &ws_cmd_tx, &ws_room_peers, &mut mls,
+                                &server_states, &bundle_keypair, &local_peer_str,
+                                server_id, channel_id,
+                            );
+                        }
+                    }
+
+                    NodeCommand::SetInvisible { invisible } => {
+                        social::handle_set_invisible(
+                            &ws_cmd_tx, &ws_room_peers, &local_peer_str,
+                            invisible, &mut is_invisible,
                         );
                     }
 
@@ -1206,10 +1223,11 @@ async fn run_event_loop(
                                 }
 
                                 if is_new {
-                                    // Send our profile to the new peer so they see our display name.
+                                    // Send our profile (with invisible flag) to the new peer.
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
                                         &bundle_keypair, &local_peer_str, &peer_id,
+                                        is_invisible,
                                     );
 
                                     // Proactive key exchange if no Olm session.
@@ -1483,6 +1501,7 @@ async fn run_event_loop(
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
                                         &bundle_keypair, &local_peer_str, pid,
+                                        is_invisible,
                                     );
                                 }
                             }
@@ -1501,10 +1520,11 @@ async fn run_event_loop(
                                 // on join with all current members, before individual PeerJoined).
                                 let is_new = synced_peers.insert(pid_str.clone());
                                 if is_new {
-                                    // Send our profile so the peer sees our display name.
+                                    // Send our profile (with invisible flag) so the peer sees our display name.
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
                                         &bundle_keypair, &local_peer_str, pid_str,
+                                        is_invisible,
                                     );
 
                                     // Request their profile if we don't have it.
@@ -2026,7 +2046,7 @@ async fn run_event_loop(
                                         &mut voice_channel_participants,
                                         &mut voice_channel_gossip_mode,
                                         &mut vc_signal_rate_tokens,
-                                        &local_peer_str, &from, msg,
+                                        &local_peer_str, &from, is_invisible, msg,
                                     ).await;
                             } else {
                                 hollow_log!("[HOLLOW-WS] Failed to parse HavenMessage from {from} in {room}");
@@ -2578,6 +2598,7 @@ async fn handle_incoming_request(
     vc_signal_rate_tokens: &mut HashMap<String, (u32, std::time::Instant)>,
     local_peer_str: &str,
     peer_str: &str,
+    is_invisible: bool,
     request: HavenMessage,
 ) {
 
@@ -5466,7 +5487,13 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64 } => {
+                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible } => {
+                                if peer_invisible {
+                                    let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
+                                        peer_id: sender_peer_id.clone(),
+                                        status: "invisible".to_string(),
+                                    }).await;
+                                }
                                 super::social::handle_envelope_profile_update(
                                     event_tx, server_states, bundle_keypair,
                                     sender_peer_id, display_name, status, about_me,
@@ -6139,7 +6166,7 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::TypingIndicator { server_id, channel_id } => {
-            
+
 
             let _ = event_tx.send(NetworkEvent::TypingStarted {
                 peer_id: peer_str.to_string(),
@@ -6148,8 +6175,23 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64 } => {
-            
+        HavenMessage::StatusUpdate { status } => {
+            hollow_log!("[HOLLOW-STATUS] Received status update from {peer_str}: {status}");
+            let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
+                peer_id: peer_str.to_string(),
+                status,
+            }).await;
+        }
+
+        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible } => {
+            // If the profile carries an invisible flag, emit PeerStatusChanged so the
+            // UI treats this peer as offline from the very first event.
+            if peer_invisible {
+                let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
+                    peer_id: peer_str.to_string(),
+                    status: "invisible".to_string(),
+                }).await;
+            }
 
             // SECURITY: Truncate profile fields to prevent oversized strings from malicious peers.
             // Slightly above UI limits (32/48/128) as a safety backstop.
@@ -6551,6 +6593,7 @@ async fn handle_incoming_request(
             social::send_own_profile_to_peer(
                 ws_cmd_tx, ws_room_peers,
                 bundle_keypair, local_peer_str, peer_str,
+                is_invisible,
             );
         }
 

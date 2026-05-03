@@ -9,6 +9,7 @@ import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
@@ -172,6 +173,8 @@ class _ProfileColumn extends ConsumerWidget {
     final statusText = profile?.status ?? '';
     final aboutMe = profile?.aboutMe ?? '';
     final isOnline = nodeState.status == NodeStatus.connected;
+    final amInvisible =
+        ref.watch(invisibleModeProvider);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
@@ -212,15 +215,21 @@ class _ProfileColumn extends ConsumerWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             StatusDot(
-              color: isOnline ? hollow.success : hollow.textSecondary,
+              color: amInvisible
+                  ? hollow.textSecondary
+                  : (isOnline ? hollow.success : hollow.textSecondary),
               size: 8,
-              pulse: isOnline,
+              pulse: amInvisible ? false : isOnline,
             ),
             const SizedBox(width: HollowSpacing.xs),
             Text(
-              isOnline ? 'Online' : 'Offline',
+              amInvisible
+                  ? 'Invisible'
+                  : (isOnline ? 'Online' : 'Offline'),
               style: HollowTypography.caption.copyWith(
-                color: isOnline ? hollow.success : hollow.textSecondary,
+                color: amInvisible
+                    ? hollow.textSecondary
+                    : (isOnline ? hollow.success : hollow.textSecondary),
               ),
             ),
           ],
@@ -452,6 +461,7 @@ class _RecentConversationsColumn extends ConsumerWidget {
     final chatHistory = ref.watch(chatProvider);
     final profiles = ref.watch(profileProvider);
     final peers = ref.watch(peersProvider);
+    final invPeers = ref.watch(invisiblePeersProvider);
     final unreadState = ref.watch(unreadProvider);
 
     // Build list of friends with their last message, sorted by recency.
@@ -468,7 +478,8 @@ class _RecentConversationsColumn extends ConsumerWidget {
         peerId: friend.peerId,
         lastMessage: lastMsg,
         timestamp: timestamp,
-        isOnline: peers.containsKey(friend.peerId),
+        isOnline: peers.containsKey(friend.peerId) &&
+            !invPeers.contains(friend.peerId),
         unreadCount: unreadState.dmUnreadCounts[friend.peerId] ?? 0,
       ));
     }

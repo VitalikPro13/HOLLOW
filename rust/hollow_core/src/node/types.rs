@@ -92,6 +92,8 @@ pub(crate) enum NetworkEvent {
     FriendRemoved { peer_id: String },
     // -- Typing indicator events (Phase 3.5) --
     TypingStarted { peer_id: String, server_id: String, channel_id: String },
+    // -- Presence events (Phase 6.75) --
+    PeerStatusChanged { peer_id: String, status: String },
     // -- Pinned message events (Phase 3.5) --
     MessagePinned { server_id: String, channel_id: String, message_id: String },
     MessageUnpinned { server_id: String, channel_id: String, message_id: String },
@@ -304,6 +306,8 @@ pub(crate) enum NodeCommand {
     RemoveFriend { peer_id: String },
     // -- Typing indicators (Phase 3.5) --
     SendTypingIndicator { server_id: String, channel_id: String },
+    // -- Presence (Phase 6.75) --
+    SetInvisible { invisible: bool },
     // -- Channel layout (Phase 3.5) --
     UpdateChannelLayout { server_id: String, layout_json: String },
     // -- Pinned messages (Phase 3.5) --
@@ -573,6 +577,8 @@ pub(crate) enum HavenMessage {
         avatar_b64: String,
         #[serde(default)]
         banner_b64: String,
+        #[serde(default)]
+        is_invisible: bool,
     },
 
     // -- Multi-peer fan-out sync (Phase 3.5) --
@@ -615,6 +621,14 @@ pub(crate) enum HavenMessage {
         server_id: String,
         /// Empty string for DMs.
         channel_id: String,
+    },
+
+    /// Ephemeral status update. Not stored, not signed. Fire-and-forget.
+    /// Used for invisible mode — tells peers to treat this user as offline.
+    #[serde(rename = "status_update")]
+    StatusUpdate {
+        /// "online" or "invisible"
+        status: String,
     },
 
     /// Response to a sync probe: the peer's latest timestamp for the channel.
@@ -1344,6 +1358,8 @@ pub(crate) enum MessageEnvelope {
         avatar_b64: String,
         #[serde(default)]
         banner_b64: String,
+        #[serde(default)]
+        is_invisible: bool,
     },
 
     /// CRDT sync request (replaces HavenMessage::SyncRequest for MLS path).

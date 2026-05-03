@@ -1,4 +1,6 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// Whether closing the window minimizes to system tray instead of quitting.
@@ -395,3 +397,36 @@ class ProxyEnabledNotifier extends AsyncNotifier<bool> {
     state = AsyncData(value);
   }
 }
+
+/// Whether the user wants to appear invisible (offline) to others.
+/// Synchronous state — loaded eagerly during bootstrap, persisted on toggle.
+class InvisibleModeNotifier extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  /// Load persisted value from DB. Called during bootstrap (fire-and-forget).
+  Future<void> load() async {
+    try {
+      final val = await storage_api.loadSetting(key: 'invisible_mode');
+      debugPrint('[HOLLOW] invisibleMode.load() → raw="$val" → ${val == "true"}');
+      state = val == 'true';
+    } catch (e) {
+      debugPrint('[HOLLOW] invisibleMode.load() failed: $e');
+    }
+  }
+
+  Future<void> setInvisible(bool value) async {
+    debugPrint('[HOLLOW] invisibleMode.setInvisible($value)');
+    state = value;
+    await storage_api.saveSetting(
+      key: 'invisible_mode',
+      value: value.toString(),
+    );
+    try {
+      await network_api.setInvisible(invisible: value);
+    } catch (_) {}
+  }
+}
+
+final invisibleModeProvider =
+    NotifierProvider<InvisibleModeNotifier, bool>(InvisibleModeNotifier.new);

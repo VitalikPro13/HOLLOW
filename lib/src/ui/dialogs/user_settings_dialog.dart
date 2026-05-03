@@ -149,6 +149,9 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   bool _pendingDisableAnimations = false;
   bool _initialDisableAnimations = false;
   bool _animInitialized = false;
+  bool _pendingInvisible = false;
+  bool _initialInvisible = false;
+  bool _invisibleInitialized = false;
   int _pendingAutoDownloadThreshold = 169;
   int _initialAutoDownloadThreshold = 169;
   bool _thresholdInitialized = false;
@@ -198,6 +201,10 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       _initialDisableAnimations = _pendingDisableAnimations;
       _animInitialized = true;
     }
+
+    _pendingInvisible = ref.read(invisibleModeProvider);
+    _initialInvisible = _pendingInvisible;
+    _invisibleInitialized = true;
 
     final thresholdAsync = ref.read(autoDownloadThresholdProvider);
     if (thresholdAsync.hasValue) {
@@ -383,6 +390,13 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
         SharedTickers.instance.start();
         SharedTickers.instance.resume();
       }
+    }
+
+    // Apply invisible mode toggle.
+    if (_pendingInvisible != _initialInvisible) {
+      await ref
+          .read(invisibleModeProvider.notifier)
+          .setInvisible(_pendingInvisible);
     }
 
     // Save profile.
@@ -1008,6 +1022,17 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
           // ── System ──
           _SectionLabel(label: 'SYSTEM'),
           const SizedBox(height: HollowSpacing.sm),
+
+          // Invisible mode toggle
+          _ToggleRow(
+            icon: LucideIcons.eyeOff,
+            label: 'Appear Invisible',
+            subtitle: 'Show as offline to other users',
+            value: _pendingInvisible,
+            onChanged: (value) =>
+                setState(() => _pendingInvisible = value),
+          ),
+          const SizedBox(height: HollowSpacing.md),
 
           // Minimize to tray toggle
           if (isDesktop) ...[

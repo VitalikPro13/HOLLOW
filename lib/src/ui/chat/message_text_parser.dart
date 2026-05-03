@@ -180,37 +180,42 @@ List<InlineSpan> _parseInline(
       }
     }
 
-    // @mention — @everyone or @displayName
+    // @mention — @everyone or @displayName (longest-match against memberNames)
     if (text[i] == '@') {
-      final mentionRegex = RegExp(r'@(\S+)');
-      final match = mentionRegex.matchAsPrefix(text, i);
-      if (match != null) {
-        final mentionName = match.group(1)!;
-        final isEveryone = mentionName == 'everyone';
-        final isValidMember = memberNames?.contains(mentionName) ?? false;
-        if (isEveryone || isValidMember) {
-          _flushBuffer(buffer, spans, style);
-          spans.add(WidgetSpan(
-            alignment: PlaceholderAlignment.baseline,
-            baseline: TextBaseline.alphabetic,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-              decoration: BoxDecoration(
-                color: hollow.accent.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(3),
-              ),
-              child: Text(
-                match.group(0)!,
-                style: style.copyWith(
-                  color: hollow.accent,
-                  fontWeight: FontWeight.w600,
-                ),
+      final rest = text.substring(i + 1);
+      String? matched;
+      if (rest.startsWith('everyone')) {
+        matched = 'everyone';
+      } else if (memberNames != null) {
+        for (final name in memberNames) {
+          if (rest.startsWith(name) &&
+              (matched == null || name.length > matched.length)) {
+            matched = name;
+          }
+        }
+      }
+      if (matched != null) {
+        _flushBuffer(buffer, spans, style);
+        spans.add(WidgetSpan(
+          alignment: PlaceholderAlignment.baseline,
+          baseline: TextBaseline.alphabetic,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+            decoration: BoxDecoration(
+              color: hollow.accent.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(3),
+            ),
+            child: Text(
+              '@$matched',
+              style: style.copyWith(
+                color: hollow.accent,
+                fontWeight: FontWeight.w600,
               ),
             ),
-          ));
-          i = match.end;
-          continue;
-        }
+          ),
+        ));
+        i += 1 + matched.length;
+        continue;
       }
     }
 

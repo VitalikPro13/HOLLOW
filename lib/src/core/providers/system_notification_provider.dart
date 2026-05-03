@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -144,7 +145,16 @@ class SystemNotificationNotifier
 
     if (level == NotificationLevel.nothing) return;
     if (level == NotificationLevel.mentions) {
-      if (replyToMid == null) return;
+      final localPeerId = ref.read(identityProvider).peerId ?? '';
+      final profiles = ref.read(profileProvider);
+      final localName = displayNameFor(profiles, localPeerId);
+      final localNick =
+          ref.read(serverNicknamesProvider(serverId))[localPeerId];
+      final isMentioned = text.contains('@everyone') ||
+          text.contains('@$localName') ||
+          (localNick != null && text.contains('@$localNick')) ||
+          replyToMid != null;
+      if (!isMentioned) return;
     }
 
     final profiles = ref.read(profileProvider);

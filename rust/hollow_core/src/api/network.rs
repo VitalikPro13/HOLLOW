@@ -170,6 +170,8 @@ pub enum NetworkEvent {
     FriendRemoved { peer_id: String },
     // -- Typing indicator events (Phase 3.5) --
     TypingStarted { peer_id: String, server_id: String, channel_id: String },
+    // -- Presence events (Phase 6.75) --
+    PeerStatusChanged { peer_id: String, status: String },
     // -- Pinned message events (Phase 3.5) --
     MessagePinned { server_id: String, channel_id: String, message_id: String },
     MessageUnpinned { server_id: String, channel_id: String, message_id: String },
@@ -478,6 +480,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::TypingStarted { peer_id, server_id, .. } => {
             hollow_log!("[HOLLOW] Typing started: {peer_id} in {server_id}");
         }
+        node::NetworkEvent::PeerStatusChanged { peer_id, status } => {
+            hollow_log!("[HOLLOW] Peer status changed: {peer_id} → {status}");
+        }
         node::NetworkEvent::MessagePinned { server_id, channel_id, message_id } => {
             hollow_log!("[HOLLOW] Message {message_id} pinned in {server_id}/{channel_id}");
         }
@@ -625,6 +630,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::TypingStarted { peer_id, server_id, channel_id } => {
             NetworkEvent::TypingStarted { peer_id, server_id, channel_id }
+        }
+        node::NetworkEvent::PeerStatusChanged { peer_id, status } => {
+            NetworkEvent::PeerStatusChanged { peer_id, status }
         }
         node::NetworkEvent::MessagePinned { server_id, channel_id, message_id } => {
             NetworkEvent::MessagePinned { server_id, channel_id, message_id }
@@ -901,6 +909,19 @@ pub fn start_node() -> Result<String, String> {
     // Extract fingerprint before moving OlmManager into the swarm task.
     let olm_fingerprint = olm.identity_key_base64();
 
+    // Load invisible mode preference from DB so the node starts invisible
+    // before any peers connect (avoids a brief "online" flash on restart).
+    let initial_invisible = {
+        let store = MessageStore::open(&db_path, &passphrase)?;
+        let raw = store.load_setting("invisible_mode");
+        hollow_log!("[HOLLOW-STATUS] Loaded invisible_mode from DB: {:?}", raw);
+        raw.ok()
+            .flatten()
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    };
+    hollow_log!("[HOLLOW-STATUS] initial_invisible = {initial_invisible}");
+
     // Open the CryptoStore persistence actor (runs in its own blocking thread).
     let rt = get_runtime();
     let crypto_store = rt.block_on(async {
@@ -917,7 +938,7 @@ pub fn start_node() -> Result<String, String> {
 
     let cmd_tx_clone = cmd_tx.clone();
     let (peer_id_str, handle) = rt
-        .block_on(node::spawn_node(id.keypair, event_tx, cmd_rx, cmd_tx_clone, olm, crypto_store, license_key))
+        .block_on(node::spawn_node(id.keypair, event_tx, cmd_rx, cmd_tx_clone, olm, crypto_store, license_key, initial_invisible))
         .map_err(|e| format!("Failed to start node: {e}"))?;
 
     // Store event receiver separately so watch_network_events() can take it.
@@ -1389,6 +1410,22 @@ pub fn send_typing_indicator(server_id: String, channel_id: String) -> Result<()
             server_id,
             channel_id,
         }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+/// Toggle invisible mode. Broadcasts StatusUpdate to all connected peers.
+#[frb]
+pub fn set_invisible(invisible: bool) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(
+        state.cmd_tx.send(node::NodeCommand::SetInvisible { invisible }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
 

@@ -20,6 +20,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
 import 'package:hollow/src/core/providers/typing_provider.dart';
 import 'package:hollow/src/core/providers/pinned_provider.dart';
@@ -41,6 +42,7 @@ import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
 import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
+import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -115,6 +117,13 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   Timer? _urlDebounce;
   static final RegExp _urlRegex = RegExp(r'(?:https?|hollow)://[^\s<>"' "'" r')\]}]+');
 
+  /// @mention autocomplete state.
+  OverlayEntry? _mentionOverlay;
+  final _mentionLayerLink = LayerLink();
+  List<_MentionCandidate> _mentionCandidates = [];
+  int _mentionSelectedIndex = 0;
+  int _mentionAtPosition = -1;
+
   String get _stateKey => '${widget.serverId}:${widget.channelId}';
 
 
@@ -181,6 +190,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
   @override
   void dispose() {
+    _dismissMentionOverlay();
     _urlDebounce?.cancel();
     _itemPositionsListener.itemPositions.removeListener(_onScrollPositionChanged);
     _controller.dispose();
@@ -446,7 +456,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     _urlDebounce?.cancel();
     _urlDebounce = Timer(const Duration(milliseconds: 600), _detectUrl);
 
+    // @mention autocomplete detection.
+    _updateMentionAutocomplete(text);
+
     if (text.isEmpty) return;
+    // Don't send typing indicators when invisible.
+    final amInvisible =
+        ref.read(invisibleModeProvider);
+    if (amInvisible) return;
     final now = DateTime.now();
     if (_lastTypingSent != null &&
         now.difference(_lastTypingSent!).inSeconds < 3) {
@@ -459,6 +476,220 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         channelId: widget.channelId,
       );
     } catch (_) {}
+  }
+
+  void _updateMentionAutocomplete(String text) {
+    final cursor = _controller.selection.baseOffset;
+    if (cursor < 0) {
+      _dismissMentionOverlay();
+      return;
+    }
+
+    // Scan backward from cursor to find '@' preceded by space/newline/start.
+    int atPos = -1;
+    for (int i = cursor - 1; i >= 0; i--) {
+      final c = text[i];
+      if (c == '@') {
+        if (i == 0 || text[i - 1] == ' ' || text[i - 1] == '\n') {
+          atPos = i;
+        }
+        break;
+      }
+      if (c == ' ' || c == '\n') break;
+    }
+
+    if (atPos < 0) {
+      _dismissMentionOverlay();
+      return;
+    }
+
+    final query = text.substring(atPos + 1, cursor).toLowerCase();
+    _mentionAtPosition = atPos;
+
+    // Build candidates from server members.
+    final membersAsync = ref.read(serverMembersProvider(widget.serverId));
+    final profiles = ref.read(profileProvider);
+    final nicknames = ref.read(serverNicknamesProvider(widget.serverId));
+    final candidates = <_MentionCandidate>[];
+
+    membersAsync.whenData((members) {
+      for (final m in members) {
+        final displayName = serverDisplayNameFor(
+          profiles, m.peerId, nickname: nicknames[m.peerId] ?? '',
+        );
+        final serverNick = nicknames[m.peerId] ?? '';
+        final profileName = profiles[m.peerId]?.displayName ?? '';
+
+        final matchesDisplay =
+            displayName.toLowerCase().startsWith(query);
+        final matchesNick = serverNick.isNotEmpty &&
+            serverNick.toLowerCase().startsWith(query);
+        final matchesProfile = profileName.isNotEmpty &&
+            profileName.toLowerCase().startsWith(query);
+
+        if (query.isEmpty || matchesDisplay || matchesNick || matchesProfile) {
+          final avatar = profiles[m.peerId]?.avatarBytes;
+          candidates.add(_MentionCandidate(
+            peerId: m.peerId,
+            displayName: displayName,
+            subtitle: serverNick.isNotEmpty && serverNick != displayName
+                ? profileName.isNotEmpty ? profileName : null
+                : serverNick.isNotEmpty ? serverNick : null,
+            avatarBytes: avatar,
+          ));
+        }
+      }
+    });
+
+    // Also add @everyone.
+    if (query.isEmpty || 'everyone'.startsWith(query)) {
+      candidates.insert(0, _MentionCandidate(
+        peerId: '',
+        displayName: 'everyone',
+        subtitle: 'Notify all members',
+        avatarBytes: null,
+      ));
+    }
+
+    if (candidates.isEmpty) {
+      _dismissMentionOverlay();
+      return;
+    }
+
+    _mentionCandidates = candidates.take(6).toList();
+    _mentionSelectedIndex = _mentionSelectedIndex.clamp(
+        0, _mentionCandidates.length - 1);
+    _showMentionOverlay();
+  }
+
+  void _showMentionOverlay() {
+    _mentionOverlay?.remove();
+    _mentionOverlay = OverlayEntry(builder: (_) => _buildMentionOverlay());
+    Overlay.of(context).insert(_mentionOverlay!);
+  }
+
+  void _dismissMentionOverlay() {
+    _mentionOverlay?.remove();
+    _mentionOverlay = null;
+    _mentionCandidates = [];
+    _mentionSelectedIndex = 0;
+    _mentionAtPosition = -1;
+  }
+
+  void _acceptMention(_MentionCandidate candidate) {
+    final text = _controller.text;
+    final cursor = _controller.selection.baseOffset;
+    final replacement = '@${candidate.displayName} ';
+    final newText = text.replaceRange(_mentionAtPosition, cursor, replacement);
+    _controller.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(
+        offset: _mentionAtPosition + replacement.length,
+      ),
+    );
+    _dismissMentionOverlay();
+  }
+
+  Widget _buildMentionOverlay() {
+    final hollow = HollowTheme.of(context);
+    return Positioned(
+      width: 260,
+      child: CompositedTransformFollower(
+        link: _mentionLayerLink,
+        targetAnchor: Alignment.topLeft,
+        followerAnchor: Alignment.bottomLeft,
+        offset: const Offset(0, -4),
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            constraints: const BoxConstraints(maxHeight: 220),
+            decoration: BoxDecoration(
+              color: hollow.elevated,
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
+              border: Border.all(color: hollow.border),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.3),
+                  blurRadius: 12,
+                  offset: const Offset(0, -4),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
+              child: ListView.builder(
+                shrinkWrap: true,
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                itemCount: _mentionCandidates.length,
+                itemBuilder: (ctx, i) {
+                  final c = _mentionCandidates[i];
+                  final selected = i == _mentionSelectedIndex;
+                  return HollowPressable(
+                    onTap: () => _acceptMention(c),
+                    backgroundColor: selected
+                        ? hollow.accent.withValues(alpha: 0.15)
+                        : Colors.transparent,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: HollowSpacing.sm,
+                      vertical: HollowSpacing.xs,
+                    ),
+                    child: Row(
+                      children: [
+                        if (c.peerId.isNotEmpty)
+                          HollowAvatar(
+                            peerId: c.peerId,
+                            size: 24,
+                            imageBytes: c.avatarBytes,
+                          )
+                        else
+                          Container(
+                            width: 24,
+                            height: 24,
+                            decoration: BoxDecoration(
+                              color: hollow.accent.withValues(alpha: 0.2),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(LucideIcons.atSign,
+                                size: 14, color: hollow.accent),
+                          ),
+                        const SizedBox(width: HollowSpacing.sm),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                c.displayName,
+                                style: HollowTypography.bodySmall.copyWith(
+                                  color: hollow.textPrimary,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              if (c.subtitle != null)
+                                Text(
+                                  c.subtitle!,
+                                  style: HollowTypography.caption.copyWith(
+                                    color: hollow.textSecondary,
+                                    fontSize: 11,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   /// Extract the first URL from the current compose text and, if it
@@ -519,6 +750,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   }
 
   Future<void> _handleSend() async {
+    _dismissMentionOverlay();
     // If a file is staged, send it (with optional text).
     if (_stagedFilePath != null) {
       await _sendStagedFile();
@@ -1534,6 +1766,16 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                               }
                             }
                           }
+                          // Check if this message mentions the local user.
+                          final localName = displayNameFor(
+                              ref.read(profileProvider), localPeerId);
+                          final localNick = ref.read(
+                              serverNicknamesProvider(widget.serverId))[localPeerId];
+                          final msgMentioned = msg.text.contains('@everyone') ||
+                              msg.text.contains('@$localName') ||
+                              (localNick != null &&
+                                  localNick.isNotEmpty &&
+                                  msg.text.contains('@$localNick'));
                           return ChannelMessageBubble(
                             message: msg,
                             serverId: widget.serverId,
@@ -1542,6 +1784,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                             replyToText: replyText,
                             replyToImagePath: replyImagePath,
                             isHighlighted: _highlightIndex == index,
+                            isMentioned: msgMentioned,
                             onReplyTap: replyIndex != null
                                 ? () => _scrollToMessage(replyIndex!)
                                 : null,
@@ -1874,24 +2117,68 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                     ),
                     const SizedBox(width: HollowSpacing.xs),
                     Expanded(
-                      child: Focus(
-                        onKeyEvent: (_, event) => handleChatInputKey(
-                          event, _controller, _focusNode, _handleSend,
-                          onPasteImage: _stageClipboardImage,
-                        ),
-                        child: HollowTextField(
-                          controller: _controller,
-                          focusNode: _focusNode,
-                          hintText: 'Message #${widget.channelName}',
-                          autofocus: true,
-                          maxLines: 5,
-                          minLines: 1,
-                          maxLength: 4000,
-                          showCounter: false,
-                          style: HollowTypography.body
-                              .copyWith(color: hollow.textPrimary),
-                          borderRadius: hollow.radiusLg,
-                          onChanged: _onTextChanged,
+                      child: CompositedTransformTarget(
+                        link: _mentionLayerLink,
+                        child: Focus(
+                          onKeyEvent: (_, event) {
+                            if (_mentionOverlay != null &&
+                                (event is KeyDownEvent ||
+                                    event is KeyRepeatEvent)) {
+                              if (event.logicalKey ==
+                                  LogicalKeyboardKey.arrowDown) {
+                                setState(() {
+                                  _mentionSelectedIndex =
+                                      (_mentionSelectedIndex + 1)
+                                          .clamp(0,
+                                              _mentionCandidates.length - 1);
+                                });
+                                _showMentionOverlay();
+                                return KeyEventResult.handled;
+                              }
+                              if (event.logicalKey ==
+                                  LogicalKeyboardKey.arrowUp) {
+                                setState(() {
+                                  _mentionSelectedIndex =
+                                      (_mentionSelectedIndex - 1)
+                                          .clamp(0,
+                                              _mentionCandidates.length - 1);
+                                });
+                                _showMentionOverlay();
+                                return KeyEventResult.handled;
+                              }
+                              if (event.logicalKey ==
+                                      LogicalKeyboardKey.enter ||
+                                  event.logicalKey ==
+                                      LogicalKeyboardKey.tab) {
+                                _acceptMention(
+                                    _mentionCandidates[_mentionSelectedIndex]);
+                                return KeyEventResult.handled;
+                              }
+                              if (event.logicalKey ==
+                                  LogicalKeyboardKey.escape) {
+                                _dismissMentionOverlay();
+                                return KeyEventResult.handled;
+                              }
+                            }
+                            return handleChatInputKey(
+                              event, _controller, _focusNode, _handleSend,
+                              onPasteImage: _stageClipboardImage,
+                            );
+                          },
+                          child: HollowTextField(
+                            controller: _controller,
+                            focusNode: _focusNode,
+                            hintText: 'Message #${widget.channelName}',
+                            autofocus: true,
+                            maxLines: 5,
+                            minLines: 1,
+                            maxLength: 4000,
+                            showCounter: false,
+                            style: HollowTypography.body
+                                .copyWith(color: hollow.textPrimary),
+                            borderRadius: hollow.radiusLg,
+                            onChanged: _onTextChanged,
+                          ),
                         ),
                       ),
                     ),
@@ -2192,5 +2479,19 @@ class _UnreadPill extends StatelessWidget {
       ),
     );
   }
+}
+
+class _MentionCandidate {
+  final String peerId;
+  final String displayName;
+  final String? subtitle;
+  final Uint8List? avatarBytes;
+
+  const _MentionCandidate({
+    required this.peerId,
+    required this.displayName,
+    this.subtitle,
+    this.avatarBytes,
+  });
 }
 

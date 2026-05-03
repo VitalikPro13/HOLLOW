@@ -249,6 +249,30 @@ pub(crate) fn handle_send_typing_indicator(
     }
 }
 
+/// Handle `NodeCommand::SetInvisible`.
+/// Broadcasts StatusUpdate to every unique connected peer across all WS rooms.
+pub(crate) fn handle_set_invisible(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    invisible: bool,
+    is_invisible: &mut bool,
+) {
+    *is_invisible = invisible;
+    let status = if invisible { "invisible" } else { "online" };
+    hollow_log!("[HOLLOW-STATUS] Setting invisible={invisible}, broadcasting status={status}");
+    let msg = HavenMessage::StatusUpdate { status: status.to_string() };
+
+    let mut sent_to = std::collections::HashSet::new();
+    for peers in ws_room_peers.values() {
+        for peer in peers {
+            if peer != local_peer_str && sent_to.insert(peer.clone()) {
+                send_message_to_peer(ws_cmd_tx, ws_room_peers, peer, msg.clone());
+            }
+        }
+    }
+}
+
 /// Handle `NodeCommand::UpdateProfile`.
 pub(crate) async fn handle_update_profile(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -263,6 +287,7 @@ pub(crate) async fn handle_update_profile(
     about_me: String,
     avatar_bytes: Option<Vec<u8>>,
     banner_bytes: Option<Vec<u8>>,
+    is_invisible: bool,
 ) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -305,6 +330,7 @@ pub(crate) async fn handle_update_profile(
         updated_at: now,
         avatar_b64: avatar_b64.clone(),
         banner_b64: banner_b64.clone(),
+        is_invisible,
     };
     let mut mls_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Send via MLS to each server we're in.
@@ -329,6 +355,7 @@ pub(crate) async fn handle_update_profile(
         updated_at: now,
         avatar_b64: avatar_b64.clone(),
         banner_b64: banner_b64.clone(),
+        is_invisible,
     };
     hollow_log!("[HOLLOW-SWARM] Broadcasting profile update");
     {
@@ -362,6 +389,7 @@ pub(crate) fn send_own_profile_to_peer(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     target_peer: &str,
+    is_invisible: bool,
 ) {
     let data_dir = crate::identity::data_dir().unwrap_or_default();
     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
@@ -384,6 +412,7 @@ pub(crate) fn send_own_profile_to_peer(
                 updated_at: profile.updated_at,
                 avatar_b64,
                 banner_b64,
+                is_invisible,
             };
             send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, msg);
         }

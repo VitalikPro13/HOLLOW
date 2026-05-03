@@ -38,6 +38,7 @@ class FriendsBar extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final friends = ref.watch(friendsProvider);
     final peers = ref.watch(peersProvider);
+    final invisiblePeers = ref.watch(invisiblePeersProvider);
     final profiles = ref.watch(profileProvider);
     final unreadState = ref.watch(unreadProvider);
     final notifSettings = ref.watch(notificationSettingsProvider.notifier);
@@ -50,8 +51,8 @@ class FriendsBar extends ConsumerWidget {
         .where((f) => f.status == 'accepted')
         .toList();
     accepted.sort((a, b) {
-      final aOnline = peers.containsKey(a.peerId) ? 0 : 1;
-      final bOnline = peers.containsKey(b.peerId) ? 0 : 1;
+      final aOnline = (peers.containsKey(a.peerId) && !invisiblePeers.contains(a.peerId)) ? 0 : 1;
+      final bOnline = (peers.containsKey(b.peerId) && !invisiblePeers.contains(b.peerId)) ? 0 : 1;
       if (aOnline != bOnline) return aOnline.compareTo(bOnline);
       final aName = displayNameFor(profiles, a.peerId);
       final bName = displayNameFor(profiles, b.peerId);
@@ -160,7 +161,8 @@ class FriendsBar extends ConsumerWidget {
                     ),
                     itemBuilder: (context, index) {
                       final friend = displayList[index];
-                      final isOnline = peers.containsKey(friend.peerId);
+                      final isOnline = peers.containsKey(friend.peerId) &&
+                          !invisiblePeers.contains(friend.peerId);
                       final isSelected = friend.peerId == selectedPeerId;
                       final name = displayNameFor(profiles, friend.peerId);
 
@@ -255,13 +257,14 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
     final hollow = HollowTheme.of(context);
     final friends = ref.watch(friendsProvider);
     final peers = ref.watch(peersProvider);
+    final invPeers = ref.watch(invisiblePeersProvider);
 
     final accepted = friends.values
         .where((f) => f.status == 'accepted')
         .toList()
       ..sort((a, b) {
-        final aOn = peers.containsKey(a.peerId) ? 0 : 1;
-        final bOn = peers.containsKey(b.peerId) ? 0 : 1;
+        final aOn = (peers.containsKey(a.peerId) && !invPeers.contains(a.peerId)) ? 0 : 1;
+        final bOn = (peers.containsKey(b.peerId) && !invPeers.contains(b.peerId)) ? 0 : 1;
         if (aOn != bOn) return aOn.compareTo(bOn);
         return a.peerId.compareTo(b.peerId);
       });
@@ -504,6 +507,7 @@ class _FriendsListTab extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final profiles = ref.watch(profileProvider);
     final peers = ref.watch(peersProvider);
+    final invPeers = ref.watch(invisiblePeersProvider);
 
     if (accepted.isEmpty) {
       return Center(
@@ -531,7 +535,8 @@ class _FriendsListTab extends ConsumerWidget {
       itemBuilder: (context, index) {
         final friend = accepted[index];
         final name = displayNameFor(profiles, friend.peerId);
-        final isOnline = peers.containsKey(friend.peerId);
+        final isOnline = peers.containsKey(friend.peerId) &&
+            !invPeers.contains(friend.peerId);
 
         return Padding(
           padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
@@ -676,6 +681,7 @@ class _FavouritesReorderTab extends ConsumerWidget {
     final favourites = ref.watch(favouriteFriendsProvider);
     final profiles = ref.watch(profileProvider);
     final peers = ref.watch(peersProvider);
+    final invPeers = ref.watch(invisiblePeersProvider);
     final acceptedIds = accepted.map((f) => f.peerId).toSet();
 
     // Filter to valid favourites only.
@@ -726,7 +732,8 @@ class _FavouritesReorderTab extends ConsumerWidget {
       itemBuilder: (context, index) {
         final peerId = validFavs[index];
         final name = displayNameFor(profiles, peerId);
-        final isOnline = peers.containsKey(peerId);
+        final isOnline = peers.containsKey(peerId) &&
+            !invPeers.contains(peerId);
 
         return Padding(
           key: ValueKey(peerId),

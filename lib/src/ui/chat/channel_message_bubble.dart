@@ -31,6 +31,7 @@ class ChannelMessageBubble extends ConsumerWidget {
   final String? replyToText;
   final String? replyToImagePath;
   final bool isHighlighted;
+  final bool isMentioned;
   final VoidCallback? onReplyTap;
   final void Function(String emoji)? onToggleReaction;
 
@@ -43,6 +44,7 @@ class ChannelMessageBubble extends ConsumerWidget {
     this.replyToText,
     this.replyToImagePath,
     this.isHighlighted = false,
+    this.isMentioned = false,
     this.onReplyTap,
     this.onToggleReaction,
   });
@@ -144,6 +146,26 @@ class ChannelMessageBubble extends ConsumerWidget {
 
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
 
+    // Build mentionable names for @mention highlighting.
+    final membersAsync = ref.watch(serverMembersProvider(serverId));
+    final memberNames = membersAsync.whenOrNull(
+      data: (members) {
+        final names = <String>{};
+        for (final m in members) {
+          final displayName = serverDisplayNameFor(
+            profiles, m.peerId, nickname: nicknames[m.peerId] ?? '',
+          );
+          names.add(displayName);
+          if (m.nickname.isNotEmpty) names.add(m.nickname);
+          final profile = profiles[m.peerId];
+          if (profile != null && profile.displayName.isNotEmpty) {
+            names.add(profile.displayName);
+          }
+        }
+        return names;
+      },
+    );
+
     final isFileOnly = message.fileAttachment != null &&
         (message.text.isEmpty || message.text.startsWith('[file:'));
     final messageTextWidget = isFileOnly
@@ -151,6 +173,7 @@ class ChannelMessageBubble extends ConsumerWidget {
         : buildMessageText(
             message.text,
             context,
+            memberNames: memberNames,
             suffixSpans: isEdited
                 ? [
                     TextSpan(
@@ -210,7 +233,7 @@ class ChannelMessageBubble extends ConsumerWidget {
       ),
     );
 
-    final highlightDecoration = isHighlighted
+    final highlightDecoration = isHighlighted || isMentioned
         ? BoxDecoration(
             color: hollow.accent.withValues(alpha: 0.08),
             border: isMe ? meDecoration.border : null,
