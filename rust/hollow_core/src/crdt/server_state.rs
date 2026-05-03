@@ -684,9 +684,11 @@ impl ServerState {
             .collect()
     }
 
-    /// Get all label definitions.
+    /// Get all label definitions, sorted by name for stable ordering.
     pub fn labels_list(&self) -> Vec<&LabelInfo> {
-        self.labels.values().collect()
+        let mut list: Vec<_> = self.labels.values().collect();
+        list.sort_by(|a, b| a.name.cmp(&b.name));
+        list
     }
 
     /// Get the labels assigned to a member.

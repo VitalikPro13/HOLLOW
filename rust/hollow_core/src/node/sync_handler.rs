@@ -1182,7 +1182,16 @@ pub(crate) async fn handle_label_op(
 ) -> bool {
     if let Some(state) = server_states.get_mut(&server_id) {
         let local_peer = local_peer_str.to_string();
-        if !state.has_permission(&local_peer, Permission::MANAGE_ROLES) {
+
+        // Self-assign/unassign: any member can toggle their own labels.
+        // All other label ops require MANAGE_ROLES.
+        let is_self_toggle = match &payload {
+            CrdtPayload::LabelAssigned { peer_id, .. }
+            | CrdtPayload::LabelUnassigned { peer_id, .. } => peer_id == &local_peer,
+            _ => false,
+        };
+
+        if !is_self_toggle && !state.has_permission(&local_peer, Permission::MANAGE_ROLES) {
             hollow_log!("[HOLLOW-CRDT] Permission denied: cannot manage labels in {server_id}");
             let _ = event_tx.send(NetworkEvent::Error {
                 message: "Permission denied: cannot manage labels".to_string(),
@@ -2100,10 +2109,12 @@ pub(crate) async fn handle_envelope_crdt_op(
             }
             CrdtPayload::LabelCreated { .. }
             | CrdtPayload::LabelDeleted { .. }
-            | CrdtPayload::LabelUpdated { .. }
-            | CrdtPayload::LabelAssigned { .. }
-            | CrdtPayload::LabelUnassigned { .. } => {
+            | CrdtPayload::LabelUpdated { .. } => {
                 (sender_perms & Permission::MANAGE_ROLES) != 0
+            }
+            CrdtPayload::LabelAssigned { peer_id, .. }
+            | CrdtPayload::LabelUnassigned { peer_id, .. } => {
+                peer_id == &op.author || (sender_perms & Permission::MANAGE_ROLES) != 0
             }
             CrdtPayload::ServerCreated { .. } => true,
         };

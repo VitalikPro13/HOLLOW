@@ -5,6 +5,7 @@ import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
@@ -364,6 +365,7 @@ class _ServerMemberContent extends ConsumerWidget {
                       role: m.role,
                       nickname: m.nickname,
                       twitchUsername: m.twitchUsername,
+                      labels: m.labels,
                       isOnline: isOnline,
                       serverId: serverId,
                     ));
@@ -518,6 +520,7 @@ class _ServerMemberTile extends ConsumerWidget {
   final String twitchUsername;
   final bool isOnline;
   final String? serverId;
+  final List<crdt_api.LabelFfi> labels;
 
   const _ServerMemberTile({
     required this.peerId,
@@ -527,6 +530,7 @@ class _ServerMemberTile extends ConsumerWidget {
     required this.twitchUsername,
     required this.isOnline,
     this.serverId,
+    this.labels = const [],
   });
 
   @override
@@ -557,6 +561,7 @@ class _ServerMemberTile extends ConsumerWidget {
             nickname: nickname.isNotEmpty ? nickname : null,
             role: role,
             twitchUsername: twitchUsername.isNotEmpty ? twitchUsername : null,
+            labels: labels.isNotEmpty ? labels : null,
             anchor: Offset(pos.dx - 290, pos.dy - 100),
           );
         },

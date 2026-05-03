@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
+import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -36,6 +37,7 @@ void showProfileCardPopup({
   String? nickname,
   String? role,
   String? twitchUsername,
+  List<crdt_api.LabelFfi>? labels,
   required Offset anchor,
   bool anchorBottom = false,
 }) {
@@ -48,6 +50,7 @@ void showProfileCardPopup({
       nickname: nickname,
       role: role,
       twitchUsername: twitchUsername,
+      labels: labels,
       anchor: anchor,
       anchorBottom: anchorBottom,
       onDismiss: () { entry.remove(); entry.dispose(); },
@@ -62,6 +65,7 @@ class _ProfileCardOverlay extends ConsumerStatefulWidget {
   final String? nickname;
   final String? role;
   final String? twitchUsername;
+  final List<crdt_api.LabelFfi>? labels;
   final Offset anchor;
   final bool anchorBottom;
   final VoidCallback onDismiss;
@@ -71,6 +75,7 @@ class _ProfileCardOverlay extends ConsumerStatefulWidget {
     required this.nickname,
     required this.role,
     this.twitchUsername,
+    this.labels,
     required this.anchor,
     this.anchorBottom = false,
     required this.onDismiss,
@@ -349,6 +354,38 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
                                       fontSize: 10,
                                     ),
                                   ),
+                                ),
+                              ],
+
+                              // Labels
+                              if (widget.labels != null &&
+                                  widget.labels!.isNotEmpty) ...[
+                                const SizedBox(height: HollowSpacing.xs),
+                                Wrap(
+                                  spacing: 4,
+                                  runSpacing: 4,
+                                  alignment: WrapAlignment.center,
+                                  children: widget.labels!.map((l) {
+                                    final c = _parseLabelColor(l.color);
+                                    return Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 6, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: c.withValues(alpha: 0.15),
+                                        borderRadius: BorderRadius.circular(
+                                            HollowRadius.sm),
+                                      ),
+                                      child: Text(
+                                        l.name,
+                                        style: HollowTypography.caption
+                                            .copyWith(
+                                          color: c,
+                                          fontWeight: FontWeight.w600,
+                                          fontSize: 10,
+                                        ),
+                                      ),
+                                    );
+                                  }).toList(),
                                 ),
                               ],
 
@@ -631,6 +668,14 @@ class _FriendActionButton extends ConsumerWidget {
       ],
     );
   }
+}
+
+Color _parseLabelColor(String hex) {
+  final cleaned = hex.replaceAll('#', '');
+  if (cleaned.length == 6) {
+    return Color(int.parse('FF$cleaned', radix: 16));
+  }
+  return const Color(0xFF78909C);
 }
 
 /// Role badge color.

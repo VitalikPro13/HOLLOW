@@ -61,14 +61,12 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
       ));
     }
 
-    // Labels — for role managers
-    if (permissions & Permission.manageRoles != 0) {
-      tabs.add((
-        icon: LucideIcons.tag,
-        label: 'Labels',
-        isDanger: false,
-      ));
-    }
+    // Labels — visible to everyone (self-assign), management for MANAGE_ROLES
+    tabs.add((
+      icon: LucideIcons.tag,
+      label: 'Labels',
+      isDanger: false,
+    ));
 
     // Members — always visible (viewing is OK, actions gated inside)
     tabs.add((

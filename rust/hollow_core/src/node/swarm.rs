@@ -4595,10 +4595,12 @@ async fn handle_incoming_request(
                         }
                         CrdtPayload::LabelCreated { .. }
                         | CrdtPayload::LabelDeleted { .. }
-                        | CrdtPayload::LabelUpdated { .. }
-                        | CrdtPayload::LabelAssigned { .. }
-                        | CrdtPayload::LabelUnassigned { .. } => {
+                        | CrdtPayload::LabelUpdated { .. } => {
                             (sender_perms & Permission::MANAGE_ROLES) != 0
+                        }
+                        CrdtPayload::LabelAssigned { peer_id, .. }
+                        | CrdtPayload::LabelUnassigned { peer_id, .. } => {
+                            peer_id == &peer_str || (sender_perms & Permission::MANAGE_ROLES) != 0
                         }
                         CrdtPayload::ServerCreated { .. } => true,
                     };
