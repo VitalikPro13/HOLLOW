@@ -1895,6 +1895,7 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [ ] Device linking via QR code (multi-device identity sync) — requires MLS + CRDTs. 🎞️ Animate: QR scan success celebration, device linked confirmation
 - [ ] Mobile platform testing & platform-specific fixes (adaptive layout built in Phase 2.5)
 - [ ] Accessibility (screen reader support, high contrast)
+- [ ] Performance, quality, and QA audit — stress-test at scale (1000+ members), optimize: MLS coordinator load distribution (spread commits across multiple trusted peers instead of single lowest-ID), lazy member panel rendering (virtualized list, don't load all 2k profiles at once), profile broadcast batching/throttling, CRDT op log compaction tuning, per-channel MLS subgroups (Option B) for true channel isolation, offline→online edge cases (friend requests, role changes, message sync gaps, pending invites), compound DB storage growth analysis, WebRTC mesh limits, comprehensive "what if peer is offline" QA pass across all features
 
 **Deliverable:** A polished, feature-complete communication platform ready for public release — with private, encrypted P2P file sharing that rivals torrent performance without any of the privacy/legal exposure.
 

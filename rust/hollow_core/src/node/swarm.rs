@@ -608,12 +608,12 @@ async fn run_event_loop(
                             &mut channel_sync_sent, server_id, channel_id,
                         ).await { continue; }
                     }
-                    NodeCommand::UpdateProfile { display_name, status, about_me, avatar_bytes, banner_bytes } => {
+                    NodeCommand::UpdateProfile { display_name, status, about_me, avatar_bytes, banner_bytes, twitch_username } => {
                         social::handle_update_profile(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut mls, &server_states, &bundle_keypair,
                             &local_peer_str, display_name, status, about_me,
-                            avatar_bytes, banner_bytes, is_invisible,
+                            avatar_bytes, banner_bytes, is_invisible, twitch_username,
                         ).await;
                     }
 
@@ -5487,7 +5487,7 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible } => {
+                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username } => {
                                 if peer_invisible {
                                     let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
                                         peer_id: sender_peer_id.clone(),
@@ -5497,7 +5497,7 @@ async fn handle_incoming_request(
                                 super::social::handle_envelope_profile_update(
                                     event_tx, server_states, bundle_keypair,
                                     sender_peer_id, display_name, status, about_me,
-                                    updated_at, avatar_b64, banner_b64,
+                                    updated_at, avatar_b64, banner_b64, twitch_username,
                                 ).await;
                             }
 
@@ -6183,7 +6183,7 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible } => {
+        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username } => {
             // If the profile carries an invisible flag, emit PeerStatusChanged so the
             // UI treats this peer as offline from the very first event.
             if peer_invisible {
@@ -6198,6 +6198,7 @@ async fn handle_incoming_request(
             let display_name = if display_name.len() > 64 { display_name[..64].to_string() } else { display_name };
             let status = if status.len() > 96 { status[..96].to_string() } else { status };
             let about_me = if about_me.len() > 256 { about_me[..256].to_string() } else { about_me };
+            let twitch_username = if twitch_username.len() > 64 { twitch_username[..64].to_string() } else { twitch_username };
 
             // Decode avatar/banner from base64.
             // Empty string = no change (None). "CLEAR" = clear (Some(empty)). Otherwise = base64 data.
@@ -6236,7 +6237,7 @@ async fn handle_incoming_request(
                     if let Ok(db) = crate::storage::MessageStore::open(&db_path, &passphrase) {
                         if let Err(e) = db.save_profile(
                             &peer_str, &display_name, &status, &about_me, updated_at,
-                            avatar_bytes.as_deref(), banner_bytes.as_deref(),
+                            avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
                         ) {
                             hollow_log!("[HOLLOW-SWARM] Failed to save peer profile: {e}");
                         }

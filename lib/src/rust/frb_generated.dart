@@ -718,6 +718,7 @@ abstract class RustLibApi extends BaseApi {
     required String aboutMe,
     Uint8List? avatarBytes,
     Uint8List? bannerBytes,
+    required String twitchUsername,
   });
 
   Future<void> crateApiCrdtUpdateServerSetting({
@@ -5984,6 +5985,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required String aboutMe,
     Uint8List? avatarBytes,
     Uint8List? bannerBytes,
+    required String twitchUsername,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -5994,6 +5996,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(aboutMe, serializer);
           sse_encode_opt_list_prim_u_8_strict(avatarBytes, serializer);
           sse_encode_opt_list_prim_u_8_strict(bannerBytes, serializer);
+          sse_encode_String(twitchUsername, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -6006,7 +6009,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiNetworkUpdateProfileConstMeta,
-        argValues: [displayName, status, aboutMe, avatarBytes, bannerBytes],
+        argValues: [
+          displayName,
+          status,
+          aboutMe,
+          avatarBytes,
+          bannerBytes,
+          twitchUsername,
+        ],
         apiImpl: this,
       ),
     );
@@ -6021,6 +6031,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "aboutMe",
           "avatarBytes",
           "bannerBytes",
+          "twitchUsername",
         ],
       );
 
@@ -8212,8 +8223,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   UserProfile dco_decode_user_profile(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return UserProfile(
       peerId: dco_decode_String(arr[0]),
       displayName: dco_decode_String(arr[1]),
@@ -8222,6 +8233,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       updatedAt: dco_decode_i_64(arr[4]),
       avatarBytes: dco_decode_opt_list_prim_u_8_strict(arr[5]),
       bannerBytes: dco_decode_opt_list_prim_u_8_strict(arr[6]),
+      twitchUsername: dco_decode_String(arr[7]),
     );
   }
 
@@ -10433,6 +10445,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_updatedAt = sse_decode_i_64(deserializer);
     var var_avatarBytes = sse_decode_opt_list_prim_u_8_strict(deserializer);
     var var_bannerBytes = sse_decode_opt_list_prim_u_8_strict(deserializer);
+    var var_twitchUsername = sse_decode_String(deserializer);
     return UserProfile(
       peerId: var_peerId,
       displayName: var_displayName,
@@ -10441,6 +10454,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       updatedAt: var_updatedAt,
       avatarBytes: var_avatarBytes,
       bannerBytes: var_bannerBytes,
+      twitchUsername: var_twitchUsername,
     );
   }
 
@@ -12439,6 +12453,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_64(self.updatedAt, serializer);
     sse_encode_opt_list_prim_u_8_strict(self.avatarBytes, serializer);
     sse_encode_opt_list_prim_u_8_strict(self.bannerBytes, serializer);
+    sse_encode_String(self.twitchUsername, serializer);
   }
 
   @protected

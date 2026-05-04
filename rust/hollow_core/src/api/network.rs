@@ -1464,6 +1464,7 @@ pub fn update_profile(
     about_me: String,
     avatar_bytes: Option<Vec<u8>>,
     banner_bytes: Option<Vec<u8>>,
+    twitch_username: String,
 ) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -1477,6 +1478,7 @@ pub fn update_profile(
             about_me,
             avatar_bytes,
             banner_bytes,
+            twitch_username,
         }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;

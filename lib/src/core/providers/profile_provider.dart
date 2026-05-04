@@ -44,6 +44,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
     String aboutMe = '',
     Uint8List? avatarBytes,
     Uint8List? bannerBytes,
+    String twitchUsername = '',
   }) async {
     try {
       await network_api.updateProfile(
@@ -52,6 +53,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
         aboutMe: aboutMe,
         avatarBytes: avatarBytes,
         bannerBytes: bannerBytes,
+        twitchUsername: twitchUsername,
       );
     } catch (e) {
       debugPrint('[HOLLOW] Failed to update profile: $e');

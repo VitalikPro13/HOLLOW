@@ -399,13 +399,19 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
           .setInvisible(_pendingInvisible);
     }
 
-    // Save profile.
+    // Save profile (include Twitch username if connected).
+    String twitchUsername = '';
+    try {
+      final tw = await twitch_api.twitchGetUsername();
+      if (tw != null && tw.isNotEmpty) twitchUsername = tw;
+    } catch (_) {}
     await ref.read(profileProvider.notifier).updateMyProfile(
           displayName: displayName,
           status: status,
           aboutMe: aboutMe,
           avatarBytes: _avatarChanged ? _pendingAvatarBytes : null,
           bannerBytes: _bannerChanged ? _pendingBannerBytes : null,
+          twitchUsername: twitchUsername,
         );
 
     if (!mounted) return;
@@ -4954,6 +4960,19 @@ class _TwitchConnectionRowState extends ConsumerState<_TwitchConnectionRow> {
   Future<void> _disconnect() async {
     try {
       await twitch_api.twitchDisconnect();
+      // Clear Twitch username from all servers
+      try {
+        final localPeerId = ref.read(identityProvider).peerId;
+        if (localPeerId != null) {
+          final servers = ref.read(serverListProvider);
+          for (final server in servers.values) {
+            await crdt_api.setTwitchUsername(
+                serverId: server.serverId,
+                peerId: localPeerId,
+                twitchUsername: '');
+          }
+        }
+      } catch (_) {}
       if (mounted) {
         setState(() {
           _connected = false;
@@ -5111,6 +5130,7 @@ class _TwitchDeviceCodeDialogState extends State<_TwitchDeviceCodeDialog> {
       title: 'Connect Twitch',
       content: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           if (_error != null) ...[
             Icon(LucideIcons.alertCircle, size: 32, color: hollow.error),
@@ -5122,13 +5142,19 @@ class _TwitchDeviceCodeDialogState extends State<_TwitchDeviceCodeDialog> {
               textAlign: TextAlign.center,
             ),
           ] else if (_done) ...[
-            Icon(LucideIcons.checkCircle, size: 32,
-                color: hollow.accent),
-            const SizedBox(height: HollowSpacing.md),
-            Text(
-              'Twitch connected!',
-              style: HollowTypography.body
-                  .copyWith(color: hollow.accent),
+            Center(
+              child: Column(
+                children: [
+                  Icon(LucideIcons.checkCircle, size: 32,
+                      color: hollow.accent),
+                  const SizedBox(height: HollowSpacing.md),
+                  Text(
+                    'Twitch connected!',
+                    style: HollowTypography.body
+                        .copyWith(color: hollow.accent),
+                  ),
+                ],
+              ),
             ),
           ] else if (_userCode != null) ...[
             Text(

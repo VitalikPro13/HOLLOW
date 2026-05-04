@@ -256,12 +256,14 @@ Future<void> updateProfile({
   required String aboutMe,
   Uint8List? avatarBytes,
   Uint8List? bannerBytes,
+  required String twitchUsername,
 }) => RustLib.instance.api.crateApiNetworkUpdateProfile(
   displayName: displayName,
   status: status,
   aboutMe: aboutMe,
   avatarBytes: avatarBytes,
   bannerBytes: bannerBytes,
+  twitchUsername: twitchUsername,
 );
 
 /// Process a raw image into avatar format (128x128 WebP). Returns processed bytes.

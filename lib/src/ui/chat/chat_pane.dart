@@ -53,6 +53,8 @@ import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:lucide_icons/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
+import 'package:simple_icons/simple_icons.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 /// Whether the DM profile panel is visible.
 final dmProfilePanelProvider = StateProvider<bool>((ref) => true);
@@ -3709,6 +3711,43 @@ class _DmProfilePanel extends ConsumerWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       textAlign: TextAlign.center,
+                    ),
+                  ],
+
+                  // Twitch badge
+                  if (profile != null && profile.twitchUsername.isNotEmpty) ...[
+                    const SizedBox(height: HollowSpacing.xs),
+                    GestureDetector(
+                      onTap: () => launchUrl(
+                        Uri.parse('https://twitch.tv/${profile.twitchUsername}'),
+                        mode: LaunchMode.externalApplication,
+                      ),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: HollowSpacing.sm,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF9146FF).withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(SimpleIcons.twitch,
+                                size: 11, color: Color(0xFF9146FF)),
+                            const SizedBox(width: 4),
+                            Text(
+                              profile.twitchUsername,
+                              style: HollowTypography.caption.copyWith(
+                                color: const Color(0xFF9146FF),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ],
                 ],

@@ -2,7 +2,7 @@ import hashlib
 import re
 from pathlib import Path
 
-from config import MEMORY_DIR, HOLLOW_PLAN_PATH, WHITEPAPER_PATH, CLAUDE_MD_PATH
+from config import MEMORY_DIR, HOLLOW_PLAN_PATH, WHITEPAPER_PATH, CLAUDE_MD_PATH, WIKI_DIR
 
 
 def _hash(text: str) -> str:
@@ -180,6 +180,38 @@ def chunk_claude_md() -> list[dict]:
     }]
 
 
+def chunk_wiki_files() -> list[dict]:
+    """Split wiki markdown files by ## headings into searchable chunks."""
+    chunks = []
+    if not WIKI_DIR.exists():
+        return chunks
+
+    for f in sorted(WIKI_DIR.glob("*.md")):
+        content = f.read_text(encoding="utf-8", errors="replace")
+
+        title = f.stem.replace("_", " ").title()
+        first_line = content.split("\n", 1)[0]
+        if first_line.startswith("# "):
+            title = first_line.lstrip("# ").strip()
+
+        sections = _split_by_headings(content, "## ")
+        for heading, section_text in sections:
+            if not heading or len(section_text.strip()) < 50:
+                continue
+            embed_text = f"{title} > {heading}\n\n{section_text}"
+            chunks.append({
+                "source": f"wiki/{f.name}",
+                "heading": heading,
+                "chunk_type": "wiki",
+                "name": f"{title} > {heading}",
+                "description": f"Wiki: {title}",
+                "content": embed_text,
+                "content_hash": _hash(embed_text),
+            })
+
+    return chunks
+
+
 def get_all_chunks() -> list[dict]:
     """Get all chunks from all sources."""
     chunks = []
@@ -187,4 +219,5 @@ def get_all_chunks() -> list[dict]:
     chunks.extend(chunk_plan())
     chunks.extend(chunk_whitepaper())
     chunks.extend(chunk_claude_md())
+    chunks.extend(chunk_wiki_files())
     return chunks

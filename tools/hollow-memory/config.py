@@ -8,6 +8,7 @@ MEMORY_DIR = Path("C:/Users/Jabun/.claude/projects/C--Users-Jabun-Documents-Codi
 HOLLOW_PLAN_PATH = PROJECT_ROOT / "HOLLOW_PLAN.md"
 WHITEPAPER_PATH = PROJECT_ROOT / "WHITEPAPER.md"
 CLAUDE_MD_PATH = PROJECT_ROOT / "CLAUDE.md"
+WIKI_DIR = PROJECT_ROOT / "tools" / "hollow-memory" / "wiki"
 
 # Model paths
 MODELS_DIR = TOOL_DIR / "models"

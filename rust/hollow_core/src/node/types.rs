@@ -287,7 +287,7 @@ pub(crate) enum NodeCommand {
     SetTwitchUsername { server_id: String, peer_id: String, twitch_username: String },
     NotifyShutdown,
     // -- Profile commands (Phase 3.5) --
-    UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>> },
+    UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>>, twitch_username: String },
     // -- Message editing (Phase 3.5) --
     EditChannelMessage { server_id: String, channel_id: String, message_id: String, new_text: String },
     EditDmMessage { peer_id: String, message_id: String, new_text: String },
@@ -579,6 +579,8 @@ pub(crate) enum HavenMessage {
         banner_b64: String,
         #[serde(default)]
         is_invisible: bool,
+        #[serde(default)]
+        twitch_username: String,
     },
 
     // -- Multi-peer fan-out sync (Phase 3.5) --
@@ -1360,6 +1362,8 @@ pub(crate) enum MessageEnvelope {
         banner_b64: String,
         #[serde(default)]
         is_invisible: bool,
+        #[serde(default)]
+        twitch_username: String,
     },
 
     /// CRDT sync request (replaces HavenMessage::SyncRequest for MLS path).

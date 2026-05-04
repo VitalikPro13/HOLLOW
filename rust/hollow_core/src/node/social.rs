@@ -288,6 +288,7 @@ pub(crate) async fn handle_update_profile(
     avatar_bytes: Option<Vec<u8>>,
     banner_bytes: Option<Vec<u8>>,
     is_invisible: bool,
+    twitch_username: String,
 ) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -315,7 +316,7 @@ pub(crate) async fn handle_update_profile(
         if let Ok(db) = crate::storage::MessageStore::open(&db_path, &passphrase) {
             if let Err(e) = db.save_profile(
                 &local_peer_str, &display_name, &status, &about_me, now,
-                avatar_bytes.as_deref(), banner_bytes.as_deref(),
+                avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
             ) {
                 hollow_log!("[HOLLOW-SWARM] Failed to save own profile: {e}");
             }
@@ -331,6 +332,7 @@ pub(crate) async fn handle_update_profile(
         avatar_b64: avatar_b64.clone(),
         banner_b64: banner_b64.clone(),
         is_invisible,
+        twitch_username: twitch_username.clone(),
     };
     let mut mls_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Send via MLS to each server we're in.
@@ -356,6 +358,7 @@ pub(crate) async fn handle_update_profile(
         avatar_b64: avatar_b64.clone(),
         banner_b64: banner_b64.clone(),
         is_invisible,
+        twitch_username: twitch_username.clone(),
     };
     hollow_log!("[HOLLOW-SWARM] Broadcasting profile update");
     {
@@ -413,6 +416,7 @@ pub(crate) fn send_own_profile_to_peer(
                 avatar_b64,
                 banner_b64,
                 is_invisible,
+                twitch_username: profile.twitch_username,
             };
             send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, msg);
         }
@@ -445,6 +449,7 @@ pub(crate) async fn handle_envelope_profile_update(
     updated_at: i64,
     avatar_b64: String,
     banner_b64: String,
+    twitch_username: String,
 ) {
     // Decode avatar/banner base64 (same logic as HavenMessage::ProfileUpdate handler).
     let avatar_bytes: Option<Vec<u8>> = if avatar_b64.is_empty() {
@@ -470,7 +475,7 @@ pub(crate) async fn handle_envelope_profile_update(
     if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
         let _ = store.save_profile(
             &sender_peer_id, &display_name, &status, &about_me, updated_at,
-            avatar_bytes.as_deref(), banner_bytes.as_deref(),
+            avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
         );
     }
     // Update display_name in server member lists (local-only, not a CRDT op).

@@ -13,6 +13,7 @@ pub(crate) struct StoredProfile {
     pub updated_at: i64,
     pub avatar_bytes: Option<Vec<u8>>,
     pub banner_bytes: Option<Vec<u8>>,
+    pub twitch_username: String,
 }
 
 /// A stored chat message.
@@ -515,6 +516,9 @@ impl MessageStore {
         ).unwrap_or(());
         conn.execute_batch(
             "ALTER TABLE user_profiles ADD COLUMN banner BLOB;"
+        ).unwrap_or(());
+        conn.execute_batch(
+            "ALTER TABLE user_profiles ADD COLUMN twitch_username TEXT NOT NULL DEFAULT '';"
         ).unwrap_or(());
 
         // -- Migration: content_id column on files (vault ↔ file_id link) --
@@ -1494,6 +1498,7 @@ impl MessageStore {
         updated_at: i64,
         avatar: Option<&[u8]>,
         banner: Option<&[u8]>,
+        twitch_username: &str,
     ) -> Result<(), String> {
         // For avatar/banner: None = no change (use COALESCE), Some(empty) = clear (store NULL), Some(data) = set.
         // Normalize Some(empty) to an explicit NULL for SQL.
@@ -1504,19 +1509,20 @@ impl MessageStore {
 
         self.conn
             .execute(
-                "INSERT INTO user_profiles (peer_id, display_name, status, about_me, updated_at, avatar, banner)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO user_profiles (peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(peer_id) DO UPDATE SET
                     display_name = excluded.display_name,
                     status = excluded.status,
                     about_me = excluded.about_me,
                     updated_at = excluded.updated_at,
                     avatar = COALESCE(excluded.avatar, user_profiles.avatar),
-                    banner = COALESCE(excluded.banner, user_profiles.banner)
+                    banner = COALESCE(excluded.banner, user_profiles.banner),
+                    twitch_username = excluded.twitch_username
                  WHERE excluded.updated_at >= user_profiles.updated_at
                     OR (excluded.updated_at < user_profiles.updated_at
                         AND ABS(excluded.updated_at - user_profiles.updated_at) < 86400000)",
-                params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val],
+                params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val, twitch_username],
             )
             .map_err(|e| format!("Failed to save profile: {e}"))?;
 
@@ -1541,7 +1547,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner
+                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username
                  FROM user_profiles WHERE peer_id = ?1",
             )
             .map_err(|e| format!("Failed to prepare profile query: {e}"))?;
@@ -1555,6 +1561,7 @@ impl MessageStore {
                     updated_at: row.get(4)?,
                     avatar_bytes: row.get(5)?,
                     banner_bytes: row.get(6)?,
+                    twitch_username: row.get::<_, String>(7).unwrap_or_default(),
                 })
             })
             .map_err(|e| format!("Failed to query profile: {e}"))?;
@@ -1570,7 +1577,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner
+                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username
                  FROM user_profiles",
             )
             .map_err(|e| format!("Failed to prepare all profiles query: {e}"))?;
@@ -1584,6 +1591,7 @@ impl MessageStore {
                     updated_at: row.get(4)?,
                     avatar_bytes: row.get(5)?,
                     banner_bytes: row.get(6)?,
+                    twitch_username: row.get::<_, String>(7).unwrap_or_default(),
                 })
             })
             .map_err(|e| format!("Failed to query all profiles: {e}"))?;

@@ -553,6 +553,9 @@ class _ServerMemberTile extends ConsumerWidget {
     ref.watch(localNicknameProvider); // trigger rebuild on local nickname changes
     final resolvedName =
         serverDisplayNameFor(profiles, peerId, nickname: nickname);
+    final effectiveTwitch = twitchUsername.isNotEmpty
+        ? twitchUsername
+        : (profiles[peerId]?.twitchUsername ?? '');
 
     return AnimatedOpacity(
       opacity: isOnline ? 1.0 : 0.5,
@@ -571,7 +574,7 @@ class _ServerMemberTile extends ConsumerWidget {
             peerId: peerId,
             nickname: nickname.isNotEmpty ? nickname : null,
             role: role,
-            twitchUsername: twitchUsername.isNotEmpty ? twitchUsername : null,
+            twitchUsername: effectiveTwitch.isNotEmpty ? effectiveTwitch : null,
             labels: labels.isNotEmpty ? labels : null,
             anchor: Offset(pos.dx - 290, pos.dy - 100),
           );
@@ -633,14 +636,14 @@ class _ServerMemberTile extends ConsumerWidget {
                         fontSize: 10,
                       ),
                     ),
-                  if (twitchUsername.isNotEmpty)
+                  if (effectiveTwitch.isNotEmpty)
                     Row(
                       children: [
                         Icon(SimpleIcons.twitch,
                             size: 10, color: const Color(0xFF9146FF)),
                         const SizedBox(width: 3),
                         Text(
-                          twitchUsername,
+                          effectiveTwitch,
                           style: HollowTypography.caption.copyWith(
                             color: const Color(0xFF9146FF),
                             fontSize: 9,

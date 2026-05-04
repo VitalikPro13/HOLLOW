@@ -5520,6 +5520,7 @@ fn wire__crate__api__network__update_profile_impl(
             let api_about_me = <String>::sse_decode(&mut deserializer);
             let api_avatar_bytes = <Option<Vec<u8>>>::sse_decode(&mut deserializer);
             let api_banner_bytes = <Option<Vec<u8>>>::sse_decode(&mut deserializer);
+            let api_twitch_username = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
@@ -5529,6 +5530,7 @@ fn wire__crate__api__network__update_profile_impl(
                         api_about_me,
                         api_avatar_bytes,
                         api_banner_bytes,
+                        api_twitch_username,
                     )?;
                     Ok(output_ok)
                 })())
@@ -8499,6 +8501,7 @@ impl SseDecode for crate::api::storage::UserProfile {
         let mut var_updatedAt = <i64>::sse_decode(deserializer);
         let mut var_avatarBytes = <Option<Vec<u8>>>::sse_decode(deserializer);
         let mut var_bannerBytes = <Option<Vec<u8>>>::sse_decode(deserializer);
+        let mut var_twitchUsername = <String>::sse_decode(deserializer);
         return crate::api::storage::UserProfile {
             peer_id: var_peerId,
             display_name: var_displayName,
@@ -8507,6 +8510,7 @@ impl SseDecode for crate::api::storage::UserProfile {
             updated_at: var_updatedAt,
             avatar_bytes: var_avatarBytes,
             banner_bytes: var_bannerBytes,
+            twitch_username: var_twitchUsername,
         };
     }
 }
@@ -10727,6 +10731,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::storage::UserProfile {
             self.updated_at.into_into_dart().into_dart(),
             self.avatar_bytes.into_into_dart().into_dart(),
             self.banner_bytes.into_into_dart().into_dart(),
+            self.twitch_username.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -12589,6 +12594,7 @@ impl SseEncode for crate::api::storage::UserProfile {
         <i64>::sse_encode(self.updated_at, serializer);
         <Option<Vec<u8>>>::sse_encode(self.avatar_bytes, serializer);
         <Option<Vec<u8>>>::sse_encode(self.banner_bytes, serializer);
+        <String>::sse_encode(self.twitch_username, serializer);
     }
 }
 

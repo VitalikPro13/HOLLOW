@@ -151,6 +151,7 @@ All UI uses custom Hollow widgets — no Material defaults.
 - **Reindex:** Run `memory_reindex()` after modifying memory files, HOLLOW_PLAN.md, or CLAUDE.md (automatic during `/compush`).
 - **Save liberally:** Discovery is by meaning now, not by scanning an index. Save granular patterns, decision rationale, subtle bug causes, non-obvious code behaviors — anything useful to recall later. The threshold is "would finding this by meaning help a future session?" not "is this important enough for the index?"
 - **Location:** `tools/hollow-memory/` — local ONNX embeddings, sqlite-vec, zero API costs.
+- **Wiki:** `tools/hollow-memory/wiki/` contains ~40 machine-optimized markdown files covering every UI panel, data flow, background system, provider, and Rust module. Each is chunked by `## ` heading and indexed. Search queries like "voice channel WebRTC flow" or "CRDT sync handler" return precise wiki results with file paths and function references. Update relevant wiki files during `/compush` when features change.
 
 ## Rules
 - Never commit secrets, keys, or credentials.

@@ -96,7 +96,7 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
   @override
   void initState() {
     super.initState();
-    _resolvedTwitchUsername = _resolvedTwitchUsername;
+    _resolvedTwitchUsername = widget.twitchUsername;
     _controller = AnimationController(
       vsync: this,
       duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 180),
@@ -121,7 +121,14 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
         final username = await twitchGetUsername();
         if (mounted && username != null && username.isNotEmpty) {
           setState(() => _resolvedTwitchUsername = username);
+          return;
         }
+      }
+      // Fallback: check profile DB for any peer's Twitch username
+      final profiles = ref.read(profileProvider);
+      final profile = profiles[widget.peerId];
+      if (mounted && profile != null && profile.twitchUsername.isNotEmpty) {
+        setState(() => _resolvedTwitchUsername = profile.twitchUsername);
       }
     } catch (_) {}
   }
