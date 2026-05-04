@@ -1,8 +1,14 @@
 [
   {
+    "id": "2026-05-04-v020",
+    "date": "May 4, 2026",
+    "title": "v0.2.0 — Roles, Mentions & More",
+    "body": "Hey everybody! We're back once again with some good updates. Roles were completely reworked with some additional fixes. Also, apparently I forgot to add 'Leave server' option... well, v0.1.0 won't be available cause it's breaking changes, so yeah.\n\n Like, I think that we can work this way. If there are breaking changes, then better update and remove the ability to downgrade, but if it's non-breaking - then no need to. Alright, enough of my yapping. Enjoy the update!\n\n Release notes:\n\n- **Roles & permissions system** — Owner/Admin/Moderator/Member power roles, permission editing gated by tier, leave server, bans\n\n- **Labels** — cosmetic labels with profile card badges, self-service picker, stable ordering\n\n- **@Mentions** — inline mention highlighting with autocomplete, notification badge support\n\n- **Invisible status** — appear offline while staying connected\n\n- **Twitch profile sync** — Twitch badge on DM profiles, sync fix on both DMs/servers"
+  },
+  {
     "id": "2026-05-02-public-alpha",
     "date": "May 2, 2026",
     "title": "Hollow is now in public alpha!",
-    "body": "Welcome to Hollow — a fully distributed, end-to-end encrypted communication platform.\n\n**What's included:**\n- End-to-end encrypted messaging (Olm + MLS)\n- Voice and video calls (WebRTC + SFrame)\n- File sharing with erasure-coded vault storage\n- Twitch-gated servers\n- Built-in auto-updater\n\nThis is the first public release. Everything is free, open-source relay, no account needed. Your identity lives on your device — back up your mnemonic phrase!\n\nFeedback and bugs: [GitHub Issues](https://github.com/VitalikPro13/hollow-relay/issues)"
+    "body": "I'm so happy, you just can't believe it! If you want to know all the features, then check out the main overview video of the project on my [YouTube channel](https://www.youtube.com/watch?v=qsXc-hJizsQ)\n\n Full End-to-End Encryption everywhere, file sharing, DMs and servers (also, the ability to allow only your Twitch followers to join one!), simple built-in auto-updater, so you can be up-to-date with all the latest features.\n\n I would love to hear your feedback, so please write to feedback@anonlisten.com or simply post your comments on my [TwitterX](https://x.com/Anon_Listen). Have fun!"
   }
 ]

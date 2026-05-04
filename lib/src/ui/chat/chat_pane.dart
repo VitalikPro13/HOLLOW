@@ -24,6 +24,7 @@ import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/core/providers/typing_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -815,6 +816,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
     final typingPeers = ref.watch(typingProvider)[widget.peerId] ?? {};
     final showProfilePanel = ref.watch(dmProfilePanelProvider);
+    final profiles = ref.watch(profileProvider);
+    final localPeerId = ref.watch(identityProvider).peerId ?? '';
 
     // Screen share layout only shows in the DM with the call peer.
     final call = ref.watch(callProvider);
@@ -1133,7 +1136,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                             ),
                             child: Column(
                               children: _buildMessageArea(
-                                hollow, messages, typingPeers),
+                                hollow, messages, typingPeers, profiles, localPeerId),
                             ),
                           ),
                         ),
@@ -1165,7 +1168,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           )
         else ...[
           _InlineCallPanelSlider(peerId: widget.peerId),
-          ..._buildMessageArea(hollow, messages, typingPeers),
+          ..._buildMessageArea(hollow, messages, typingPeers, profiles, localPeerId),
         ],
       ],
           ), // Column
@@ -1181,6 +1184,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     HollowTheme hollow,
     List<dynamic> messages,
     Set<String> typingPeers,
+    Map<String, storage_api.UserProfile> profiles,
+    String localPeerId,
   ) {
     return [
       // Messages list + unread pill overlay
@@ -1252,9 +1257,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                                       previousTime:
                                           messages[index - 1].timestamp,
                                     );
-                                final profiles = ref.watch(profileProvider);
-                                final localPeerId =
-                                    ref.watch(identityProvider).peerId ?? '';
                                 final wrapper = MessageHoverWrapper(
                                   isMe: msg.isMe,
                                   messageId: msg.messageId,

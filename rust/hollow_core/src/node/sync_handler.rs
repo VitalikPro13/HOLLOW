@@ -2510,15 +2510,45 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
         let mut new_count = 0u32;
         for msg in &messages {
             let is_mine = msg.s == local_peer;
-            if let Ok(1) = store.insert_channel_message(
-                &sid, &cid, &msg.s, &msg.t, is_mine, msg.ts,
-                msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
-                msg.reply_to.as_deref(), msg.file_id.as_deref(),
-            ) {
-                new_count += 1;
+            let already_exists = msg.mid.as_ref()
+                .map(|mid| store.channel_message_exists(mid))
+                .unwrap_or(false);
+
+            if !already_exists {
+                if let Ok(1) = store.insert_channel_message(
+                    &sid, &cid, &msg.s, &msg.t, is_mine, msg.ts,
+                    msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
+                    msg.reply_to.as_deref(), msg.file_id.as_deref(),
+                ) {
+                    new_count += 1;
+                }
+            }
+            if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
+                if store.edit_channel_message(
+                    mid, &msg.t, edit_ts,
+                    msg.sig.as_deref(),
+                    msg.pk.as_deref(),
+                ).unwrap_or(false) {
+                    let _ = event_tx.send(NetworkEvent::ChannelMessageEdited {
+                        server_id: sid.clone(),
+                        channel_id: cid.clone(),
+                        message_id: mid.clone(),
+                        new_text: msg.t.clone(),
+                        edited_at: edit_ts,
+                        signature: msg.sig.clone(),
+                        public_key: msg.pk.clone(),
+                    }).await;
+                }
             }
             if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
-                let _ = store.set_channel_message_hidden(mid, hidden_ts);
+                if store.set_channel_message_hidden(mid, hidden_ts).is_ok() {
+                    let _ = event_tx.send(NetworkEvent::ChannelMessageDeleted {
+                        server_id: sid.clone(),
+                        channel_id: cid.clone(),
+                        message_id: mid.clone(),
+                        deleted_at: hidden_ts,
+                    }).await;
+                }
             }
             if let Some(ref fm) = msg.file_meta {
                 let ctx_id = format!("{sid}:{cid}");

@@ -458,7 +458,7 @@ class _RecentConversationsColumn extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final friends = ref.watch(friendsProvider);
-    final chatHistory = ref.watch(chatProvider);
+    final lastMessages = ref.watch(lastDmMessageProvider);
     final profiles = ref.watch(profileProvider);
     final peers = ref.watch(peersProvider);
     final invPeers = ref.watch(invisiblePeersProvider);
@@ -471,8 +471,7 @@ class _RecentConversationsColumn extends ConsumerWidget {
 
     final conversations = <_ConversationInfo>[];
     for (final friend in accepted) {
-      final msgs = chatHistory[friend.peerId];
-      final lastMsg = msgs != null && msgs.isNotEmpty ? msgs.last : null;
+      final lastMsg = lastMessages[friend.peerId];
       final timestamp = lastMsg?.timestamp ?? DateTime(2000);
       conversations.add(_ConversationInfo(
         peerId: friend.peerId,

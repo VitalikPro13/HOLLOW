@@ -191,6 +191,10 @@ All timers consume their immediate first tick during initialization so they do n
 
 ### WsEvent::Disconnected
 - Clears `ws_room_peers` entirely.
+- Clears `synced_peers` — ensures full re-sync on reconnect (without this, peers skip sync because they're already in the set).
+- Clears `key_request_in_flight` — allows fresh key exchange after reconnect.
+- Clears `mls_bootstrap_requested` — allows MLS bootstrap retry.
+- Drains `pending_messages` — stale queued messages from pre-disconnect.
 - Cleans up in-progress WS stream transfers.
 
 ### WsEvent::PeerJoined { room, peer_id }
@@ -204,7 +208,7 @@ Critical path — triggers most of the sync machinery:
    - Sends own profile (with invisible flag).
    - Initiates Olm key exchange if no session exists.
    - If Olm session exists: emits SessionEstablished, drains pending_messages, flushes pending_sync_requests.
-   - For each shared server: sends CRDT SyncReq (MLS first, plaintext fallback), registers for channel sync via coordinator, requests MLS KeyPackage if coordinator.
+   - For each shared server: sends CRDT SyncReq (always plaintext — MLS epoch may be stale after reconnect), registers for channel sync via coordinator, requests MLS KeyPackage if coordinator.
    - Re-broadcasts voice channel joins to reconnecting peer.
    - Sends DmSyncRequest for DM history.
 7. If room matches a pending server join: sends ServerJoinRequest.
@@ -410,7 +414,7 @@ Drop stale local group, send KeyPackage to owner for re-bootstrap.
 `file_handler::handle_webrtc_transfer_failed()` removes peer from `webrtc_peers`, falls back to WS stream for the pending send.
 
 ### WS disconnect
-Clears all `ws_room_peers`, cleans up in-progress WS transfers. The WS client auto-reconnects; on reconnect (`WsEvent::Connected`), rooms are re-joined automatically.
+Clears `ws_room_peers`, `synced_peers`, `key_request_in_flight`, `mls_bootstrap_requested`, drains `pending_messages`, and cleans up in-progress WS transfers. The WS client auto-reconnects; on reconnect (`WsEvent::Connected`), rooms are re-joined and full sync is retriggered for all peers.
 
 ### MLS Welcome after join
 After joining from Welcome, sends plaintext `ChannelSyncRequest` for channels with no messages (MLS epoch may be stale on responder, so MLS sync would silently fail).

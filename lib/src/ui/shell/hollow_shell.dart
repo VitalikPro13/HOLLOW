@@ -403,10 +403,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
   }
 
   ChatMessage? _lastMessage(
-      String peerId, Map<String, List<ChatMessage>> chatHistory) {
-    final msgs = chatHistory[peerId];
-    if (msgs == null || msgs.isEmpty) return null;
-    return msgs.last;
+      String peerId, Map<String, ChatMessage> lastMessages) {
+    return lastMessages[peerId];
   }
 
   String _formatTime(DateTime dt) {
@@ -419,7 +417,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
   Widget _buildChannelSidebar({
     required Map<String, dynamic> peers,
-    required Map<String, List<ChatMessage>> chatHistory,
+    required Map<String, ChatMessage> lastMessages,
     required String? selectedPeerId,
     required NodeStatus nodeStatus,
     required ServerInfo? selectedServer,
@@ -431,7 +429,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
   }) {
     return ChannelSidebar(
       peers: Map.from(peers),
-      chatHistory: chatHistory,
+      lastMessages: lastMessages,
       selectedPeerId: selectedPeerId,
       nodeStatus: nodeStatus,
       width: width,
@@ -441,16 +439,13 @@ class _HollowShellState extends ConsumerState<HollowShell>
         ref.read(shareTabOpenProvider.notifier).state = false;
         ref.read(archiveTabOpenProvider.notifier).state = false;
         ref.read(selectedPeerProvider.notifier).state = peerId;
-        // Mark DM as read.
-        final msgs = chatHistory[peerId];
-        final latestId = msgs != null && msgs.isNotEmpty
-            ? msgs.last.messageId
-            : null;
-        ref.read(unreadProvider.notifier).markDmSeen(peerId, latestId);
+        // Mark DM as read — use ref.read (not watch) since this is a callback.
+        final lastMsg = ref.read(lastDmMessageProvider)[peerId];
+        ref.read(unreadProvider.notifier).markDmSeen(peerId, lastMsg?.messageId);
         // On mobile, switch to chat tab when peer is selected.
         ref.read(mobileTabProvider.notifier).state = 1;
       },
-      lastMessage: (peerId) => _lastMessage(peerId, chatHistory),
+      lastMessage: (peerId) => _lastMessage(peerId, lastMessages),
       formatTime: _formatTime,
       // Server mode props
       selectedServer: selectedServer,
@@ -687,7 +682,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final nodeState = ref.watch(nodeProvider);
     final peers = ref.watch(peersProvider);
     final selectedPeerId = ref.watch(selectedPeerProvider);
-    final chatHistory = ref.watch(chatProvider);
+    final lastMessages = ref.watch(lastDmMessageProvider);
 
     final memberPanelOpen = ref.watch(memberPanelProvider);
 
@@ -715,7 +710,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
           return _buildMobileLayout(
             hollow: hollow,
             peers: peers,
-            chatHistory: chatHistory,
+            lastMessages: lastMessages,
             selectedPeerId: selectedPeerId,
             nodeStatus: nodeState.status,
 
@@ -737,7 +732,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
             isDesktopPlatform: isDesktopPlatform,
             isDesktop: isDesktop,
             peers: peers,
-            chatHistory: chatHistory,
+            lastMessages: lastMessages,
             selectedPeerId: selectedPeerId,
             nodeStatus: nodeState.status,
             selectedServer: selectedServer,
@@ -755,7 +750,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
             isDesktop: isDesktop,
             isMobile: isMobile,
             peers: peers,
-            chatHistory: chatHistory,
+            lastMessages: lastMessages,
             selectedPeerId: selectedPeerId,
             nodeStatus: nodeState.status,
             selectedServer: selectedServer,
@@ -820,7 +815,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     required bool isDesktop,
     required bool isMobile,
     required Map<String, dynamic> peers,
-    required Map<String, List<ChatMessage>> chatHistory,
+    required Map<String, ChatMessage> lastMessages,
     required String? selectedPeerId,
     required NodeStatus nodeStatus,
     required ServerInfo? selectedServer,
@@ -850,7 +845,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                 const RepaintBoundary(child: ServerStrip()),
                 _buildChannelSidebar(
                   peers: peers,
-                  chatHistory: chatHistory,
+                  lastMessages: lastMessages,
                   selectedPeerId: selectedPeerId,
                   nodeStatus: nodeStatus,
                   selectedServer: selectedServer,
@@ -919,7 +914,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     required bool isDesktopPlatform,
     required bool isDesktop,
     required Map<String, dynamic> peers,
-    required Map<String, List<ChatMessage>> chatHistory,
+    required Map<String, ChatMessage> lastMessages,
     required String? selectedPeerId,
     required NodeStatus nodeStatus,
     required ServerInfo? selectedServer,
@@ -1005,7 +1000,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                   visible: selectedServerId != null,
                   child: _buildChannelSidebar(
                     peers: peers,
-                    chatHistory: chatHistory,
+                    lastMessages: lastMessages,
                     selectedPeerId: selectedPeerId,
                     nodeStatus: nodeStatus,
                     selectedServer: selectedServer,
@@ -1130,7 +1125,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
   Widget _buildMobileLayout({
     required HollowTheme hollow,
     required Map<String, dynamic> peers,
-    required Map<String, List<ChatMessage>> chatHistory,
+    required Map<String, ChatMessage> lastMessages,
     required String? selectedPeerId,
     required NodeStatus nodeStatus,
 
@@ -1146,7 +1141,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
       case 0: // Home — channel sidebar content (full width on mobile)
         body = _buildChannelSidebar(
           peers: peers,
-          chatHistory: chatHistory,
+          lastMessages: lastMessages,
           selectedPeerId: selectedPeerId,
           nodeStatus: nodeStatus,
 
@@ -1633,7 +1628,7 @@ class _RightPaneSidebarState extends ConsumerState<_RightPaneSidebar> {
 
     return ChannelSidebar(
       peers: const {},
-      chatHistory: const {},
+      lastMessages: const {},
       selectedPeerId: null,
       nodeStatus: NodeStatus.connected,
       onPeerSelected: (_) {},

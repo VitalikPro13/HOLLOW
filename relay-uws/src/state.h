@@ -9,7 +9,7 @@
 #include <App.h>
 #include "license.h"
 
-constexpr size_t MAX_BACKPRESSURE_SOFT = 64 * 1024;
+constexpr size_t MAX_BACKPRESSURE_SOFT = 2 * 1024 * 1024;
 
 using SSLWebSocket = uWS::WebSocket<true, true, struct PerSocketData>;
 

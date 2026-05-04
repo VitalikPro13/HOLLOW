@@ -510,6 +510,24 @@ impl MessageStore {
             "ALTER TABLE channel_messages ADD COLUMN link_preview_json TEXT;"
         ).unwrap_or(());
 
+        // -- Migration: updated_at column for edit/delete sync (H12+H13 QA fix) --
+        // Tracks when a message was last modified (edit or delete) so sync queries
+        // can catch edits/deletes to old messages that would otherwise be missed.
+        conn.execute_batch(
+            "ALTER TABLE messages ADD COLUMN updated_at INTEGER;"
+        ).unwrap_or(());
+        conn.execute_batch(
+            "ALTER TABLE channel_messages ADD COLUMN updated_at INTEGER;"
+        ).unwrap_or(());
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_peer_updated ON messages (peer_id, updated_at)",
+            [],
+        ).map_err(|e| format!("Failed to create idx_messages_peer_updated: {e}"))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_channel_msgs_updated ON channel_messages (server_id, channel_id, updated_at)",
+            [],
+        ).map_err(|e| format!("Failed to create idx_channel_msgs_updated: {e}"))?;
+
         // -- Migration: avatar/banner BLOB columns on user_profiles --
         conn.execute_batch(
             "ALTER TABLE user_profiles ADD COLUMN avatar BLOB;"
@@ -589,6 +607,28 @@ impl MessageStore {
         .map_err(|e| format!("Failed to create share_chunks table: {e}"))?;
 
         Ok(MessageStore { conn })
+    }
+
+    /// Check if a DM message with the given message_id exists.
+    pub fn dm_message_exists(&self, message_id: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM messages WHERE message_id = ?1 LIMIT 1",
+                params![message_id],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    /// Check if a channel message with the given message_id exists.
+    pub fn channel_message_exists(&self, message_id: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM channel_messages WHERE message_id = ?1 LIMIT 1",
+                params![message_id],
+                |_| Ok(()),
+            )
+            .is_ok()
     }
 
     /// Insert a message. Returns the row ID.
@@ -801,7 +841,7 @@ impl MessageStore {
             .prepare(
                 "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json
                  FROM messages
-                 WHERE peer_id = ?1 AND timestamp >= ?2 AND is_mine = 1
+                 WHERE peer_id = ?1 AND is_mine = 1 AND (timestamp >= ?2 OR updated_at >= ?2)
                  ORDER BY timestamp ASC
                  LIMIT ?3",
             )
@@ -1070,7 +1110,7 @@ impl MessageStore {
             .prepare(
                 "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json
                  FROM channel_messages
-                 WHERE server_id = ?1 AND channel_id = ?2 AND timestamp > ?3
+                 WHERE server_id = ?1 AND channel_id = ?2 AND (timestamp > ?3 OR updated_at > ?3)
                  ORDER BY timestamp ASC
                  LIMIT ?4",
             )
@@ -1696,7 +1736,7 @@ impl MessageStore {
         let rows = self
             .conn
             .execute(
-                "UPDATE channel_messages SET text = ?1, edited_at = ?2, signature = ?3, public_key = ?4 WHERE message_id = ?5",
+                "UPDATE channel_messages SET text = ?1, edited_at = ?2, signature = ?3, public_key = ?4, updated_at = ?2 WHERE message_id = ?5",
                 params![new_text, edited_at, signature, public_key, message_id],
             )
             .map_err(|e| format!("Failed to update channel message: {e}"))?;
@@ -1747,7 +1787,7 @@ impl MessageStore {
         let rows = self
             .conn
             .execute(
-                "UPDATE messages SET text = ?1, edited_at = ?2, signature = ?3, public_key = ?4 WHERE message_id = ?5",
+                "UPDATE messages SET text = ?1, edited_at = ?2, signature = ?3, public_key = ?4, updated_at = ?2 WHERE message_id = ?5",
                 params![new_text, edited_at, signature, public_key, message_id],
             )
             .map_err(|e| format!("Failed to update DM message: {e}"))?;
@@ -1794,7 +1834,7 @@ impl MessageStore {
         let rows = self
             .conn
             .execute(
-                "UPDATE channel_messages SET hidden_at = ?1 WHERE message_id = ?2",
+                "UPDATE channel_messages SET hidden_at = ?1, updated_at = ?1 WHERE message_id = ?2",
                 params![deleted_at, message_id],
             )
             .map_err(|e| format!("Failed to hide channel message: {e}"))?;
@@ -1838,7 +1878,7 @@ impl MessageStore {
         let rows = self
             .conn
             .execute(
-                "UPDATE messages SET hidden_at = ?1 WHERE message_id = ?2",
+                "UPDATE messages SET hidden_at = ?1, updated_at = ?1 WHERE message_id = ?2",
                 params![deleted_at, message_id],
             )
             .map_err(|e| format!("Failed to hide DM message: {e}"))?;
@@ -1852,7 +1892,7 @@ impl MessageStore {
     pub fn set_channel_message_hidden(&self, message_id: &str, hidden_at: i64) -> Result<(), String> {
         self.conn
             .execute(
-                "UPDATE channel_messages SET hidden_at = ?1 WHERE message_id = ?2",
+                "UPDATE channel_messages SET hidden_at = ?1, updated_at = ?1 WHERE message_id = ?2",
                 params![hidden_at, message_id],
             )
             .map_err(|e| format!("Failed to set channel message hidden_at: {e}"))?;
@@ -1863,7 +1903,7 @@ impl MessageStore {
     pub fn set_dm_message_hidden(&self, message_id: &str, hidden_at: i64) -> Result<(), String> {
         self.conn
             .execute(
-                "UPDATE messages SET hidden_at = ?1 WHERE message_id = ?2",
+                "UPDATE messages SET hidden_at = ?1, updated_at = ?1 WHERE message_id = ?2",
                 params![hidden_at, message_id],
             )
             .map_err(|e| format!("Failed to set DM message hidden_at: {e}"))?;

@@ -298,8 +298,8 @@ Normal input row is a `Row` containing:
 | `typingProvider` | Typing indicator set per peer |
 | `dmProfilePanelProvider` | Profile panel visibility |
 | `callProvider` | Call state (status, video, screen share, mute) |
-| `profileProvider` | Display names, avatars, banners for all peers |
-| `identityProvider` | Local peer ID |
+| `profileProvider` | Display names, avatars, banners for all peers. Hoisted to `build()` level — NOT inside `itemBuilder` (avoids cascade rebuilds) |
+| `identityProvider` | Local peer ID. Hoisted to `build()` level — NOT inside `itemBuilder` |
 | `peersProvider` | Online peer map (for status dot and button enable logic) |
 | `invisiblePeersProvider` | Set of peers whose invisible status we know about |
 | `invisibleModeProvider` | Whether local user is in invisible mode (suppresses typing) |

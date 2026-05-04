@@ -454,3 +454,17 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
 final chatProvider =
     NotifierProvider<ChatNotifier, Map<String, List<ChatMessage>>>(
         ChatNotifier.new);
+
+/// Lightweight derived provider: only the last message per peer.
+/// Changes far less frequently than the full chatProvider (only when a new
+/// message arrives or the latest message is edited/deleted, not on every
+/// message in any conversation). Use this in the shell/sidebar instead of
+/// watching the full chatProvider to avoid root-widget rebuilds.
+final lastDmMessageProvider =
+    Provider<Map<String, ChatMessage>>((ref) {
+  final history = ref.watch(chatProvider);
+  return {
+    for (final entry in history.entries)
+      if (entry.value.isNotEmpty) entry.key: entry.value.last,
+  };
+});

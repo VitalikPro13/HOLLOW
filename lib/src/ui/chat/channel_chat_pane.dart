@@ -1240,6 +1240,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     });
 
     final typingPeers = ref.watch(typingProvider)[_stateKey] ?? {};
+    final profiles = ref.watch(profileProvider);
+    final nicknames = ref.watch(serverNicknamesProvider(widget.serverId));
 
     return ChatDropZone(
       onFileDropped: _handleDroppedFile,
@@ -1574,8 +1576,6 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                             currentSenderId: msg.senderId,
                             previousSenderId: messages[index - 1].senderId,
                           );
-                      final profiles = ref.watch(profileProvider);
-                      final nicknames = ref.watch(serverNicknamesProvider(widget.serverId));
                       final wrapper = MessageHoverWrapper(
                         isMe: msg.isMe,
                         messageId: msg.messageId,

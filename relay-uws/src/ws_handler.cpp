@@ -28,6 +28,10 @@ static void send_json(SSLWebSocket* ws, const json& j) {
 static void send_to_peer(SSLWebSocket* ws, std::string_view data, uWS::OpCode op) {
     if (ws->getBufferedAmount() < MAX_BACKPRESSURE_SOFT) {
         ws->send(data, op);
+    } else {
+        auto* d = ws->getUserData();
+        fprintf(stderr, "[RELAY] Backpressure drop: peer=%s buffered=%zu msg_size=%zu\n",
+                d ? d->peer_id.c_str() : "?", ws->getBufferedAmount(), data.size());
     }
 }
 
@@ -444,7 +448,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state) {
         .compression = uWS::DISABLED,
         .maxPayloadLength = 10 * 1024 * 1024,
         .idleTimeout = 120,
-        .maxBackpressure = 256 * 1024,
+        .maxBackpressure = 4 * 1024 * 1024,
         .sendPingsAutomatically = true,
 
         .open = [&state](SSLWebSocket* ws) {

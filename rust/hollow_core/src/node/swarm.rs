@@ -4,6 +4,8 @@ use std::time::Duration;
 use base64::Engine;
 use tokio::sync::mpsc;
 
+const MLS_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
+
 use crate::crdt::hlc::Hlc;
 use crate::crdt::operations::{CrdtPayload, Permission};
 use crate::crdt::server_state::ServerState;
@@ -294,7 +296,8 @@ async fn run_event_loop(
 
     // Track server_ids for which we've already requested MLS bootstrap (KeyPackage sent to owner).
     // Prevents spamming the owner on every MlsChannelMessage for an unknown group.
-    let mut mls_bootstrap_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Value = when the request was sent; entries expire after MLS_BOOTSTRAP_TIMEOUT to allow retry.
+    let mut mls_bootstrap_requested: HashMap<String, std::time::Instant> = HashMap::new();
 
     // MLS batch addition queue: collect KeyPackages and process them in a single commit.
     let mut pending_mls_key_packages: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
@@ -1141,6 +1144,13 @@ async fn run_event_loop(
                     WsEvent::Disconnected => {
                         hollow_log!("[HOLLOW-WS] Relay disconnected — will auto-reconnect");
                         ws_room_peers.clear();
+                        synced_peers.clear();
+                        key_request_in_flight.clear();
+                        mls_bootstrap_requested.clear();
+                        if !pending_messages.is_empty() {
+                            hollow_log!("[HOLLOW-WS] Draining {} pending message queues on disconnect", pending_messages.len());
+                            pending_messages.clear();
+                        }
                         // Clean up any in-progress WS stream transfers.
                         if !pending_ws_transfers.is_empty() {
                             hollow_log!("[HOLLOW-WS] Cleaning up {} in-progress WS transfers", pending_ws_transfers.len());
@@ -1267,30 +1277,15 @@ async fn run_event_loop(
                                             // CRDT state sync via MLS.
                                             let our_vector = StateVector::from_server_state(state);
                                             if let Ok(sv_json) = serde_json::to_string(&our_vector) {
-                                                let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(sid));
-                                                if mls_ok {
-                                                    let envelope = MessageEnvelope::SyncReq {
-                                                        sid: sid.clone(), state_vector_json: sv_json.clone(), target: None,
-                                                    };
-                                                    if let Err(e) = send_mls_to_peer(mls.as_mut().unwrap(), &ws_cmd_tx, sid, &peer_id, &envelope, &bundle_keypair) {
-                                                        hollow_log!("[HOLLOW-MLS] SyncReq targeted send failed: {e}, falling back to plaintext");
-                                                        send_message_to_peer(
-                                                            &ws_cmd_tx, &ws_room_peers,
-                                                            &peer_id, HavenMessage::SyncRequest {
-                                                                server_id: sid.clone(),
-                                                                state_vector_json: sv_json,
-                                                            },
-                                                        );
-                                                    }
-                                                } else {
-                                                    send_message_to_peer(
-                                                        &ws_cmd_tx, &ws_room_peers,
-                                                        &peer_id, HavenMessage::SyncRequest {
-                                                            server_id: sid.clone(),
-                                                            state_vector_json: sv_json,
-                                                        },
-                                                    );
-                                                }
+                                                // Always use plaintext for post-reconnection SyncReq —
+                                                // the peer's MLS epoch may be stale, causing silent decrypt failure.
+                                                send_message_to_peer(
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    &peer_id, HavenMessage::SyncRequest {
+                                                        server_id: sid.clone(),
+                                                        state_vector_json: sv_json,
+                                                    },
+                                                );
                                             }
 
                                             // Channel message sync via coordinator.
@@ -2578,7 +2573,7 @@ async fn handle_incoming_request(
     pending_server_joins: &mut HashMap<String, Option<String>>,
     pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
     mls: &mut Option<MlsManager>,
-    mls_bootstrap_requested: &mut std::collections::HashSet<String>,
+    mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
     sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     pending_shard_assembly: &mut HashMap<String, PendingShardAssembly>,
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
@@ -2877,9 +2872,7 @@ async fn handle_incoming_request(
                                 );
                             }
                         }
-                        // else: within cooldown — silently skip this stale message
 
-                        
                         return;
                     }
                 }
@@ -3172,18 +3165,49 @@ async fn handle_incoming_request(
                                     }
                                 }
 
-                                match store.insert(
-                                    &peer_str, &msg.t, false, msg.ts,
-                                    msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
-                                    msg.reply_to.as_deref(), msg.file_id.as_deref(),
-                                ) {
-                                    Ok(id) if id > 0 => { new_count += 1; }
-                                    _ => {} // Duplicate or error — skip.
+                                let already_exists = msg.mid.as_ref()
+                                    .map(|mid| store.dm_message_exists(mid))
+                                    .unwrap_or(false);
+
+                                if !already_exists {
+                                    match store.insert(
+                                        &peer_str, &msg.t, false, msg.ts,
+                                        msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
+                                        msg.reply_to.as_deref(), msg.file_id.as_deref(),
+                                    ) {
+                                        Ok(id) if id > 0 => { new_count += 1; }
+                                        _ => {}
+                                    }
+                                }
+
+                                // Apply edit if the message was edited on the syncing peer.
+                                if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
+                                    let edit_result = store.edit_dm_message(
+                                        mid, &msg.t, edit_ts,
+                                        msg.sig.as_deref(),
+                                        msg.pk.as_deref(),
+                                    );
+                                    if edit_result.unwrap_or(false) {
+                                        let _ = event_tx.send(NetworkEvent::DmMessageEdited {
+                                            peer_id: peer_str.to_string(),
+                                            message_id: mid.clone(),
+                                            new_text: msg.t.clone(),
+                                            edited_at: edit_ts,
+                                            signature: msg.sig.clone(),
+                                            public_key: msg.pk.clone(),
+                                        }).await;
+                                    }
                                 }
 
                                 // Apply deletion if the message was hidden on the syncing peer.
                                 if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
-                                    let _ = store.set_dm_message_hidden(mid, hidden_ts);
+                                    if store.set_dm_message_hidden(mid, hidden_ts).is_ok() {
+                                        let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
+                                            peer_id: peer_str.to_string(),
+                                            message_id: mid.clone(),
+                                            deleted_at: hidden_ts,
+                                        }).await;
+                                    }
                                 }
 
                                 // Insert file metadata and emit FileHeaderReceived for late joiners.
@@ -5319,9 +5343,8 @@ async fn handle_incoming_request(
 
                             send_encrypted_message(
                                 olm, crypto_store,
-                                
                                 peer_str, &envelope_json, event_tx,
-                            ws_cmd_tx, ws_room_peers,
+                                ws_cmd_tx, ws_room_peers,
                             ).await;
                         }
                     }
@@ -5349,8 +5372,8 @@ async fn handle_incoming_request(
 
                     // If we're a member of this server but don't have the MLS group,
                     // the Welcome was lost. Send KeyPackage to the owner to bootstrap.
-                    // Only do this once per server to avoid spamming the owner.
-                    if !mls_bootstrap_requested.contains(&server_id) {
+                    // Only do this once per server to avoid spamming the owner (expires after 60s).
+                    if !mls_bootstrap_requested.get(&server_id).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
                         if let Some(state) = server_states.get(&server_id) {
                             let local_peer = local_peer_str.to_string();
                             for member in state.members_list() {
@@ -5370,7 +5393,7 @@ async fn handle_incoming_request(
                                                         key_package: kp_b64,
                                                     },
                                                 );
-                                                mls_bootstrap_requested.insert(server_id.clone());
+                                                mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
                                             }
                                         }
                                     break;
@@ -5749,7 +5772,7 @@ async fn handle_incoming_request(
                         let count = mls_decrypt_failures.entry(server_id.clone()).or_insert(0);
                         *count += 1;
 
-                        if *count >= 3 && !mls_bootstrap_requested.contains(&server_id) {
+                        if *count >= 3 && !mls_bootstrap_requested.get(&server_id).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
                             hollow_log!("[HOLLOW-MLS] {} consecutive decrypt failures — initiating MLS recovery for {server_id}", count);
                             *count = 0;
 
@@ -5775,7 +5798,7 @@ async fn handle_incoming_request(
                                                             key_package: kp_b64,
                                                         },
                                                     );
-                                                    mls_bootstrap_requested.insert(server_id.clone());
+                                                    mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
                                                     hollow_log!("[HOLLOW-MLS] Sent recovery KeyPackage to owner for {server_id}");
                                                 }
                                             }
@@ -5993,7 +6016,7 @@ async fn handle_incoming_request(
 
                         // Commit processing failed — MLS group state is stale.
                         // Drop group and request re-bootstrap from owner.
-                        if !mls_bootstrap_requested.contains(&server_id) {
+                        if !mls_bootstrap_requested.get(&server_id).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
                             hollow_log!("[HOLLOW-MLS] Dropping stale MLS group and requesting re-bootstrap for {server_id}");
                             mls_mgr.remove_group(&server_id);
                             persist_mls_state(mls_mgr, bundle_keypair);
@@ -6016,7 +6039,7 @@ async fn handle_incoming_request(
                                                             key_package: kp_b64,
                                                         },
                                                     );
-                                                    mls_bootstrap_requested.insert(server_id.clone());
+                                                    mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
                                                 }
                                             }
                                         break;

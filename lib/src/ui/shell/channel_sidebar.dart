@@ -41,7 +41,7 @@ import 'package:lucide_icons/lucide_icons.dart';
 class ChannelSidebar extends StatelessWidget {
   // -- Home mode props --
   final Map<String, PeerInfo> peers;
-  final Map<String, List<ChatMessage>> chatHistory;
+  final Map<String, ChatMessage> lastMessages;
   final String? selectedPeerId;
   final NodeStatus nodeStatus;
   final ValueChanged<String> onPeerSelected;
@@ -70,7 +70,7 @@ class ChannelSidebar extends StatelessWidget {
   const ChannelSidebar({
     super.key,
     required this.peers,
-    required this.chatHistory,
+    required this.lastMessages,
     required this.selectedPeerId,
     required this.nodeStatus,
     required this.onPeerSelected,
