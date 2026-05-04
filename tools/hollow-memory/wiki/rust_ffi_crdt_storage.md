@@ -301,10 +301,22 @@ Signature: `fn count_all_unread_channel(server_id: String, channel_id: String) -
 ## Profiles (storage.rs)
 
 ### storage.rs:get_profile()
-Signature: `fn get_profile(peer_id: String) -> Result<Option<UserProfile>, String>`. Returns the stored profile for a specific peer. Returns `None` if no profile stored. Delegates to `ms.load_profile()`. Profile includes avatar_bytes and banner_bytes as raw binary data.
+Signature: `fn get_profile(peer_id: String) -> Result<Option<UserProfile>, String>`. Returns the stored profile for a specific peer with ALL fields including avatar/banner blobs. Returns `None` if no profile stored. Delegates to `ms.load_profile()`.
 
 ### storage.rs:get_all_profiles()
-Signature: `fn get_all_profiles() -> Result<Vec<UserProfile>, String>`. Returns all stored profiles. Used to populate the profile cache on app startup. Delegates to `ms.load_all_profiles()`.
+Signature: `fn get_all_profiles() -> Result<Vec<UserProfile>, String>`. Returns all stored profiles with blobs. **Legacy — use `get_all_profiles_light()` instead.**
+
+### storage.rs:get_all_profiles_light()
+Signature: `fn get_all_profiles_light() -> Result<Vec<UserProfile>, String>`. Returns all profiles WITHOUT avatar/banner blobs (avatar_bytes=None, banner_bytes=None). Used for fast startup loading. Delegates to `ms.load_all_profiles_light()`.
+
+### storage.rs:get_profile_light()
+Signature: `fn get_profile_light(peer_id: String) -> Result<Option<UserProfile>, String>`. Single profile without blobs. Used by `ProfileNotifier.reloadProfile()` on ProfileUpdated events.
+
+### storage.rs:get_avatar()
+Signature: `fn get_avatar(peer_id: String) -> Result<Option<Vec<u8>>, String>`. Returns only the avatar BLOB for a peer. Used by `AvatarNotifier.loadAvatar()` for on-demand lazy loading.
+
+### storage.rs:get_banner()
+Signature: `fn get_banner(peer_id: String) -> Result<Option<Vec<u8>>, String>`. Returns only the banner BLOB for a peer. Used by `bannerProvider` for on-demand lazy loading.
 
 ## App Settings KV Store (storage.rs)
 

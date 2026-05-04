@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/avatar_provider.dart';
+import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -505,6 +507,8 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_ProfileUpdated(:final peerId):
         debugPrint('[HOLLOW] Profile updated: $peerId');
         ref.read(profileProvider.notifier).reloadProfile(peerId);
+        ref.read(avatarProvider.notifier).invalidate(peerId);
+        ref.invalidate(bannerProvider(peerId));
 
       case NetworkEvent_ChannelMessageEdited(
             :final serverId, :final channelId, :final messageId, :final newText, :final editedAt, :final signature, :final publicKey):

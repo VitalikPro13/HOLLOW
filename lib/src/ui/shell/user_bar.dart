@@ -122,7 +122,7 @@ class UserBar extends ConsumerWidget {
         children: [
           // Avatar
           if (localPeerId != null)
-            HollowAvatar(peerId: localPeerId, size: 32, imageBytes: profiles[localPeerId]?.avatarBytes)
+            HollowAvatar(peerId: localPeerId, size: 32)
           else
             Container(
               width: 32,

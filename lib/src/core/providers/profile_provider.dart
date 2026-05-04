@@ -13,7 +13,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
   /// Load all profiles from the local DB into memory.
   Future<void> loadAll() async {
     try {
-      final profiles = await storage_api.getAllProfiles();
+      final profiles = await storage_api.getAllProfilesLight();
       final map = <String, storage_api.UserProfile>{};
       for (final p in profiles) {
         map[p.peerId] = p;
@@ -27,7 +27,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
   /// Reload a single profile from DB (called on ProfileUpdated event).
   Future<void> reloadProfile(String peerId) async {
     try {
-      final profile = await storage_api.getProfile(peerId: peerId);
+      final profile = await storage_api.getProfileLight(peerId: peerId);
       if (profile != null) {
         state = {...state, peerId: profile};
       }

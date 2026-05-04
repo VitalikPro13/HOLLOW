@@ -291,6 +291,69 @@ pub fn get_all_profiles() -> Result<Vec<UserProfile>, String> {
         .collect())
 }
 
+/// Get all stored profiles WITHOUT avatar/banner blobs (fast startup load).
+#[frb]
+pub fn get_all_profiles_light() -> Result<Vec<UserProfile>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+
+    let profiles = ms.load_all_profiles_light()?;
+    Ok(profiles
+        .into_iter()
+        .map(|p| UserProfile {
+            peer_id: p.peer_id,
+            display_name: p.display_name,
+            status: p.status,
+            about_me: p.about_me,
+            updated_at: p.updated_at,
+            avatar_bytes: None,
+            banner_bytes: None,
+            twitch_username: p.twitch_username,
+        })
+        .collect())
+}
+
+/// Get a single profile WITHOUT avatar/banner blobs (light reload on update).
+#[frb]
+pub fn get_profile_light(peer_id: String) -> Result<Option<UserProfile>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+
+    match ms.load_profile_light(&peer_id)? {
+        Some(p) => Ok(Some(UserProfile {
+            peer_id: p.peer_id,
+            display_name: p.display_name,
+            status: p.status,
+            about_me: p.about_me,
+            updated_at: p.updated_at,
+            avatar_bytes: None,
+            banner_bytes: None,
+            twitch_username: p.twitch_username,
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Get only the avatar bytes for a peer (lazy load for HollowAvatar).
+#[frb]
+pub fn get_avatar(peer_id: String) -> Result<Option<Vec<u8>>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    ms.load_avatar(&peer_id)
+}
+
+/// Get only the banner bytes for a peer (lazy load for profile card/DM header).
+#[frb]
+pub fn get_banner(peer_id: String) -> Result<Option<Vec<u8>>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    ms.load_banner(&peer_id)
+}
+
 // ── App Settings ──────────────────────────────────────────────
 
 /// Save a key-value setting to the local database.

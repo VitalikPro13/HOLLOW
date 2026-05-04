@@ -1,16 +1,22 @@
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 
 /// Avatar widget — shows a real image when available, falls back to
 /// deterministic color + initials from peer ID.
 ///
+/// Automatically fetches avatar bytes from [avatarProvider] on-demand.
+/// Pass [imageBytes] to override with explicit data (e.g. archive data).
+///
 /// Set [animate] to true for focused profile contexts (profile card,
 /// DM panel, settings preview). Defaults to false (static first frame).
-class HollowAvatar extends StatelessWidget {
+class HollowAvatar extends ConsumerWidget {
   final String peerId;
   final double size;
   final Uint8List? imageBytes;
@@ -56,25 +62,33 @@ class HollowAvatar extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
 
-    if (imageBytes != null && imageBytes!.isNotEmpty) {
+    Uint8List? bytes = imageBytes;
+    if (bytes == null && peerId.isNotEmpty) {
+      final cache = ref.watch(avatarProvider);
+      bytes = cache[peerId];
+      if (bytes == null) {
+        Future.microtask(
+            () => ref.read(avatarProvider.notifier).loadAvatar(peerId));
+      }
+    }
+
+    if (bytes != null && bytes.isNotEmpty) {
       Widget image;
 
       if (animate) {
-        // Animated GIF with proper frame delay handling
         image = AnimatedGifImage(
-          bytes: imageBytes!,
+          bytes: bytes,
           width: size,
           height: size,
           fit: BoxFit.cover,
           errorWidget: _buildFallback(hollow),
         );
       } else {
-        // Static — show only first frame
         image = _StaticFirstFrame(
-          imageBytes: imageBytes!,
+          imageBytes: bytes,
           size: size,
           fallback: _buildFallback(hollow),
         );
@@ -119,7 +133,8 @@ class _StaticFirstFrameState extends State<_StaticFirstFrame> {
   @override
   void didUpdateWidget(_StaticFirstFrame old) {
     super.didUpdateWidget(old);
-    if (!identical(old.imageBytes, widget.imageBytes)) {
+    if (old.imageBytes.length != widget.imageBytes.length ||
+        !listEquals(old.imageBytes, widget.imageBytes)) {
       _frame?.dispose();
       _frame = null;
       _failed = false;

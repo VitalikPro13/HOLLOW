@@ -34,6 +34,14 @@
 ### Additional fixes discovered during implementation
 - [x] **SFrame key initialization:** MLS epoch key now emitted on voice channel join + cached by Dart provider. `rotateKey` used instead of `setSharedKey`. `setKeyIndexForPeer` called after every cryptor creation. Fixed pre-existing black screen in voice channel screen share.
 
+### Tier 5 — UI performance & lazy loading
+- [x] **M1:** `_ServerMemberTile` + `_MemberTile` now use `.select()` on profileProvider — only affected peer's tile rebuilds
+- [x] **M2:** HollowAvatar uses `listEquals` content check instead of `identical()` identity check — prevents re-decode on reference change
+- [x] **M3:** HollowPressable skips AnimationController allocation in `subtle` mode — saves widget tree depth for list items
+- [x] **M4:** Member panel filtering/grouping extracted into `_serverMemberEntriesProvider` computed provider — memoized, no per-build O(n) work
+- [x] **M5+M11:** Lazy profile blob loading — startup loads metadata only (`getAllProfilesLight()`), avatars/banners load on-demand via `avatarProvider`/`bannerProvider`. HollowAvatar is now a ConsumerWidget.
+- [x] **L1:** Channel sidebar `ListView(children:)` → `ListView.builder` for lazy rendering
+
 ---
 
 ## Remaining Items (not yet fixed)
@@ -41,17 +49,11 @@
 ### MEDIUM Severity
 | # | Domain | Title |
 |---|--------|-------|
-| M1 | UI | Each `_ServerMemberTile` watches entire profile map — use `.select()` |
-| M2 | UI | HollowAvatar re-decodes image on reference change, not content change |
-| M3 | UI | HollowPressable allocates AnimationController in `subtle` mode (never used) |
-| M4 | UI | Member panel re-filters/re-groups on every provider change — computed provider |
-| M5 | UI | All profiles (80+ MB avatar blobs) loaded into memory at startup |
 | M6 | Storage | Server avatar in CRDT settings (133KB in every serialization). Hot/cold deferred — needs sync FFI read path fix |
 | M7 | Storage | No message retention policy (~850 MB/server/year) |
 | M8 | Storage | Full op_log (300-500 KB) sent as plaintext to new joiners |
 | M9 | Storage | O(n) duplicate detection in `apply_op` — use HashSet for dedup |
 | M10 | Storage | In-memory HashMaps never evicted (rate tokens, cooldowns, shard assembly) |
-| M11 | Storage | Profile storage loads all avatar/banner blobs for every peer |
 | M15 | MLS | MLS recovery only targets Owner, not current coordinator |
 | M16 | MLS | Targeted MLS messages encrypt+broadcast to ALL members (O(n)) |
 | M17 | MLS | Commits only sent to online members — offline permanently desync |
@@ -72,7 +74,6 @@
 ### LOW Severity
 | # | Domain | Title |
 |---|--------|-------|
-| L1 | UI | Channel sidebar uses eager `ListView(children:)` |
 | L2 | Storage | `banned_members` HashMap grows without bound |
 | L3 | Storage | `channel_sync_sent` HashMap never pruned |
 | L4 | Storage | `LIKE '%query%'` search without FTS index |

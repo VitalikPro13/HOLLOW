@@ -85,6 +85,22 @@ Future<UserProfile?> getProfile({required String peerId}) =>
 Future<List<UserProfile>> getAllProfiles() =>
     RustLib.instance.api.crateApiStorageGetAllProfiles();
 
+/// Get all stored profiles WITHOUT avatar/banner blobs (fast startup load).
+Future<List<UserProfile>> getAllProfilesLight() =>
+    RustLib.instance.api.crateApiStorageGetAllProfilesLight();
+
+/// Get a single profile WITHOUT avatar/banner blobs (light reload on update).
+Future<UserProfile?> getProfileLight({required String peerId}) =>
+    RustLib.instance.api.crateApiStorageGetProfileLight(peerId: peerId);
+
+/// Get only the avatar bytes for a peer (lazy load for HollowAvatar).
+Future<Uint8List?> getAvatar({required String peerId}) =>
+    RustLib.instance.api.crateApiStorageGetAvatar(peerId: peerId);
+
+/// Get only the banner bytes for a peer (lazy load for profile card/DM header).
+Future<Uint8List?> getBanner({required String peerId}) =>
+    RustLib.instance.api.crateApiStorageGetBanner(peerId: peerId);
+
 /// Save a key-value setting to the local database.
 Future<void> saveSetting({required String key, required String value}) =>
     RustLib.instance.api.crateApiStorageSaveSetting(key: key, value: value);

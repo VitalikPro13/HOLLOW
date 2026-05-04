@@ -35,7 +35,6 @@ class _CallVideoViewState extends ConsumerState<CallVideoView> {
     final peerId = call.peerId ?? '';
     final profiles = ref.watch(profileProvider);
     final displayName = displayNameFor(profiles, peerId);
-    final avatarBytes = profiles[peerId]?.avatarBytes;
 
     final remoteRenderer = voiceService?.remoteRenderer;
     final localRenderer = voiceService?.localRenderer;
@@ -89,7 +88,6 @@ class _CallVideoViewState extends ConsumerState<CallVideoView> {
                             HollowAvatar(
                               peerId: peerId,
                               size: 64,
-                              imageBytes: avatarBytes,
                             ),
                             const SizedBox(height: HollowSpacing.sm),
                             Text(

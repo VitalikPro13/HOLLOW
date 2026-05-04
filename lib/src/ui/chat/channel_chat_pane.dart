@@ -528,14 +528,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             profileName.toLowerCase().startsWith(query);
 
         if (query.isEmpty || matchesDisplay || matchesNick || matchesProfile) {
-          final avatar = profiles[m.peerId]?.avatarBytes;
           candidates.add(_MentionCandidate(
             peerId: m.peerId,
             displayName: displayName,
             subtitle: serverNick.isNotEmpty && serverNick != displayName
                 ? profileName.isNotEmpty ? profileName : null
                 : serverNick.isNotEmpty ? serverNick : null,
-            avatarBytes: avatar,
           ));
         }
       }
@@ -547,7 +545,6 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         peerId: '',
         displayName: 'everyone',
         subtitle: 'Notify all members',
-        avatarBytes: null,
       ));
     }
 
@@ -639,7 +636,6 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                           HollowAvatar(
                             peerId: c.peerId,
                             size: 24,
-                            imageBytes: c.avatarBytes,
                           )
                         else
                           Container(
@@ -1721,8 +1717,6 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                                 senderPeerId,
                                 nickname: nicknames[senderPeerId] ?? '',
                               ),
-                              senderAvatar:
-                                  profiles[senderPeerId]?.avatarBytes,
                               text: msg.text,
                               // If the message has been edited, the signature
                               // was computed over the edit timestamp + new text
@@ -2485,13 +2479,11 @@ class _MentionCandidate {
   final String peerId;
   final String displayName;
   final String? subtitle;
-  final Uint8List? avatarBytes;
 
   const _MentionCandidate({
     required this.peerId,
     required this.displayName,
     this.subtitle,
-    this.avatarBytes,
   });
 }
 

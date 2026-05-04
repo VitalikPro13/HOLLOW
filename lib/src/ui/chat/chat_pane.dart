@@ -8,6 +8,7 @@ import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
+import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
@@ -330,7 +331,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           mainAxisSize: MainAxisSize.min,
           children: sources.map((source) {
             final name = displayNameFor(profiles, source.peerId);
-            final profile = profiles[source.peerId];
             final isScreen = source.type == 'screen';
             final isFocused = focused.peerId == source.peerId &&
                 focused.type == source.type;
@@ -362,7 +362,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                     HollowAvatar(
                       peerId: source.peerId,
                       size: 18,
-                      imageBytes: profile?.avatarBytes,
                     ),
                     const SizedBox(width: HollowSpacing.xs),
                     Text(
@@ -853,7 +852,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           ),
           child: Row(
             children: [
-              HollowAvatar(peerId: widget.peerId, size: 28, imageBytes: ref.watch(profileProvider)[widget.peerId]?.avatarBytes),
+              HollowAvatar(peerId: widget.peerId, size: 28),
               const SizedBox(width: HollowSpacing.sm),
               Builder(builder: (_) {
                 final isOnline = ref.watch(peersProvider).containsKey(widget.peerId) &&
@@ -1380,8 +1379,6 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                                         senderPeerId: senderPeerId,
                                         senderDisplayName: displayNameFor(
                                             profiles, senderPeerId),
-                                        senderAvatar:
-                                            profiles[senderPeerId]?.avatarBytes,
                                         text: msg.text,
                                         // If the message has been edited, the
                                         // signature was computed over the edit
@@ -1981,7 +1978,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
           final isFocused =
               source.peerId == focusedPeerId && source.type == focusedType;
           final name = displayNameFor(profiles, source.peerId);
-          final profile = profiles[source.peerId];
 
           return Padding(
             padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
@@ -2010,7 +2006,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                   HollowAvatar(
                     peerId: source.peerId,
                     size: 18,
-                    imageBytes: profile?.avatarBytes,
                   ),
                   const SizedBox(width: HollowSpacing.xs),
                   Text(
@@ -2062,8 +2057,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     final profiles = ref.watch(profileProvider);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     final displayName = displayNameFor(profiles, widget.peerId);
-    final remoteAvatar = profiles[widget.peerId]?.avatarBytes;
-    final localAvatar = profiles[localPeerId]?.avatarBytes;
 
     // Start timer.
     if (call.status == CallStatus.active && call.startedAt != null) {
@@ -2125,11 +2118,11 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                     Positioned.fill(
                       child: _expandedRenderer != null
                           ? _buildFullscreenVideo(
-                              hollow, displayName, remoteAvatar, localAvatar,
+                              hollow, displayName,
                               remoteRenderer, localRenderer,
                               hasRemoteVideo, hasLocalVideo)
                           : _buildSideBySideVideo(
-                              hollow, displayName, remoteAvatar, localAvatar,
+                              hollow, displayName,
                               remoteRenderer, localRenderer,
                               hasRemoteVideo, hasLocalVideo),
                     ),
@@ -2214,13 +2207,11 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                   HollowAvatar(
                     peerId: localPeerId,
                     size: 60,
-                    imageBytes: localAvatar,
                   ),
                   const SizedBox(width: HollowSpacing.sm),
                   HollowAvatar(
                     peerId: widget.peerId,
                     size: 60,
-                    imageBytes: remoteAvatar,
                   ),
                 ],
 
@@ -2334,8 +2325,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   Widget _buildSideBySideVideo(
     HollowTheme hollow,
     String displayName,
-    Uint8List? remoteAvatar,
-    Uint8List? localAvatar,
     RTCVideoRenderer? remoteRenderer,
     RTCVideoRenderer? localRenderer,
     bool hasRemoteVideo,
@@ -2371,7 +2360,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                           HollowAvatar(
                             peerId: ref.read(identityProvider).peerId ?? '',
                             size: 48,
-                            imageBytes: localAvatar,
                           ),
                           const SizedBox(height: HollowSpacing.xs),
                           Text(
@@ -2414,7 +2402,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                           HollowAvatar(
                             peerId: widget.peerId,
                             size: 48,
-                            imageBytes: remoteAvatar,
                           ),
                           const SizedBox(height: HollowSpacing.xs),
                           Text(
@@ -2438,8 +2425,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   Widget _buildFullscreenVideo(
     HollowTheme hollow,
     String displayName,
-    Uint8List? remoteAvatar,
-    Uint8List? localAvatar,
     RTCVideoRenderer? remoteRenderer,
     RTCVideoRenderer? localRenderer,
     bool hasRemoteVideo,
@@ -3592,8 +3577,7 @@ class _DmProfilePanel extends ConsumerWidget {
     final displayName = profile?.displayName ?? '';
     final status = profile?.status ?? '';
     final aboutMe = profile?.aboutMe ?? '';
-    final bannerBytes = profile?.bannerBytes;
-    final avatarBytes = profile?.avatarBytes;
+    final bannerBytes = ref.watch(bannerProvider(peerId)).valueOrNull;
 
     final shownName = displayName.isNotEmpty
         ? displayName
@@ -3640,7 +3624,6 @@ class _DmProfilePanel extends ConsumerWidget {
                         child: HollowAvatar(
                           peerId: peerId,
                           size: 64,
-                          imageBytes: avatarBytes,
                           animate: true,
                         ),
                       ),

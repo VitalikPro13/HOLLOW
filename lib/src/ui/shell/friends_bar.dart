@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
@@ -178,7 +176,6 @@ class FriendsBar extends ConsumerWidget {
                         isOnline: isOnline,
                         isSelected: isSelected,
                         unreadCount: unreadCount,
-                        avatarBytes: profiles[friend.peerId]?.avatarBytes,
                         onTap: () => _selectFriend(ref, friend.peerId),
                       );
                     },
@@ -554,7 +551,7 @@ class _FriendsListTab extends ConsumerWidget {
                 Stack(
                   clipBehavior: Clip.none,
                   children: [
-                    HollowAvatar(peerId: friend.peerId, size: 32, imageBytes: profiles[friend.peerId]?.avatarBytes),
+                    HollowAvatar(peerId: friend.peerId, size: 32),
                     Positioned(
                       right: -1,
                       bottom: -1,
@@ -758,7 +755,6 @@ class _FavouritesReorderTab extends ConsumerWidget {
                 HollowAvatar(
                   peerId: peerId,
                   size: 28,
-                  imageBytes: profiles[peerId]?.avatarBytes,
                 ),
                 const SizedBox(width: HollowSpacing.sm),
                 Expanded(
@@ -939,7 +935,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
             ),
             child: Row(
               children: [
-                HollowAvatar(peerId: req.peerId, size: 32, imageBytes: profiles[req.peerId]?.avatarBytes),
+                HollowAvatar(peerId: req.peerId, size: 32),
                 const SizedBox(width: HollowSpacing.sm),
                 Expanded(
                   child: Column(
@@ -1085,7 +1081,6 @@ class _FriendChip extends StatelessWidget {
   final bool isOnline;
   final bool isSelected;
   final int unreadCount;
-  final Uint8List? avatarBytes;
   final VoidCallback onTap;
 
   const _FriendChip({
@@ -1094,7 +1089,6 @@ class _FriendChip extends StatelessWidget {
     required this.isOnline,
     required this.isSelected,
     required this.unreadCount,
-    this.avatarBytes,
     required this.onTap,
   });
 
@@ -1123,7 +1117,7 @@ class _FriendChip extends StatelessWidget {
               Stack(
                 clipBehavior: Clip.none,
                 children: [
-                  HollowAvatar(peerId: peerId, size: 24, imageBytes: avatarBytes),
+                  HollowAvatar(peerId: peerId, size: 24),
                   Positioned(
                     right: -2,
                     bottom: -2,

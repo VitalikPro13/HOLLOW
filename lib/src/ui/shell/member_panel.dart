@@ -78,7 +78,7 @@ class _MemberListEntry {
   // Divider fields
   final String? label;
   final int? count;
-  final Color? glowColor;
+  final String? dividerRole;
   // Member fields
   final String? peerId;
   final String? displayName;
@@ -93,7 +93,7 @@ class _MemberListEntry {
     required this.isOnline,
     this.label,
     this.count,
-    this.glowColor,
+    this.dividerRole,
     this.peerId,
     this.displayName,
     this.role,
@@ -107,10 +107,10 @@ class _MemberListEntry {
     required String label,
     required int count,
     required bool isOnline,
-    Color? glowColor,
+    String? dividerRole,
   }) => _MemberListEntry._(
     isDivider: true, isOnline: isOnline,
-    label: label, count: count, glowColor: glowColor,
+    label: label, count: count, dividerRole: dividerRole,
   );
 
   factory _MemberListEntry.member(dynamic m, {required bool isOnline, String? serverId}) =>
@@ -289,6 +289,86 @@ Color _roleLabelColor(String role, HollowTheme hollow) {
   };
 }
 
+/// Computed member list entries: memoized online/offline split + role grouping.
+/// Returns (entries, totalMemberCount, isLoading, errorMessage).
+final _serverMemberEntriesProvider = Provider.family
+    .autoDispose<(List<_MemberListEntry>, int, bool, String?), String>(
+        (ref, serverId) {
+  final membersAsync = ref.watch(serverMembersProvider(serverId));
+  final connectedPeers = ref.watch(peersProvider);
+  final localPeerId = ref.watch(identityProvider).peerId;
+  final invisiblePeers = ref.watch(invisiblePeersProvider);
+  final amInvisible = ref.watch(invisibleModeProvider);
+
+  return membersAsync.when(
+    data: (members) {
+      if (members.isEmpty) return (const <_MemberListEntry>[], 0, false, null);
+
+      final online = members
+          .where((m) {
+            if (m.peerId == localPeerId) return !amInvisible;
+            return connectedPeers.containsKey(m.peerId) &&
+                !invisiblePeers.contains(m.peerId);
+          })
+          .toList();
+      final offline = members
+          .where((m) {
+            if (m.peerId == localPeerId) return amInvisible;
+            return !connectedPeers.containsKey(m.peerId) ||
+                invisiblePeers.contains(m.peerId);
+          })
+          .toList();
+
+      const roleOrder = ['owner', 'admin', 'moderator', 'member'];
+      final flatItems = <_MemberListEntry>[];
+
+      if (online.isNotEmpty) {
+        final roles = online.map((m) => m.role).toSet();
+        if (roles.length == 1 && roles.first == 'member') {
+          flatItems.add(_MemberListEntry.divider(
+            label: 'Online', count: online.length, isOnline: true,
+          ));
+          for (final m in online) {
+            flatItems.add(
+                _MemberListEntry.member(m, isOnline: true, serverId: serverId));
+          }
+        } else {
+          final groups = <String, List<dynamic>>{};
+          for (final m in online) {
+            (groups[m.role] ??= []).add(m);
+          }
+          for (final role in roleOrder) {
+            final group = groups[role];
+            if (group == null || group.isEmpty) continue;
+            flatItems.add(_MemberListEntry.divider(
+              label: _roleDividerLabel(role),
+              count: group.length,
+              isOnline: true,
+              dividerRole: role,
+            ));
+            for (final m in group) {
+              flatItems.add(_MemberListEntry.member(m,
+                  isOnline: true, serverId: serverId));
+            }
+          }
+        }
+      }
+      if (offline.isNotEmpty) {
+        flatItems.add(_MemberListEntry.divider(
+          label: 'Offline', count: offline.length, isOnline: false,
+        ));
+        for (final m in offline) {
+          flatItems.add(
+              _MemberListEntry.member(m, isOnline: false, serverId: serverId));
+        }
+      }
+      return (flatItems, members.length, false, null);
+    },
+    loading: () => (const <_MemberListEntry>[], 0, true, null),
+    error: (e, _) => (const <_MemberListEntry>[], 0, false, e.toString()),
+  );
+});
+
 /// Server member list content (header + online/offline member list).
 class _ServerMemberContent extends ConsumerWidget {
   final String serverId;
@@ -301,12 +381,15 @@ class _ServerMemberContent extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final membersAsync = ref.watch(serverMembersProvider(serverId));
-    final connectedPeers = ref.watch(peersProvider);
-    final localPeerId = ref.watch(identityProvider).peerId;
-    final invisiblePeers = ref.watch(invisiblePeersProvider);
-    final amInvisible =
-        ref.watch(invisibleModeProvider);
+    final (entries, totalCount, isLoading, error) =
+        ref.watch(_serverMemberEntriesProvider(serverId));
+
+    final captionStyle = HollowTypography.caption.copyWith(
+      color: hollow.textSecondary,
+      fontWeight: FontWeight.w600,
+      letterSpacing: 0.8,
+      fontSize: 11,
+    );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -320,163 +403,87 @@ class _ServerMemberContent extends ConsumerWidget {
             ),
           ),
           alignment: Alignment.centerLeft,
-          child: membersAsync.when(
-            data: (members) => _SectionDivider(
-              label: 'Members',
-              count: members.length,
-              isOnline: false,
-            ),
-            loading: () => Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.sm + 2,
-              ),
-              child: Text(
-                'Members ...',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.8,
-                  fontSize: 11,
-                ),
-              ),
-            ),
-            error: (_, _) => Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.sm + 2,
-              ),
-              child: Text(
-                'Members ?',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.8,
-                  fontSize: 11,
-                ),
-              ),
-            ),
-          ),
+          child: isLoading
+              ? Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: HollowSpacing.sm + 2,
+                  ),
+                  child: Text('Members ...', style: captionStyle),
+                )
+              : error != null
+                  ? Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: HollowSpacing.sm + 2,
+                      ),
+                      child: Text('Members ?', style: captionStyle),
+                    )
+                  : _SectionDivider(
+                      label: 'Members',
+                      count: totalCount,
+                      isOnline: false,
+                    ),
         ),
 
         // Member list with online/offline sections
         Expanded(
-          child: membersAsync.when(
-            data: (members) {
-              if (members.isEmpty) {
-                return Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(HollowSpacing.xl),
-                    child: Text(
-                      'No members',
-                      style: HollowTypography.bodySmall
-                          .copyWith(color: hollow.textSecondary),
-                    ),
+          child: isLoading
+              ? const Center(
+                  child: SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2),
                   ),
-                );
-              }
-
-              // Split into online/offline (invisible peers appear offline)
-              final online = members
-                  .where((m) {
-                    if (m.peerId == localPeerId) return !amInvisible;
-                    return connectedPeers.containsKey(m.peerId) &&
-                        !invisiblePeers.contains(m.peerId);
-                  })
-                  .toList();
-              final offline = members
-                  .where((m) {
-                    if (m.peerId == localPeerId) return amInvisible;
-                    return !connectedPeers.containsKey(m.peerId) ||
-                        invisiblePeers.contains(m.peerId);
-                  })
-                  .toList();
-
-              // Build a flat data list — widgets are created lazily by ListView.builder.
-              final roleOrder = ['owner', 'admin', 'moderator', 'member'];
-              final flatItems = <_MemberListEntry>[];
-
-              if (online.isNotEmpty) {
-                final roles = online.map((m) => m.role).toSet();
-                if (roles.length == 1 && roles.first == 'member') {
-                  flatItems.add(_MemberListEntry.divider(
-                    label: 'Online', count: online.length, isOnline: true,
-                  ));
-                  for (final m in online) {
-                    flatItems.add(_MemberListEntry.member(m, isOnline: true, serverId: serverId));
-                  }
-                } else {
-                  final groups = <String, List<dynamic>>{};
-                  for (final m in online) {
-                    (groups[m.role as String] ??= []).add(m);
-                  }
-                  for (final role in roleOrder) {
-                    final group = groups[role];
-                    if (group == null || group.isEmpty) continue;
-                    flatItems.add(_MemberListEntry.divider(
-                      label: _roleDividerLabel(role),
-                      count: group.length,
-                      isOnline: true,
-                      glowColor: _roleGlowColor(role, hollow),
-                    ));
-                    for (final m in group) {
-                      flatItems.add(_MemberListEntry.member(m, isOnline: true, serverId: serverId));
-                    }
-                  }
-                }
-              }
-              if (offline.isNotEmpty) {
-                flatItems.add(_MemberListEntry.divider(
-                  label: 'Offline', count: offline.length, isOnline: false,
-                ));
-                for (final m in offline) {
-                  flatItems.add(_MemberListEntry.member(m, isOnline: false, serverId: serverId));
-                }
-              }
-
-              return ListView.builder(
-                padding: const EdgeInsets.symmetric(
-                    vertical: HollowSpacing.sm),
-                itemCount: flatItems.length,
-                itemBuilder: (context, index) {
-                  final entry = flatItems[index];
-                  if (entry.isDivider) {
-                    return _SectionDivider(
-                      label: entry.label!,
-                      count: entry.count!,
-                      isOnline: entry.isOnline,
-                      glowColor: entry.glowColor,
-                    );
-                  }
-                  return _ServerMemberTile(
-                    peerId: entry.peerId!,
-                    displayName: entry.displayName!,
-                    role: entry.role!,
-                    nickname: entry.nickname!,
-                    twitchUsername: entry.twitchUsername!,
-                    labels: entry.labels!,
-                    isOnline: entry.isOnline,
-                    serverId: entry.serverId,
-                  );
-                },
-              );
-            },
-            loading: () => const Center(
-              child: SizedBox(
-                width: 24,
-                height: 24,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-            ),
-            error: (e, _) => Center(
-              child: Padding(
-                padding: const EdgeInsets.all(HollowSpacing.xl),
-                child: Text(
-                  'Failed to load members',
-                  style: HollowTypography.bodySmall
-                      .copyWith(color: hollow.textSecondary),
-                ),
-              ),
-            ),
-          ),
+                )
+              : error != null
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(HollowSpacing.xl),
+                        child: Text(
+                          'Failed to load members',
+                          style: HollowTypography.bodySmall
+                              .copyWith(color: hollow.textSecondary),
+                        ),
+                      ),
+                    )
+                  : entries.isEmpty
+                      ? Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(HollowSpacing.xl),
+                            child: Text(
+                              'No members',
+                              style: HollowTypography.bodySmall
+                                  .copyWith(color: hollow.textSecondary),
+                            ),
+                          ),
+                        )
+                      : ListView.builder(
+                          padding: const EdgeInsets.symmetric(
+                              vertical: HollowSpacing.sm),
+                          itemCount: entries.length,
+                          itemBuilder: (context, index) {
+                            final entry = entries[index];
+                            if (entry.isDivider) {
+                              return _SectionDivider(
+                                label: entry.label!,
+                                count: entry.count!,
+                                isOnline: entry.isOnline,
+                                glowColor: entry.dividerRole != null
+                                    ? _roleGlowColor(entry.dividerRole!, hollow)
+                                    : null,
+                              );
+                            }
+                            return _ServerMemberTile(
+                              peerId: entry.peerId!,
+                              displayName: entry.displayName!,
+                              role: entry.role!,
+                              nickname: entry.nickname!,
+                              twitchUsername: entry.twitchUsername!,
+                              labels: entry.labels!,
+                              isOnline: entry.isOnline,
+                              serverId: entry.serverId,
+                            );
+                          },
+                        ),
         ),
       ],
     );
@@ -569,13 +576,14 @@ class _ServerMemberTile extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final isSyncing = ref.watch(isPeerSyncingProvider(peerId));
     // Resolution: local nickname → server nickname → profile display name → short peer ID.
-    final profiles = ref.watch(profileProvider);
+    final profile = ref.watch(profileProvider.select((p) => p[peerId]));
     ref.watch(localNicknameProvider); // trigger rebuild on local nickname changes
-    final resolvedName =
-        serverDisplayNameFor(profiles, peerId, nickname: nickname);
+    final resolvedName = profile != null
+        ? serverDisplayNameFor({peerId: profile}, peerId, nickname: nickname)
+        : serverDisplayNameFor({}, peerId, nickname: nickname);
     final effectiveTwitch = twitchUsername.isNotEmpty
         ? twitchUsername
-        : (profiles[peerId]?.twitchUsername ?? '');
+        : (profile?.twitchUsername ?? '');
 
     return AnimatedOpacity(
       opacity: isOnline ? 1.0 : 0.5,
@@ -608,7 +616,7 @@ class _ServerMemberTile extends ConsumerWidget {
             // Avatar with status overlay
             Stack(
               children: [
-                HollowAvatar(peerId: peerId, size: 28, imageBytes: profiles[peerId]?.avatarBytes),
+                HollowAvatar(peerId: peerId, size: 28),
                 Positioned(
                   right: -1,
                   bottom: -1,
@@ -694,9 +702,11 @@ class _MemberTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final profiles = ref.watch(profileProvider);
+    final profile = ref.watch(profileProvider.select((p) => p[peerId]));
     ref.watch(localNicknameProvider); // trigger rebuild on local nickname changes
-    final peerName = displayNameFor(profiles, peerId);
+    final peerName = profile != null
+        ? displayNameFor({peerId: profile}, peerId)
+        : displayNameFor({}, peerId);
 
     return HollowPressable(
       subtle: true,
@@ -722,7 +732,7 @@ class _MemberTile extends ConsumerWidget {
           // Avatar with online dot
           Stack(
             children: [
-              HollowAvatar(peerId: peerId, size: 28, imageBytes: profiles[peerId]?.avatarBytes),
+              HollowAvatar(peerId: peerId, size: 28),
               Positioned(
                 right: -1,
                 bottom: -1,

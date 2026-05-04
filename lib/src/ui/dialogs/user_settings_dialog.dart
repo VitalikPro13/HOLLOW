@@ -14,7 +14,9 @@ import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:record/record.dart' as rec;
 import 'package:win32audio/win32audio.dart' as win32audio;
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
+import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
+import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -716,7 +718,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                     children: [
                   // Banner
                   Builder(builder: (_) {
-                    final savedBanner = ref.watch(profileProvider)[widget.localPeerId]?.bannerBytes;
+                    final savedBanner = ref.watch(bannerProvider(widget.localPeerId)).valueOrNull;
                     final displayBanner = _bannerChanged ? _pendingBannerBytes : savedBanner;
                     if (displayBanner != null && displayBanner.isNotEmpty) {
                       return SizedBox(
@@ -769,12 +771,10 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                               ),
                             ),
                             child: Builder(builder: (_) {
-                              final savedAvatar = ref.watch(profileProvider)[widget.localPeerId]?.avatarBytes;
-                              final displayAvatar = _avatarChanged ? _pendingAvatarBytes : savedAvatar;
                               return HollowAvatar(
                                 peerId: widget.localPeerId,
                                 size: 56,
-                                imageBytes: (displayAvatar != null && displayAvatar.isNotEmpty) ? displayAvatar : null,
+                                imageBytes: _avatarChanged ? _pendingAvatarBytes : null,
                                 animate: true,
                               );
                             }),
@@ -878,10 +878,10 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                 const SizedBox(height: HollowSpacing.md),
                 // Avatar row
                 Builder(builder: (_) {
-                  final profile = ref.watch(profileProvider)[widget.localPeerId];
+                  final savedAvatar = ref.watch(avatarProvider)[widget.localPeerId];
                   final hasAvatar = _avatarChanged
                       ? (_pendingAvatarBytes != null && _pendingAvatarBytes!.isNotEmpty)
-                      : (profile?.avatarBytes != null && profile!.avatarBytes!.isNotEmpty);
+                      : (savedAvatar != null && savedAvatar.isNotEmpty);
                   return _ImageRow(
                     label: 'Avatar',
                     onPick: _pickAvatar,
@@ -892,10 +892,10 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                 const SizedBox(height: HollowSpacing.xs),
                 // Banner row
                 Builder(builder: (_) {
-                  final profile = ref.watch(profileProvider)[widget.localPeerId];
+                  final savedBanner = ref.watch(bannerProvider(widget.localPeerId)).valueOrNull;
                   final hasBanner = _bannerChanged
                       ? (_pendingBannerBytes != null && _pendingBannerBytes!.isNotEmpty)
-                      : (profile?.bannerBytes != null && profile!.bannerBytes!.isNotEmpty);
+                      : (savedBanner != null && savedBanner.isNotEmpty);
                   return _ImageRow(
                     label: 'Banner',
                     onPick: _pickBanner,

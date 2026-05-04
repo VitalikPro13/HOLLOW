@@ -127,7 +127,6 @@ class _ArchiveDmViewer extends ConsumerWidget {
             leading: HollowAvatar(
               peerId: peerId,
               size: 24,
-              imageBytes: profiles[peerId]?.avatarBytes,
             ),
             title: displayName,
             messageCount: allMessages.length,
@@ -456,7 +455,6 @@ class _DmMessageListState extends ConsumerState<_DmMessageList> {
                   senderPeerId: senderPeerId,
                   senderDisplayName:
                       displayNameFor(profiles, senderPeerId),
-                  senderAvatar: profiles[senderPeerId]?.avatarBytes,
                   text: msg.text,
                   timestampMs: (msg.editedAt ?? msg.timestamp)
                       .millisecondsSinceEpoch,
@@ -967,7 +965,6 @@ class _ChannelMessageListState extends ConsumerState<_ChannelMessageList> {
                   senderPeerId: msg.senderId,
                   senderDisplayName:
                       displayNameFor(profiles, msg.senderId),
-                  senderAvatar: profiles[msg.senderId]?.avatarBytes,
                   text: msg.text,
                   timestampMs: (msg.editedAt ?? msg.timestamp)
                       .millisecondsSinceEpoch,
@@ -1384,7 +1381,7 @@ class _FilterDialogState extends State<_FilterDialog> {
                             horizontal: HollowSpacing.md, vertical: 5),
                         child: Row(
                           children: [
-                            HollowAvatar(peerId: id, size: 20, imageBytes: widget.senderAvatars[id]),
+                            HollowAvatar(peerId: id, size: 20),
                             const SizedBox(width: HollowSpacing.sm),
                             Expanded(
                               child: Text(
@@ -1714,8 +1711,6 @@ class _EditHistoryIndicatorState extends State<EditHistoryIndicator> {
                                           senderPeerId: widget.senderPeerId!,
                                           senderDisplayName: displayNameFor(
                                               profiles, widget.senderPeerId!),
-                                          senderAvatar: profiles[widget.senderPeerId]
-                                              ?.avatarBytes,
                                           text: e.oldText,
                                           timestampMs: proofTs!,
                                           signature: proofSig,

@@ -424,7 +424,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                     HollowAvatar(
                       peerId: peerId,
                       size: 48,
-                      imageBytes: profiles[peerId]?.avatarBytes,
                     ),
                     const SizedBox(height: HollowSpacing.xs),
                     Text(
@@ -478,7 +477,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     final isLocal = focusedPeerId == localPeerId;
     final renderer = ref.read(voiceChannelProvider.notifier)
         .getCameraRenderer(focusedPeerId);
-    final profiles = ref.watch(profileProvider);
     final others = cameraPeers.where((p) => p != focusedPeerId).toList();
 
     return GestureDetector(
@@ -541,7 +539,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                         .read(voiceChannelProvider.notifier)
                         .getCameraRenderer(peerId);
                     final pipIsLocal = peerId == localPeerId;
-                    final profile = profiles[peerId];
 
                     return GestureDetector(
                       onTap: () =>
@@ -579,7 +576,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                                   child: HollowAvatar(
                                     peerId: peerId,
                                     size: 28,
-                                    imageBytes: profile?.avatarBytes,
                                   ),
                                 ),
                               ),
@@ -937,7 +933,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                   HollowAvatar(
                     peerId: focusedPeerId,
                     size: 64,
-                    imageBytes: profiles[focusedPeerId]?.avatarBytes,
                   ),
                   const SizedBox(height: HollowSpacing.md),
                   Text(
@@ -1005,7 +1000,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                   peerId == vcState.focusedScreenSharePeerId &&
                   sourceType == vcState.focusedSourceType;
               final name = displayNameFor(profiles, peerId);
-              final profile = profiles[peerId];
 
               return Padding(
                 padding: const EdgeInsets.symmetric(
@@ -1039,7 +1033,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                       HollowAvatar(
                         peerId: peerId,
                         size: 18,
-                        imageBytes: profile?.avatarBytes,
                       ),
                       const SizedBox(width: HollowSpacing.xs),
                       Text(

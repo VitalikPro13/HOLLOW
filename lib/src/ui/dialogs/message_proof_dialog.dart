@@ -19,7 +19,6 @@ import 'package:lucide_icons/lucide_icons.dart';
 class MessageProofData {
   final String senderPeerId;
   final String senderDisplayName;
-  final Uint8List? senderAvatar;
   final String text;
   final int timestampMs;
   final String? signature;
@@ -32,7 +31,6 @@ class MessageProofData {
   const MessageProofData({
     required this.senderPeerId,
     required this.senderDisplayName,
-    this.senderAvatar,
     required this.text,
     required this.timestampMs,
     this.signature,
@@ -404,7 +402,6 @@ class _MessagePreview extends StatelessWidget {
           HollowAvatar(
             peerId: proof.senderPeerId,
             size: 32,
-            imageBytes: proof.senderAvatar,
           ),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(

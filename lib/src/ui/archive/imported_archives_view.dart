@@ -673,7 +673,6 @@ class _ArchivePovViewerState extends ConsumerState<_ArchivePovViewer> {
       headerLeading = HollowAvatar(
         peerId: data.peerId ?? '',
         size: 24,
-        imageBytes: profiles[data.peerId]?.avatarBytes,
       );
     } else if (isServer) {
       headerTitle = activeChannelName ?? 'Channel';
@@ -1103,7 +1102,7 @@ class _ImportedFilterDialogState extends State<_ImportedFilterDialog> {
                   onTap: () => Navigator.of(context).pop(id),
                   padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md, vertical: 5),
                   child: Row(children: [
-                    HollowAvatar(peerId: id, size: 20, imageBytes: widget.senderAvatars[id]),
+                    HollowAvatar(peerId: id, size: 20),
                     const SizedBox(width: HollowSpacing.sm),
                     Expanded(child: Text(name, style: HollowTypography.body.copyWith(
                       color: isActive ? hollow.accent : hollow.textPrimary,
@@ -1372,8 +1371,6 @@ class _ImportedDmMessageListState
                         senderPeerId: senderPeerId,
                         senderDisplayName:
                             displayNameFor(profiles, senderPeerId),
-                        senderAvatar:
-                            profiles[senderPeerId]?.avatarBytes,
                         text: msg.text,
                         timestampMs: (msg.editedAt ?? msg.timestamp)
                             .millisecondsSinceEpoch,
@@ -1709,8 +1706,8 @@ class _ImportedChannelMessageListState
                         senderPeerId: msg.senderId,
                         senderDisplayName:
                             displayNameFor(profiles, msg.senderId),
-                        senderAvatar:
-                            profiles[msg.senderId]?.avatarBytes,
+
+
                         text: msg.text,
                         timestampMs: (msg.editedAt ?? msg.timestamp)
                             .millisecondsSinceEpoch,

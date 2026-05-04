@@ -125,7 +125,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
               child: Row(
                 children: [
                   if (localPeerId != null)
-                    HollowAvatar(peerId: localPeerId, size: 28, imageBytes: profiles[localPeerId]?.avatarBytes)
+                    HollowAvatar(peerId: localPeerId, size: 28)
                   else
                     Container(
                       width: 28,

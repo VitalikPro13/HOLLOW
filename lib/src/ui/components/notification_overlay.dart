@@ -10,7 +10,6 @@ import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
-import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -236,7 +235,6 @@ class _NotificationCardWidgetState
                         HollowAvatar(
                           peerId: card.avatarId,
                           size: 24,
-                          imageBytes: ref.watch(profileProvider)[card.avatarId]?.avatarBytes,
                         ),
                         const SizedBox(width: HollowSpacing.sm),
                         Expanded(

@@ -297,7 +297,6 @@ class _DmRow extends ConsumerWidget {
               HollowAvatar(
                 peerId: entry.peerId,
                 size: 28,
-                imageBytes: profiles[entry.peerId]?.avatarBytes,
               ),
               const SizedBox(width: HollowSpacing.sm),
               Expanded(

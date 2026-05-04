@@ -425,9 +425,10 @@ class _ServerContentState extends State<_ServerContent> {
                       style: HollowTypography.bodySmall
                           .copyWith(color: w.hollow.textSecondary)),
                 )
-              : ListView(
+              : ListView.builder(
                   padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
-                  children: items,
+                  itemCount: items.length,
+                  itemBuilder: (_, i) => items[i],
                 ),
         ),
       ],
@@ -785,7 +786,7 @@ class _PendingRequestTile extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            HollowAvatar(peerId: peerId, size: 28, imageBytes: profiles[peerId]?.avatarBytes),
+            HollowAvatar(peerId: peerId, size: 28),
             const SizedBox(width: HollowSpacing.sm),
             Expanded(
               child: Column(
@@ -1182,8 +1183,7 @@ class _VoiceParticipantRow extends ConsumerWidget {
           children: [
             HollowAvatar(
                 peerId: peerId,
-                size: 18,
-                imageBytes: profiles[peerId]?.avatarBytes),
+                size: 18),
             const SizedBox(width: HollowSpacing.xs),
             Expanded(
               child: Text(

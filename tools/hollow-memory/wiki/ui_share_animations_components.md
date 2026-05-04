@@ -661,9 +661,13 @@ File: `lib/src/ui/components/hollow_toggle.dart`
 
 File: `lib/src/ui/components/hollow_avatar.dart`
 
-`StatelessWidget`. User avatar with deterministic fallback.
+`ConsumerWidget`. User avatar with deterministic fallback. Auto-fetches avatar bytes from `avatarProvider` on mount.
 
-**Parameters:** `peerId` (String), `size` (default 36), `imageBytes` (Uint8List?), `animate` (default false).
+**Parameters:** `peerId` (String), `size` (default 36), `imageBytes` (Uint8List?, explicit override), `animate` (default false).
+
+**Avatar resolution order:**
+1. If `imageBytes` is passed (non-null), use it directly (for archive data or explicit overrides).
+2. Otherwise, read from `avatarProvider` cache. If not yet cached, schedules `loadAvatar(peerId)` via `Future.microtask`.
 
 **With image:**
 - `animate: true` — renders `AnimatedGifImage` (for GIF avatar support in profile cards, DM panel, settings).
@@ -675,9 +679,11 @@ File: `lib/src/ui/components/hollow_avatar.dart`
 - Initials: first 2 characters of peerId, uppercased.
 - Container: `radiusMd` corners, centered text at `size * 0.38` font size.
 
+**IMPORTANT:** Do NOT pass `imageBytes: profiles[peerId]?.avatarBytes` — profileProvider loads light profiles without blobs. Avatar bytes are managed by `avatarProvider`.
+
 ### _StaticFirstFrame
 
-Private `StatefulWidget`. Decodes only the first frame of an image using `ui.instantiateImageCodec` + `codec.getNextFrame()`. Properly disposes `ui.Image` and `codec`. Shows fallback on error, blank `SizedBox` while loading. `didUpdateWidget` re-decodes when `imageBytes` identity changes.
+Private `StatefulWidget`. Decodes only the first frame of an image using `ui.instantiateImageCodec` + `codec.getNextFrame()`. Properly disposes `ui.Image` and `codec`. Shows fallback on error, blank `SizedBox` while loading. `didUpdateWidget` re-decodes when `imageBytes` content changes (uses `listEquals` for content comparison, not identity).
 
 
 ## AnimatedGifImage

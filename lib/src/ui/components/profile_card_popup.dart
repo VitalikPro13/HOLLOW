@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -233,7 +234,7 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
                     children: [
                       // Banner
                       Builder(builder: (_) {
-                        final bannerBytes = profile?.bannerBytes;
+                        final bannerBytes = ref.watch(bannerProvider(widget.peerId)).valueOrNull;
                         if (bannerBytes != null && bannerBytes.isNotEmpty) {
                           return SizedBox(
                             height: 80,
@@ -284,7 +285,7 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
                                   ),
                                 ),
                                 child: HollowAvatar(
-                                    peerId: widget.peerId, size: 64, imageBytes: profile?.avatarBytes, animate: true),
+                                    peerId: widget.peerId, size: 64, animate: true),
                               ),
 
                               const SizedBox(height: HollowSpacing.xs + 2),

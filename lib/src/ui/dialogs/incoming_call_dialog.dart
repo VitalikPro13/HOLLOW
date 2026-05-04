@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
@@ -40,7 +39,6 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
   // Cached display info so the card doesn't go blank during exit animation.
   String _cachedPeerId = '';
   String _cachedDisplayName = '';
-  Uint8List? _cachedAvatarBytes;
   bool _cachedIsVideoCall = false;
 
   @override
@@ -134,7 +132,6 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
       final profiles = ref.watch(profileProvider);
       _cachedPeerId = call.peerId ?? '';
       _cachedDisplayName = displayNameFor(profiles, _cachedPeerId);
-      _cachedAvatarBytes = profiles[_cachedPeerId]?.avatarBytes;
       _cachedIsVideoCall = call.isVideoCall;
     }
 
@@ -187,7 +184,6 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
                   HollowAvatar(
                     peerId: _cachedPeerId,
                     size: 56,
-                    imageBytes: _cachedAvatarBytes,
                   ),
                   const SizedBox(height: HollowSpacing.sm),
                   Text(

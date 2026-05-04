@@ -150,18 +150,37 @@ A peer is online if it exists in the `peersProvider` map (was discovered and not
 - `status` — short status text (e.g., "Available")
 - `aboutMe` — bio/about section text
 - `updatedAt` — epoch timestamp of last profile update
-- `avatarBytes` — optional `Uint8List` of avatar image data (WebP)
-- `bannerBytes` — optional `Uint8List` of banner image data (WebP)
+- `avatarBytes` — **always null** (light load, blobs managed by `avatarProvider`)
+- `bannerBytes` — **always null** (light load, blobs managed by `bannerProvider`)
+- `twitchUsername` — linked Twitch handle
 
 ### Loading and Caching
 
-`ProfileNotifier.loadAll()` calls `storage_api.getAllProfiles()` (Rust FFI — `api/storage.rs:get_all_profiles`). Reads all rows from the `profiles` table in SQLCipher and returns `Vec<UserProfile>`. Dart maps them into a `Map<String, UserProfile>` keyed by `peerId` and replaces `state`.
+`ProfileNotifier.loadAll()` calls `storage_api.getAllProfilesLight()` (Rust FFI — `api/storage.rs:get_all_profiles_light`). Reads all rows from the `user_profiles` table in SQLCipher **without avatar/banner BLOB columns** and returns `Vec<UserProfile>` with `avatarBytes: None, bannerBytes: None`. Dart maps them into a `Map<String, UserProfile>` keyed by `peerId` and replaces `state`.
 
 Called during bootstrap in `hollow_shell.dart:_bootstrap()` after node start, before friends list load. This means profiles are available in memory before the FriendsBar renders.
 
 ### Single Profile Reload
 
-`ProfileNotifier.reloadProfile(peerId)` calls `storage_api.getProfile(peerId:)` which queries SQLCipher for a single peer's profile. If found, merges it into the existing state map with spread + override: `state = {...state, peerId: profile}`. Called from `event_provider.dart` on `NetworkEvent_ProfileUpdated`.
+`ProfileNotifier.reloadProfile(peerId)` calls `storage_api.getProfileLight(peerId:)` which queries SQLCipher for a single peer's metadata (no blobs). If found, merges it into the existing state map with spread + override: `state = {...state, peerId: profile}`. Called from `event_provider.dart` on `NetworkEvent_ProfileUpdated`. The event handler also invalidates `avatarProvider` and `bannerProvider` caches for the affected peerId.
+
+## AvatarProvider
+
+**File:** `lib/src/core/providers/avatar_provider.dart`
+**Provider:** `avatarProvider` — `NotifierProvider<AvatarNotifier, Map<String, Uint8List>>`
+
+Lazy avatar cache. Same pattern as `ServerAvatarNotifier`. Avatars are loaded on-demand when `HollowAvatar` mounts — calls `storage_api.getAvatar(peerId:)` which fetches only the avatar BLOB column from SQLCipher.
+
+**Deduplication:** `_loading` Set prevents duplicate in-flight FFI calls for the same peerId.
+
+**`invalidate(peerId)`** — removes cached entry and clears loading flag. Called from event handler on `ProfileUpdated`.
+
+## BannerProvider
+
+**File:** `lib/src/core/providers/banner_provider.dart`
+**Provider:** `bannerProvider` — `FutureProvider.family<Uint8List?, String>`
+
+Lazy banner loading per peer. Calls `storage_api.getBanner(peerId:)`. Used by profile card popup, DM profile header, and user settings dialog. Invalidated via `ref.invalidate(bannerProvider(peerId))` on `ProfileUpdated`.
 
 ### Profile Update Propagation
 

@@ -1709,6 +1709,94 @@ impl MessageStore {
         Ok(profiles)
     }
 
+    /// Load all stored profiles WITHOUT avatar/banner blobs (light load for startup).
+    pub fn load_all_profiles_light(&self) -> Result<Vec<StoredProfile>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username
+                 FROM user_profiles",
+            )
+            .map_err(|e| format!("Failed to prepare light profiles query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(StoredProfile {
+                    peer_id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    status: row.get(2)?,
+                    about_me: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    avatar_bytes: None,
+                    banner_bytes: None,
+                    twitch_username: row.get::<_, String>(5).unwrap_or_default(),
+                })
+            })
+            .map_err(|e| format!("Failed to query light profiles: {e}"))?;
+        let mut profiles = Vec::new();
+        for row in rows {
+            profiles.push(row.map_err(|e| format!("Failed to read profile row: {e}"))?);
+        }
+        Ok(profiles)
+    }
+
+    /// Load a single profile WITHOUT avatar/banner blobs (light load).
+    pub fn load_profile_light(&self, peer_id: &str) -> Result<Option<StoredProfile>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username
+                 FROM user_profiles WHERE peer_id = ?1",
+            )
+            .map_err(|e| format!("Failed to prepare light profile query: {e}"))?;
+        let mut rows = stmt
+            .query_map(params![peer_id], |row| {
+                Ok(StoredProfile {
+                    peer_id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    status: row.get(2)?,
+                    about_me: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    avatar_bytes: None,
+                    banner_bytes: None,
+                    twitch_username: row.get::<_, String>(5).unwrap_or_default(),
+                })
+            })
+            .map_err(|e| format!("Failed to query light profile: {e}"))?;
+        match rows.next() {
+            Some(Ok(profile)) => Ok(Some(profile)),
+            Some(Err(e)) => Err(format!("Failed to read profile row: {e}")),
+            None => Ok(None),
+        }
+    }
+
+    /// Load only the avatar blob for a peer.
+    pub fn load_avatar(&self, peer_id: &str) -> Result<Option<Vec<u8>>, String> {
+        self.conn
+            .query_row(
+                "SELECT avatar FROM user_profiles WHERE peer_id = ?1",
+                params![peer_id],
+                |row| row.get(0),
+            )
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                _ => Err(format!("Failed to load avatar: {e}")),
+            })
+    }
+
+    /// Load only the banner blob for a peer.
+    pub fn load_banner(&self, peer_id: &str) -> Result<Option<Vec<u8>>, String> {
+        self.conn
+            .query_row(
+                "SELECT banner FROM user_profiles WHERE peer_id = ?1",
+                params![peer_id],
+                |row| row.get(0),
+            )
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                _ => Err(format!("Failed to load banner: {e}")),
+            })
+    }
+
     // ── Message Editing (Phase 3.5) ──
 
     /// Edit a channel message by message_id. Preserves old text in message_edits table.

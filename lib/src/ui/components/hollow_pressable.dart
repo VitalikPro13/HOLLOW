@@ -40,9 +40,9 @@ class HollowPressable extends StatefulWidget {
 
 class _HollowPressableState extends State<HollowPressable>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final Animation<double> _scaleAnimation;
-  late final Animation<double> _opacityAnimation;
+  AnimationController? _controller;
+  Animation<double>? _scaleAnimation;
+  Animation<double>? _opacityAnimation;
 
   bool _hovering = false;
   bool _pressing = false;
@@ -50,51 +50,51 @@ class _HollowPressableState extends State<HollowPressable>
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 120),
-      reverseDuration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 200),
-    );
-
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.98).animate(
-      CurvedAnimation(
-        parent: _controller,
-        curve: Curves.easeOutCubic,
-        reverseCurve: HollowCurves.spring,
-      ),
-    );
-
-    _opacityAnimation = Tween<double>(begin: 1.0, end: 0.85).animate(
-      CurvedAnimation(
-        parent: _controller,
-        curve: Curves.easeOutCubic,
-        reverseCurve: Curves.easeOutCubic,
-      ),
-    );
+    if (!widget.subtle) {
+      _controller = AnimationController(
+        vsync: this,
+        duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 120),
+        reverseDuration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 200),
+      );
+      _scaleAnimation = Tween<double>(begin: 1.0, end: 0.98).animate(
+        CurvedAnimation(
+          parent: _controller!,
+          curve: Curves.easeOutCubic,
+          reverseCurve: HollowCurves.spring,
+        ),
+      );
+      _opacityAnimation = Tween<double>(begin: 1.0, end: 0.85).animate(
+        CurvedAnimation(
+          parent: _controller!,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeOutCubic,
+        ),
+      );
+    }
   }
 
   @override
   void dispose() {
-    _controller.dispose();
+    _controller?.dispose();
     super.dispose();
   }
 
   void _onPointerDown(PointerDownEvent _) {
     if (widget.disabled || widget.onTap == null || widget.subtle) return;
     setState(() => _pressing = true);
-    _controller.forward();
+    _controller?.forward();
   }
 
   void _onPointerUp(PointerUpEvent _) {
     if (!_pressing || !mounted) return;
     setState(() => _pressing = false);
-    _controller.reverse();
+    _controller?.reverse();
   }
 
   void _onPointerCancel(PointerCancelEvent _) {
     if (!_pressing || !mounted) return;
     setState(() => _pressing = false);
-    _controller.reverse();
+    _controller?.reverse();
   }
 
   @override
@@ -102,6 +102,59 @@ class _HollowPressableState extends State<HollowPressable>
     final hollow = HollowTheme.of(context);
     final isInteractive = !widget.disabled && widget.onTap != null;
     final effectiveHoverColor = widget.hoverColor ?? hollow.elevated;
+
+    final container = AnimatedContainer(
+      duration: HollowDurations.fast,
+      curve: HollowCurves.subtle,
+      decoration: BoxDecoration(
+        color: _hovering && isInteractive
+            ? (widget.backgroundColor != null
+                ? Color.lerp(
+                    widget.backgroundColor!, Colors.white, 0.15)!
+                : effectiveHoverColor)
+            : (widget.backgroundColor ?? Colors.transparent),
+        borderRadius: widget.borderRadius,
+        boxShadow: _hovering &&
+                isInteractive &&
+                widget.backgroundColor != null
+            ? [
+                BoxShadow(
+                  color: widget.backgroundColor!
+                      .withValues(alpha: 0.25),
+                  blurRadius: 8,
+                  spreadRadius: 0,
+                ),
+              ]
+            : null,
+      ),
+      padding: widget.padding,
+      child: widget.child,
+    );
+
+    final Widget inner;
+    if (widget.subtle) {
+      inner = AnimatedOpacity(
+        opacity: widget.disabled ? 0.4 : 1.0,
+        duration: HollowDurations.fast,
+        child: container,
+      );
+    } else {
+      inner = AnimatedBuilder(
+        animation: _controller!,
+        builder: (context, child) {
+          return FadeTransition(
+            opacity: widget.disabled
+                ? const AlwaysStoppedAnimation(0.4)
+                : _opacityAnimation!,
+            child: ScaleTransition(
+              scale: _scaleAnimation!,
+              child: child,
+            ),
+          );
+        },
+        child: container,
+      );
+    }
 
     return MouseRegion(
       cursor: isInteractive
@@ -122,47 +175,7 @@ class _HollowPressableState extends State<HollowPressable>
           onLongPress:
               isInteractive ? widget.onLongPress : null,
           behavior: HitTestBehavior.opaque,
-          child: AnimatedBuilder(
-            animation: _controller,
-            builder: (context, child) {
-              return FadeTransition(
-                opacity: widget.disabled
-                    ? const AlwaysStoppedAnimation(0.4)
-                    : _opacityAnimation,
-                child: ScaleTransition(
-                  scale: _scaleAnimation,
-                  child: child,
-                ),
-              );
-            },
-            child: AnimatedContainer(
-              duration: HollowDurations.fast,
-              curve: HollowCurves.subtle,
-              decoration: BoxDecoration(
-                color: _hovering && isInteractive
-                    ? (widget.backgroundColor != null
-                        ? Color.lerp(
-                            widget.backgroundColor!, Colors.white, 0.15)!
-                        : effectiveHoverColor)
-                    : (widget.backgroundColor ?? Colors.transparent),
-                borderRadius: widget.borderRadius,
-                boxShadow: _hovering &&
-                        isInteractive &&
-                        widget.backgroundColor != null
-                    ? [
-                        BoxShadow(
-                          color: widget.backgroundColor!
-                              .withValues(alpha: 0.25),
-                          blurRadius: 8,
-                          spreadRadius: 0,
-                        ),
-                      ]
-                    : null,
-              ),
-              padding: widget.padding,
-              child: widget.child,
-            ),
-          ),
+          child: inner,
         ),
       ),
     );

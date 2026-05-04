@@ -154,7 +154,7 @@ class _MemberRow extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            HollowAvatar(peerId: peerId, size: 32, imageBytes: profiles[peerId]?.avatarBytes),
+            HollowAvatar(peerId: peerId, size: 32),
             const SizedBox(width: HollowSpacing.md),
             Expanded(
               child: Column(
