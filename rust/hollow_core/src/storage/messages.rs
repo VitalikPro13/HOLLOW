@@ -1273,6 +1273,32 @@ impl MessageStore {
         Ok(count as u32)
     }
 
+    /// Delete DM messages older than `before_timestamp` for a specific peer.
+    /// Returns the number of deleted rows.
+    pub fn prune_dm_messages_before(&self, peer_id: &str, before_timestamp: i64) -> Result<u32, String> {
+        let deleted = self.conn
+            .execute(
+                "DELETE FROM messages WHERE peer_id = ?1 AND timestamp < ?2",
+                params![peer_id, before_timestamp],
+            )
+            .map_err(|e| format!("Failed to prune DM messages: {e}"))?;
+        Ok(deleted as u32)
+    }
+
+    /// Delete channel messages in a time range for a specific server.
+    /// Only prunes messages with `timestamp >= since AND timestamp < before`.
+    /// This ensures forward-only retention: only messages created after the
+    /// policy was set are subject to pruning.
+    pub fn prune_channel_messages_in_range(&self, server_id: &str, since: i64, before: i64) -> Result<u32, String> {
+        let deleted = self.conn
+            .execute(
+                "DELETE FROM channel_messages WHERE server_id = ?1 AND timestamp >= ?2 AND timestamp < ?3",
+                params![server_id, since, before],
+            )
+            .map_err(|e| format!("Failed to prune channel messages: {e}"))?;
+        Ok(deleted as u32)
+    }
+
     /// Count unread DM messages: messages with autoincrement id greater than
     /// the row matching `last_seen_message_id`. Returns 0 if not found.
     pub fn count_unread_dm(&self, peer_id: &str, last_seen_message_id: &str) -> u32 {
@@ -3029,6 +3055,7 @@ impl MessageStore {
 
     /// Get file_ids from messages that have a file_id but no completed file entry.
     /// Used to find files that need downloading after message sync.
+    /// Also checks disk — skips files that already exist in ~/.hollow/files/.
     pub fn get_missing_file_ids(&self) -> Result<Vec<String>, String> {
         let mut stmt = self
             .conn
@@ -3047,10 +3074,27 @@ impl MessageStore {
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(|e| format!("Failed to query missing files: {e}"))?;
 
+        let files_dir = crate::identity::data_dir()
+            .unwrap_or_default()
+            .join("files");
+
+        // Build a set of file_id prefixes present on disk (read dir once).
+        let disk_file_ids: std::collections::HashSet<String> = std::fs::read_dir(&files_dir)
+            .map(|entries| {
+                entries.filter_map(|e| e.ok()).filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    // Files are stored as {file_id}.{ext} — extract the stem.
+                    name.split('.').next().map(|s| s.to_string())
+                }).collect()
+            })
+            .unwrap_or_default();
+
         let mut ids = Vec::new();
         for row in rows {
             if let Ok(id) = row {
-                ids.push(id);
+                if !disk_file_ids.contains(&id) {
+                    ids.push(id);
+                }
             }
         }
         Ok(ids)

@@ -37,10 +37,12 @@ class _StorageDashboardContentState
   // Static cache — persists across dialog open/close so it shows instantly on reopen.
   static final Map<String, crdt_api.StorageStatsFfi> _statsCache = {};
   static final Map<String, String> _retentionFilesCache = {};
+  static final Map<String, String> _retentionMessagesCache = {};
   static int _diskFreeBytesCache = 0;
 
   crdt_api.StorageStatsFfi? _stats;
   String _retentionFiles = '365d';
+  String _retentionMessages = '365d';
   int _diskFreeBytes = 0;
 
   @override
@@ -49,6 +51,7 @@ class _StorageDashboardContentState
     // Load cached values immediately so UI appears instantly.
     _stats = _statsCache[widget.serverId];
     _retentionFiles = _retentionFilesCache[widget.serverId] ?? '365d';
+    _retentionMessages = _retentionMessagesCache[widget.serverId] ?? '365d';
     _diskFreeBytes = _diskFreeBytesCache;
     // Refresh in background — setState triggers smooth animation.
     _loadData();
@@ -59,22 +62,26 @@ class _StorageDashboardContentState
       final results = await Future.wait([
         crdt_api.getStorageStats(serverId: widget.serverId),
         crdt_api.getServerSetting(serverId: widget.serverId, key: 'retention_files'),
+        crdt_api.getServerSetting(serverId: widget.serverId, key: 'retention_messages'),
         _getDiskFreeBytes(),
       ]);
 
       final stats = results[0] as crdt_api.StorageStatsFfi;
       final retFiles = results[1] as String;
-      final diskFree = results[2] as int;
+      final retMessages = results[2] as String;
+      final diskFree = results[3] as int;
 
       // Update static cache for next open.
       _statsCache[widget.serverId] = stats;
       _retentionFilesCache[widget.serverId] = retFiles.isNotEmpty ? retFiles : '365d';
+      _retentionMessagesCache[widget.serverId] = retMessages.isNotEmpty ? retMessages : '365d';
       _diskFreeBytesCache = diskFree;
 
       if (mounted) {
         setState(() {
           _stats = stats;
           _retentionFiles = _retentionFilesCache[widget.serverId]!;
+          _retentionMessages = _retentionMessagesCache[widget.serverId]!;
           _diskFreeBytes = diskFree;
         });
       }
@@ -543,7 +550,7 @@ class _StorageDashboardContentState
       builder: (ctx) => SimpleDialog(
         backgroundColor: hollow.elevated,
         title: Text(
-          key == 'retention_files' ? 'File Retention' : 'Voice Retention',
+          key == 'retention_files' ? 'File Retention' : key == 'retention_messages' ? 'Message Retention' : 'Voice Retention',
           style: TextStyle(color: hollow.textPrimary, fontSize: 16),
         ),
         children: [
@@ -572,6 +579,15 @@ class _StorageDashboardContentState
           key: key,
           value: result,
         );
+        // Forward-only: record when the policy was changed so only
+        // messages/files created after this point are subject to pruning.
+        final sinceKey = '${key}_since';
+        final nowSecs = (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString();
+        await crdt_api.updateServerSetting(
+          serverId: widget.serverId,
+          key: sinceKey,
+          value: nowSecs,
+        );
         _loadData();
       } catch (e) {
         debugPrint('[HOLLOW] Failed to update retention: $e');
@@ -586,10 +602,12 @@ class _StorageDashboardContentState
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        _retentionRow(hollow, 'Messages', 'retention_messages', _retentionMessages, canEdit: canEdit),
+        const SizedBox(height: HollowSpacing.xs),
         _retentionRow(hollow, 'Files', 'retention_files', _retentionFiles, canEdit: canEdit),
         const SizedBox(height: HollowSpacing.sm),
         Text(
-          'Forward-only: changes affect new uploads only.',
+          'Changes affect new content only.',
           style: HollowTypography.caption.copyWith(
             color: hollow.textSecondary,
             fontStyle: FontStyle.italic,
@@ -608,7 +626,7 @@ class _StorageDashboardContentState
       child: Row(
         children: [
           SizedBox(
-            width: 48,
+            width: 72,
             child: Text(
               '$label:',
               style: HollowTypography.body.copyWith(color: hollow.textSecondary),

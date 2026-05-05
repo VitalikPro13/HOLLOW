@@ -2408,6 +2408,30 @@ async fn run_event_loop(
                         }
                     }
 
+                    // 2c. Message retention: prune old messages per server setting.
+                    // Forward-only: only prune messages sent after the policy was set.
+                    if let Ok(msg_store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                        for (server_id, state) in &server_states {
+                            let msg_policy = state.settings
+                                .get("retention_messages")
+                                .map(|r| r.read().clone())
+                                .unwrap_or_else(|| "365d".to_string());
+                            if let Some(days) = crate::vault::adaptive::parse_retention_days(&msg_policy) {
+                                let since = state.settings
+                                    .get("retention_messages_since")
+                                    .and_then(|r| r.read().parse::<i64>().ok())
+                                    .unwrap_or(0);
+                                let cutoff = now_ts - (days as i64 * 86400);
+                                if cutoff > since {
+                                    match msg_store.prune_channel_messages_in_range(server_id, since, cutoff) {
+                                        Ok(n) if n > 0 => hollow_log!("[HOLLOW-RETENTION] Pruned {n} channel messages older than {days}d for {server_id}"),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // 3. Shard health: detect under-replicated content and request repairs via MLS.
                     let online_peers: std::collections::HashSet<String> = ws_room_peers.values()
                         .flat_map(|peers| peers.iter().cloned())
@@ -4551,6 +4575,17 @@ async fn handle_incoming_request(
                             let server_name = state.name().to_string();
                             hollow_log!("[HOLLOW-CRDT] Server join completed: {server_id} ({server_name})");
 
+                            // Drop stale MLS group from before ban/leave — forces fresh
+                            // KeyPackage exchange so the rejoining peer gets a clean epoch.
+                            if let Some(mls_mgr) = mls.as_mut() {
+                                if mls_mgr.has_group(&server_id) {
+                                    hollow_log!("[HOLLOW-MLS] Dropping stale MLS group for {server_id} on rejoin");
+                                    mls_mgr.remove_group(&server_id);
+                                    persist_mls_state(mls_mgr, crypto_store);
+                                    mls_decrypt_failures.remove(&server_id);
+                                }
+                            }
+
                             // Join the WS relay room for this server so we receive MLS broadcasts.
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                                 room_code: server_id.clone(),
@@ -4640,32 +4675,27 @@ async fn handle_incoming_request(
                             }
 
                             // MLS: if we don't have the MLS group after joining,
-                            // the MlsWelcome was lost. Send our KeyPackage to the
-                            // owner so they can re-add us to the MLS group.
+                            // send our KeyPackage to the coordinator for MLS bootstrap.
                             if let Some(mls_mgr) = mls.as_ref() {
                                 if !mls_mgr.has_group(&server_id) {
-                                    hollow_log!("[HOLLOW-MLS] No MLS group after join, sending KeyPackage to owner for MLS bootstrap");
-                                    // Find the owner and send KeyPackage.
+                                    hollow_log!("[HOLLOW-MLS] No MLS group after join, sending KeyPackage to coordinator for MLS bootstrap");
                                     let local_id = local_peer_str.to_string();
-                                    for member in state.members_list() {
-                                        if member.peer_id == local_id { continue; }
-                                        let is_owner = state.roles.get(&member.peer_id)
-                                            .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
-                                            .unwrap_or(false);
-                                        if is_owner {
-                                                if peer_is_reachable(ws_room_peers, &member.peer_id) {
-                                                    if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
-                                                        let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                                        send_message_to_peer(
-                                                            ws_cmd_tx, ws_room_peers,
-                                                            &member.peer_id, HavenMessage::MlsKeyPackage {
-                                                                server_id: server_id.clone(),
-                                                                key_package: kp_b64,
-                                                            },
-                                                        );
-                                                    }
-                                                }
-                                            break;
+                                    let mut online_members: Vec<&String> = state.members.keys()
+                                        .filter(|p| p.as_str() != local_id && peer_is_reachable(ws_room_peers, p))
+                                        .collect();
+                                    online_members.sort();
+
+                                    if let Some(coordinator) = online_members.first() {
+                                        if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                            let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                            send_message_to_peer(
+                                                ws_cmd_tx, ws_room_peers,
+                                                coordinator, HavenMessage::MlsKeyPackage {
+                                                    server_id: server_id.clone(),
+                                                    key_package: kp_b64,
+                                                },
+                                            );
+                                            hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to coordinator {} for {server_id}", coordinator);
                                         }
                                     }
                                 }
@@ -5936,33 +5966,33 @@ async fn handle_incoming_request(
                             hollow_log!("[HOLLOW-MLS] {} consecutive decrypt failures — initiating MLS recovery for {server_id}", count);
                             *count = 0;
 
-                            // Drop broken group and request re-bootstrap from owner.
+                            // Drop broken group and request re-bootstrap from coordinator.
                             mls_mgr.remove_group(&server_id);
                             persist_mls_state(mls_mgr, crypto_store);
 
                             if let Some(state) = server_states.get(&server_id) {
                                 let local_peer = local_peer_str.to_string();
-                                for member in state.members_list() {
-                                    if member.peer_id == local_peer { continue; }
-                                    let is_owner = state.roles.get(&member.peer_id)
-                                        .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
-                                        .unwrap_or(false);
-                                    if is_owner {
-                                            if peer_is_reachable(ws_room_peers, &member.peer_id) {
-                                                if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
-                                                    let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                                    send_message_to_peer(
-                                                        ws_cmd_tx, ws_room_peers,
-                                                        &member.peer_id, HavenMessage::MlsKeyPackage {
-                                                            server_id: server_id.clone(),
-                                                            key_package: kp_b64,
-                                                        },
-                                                    );
-                                                    mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
-                                                    hollow_log!("[HOLLOW-MLS] Sent recovery KeyPackage to owner for {server_id}");
-                                                }
-                                            }
-                                        break;
+                                // Only attempt recovery if we're still a member (skip if banned/removed).
+                                if !state.members.contains_key(&local_peer) {
+                                    hollow_log!("[HOLLOW-MLS] Skipping recovery for {server_id} — no longer a member");
+                                } else if let Some(coordinator) = {
+                                    let mut online_members: Vec<&String> = state.members.keys()
+                                        .filter(|p| p.as_str() != local_peer && peer_is_reachable(ws_room_peers, p))
+                                        .collect();
+                                    online_members.sort();
+                                    online_members.first().copied()
+                                } {
+                                    if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                        let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                        send_message_to_peer(
+                                            ws_cmd_tx, ws_room_peers,
+                                            coordinator, HavenMessage::MlsKeyPackage {
+                                                server_id: server_id.clone(),
+                                                key_package: kp_b64,
+                                            },
+                                        );
+                                        mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
+                                        hollow_log!("[HOLLOW-MLS] Sent recovery KeyPackage to coordinator {} for {server_id}", coordinator);
                                     }
                                 }
                             }
@@ -5974,7 +6004,17 @@ async fn handle_incoming_request(
 
         HavenMessage::MlsKeyPackage { server_id, key_package } => {
             hollow_log!("[HOLLOW-MLS] MlsKeyPackage from {peer_str} for server {server_id}");
-            
+
+            // L6: Reject KeyPackage from non-members (prevents unauthorized MLS group joins).
+            if let Some(state) = server_states.get(&server_id) {
+                if !state.members.contains_key(peer_str) {
+                    hollow_log!("[HOLLOW-SECURITY] REJECTED MlsKeyPackage from non-member {peer_str} for {server_id}");
+                    return;
+                }
+            } else {
+                hollow_log!("[HOLLOW-MLS] No server state for {server_id}, skipping KeyPackage");
+                return;
+            }
 
             // Distributed committer: lowest online MLS member processes KeyPackages.
             // Any MLS group member can be coordinator — OpenMLS enforces only valid

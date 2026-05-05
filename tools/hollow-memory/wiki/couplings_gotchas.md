@@ -75,11 +75,25 @@ Comprehensive reference of every known non-obvious coupling, critical rule, and 
 
 ### MLS decrypt failure recovery
 
-**Rule:** After 3 consecutive MLS decrypt failures for a server, recovery is triggered (request fresh key packages, rejoin the group).
+**Rule:** After 3 consecutive MLS decrypt failures for a server, recovery is triggered: drop the broken MLS group, send a fresh KeyPackage to the coordinator (lowest online CRDT member). Recovery skips if local peer is no longer a server member (banned/removed).
 
 **Where:** `swarm.rs` -- `mls_decrypt_failures` HashMap tracks per-server consecutive failure count. Incremented on each decrypt error, reset on any successful decrypt.
 
 **Why:** MLS state can become permanently desynchronized if a commit is missed (network partition, relay outage). Without recovery, the node would permanently lose the ability to decrypt messages for that server.
+
+### Server rejoin drops stale MLS group
+
+**Rule:** When a server join completes (`pending_server_joins.remove`), any existing MLS group for that server is dropped and a fresh KeyPackage is sent to the coordinator.
+
+**Why:** After ban/unban cycles, the rejoining peer retains a stale MLS group from before the ban. Messages encrypted with the old epoch cause `TooDistantInThePast` or `WrongEpoch` errors on other peers. The coordinator also rejects recovery KeyPackages because `is_mls_coordinator()` disagrees between stale and current group state.
+
+**Where:** `swarm.rs` -- in the `pending_server_joins.remove()` block, before WS room join. Also: post-join KeyPackage now targets coordinator (lowest online CRDT member), not owner.
+
+### KeyPackage membership check (L6)
+
+**Rule:** `MlsKeyPackage` handler rejects KeyPackages from peers not in the server's CRDT member list. Logged as `[HOLLOW-SECURITY] REJECTED`.
+
+**Why:** Prevents unauthorized peers from joining the MLS group by sending a valid KeyPackage without being a CRDT member first.
 
 ---
 

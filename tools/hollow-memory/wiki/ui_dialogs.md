@@ -586,16 +586,19 @@ Uses `HollowPressable` wrapper. Shows check icon when selected.
 **Static caches (survive dialog open/close for instant reopen):**
 - `_statsCache` -- `Map<String, crdt_api.StorageStatsFfi>`
 - `_retentionFilesCache` -- `Map<String, String>`
+- `_retentionMessagesCache` -- `Map<String, String>`
 - `_diskFreeBytesCache` -- int
 
 **State fields:**
 - `_stats` -- `crdt_api.StorageStatsFfi?`
 - `_retentionFiles` -- string (default `'365d'`)
+- `_retentionMessages` -- string (default `'365d'`)
 - `_diskFreeBytes` -- int
 
 **`_loadData()`:** Parallel `Future.wait` of:
 - `crdt_api.getStorageStats(serverId:)`
 - `crdt_api.getServerSetting(serverId:, key: 'retention_files')`
+- `crdt_api.getServerSetting(serverId:, key: 'retention_messages')`
 - `_getDiskFreeBytes()` -- runs PowerShell `(Get-PSDrive C).Free` on Windows
 
 **Layout (HollowDialog, 540px width):**
@@ -618,7 +621,7 @@ Uses `HollowPressable` wrapper. Shows check icon when selected.
 
 **Bottom row (always):**
 - Side-by-side: "Retention Policy" | "Vault Health"
-- Retention Policy: file retention display, editable by owner/admin via `_editRetention()` -> `SimpleDialog` with options (permanent, 30d, 90d, 180d, 365d)
+- Retention Policy: two rows — Messages (top) and Files (bottom), both editable by owner/admin via `_editRetention()` -> `SimpleDialog` with options (permanent, 30d, 90d, 180d, 365d). Both are forward-only: changing the setting writes a `{key}_since` companion CRDT setting with the current timestamp. Label: "Changes affect new content only."
 - Vault Health:
   - < 6 members: green StatusDot + "Full replication" + explainer
   - 6+ members: colored StatusDot (green/yellow/red) + status text based on active transfers and failures + shard count

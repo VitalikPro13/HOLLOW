@@ -64,6 +64,21 @@
 - [x] **M27:** Banned user server removal — `is_banned()` check after `merge_ops` in plaintext SyncResponse handler + explicit `MemberBanned` arm in CrdtOpBroadcast (emits `MemberLeft` for local user)
 - [x] **Relay uncapping:** Removed soft backpressure (was 2MB, silently dropped CRDT sync), removed binary rate limit (100 burst/20sec, blocked reconnection floods), raised `.maxBackpressure` to 64MB, raised `MAX_ROOMS_PER_PEER` to 10000
 - [x] **RoomMembers SyncRequest → plaintext:** Fixed MLS epoch staleness blocking all CRDT sync after offline (was the root cause of server renames/bans not arriving)
+- [x] **M29:** Voice channel state now syncs to newly-connecting peers (was relay backpressure dropping VoiceChannelJoin messages)
+
+### Tier 10 — Design decisions (Bucket A)
+- [x] **M15:** MLS recovery now targets lowest online CRDT member (coordinator election) instead of Owner-only. Recovery works regardless of Owner being online
+- [x] **L6:** KeyPackage rejected from non-CRDT-members — prevents unauthorized MLS group joins (`[HOLLOW-SECURITY]` log on rejection)
+- [x] **M6:** Closed — not an issue. Server avatars are already processed to 128×128 WebP (~3-8 KB base64), hard-capped at 100 KB. Negligible CRDT bloat
+- [x] **L14:** Closed — deferred as feature addition, not a bug. Banning already handles invite abuse. Expiry/max-uses is a UX nicety for later
+- [x] **M7:** Message retention policy — `retention_messages` CRDT setting (default 365d, options: permanent/30d/90d/180d/365d). Pruned every 30 min in rebalance timer. UI row in Storage Dashboard above Files
+- [x] **M8:** Closed — op_log contains only server structure metadata (channel names, member list, roles, nicknames). No messages or keys. Relay uses TLS so wire-level encryption already covers it. MLS bootstraps immediately after. No real attack surface — relay is operator-controlled, in-memory only, no logging
+- [x] **M22:** Closed — rate limiting removed intentionally (was breaking CRDT sync on reconnection bursts). 64 MB `maxBackpressure` is dead-connection detection, not rate limiting. Ed25519 auth + license key + banning at CRDT layer is the right defense model. Relay-level rate limiting hurts legit traffic more than it prevents abuse
+- [x] **M17:** MLS ban/unban desync fixed — server rejoin now drops stale MLS group and sends fresh KeyPackage to coordinator (not owner). Root cause: rejoining peer kept stale MLS group from before ban, encrypted with wrong epoch, coordinator couldn't decrypt. Also fixed post-join KeyPackage target (was owner-only, now coordinator)
+- [x] **Twitch settings toggle bug:** Save button now visible when toggling Twitch verification OFF (was hidden inside `if (_twitchEnabled)` block, making it impossible to disable)
+- [x] **M30:** Closed — known limitation, deferred to pre-v1.0. Per-channel MLS subgroups required for true enforcement. UI filtering is the current barrier; topic routing adds a second layer. Not a realistic alpha-stage threat (requires 30+ hours of RE effort for marginal gain)
+- [x] **MLS recovery skip for non-members:** Recovery KeyPackage no longer sent when local peer is not a CRDT member (fixes noisy REJECTED log after ban)
+- [x] **File re-download on rejoin:** `get_missing_file_ids()` now checks disk (`~/.hollow/files/`) in addition to DB, preventing ~250 MB redundant WebRTC transfers after ban/unban cycles
 
 ---
 
@@ -73,22 +88,7 @@
 
 | # | Domain | Title | Location |
 |---|--------|-------|----------|
-| M29 | Network | Voice channel leave not synced to peers (join works, leave doesn't) | `swarm.rs:1370-1390` |
-| M28 | Offline | @Mentions during offline sync don't trigger mention-specific unread | `unread_provider.dart` |
-
-### Tier 10 — Design decisions needed (requires discussion before coding)
-
-| # | Domain | Title | Location |
-|---|--------|-------|----------|
-| M6 | Storage | Server avatar in CRDT settings (133KB in every serialization) | `crdt.rs:364-368` |
-| M7 | Storage | No message retention policy (~850 MB/server/year) | `messages.rs` tables |
-| M8 | Storage | Full op_log (300-500 KB) sent as plaintext to new joiners | `swarm.rs:4918-4928` |
-| M15 | MLS | MLS recovery only targets Owner, not current coordinator | `swarm.rs:5353-5378` |
-| M17 | MLS | Commits only sent to online members — offline permanently desync | `swarm.rs:2108-2123` |
-| M22 | Network | Relay silently drops messages under backpressure (now logged but not retried) | `ws_handler.cpp:28-32` |
-| M30 | MLS | Channel visibility not cryptographically enforced (known, pre-v1.0) | documented |
-| L6 | MLS | KeyPackage accepted without CRDT membership verification | `swarm.rs:5792-5903` |
-| L14 | Offline | Server invites have no expiry mechanism | `sync_handler.rs` |
+| M28 | Offline | @Mentions during offline sync don't trigger mention-specific unread — requires relay `0x09` notification hint frames for unsubscribed channels (topic routing means unsubscribed channels never receive messages to count). Small Dart-only fix possible for subscribed channels, but full solution needs relay change | `unread_provider.dart` + `relay-uws/` |
 
 ### Tier 11 — Scaling & architecture (pre-v1.0, matters at 1000+ members)
 

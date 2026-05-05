@@ -708,6 +708,16 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                 child: const Text('Save Twitch Settings'),
               ),
             ),
+          ] else ...[
+            const SizedBox(height: HollowSpacing.md),
+            Align(
+              alignment: Alignment.centerRight,
+              child: HollowButton.filled(
+                onPressed: _savingTwitch ? null : _saveTwitchSettings,
+                compact: true,
+                child: const Text('Save Twitch Settings'),
+              ),
+            ),
           ],
 
           const SizedBox(height: HollowSpacing.xl),
