@@ -519,7 +519,7 @@ Tracks unread message counts for both server channels and DMs. Uses a "last seen
 
 ### UnreadState (Immutable)
 
-Six maps:
+Seven maps:
 
 | Field | Key Format | Description |
 |---|---|---|
@@ -529,8 +529,17 @@ Six maps:
 | `dmUnreadCounts` | `"peerId"` | Current unread count per DM |
 | `channelLatestId` | `"serverId:channelId"` | Latest message ID per channel (for live tracking) |
 | `dmLatestId` | `"peerId"` | Latest message ID per DM (for live tracking) |
+| `channelMentionCounts` | `"serverId:channelId"` | @mention count per channel (separate from unread) |
 
-All default to empty `const {}`. The `copyWith` method supports all six fields.
+All default to empty `const {}`. The `copyWith` method supports all seven fields.
+
+### Notification-Aware Unread Counting
+
+`recomputeServerUnread()` respects notification levels via `countUnreadChannelWithMentions()` Rust FFI. For "Mentions Only" channels, only messages containing @mentions or replies count as unread. For "Nothing" channels, unread is always 0. The function takes `max(dbCount, existingInMemoryCount)` to preserve hint-based increments.
+
+`onChannelMessage()` accepts `{bool isMention = false}` to track mentions separately. `markChannelSeen()` clears both unread and mention counts.
+
+Helper methods: `channelMentionCount()`, `serverMentionCount()`, `isChannelMentioned()`.
 
 ### Persistence Format
 `app_settings` keys:

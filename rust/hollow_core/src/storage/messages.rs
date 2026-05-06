@@ -1422,6 +1422,63 @@ impl MessageStore {
             .unwrap_or(0) as u32
     }
 
+    /// Count unread messages and mention-containing messages for a channel.
+    /// `mention_patterns` should include strings like `@everyone`, `@DisplayName`, `@Nickname`.
+    /// A message counts as a mention if it contains any pattern OR has a reply_to.
+    pub fn count_unread_channel_with_mentions(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        last_seen_message_id: Option<&str>,
+        mention_patterns: &[String],
+    ) -> (u32, u32) {
+        let threshold: i64 = if let Some(mid) = last_seen_message_id {
+            self.conn
+                .query_row(
+                    "SELECT id FROM channel_messages
+                     WHERE server_id = ?1 AND channel_id = ?2 AND message_id = ?3",
+                    params![server_id, channel_id, mid],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let mut mention_clauses = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        param_values.push(Box::new(server_id.to_string()));
+        param_values.push(Box::new(channel_id.to_string()));
+        param_values.push(Box::new(threshold));
+
+        let mut param_idx = 4;
+        for pattern in mention_patterns {
+            mention_clauses.push(format!("text LIKE ?{param_idx}"));
+            param_values.push(Box::new(format!("%{pattern}%")));
+            param_idx += 1;
+        }
+        mention_clauses.push("reply_to IS NOT NULL".to_string());
+
+        let mention_expr = mention_clauses.join(" OR ");
+        let sql = format!(
+            "SELECT COUNT(*), COUNT(CASE WHEN ({mention_expr}) THEN 1 END)
+             FROM channel_messages
+             WHERE server_id = ?1 AND channel_id = ?2 AND id > ?3
+               AND hidden_at IS NULL AND is_mine = 0"
+        );
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        self.conn
+            .query_row(&sql, params_refs.as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0).unwrap_or(0) as u32,
+                    row.get::<_, i64>(1).unwrap_or(0) as u32,
+                ))
+            })
+            .unwrap_or((0, 0))
+    }
+
     /// Get all distinct peer IDs that have DM messages.
     pub fn get_dm_peer_ids(&self) -> Vec<String> {
         let mut stmt = self

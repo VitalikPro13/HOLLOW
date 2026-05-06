@@ -27,6 +27,7 @@ import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
+import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -260,6 +261,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
         serverChannels[sid] = channels.map((c) => c.channelId).toList();
       }
       final dmPeerIds = await storage_api.getDmPeerIds();
+      // Load notification settings BEFORE unread — unread depends on notif levels.
+      await ref.read(notificationSettingsProvider.notifier)
+          .loadAll(servers.keys.toList(), serverChannels, dmPeerIds);
       await ref.read(unreadProvider.notifier).loadAll(serverChannels, dmPeerIds);
     } catch (e) {
       debugPrint('[HOLLOW] Failed to load unread state: $e');

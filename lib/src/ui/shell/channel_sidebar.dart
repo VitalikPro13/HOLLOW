@@ -858,6 +858,9 @@ class _ChannelTile extends ConsumerWidget {
         !isMuted &&
         ref.watch(unreadProvider.notifier).isChannelUnread(
             serverId, channel.channelId);
+    final mentionCount = isSelected ? 0 :
+        ref.watch(unreadProvider.notifier).channelMentionCount(
+            serverId, channel.channelId);
 
     Widget tile = HollowPressable(
       onTap: onTap,
@@ -898,8 +901,20 @@ class _ChannelTile extends ConsumerWidget {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            // Unread dot
-            if (hasUnread)
+            if (mentionCount > 0)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                decoration: BoxDecoration(
+                  color: hollow.error,
+                  borderRadius: BorderRadius.circular(9),
+                ),
+                child: Text(
+                  '@$mentionCount',
+                  style: HollowTypography.caption.copyWith(
+                    color: Colors.white, fontWeight: FontWeight.w700, fontSize: 10),
+                ),
+              )
+            else if (hasUnread)
               Container(
                 width: 8,
                 height: 8,

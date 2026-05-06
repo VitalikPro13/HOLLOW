@@ -90,6 +90,10 @@ pub(crate) enum NetworkEvent {
     FriendRequestAccepted { peer_id: String },
     FriendRequestRejected { peer_id: String },
     FriendRemoved { peer_id: String },
+    ChannelNotificationHint {
+        server_id: String, channel_id: String, from_peer: String,
+        has_everyone: bool, mentioned_names: Vec<String>, is_reply: bool,
+    },
     // -- Typing indicator events (Phase 3.5) --
     TypingStarted { peer_id: String, server_id: String, channel_id: String },
     // -- Presence events (Phase 6.75) --
@@ -615,6 +619,20 @@ pub(crate) enum HavenMessage {
 
     #[serde(rename = "friend_remove")]
     FriendRemove,
+
+    /// Lightweight notification hint for unsubscribed channels (topic routing).
+    /// Sent via SendToRoom (0x03) so all room members receive it.
+    #[serde(rename = "notif_hint")]
+    ChannelNotificationHint {
+        server_id: String,
+        channel_id: String,
+        #[serde(default)]
+        has_everyone: bool,
+        #[serde(default)]
+        mentioned_names: Vec<String>,
+        #[serde(default)]
+        is_reply: bool,
+    },
 
     // -- Typing indicators (Phase 3.5) --
 

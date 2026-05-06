@@ -291,6 +291,8 @@ async fn run_event_loop(
     // Pending friend requests: peer_id → requested_at timestamp.
     // Queued when peer isn't reachable (no shared rooms), sent when they appear.
     let mut pending_friend_requests: HashMap<String, i64> = HashMap::new();
+    // Pending friend removals: peer_ids whose FriendRemove wasn't delivered (peer offline).
+    let mut pending_friend_removals: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
         let data_dir = crate::identity::data_dir().unwrap_or_default();
         let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
@@ -307,6 +309,19 @@ async fn run_event_loop(
                     hollow_log!(
                         "[HOLLOW-FRIENDS] Restored {} pending outgoing friend requests from DB",
                         pending_friend_requests.len()
+                    );
+                }
+            }
+            if let Ok(friends) = store.load_friends(Some("removed")) {
+                for (peer_id, _status, direction, _requested_at, _updated_at) in friends {
+                    if direction == "outgoing" {
+                        pending_friend_removals.insert(peer_id);
+                    }
+                }
+                if !pending_friend_removals.is_empty() {
+                    hollow_log!(
+                        "[HOLLOW-FRIENDS] Restored {} pending friend removals from DB",
+                        pending_friend_removals.len()
                     );
                 }
             }
@@ -765,6 +780,7 @@ async fn run_event_loop(
                         social::handle_remove_friend(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &bundle_keypair, peer_id_str,
+                            &mut pending_friend_removals,
                         ).await;
                     }
 
@@ -1313,6 +1329,23 @@ async fn run_event_loop(
                                     );
                                 }
 
+                                // Drain pending friend removals for this peer.
+                                if pending_friend_removals.remove(&peer_id) {
+                                    hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared, sending queued friend removal");
+                                    send_message_to_peer(
+                                        &ws_cmd_tx, &ws_room_peers,
+                                        &peer_id, HavenMessage::FriendRemove,
+                                    );
+                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
+                                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
+                                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                            let _ = store.remove_friend(&peer_id);
+                                        }
+                                    }
+                                }
+
                                 if is_new {
                                     // Send our profile (with invisible flag) to the new peer.
                                     social::send_own_profile_to_peer(
@@ -1695,6 +1728,23 @@ async fn run_event_loop(
                                             &ws_cmd_tx, &ws_room_peers,
                                             pid_str, HavenMessage::FriendRequest { requested_at },
                                         );
+                                    }
+
+                                    // Drain pending friend removals for this peer.
+                                    if pending_friend_removals.remove(pid_str) {
+                                        hollow_log!("[HOLLOW-FRIENDS] Peer {pid_str} appeared in RoomMembers, sending queued friend removal");
+                                        send_message_to_peer(
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            pid_str, HavenMessage::FriendRemove,
+                                        );
+                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
+                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+                                        if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
+                                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                                let _ = store.remove_friend(pid_str);
+                                            }
+                                        }
                                     }
 
                                     // Olm key exchange + pending_messages drain + DM sync.
@@ -6396,6 +6446,13 @@ async fn handle_incoming_request(
 
             let _ = event_tx.send(NetworkEvent::FriendRemoved {
                 peer_id: peer_str.to_string(),
+            }).await;
+        }
+
+        HavenMessage::ChannelNotificationHint { server_id, channel_id, has_everyone, mentioned_names, is_reply } => {
+            let _ = event_tx.send(NetworkEvent::ChannelNotificationHint {
+                server_id, channel_id, from_peer: peer_str.to_string(),
+                has_everyone, mentioned_names, is_reply,
             }).await;
         }
 

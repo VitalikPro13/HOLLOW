@@ -210,8 +210,8 @@ class VoiceChannelState {
 }
 
 class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
-  static const int maxScreenShareOutgoing = 5;
-  static const int maxScreenShareIncoming = 3;
+  static const int maxScreenShareOutgoing = 15;
+  static const int maxScreenShareIncoming = 10;
 
   VoiceChannelService? _service;
 

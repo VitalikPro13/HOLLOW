@@ -111,8 +111,14 @@ The entire body is wrapped in `try-catch` to prevent unhandled exceptions from k
 **`NetworkEvent_ChannelMessageReceived`** (serverId, channelId, fromPeer, text, timestamp, messageId, replyToMid, linkPreview, signature, publicKey)
 - `channelChatProvider.notifier.receiveMessage(...)` with all fields.
 - `typingProvider.notifier.clearTyping('$serverId:$channelId', fromPeer)`
-- Unread tracking: Checks `windowVisibleProvider`, `selectedServerProvider`, `selectedChannelProvider`, and `chatAtBottomProvider`. Gets effective channel notification level. If level is `mentions`, checks if message actually mentions local user via `@everyone`, `@displayName`, `@nickname`, or is a reply. If not muted and not mention-filtered, calls `unreadProvider.notifier.onChannelMessage(serverId, channelId, messageId, isViewingChannel)`.
+- Unread tracking: Checks `windowVisibleProvider`, `selectedServerProvider`, `selectedChannelProvider`, and `chatAtBottomProvider`. Gets effective channel notification level. If level is `mentions`, checks if message actually mentions local user via `@everyone`, `@displayName`, `@nickname`, or is a reply. If not muted and not mention-filtered, calls `unreadProvider.notifier.onChannelMessage(serverId, channelId, messageId, isViewingChannel, isMention: isMentioned)`. Always adds channel to `_recentLiveChannels` dedup set (even if mention-filtered) so notification hints are properly deduped.
 - System notification: If not viewing and not filtered, calls `_notifyChannelWithName(serverId, channelId, fromPeer, text, replyToMid)`.
+
+**`NetworkEvent_ChannelNotificationHint`** (serverId, channelId, fromPeer, hasEveryone, mentionedNames, isReply)
+- Lightweight hint broadcast via SendToRoom (0x03) by the message sender. Allows unsubscribed channels (topic routing) to track unread/mentions without receiving the full message.
+- Skips if: own hint, viewing channel, channel is subscribed (in `_recentLiveChannels` or has existing unread in same server), or muted.
+- For "mentions" mode: checks `hasEveryone`, `mentionedNames.contains(localName/localNick)`, `isReply`. Skips non-mentions.
+- Increments unread via `onChannelMessage()` with synthetic message ID (`hint-{timestamp}`).
 
 **`NetworkEvent_ChannelMessageSent`** (serverId, channelId, messageId, timestamp, signature, publicKey)
 - `channelChatProvider.notifier.hydrateSignature(serverId, channelId, messageId, timestamp.toInt(), signature, publicKey)`

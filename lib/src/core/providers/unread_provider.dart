@@ -1,5 +1,10 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+import 'package:hollow/src/core/providers/notification_provider.dart';
+import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
 
 /// Tracks unread message state per channel and per DM.
 ///
@@ -75,36 +80,68 @@ class UnreadNotifier extends Notifier<UnreadState> {
   }
 
   /// Recompute unread counts from DB for all channels of a server.
-  /// Called after message sync completes to pick up messages that arrived while offline.
+  /// Respects notification settings (All/Mentions/Nothing).
   Future<void> recomputeServerUnread(
       String serverId, List<String> channelIds) async {
     final updatedCounts = Map<String, int>.from(state.channelUnreadCounts);
+    final updatedMentions = Map<String, int>.from(state.channelMentionCounts);
+    final notifSettings = ref.read(notificationSettingsProvider.notifier);
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final localName = displayNameFor(ref.read(profileProvider), localPeerId);
+    final nicknames = ref.read(serverNicknamesProvider(serverId));
+    final localNick = nicknames[localPeerId];
+    final mentionPatterns = <String>['@everyone', '@$localName'];
+    if (localNick != null && localNick.isNotEmpty) {
+      mentionPatterns.add('@$localNick');
+    }
+
     for (final cid in channelIds) {
       final key = '$serverId:$cid';
       try {
-        final lastSeen = state.channelLastSeen[key];
-        final int count;
-        if (lastSeen != null) {
-          count = await storage_api.countUnreadChannel(
-            serverId: serverId,
-            channelId: cid,
-            lastSeenMessageId: lastSeen,
-          );
-        } else {
-          // Never opened — count all messages from others.
-          count = await storage_api.countAllUnreadChannel(
-            serverId: serverId,
-            channelId: cid,
-          );
+        final level = notifSettings.effectiveChannelLevel(serverId, cid);
+        if (level == NotificationLevel.nothing) {
+          updatedCounts.remove(key);
+          updatedMentions.remove(key);
+          continue;
         }
-        if (count > 0) {
-          updatedCounts[key] = count;
+
+        final lastSeen = state.channelLastSeen[key];
+        final result = await storage_api.countUnreadChannelWithMentions(
+          serverId: serverId,
+          channelId: cid,
+          lastSeenMessageId: lastSeen,
+          mentionPatterns: mentionPatterns,
+        );
+
+        final unreadCount = level == NotificationLevel.mentions
+            ? result.mentions
+            : result.total;
+        // Keep the higher of DB count vs existing in-memory count.
+        // In-memory may include hint-based increments not yet in DB.
+        final existingCount = updatedCounts[key] ?? 0;
+        final existingMentions = updatedMentions[key] ?? 0;
+        final finalUnread = unreadCount > existingCount ? unreadCount : existingCount;
+        final finalMentions = result.mentions > existingMentions ? result.mentions : existingMentions;
+        debugPrint('[HOLLOW-UNREAD] recompute $key: level=$level total=${result.total} mentions=${result.mentions} existing=$existingCount → final=$finalUnread lastSeen=$lastSeen');
+        if (finalUnread > 0) {
+          updatedCounts[key] = finalUnread;
         } else {
           updatedCounts.remove(key);
         }
-      } catch (_) {}
+        if (finalMentions > 0) {
+          updatedMentions[key] = finalMentions;
+        } else {
+          updatedMentions.remove(key);
+        }
+      } catch (e) {
+        debugPrint('[HOLLOW-UNREAD] recompute error for $key: $e');
+      }
     }
-    state = state.copyWith(channelUnreadCounts: updatedCounts);
+    debugPrint('[HOLLOW-UNREAD] recompute done for $serverId: counts=$updatedCounts');
+    state = state.copyWith(
+      channelUnreadCounts: updatedCounts,
+      channelMentionCounts: updatedMentions,
+    );
   }
 
   /// Recompute unread count for a single DM peer from DB.
@@ -142,14 +179,18 @@ class UnreadNotifier extends Notifier<UnreadState> {
         Map<String, String>.from(state.channelLastSeen);
     updatedSeen[key] = latestMessageId;
 
-    // Clear unread count.
+    // Clear unread + mention counts.
     final updatedCounts =
         Map<String, int>.from(state.channelUnreadCounts);
     updatedCounts.remove(key);
+    final updatedMentions =
+        Map<String, int>.from(state.channelMentionCounts);
+    updatedMentions.remove(key);
 
     state = state.copyWith(
       channelLastSeen: updatedSeen,
       channelUnreadCounts: updatedCounts,
+      channelMentionCounts: updatedMentions,
     );
 
     // Persist.
@@ -183,9 +224,9 @@ class UnreadNotifier extends Notifier<UnreadState> {
   /// Called when a new live channel message arrives.
   /// Increments unread count if the channel is not currently viewed.
   void onChannelMessage(String serverId, String channelId,
-      String messageId, bool isCurrentlyViewing) {
+      String messageId, bool isCurrentlyViewing,
+      {bool isMention = false}) {
     if (isCurrentlyViewing) {
-      // User is looking at this channel — mark as seen immediately.
       markChannelSeen(serverId, channelId, messageId);
       return;
     }
@@ -195,14 +236,20 @@ class UnreadNotifier extends Notifier<UnreadState> {
         Map<String, int>.from(state.channelUnreadCounts);
     updatedCounts[key] = (updatedCounts[key] ?? 0) + 1;
 
-    // Also track the latest message ID.
     final updatedLatest =
         Map<String, String>.from(state.channelLatestId);
     updatedLatest[key] = messageId;
 
+    Map<String, int>? updatedMentions;
+    if (isMention) {
+      updatedMentions = Map<String, int>.from(state.channelMentionCounts);
+      updatedMentions[key] = (updatedMentions[key] ?? 0) + 1;
+    }
+
     state = state.copyWith(
       channelUnreadCounts: updatedCounts,
       channelLatestId: updatedLatest,
+      channelMentionCounts: updatedMentions,
     );
   }
 
@@ -262,6 +309,24 @@ class UnreadNotifier extends Notifier<UnreadState> {
     return dmUnreadCount(peerId) > 0;
   }
 
+  int channelMentionCount(String serverId, String channelId) {
+    return state.channelMentionCounts['$serverId:$channelId'] ?? 0;
+  }
+
+  int serverMentionCount(String serverId) {
+    int total = 0;
+    for (final entry in state.channelMentionCounts.entries) {
+      if (entry.key.startsWith('$serverId:')) {
+        total += entry.value;
+      }
+    }
+    return total;
+  }
+
+  bool isChannelMentioned(String serverId, String channelId) {
+    return channelMentionCount(serverId, channelId) > 0;
+  }
+
   /// Whether any DM has unread messages.
   bool hasAnyDmUnread() {
     return state.dmUnreadCounts.values.any((c) => c > 0);
@@ -288,6 +353,9 @@ class UnreadState {
   /// Latest message ID per DM.
   final Map<String, String> dmLatestId;
 
+  /// Mention counts per channel (key: "serverId:channelId").
+  final Map<String, int> channelMentionCounts;
+
   const UnreadState({
     this.channelLastSeen = const {},
     this.dmLastSeen = const {},
@@ -295,6 +363,7 @@ class UnreadState {
     this.dmUnreadCounts = const {},
     this.channelLatestId = const {},
     this.dmLatestId = const {},
+    this.channelMentionCounts = const {},
   });
 
   UnreadState copyWith({
@@ -304,6 +373,7 @@ class UnreadState {
     Map<String, int>? dmUnreadCounts,
     Map<String, String>? channelLatestId,
     Map<String, String>? dmLatestId,
+    Map<String, int>? channelMentionCounts,
   }) {
     return UnreadState(
       channelLastSeen: channelLastSeen ?? this.channelLastSeen,
@@ -312,6 +382,7 @@ class UnreadState {
       dmUnreadCounts: dmUnreadCounts ?? this.dmUnreadCounts,
       channelLatestId: channelLatestId ?? this.channelLatestId,
       dmLatestId: dmLatestId ?? this.dmLatestId,
+      channelMentionCounts: channelMentionCounts ?? this.channelMentionCounts,
     );
   }
 }

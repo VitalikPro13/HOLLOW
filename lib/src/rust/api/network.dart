@@ -794,6 +794,14 @@ sealed class NetworkEvent with _$NetworkEvent {
       NetworkEvent_FriendRequestRejected;
   const factory NetworkEvent.friendRemoved({required String peerId}) =
       NetworkEvent_FriendRemoved;
+  const factory NetworkEvent.channelNotificationHint({
+    required String serverId,
+    required String channelId,
+    required String fromPeer,
+    required bool hasEveryone,
+    required List<String> mentionedNames,
+    required bool isReply,
+  }) = NetworkEvent_ChannelNotificationHint;
   const factory NetworkEvent.typingStarted({
     required String peerId,
     required String serverId,

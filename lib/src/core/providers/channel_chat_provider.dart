@@ -5,6 +5,8 @@ import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
+import 'package:hollow/src/core/providers/file_transfer_provider.dart';
+import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
@@ -575,6 +577,37 @@ class ChannelChatNotifier
     final updated = Map.of(state);
     updated[key] = list;
     state = updated;
+  }
+
+  /// Request file downloads for messages near the viewport.
+  final Set<String> _requestedFileIds = {};
+
+  Future<void> requestVisibleFiles(
+      String serverId, String channelId,
+      List<ChannelChatMessage> messages,
+      int firstVisible, int lastVisible) async {
+    final start = (firstVisible - 15).clamp(0, messages.length - 1);
+    final end = (lastVisible + 15).clamp(0, messages.length - 1);
+    final peers = ref.read(peersProvider);
+    if (peers.isEmpty) return;
+    final peerIds = peers.keys.toList();
+
+    for (int i = start; i <= end; i++) {
+      final msg = messages[i];
+      final att = msg.fileAttachment;
+      if (att == null || att.isComplete || att.diskPath != null) continue;
+      if (_requestedFileIds.contains(att.fileId)) continue;
+      final transfer = ref.read(fileTransferProvider)[att.fileId];
+      if (transfer != null && (transfer.isDownloading || transfer.isComplete)) continue;
+      _requestedFileIds.add(att.fileId);
+      for (final peerId in peerIds) {
+        try {
+          await network_api.requestFileFromPeer(
+              fileId: att.fileId, peerId: peerId, chunks: []);
+          break;
+        } catch (_) {}
+      }
+    }
   }
 }
 

@@ -99,15 +99,25 @@
 
 ## Remaining Items (not yet fixed)
 
-### Tier 9 — Quick fixes (small, self-contained, no design decisions)
+### M28 — Notification system (partially complete)
 
-| # | Domain | Title | Location |
-|---|--------|-------|----------|
-| M28 | Offline | @Mentions during offline sync don't trigger mention-specific unread — requires relay `0x09` notification hint frames for unsubscribed channels (topic routing means unsubscribed channels never receive messages to count). Small Dart-only fix possible for subscribed channels, but full solution needs relay change | `unread_provider.dart` + `relay-uws/` |
+**Done:**
+- [x] Notification settings now persist across restarts (`loadAll` called at startup in `hollow_shell.dart`)
+- [x] `UnreadState` extended with `channelMentionCounts` — separate @mention tracking
+- [x] `recomputeServerUnread()` respects notification levels (All/Mentions/Nothing) via new `countUnreadChannelWithMentions()` Rust FFI
+- [x] `ChannelNotificationHint` plaintext message — sender broadcasts hint via `SendToRoom` after every channel message
+- [x] Unsubscribed channels correctly receive hints and respect Mentions Only / Nothing / All Messages settings
+- [x] Mention badge (`@N`) on channel sidebar + server strip
+- [x] Viewport-aware file downloads — files load on scroll proximity instead of bulk download after sync
+- [x] `onChannelMessage()` accepts `isMention` flag, `markChannelSeen()` clears mention counts
+
+**Remaining (needs deeper investigation):**
+- [ ] Subscribed channel (the one you're viewing or auto-subscribed first channel) still counts ALL messages as unread when set to Mentions Only — the live `ChannelMessageReceived` path applies mention filtering but something in the flow still increments unread for non-mention messages
+- [ ] Sync-based unread recomputation doesn't produce server badge counts — `recomputeServerUnread` runs and the FFI returns correct data, but the unread badge on the server icon doesn't appear after sync (DMs work correctly)
 
 ### New items discovered during QA work
-- [ ] Screen share gossip relay for voice channels (current limit: 5 viewers)
-- [ ] Friend removal not delivered to offline peers (no queue-and-drain like friend requests)
+- [x] Screen share caps raised to 15 outgoing / 10 incoming (was 5/3). True gossip relay deferred post-alpha — requires decrypt/re-encrypt at each hop (same as audio gossip), needs performance testing with real users. Transparent SFrame relay is not possible: WebRTC's `addTrack()` always decodes/re-encodes between PCs
+- [x] Friend removal now delivered to offline peers — `pending_friend_removals` HashSet + DB persistence (status=`removed`), drained on PeerJoined/RoomMembers, mirrors the friend request pattern
 - Note: Topic-routed channel notifications merged into M28 above
 
 ---

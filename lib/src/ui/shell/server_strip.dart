@@ -262,6 +262,9 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
     final serverUnreads = isServerMuted
         ? 0
         : ref.watch(unreadProvider.notifier).serverUnreadCount(serverId);
+    final serverMentions = isServerMuted
+        ? 0
+        : ref.watch(unreadProvider.notifier).serverMentionCount(serverId);
     final name = server?.name ?? '';
 
     Widget serverIconChild = Builder(builder: (_) {
@@ -326,6 +329,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
             child: _ServerIconWithIndicator(
               isSelected: isSelected,
               unreadCount: serverUnreads,
+              mentionCount: serverMentions,
               child: _ServerIcon(
                 isSelected: isSelected,
                 backgroundColor: _colorFromId(serverId),
@@ -551,12 +555,14 @@ String _initialsFromName(String name) {
 class _ServerIconWithIndicator extends StatefulWidget {
   final bool isSelected;
   final int unreadCount;
+  final int mentionCount;
   final Widget child;
 
   const _ServerIconWithIndicator({
     required this.isSelected,
     required this.child,
     this.unreadCount = 0,
+    this.mentionCount = 0,
   });
 
   @override
@@ -622,9 +628,9 @@ class _ServerIconWithIndicatorState
                       ),
                       alignment: Alignment.center,
                       child: Text(
-                        widget.unreadCount > 99
-                            ? '99+'
-                            : '${widget.unreadCount}',
+                        widget.mentionCount > 0
+                            ? (widget.mentionCount > 99 ? '@99+' : '@${widget.mentionCount}')
+                            : (widget.unreadCount > 99 ? '99+' : '${widget.unreadCount}'),
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 9,

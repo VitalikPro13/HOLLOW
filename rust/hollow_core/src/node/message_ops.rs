@@ -219,6 +219,32 @@ pub(crate) async fn handle_send_channel_message(
         }
     }
 
+    // Broadcast notification hint via SendToRoom (reaches all room members, even unsubscribed).
+    {
+        let has_everyone = text.contains("@everyone");
+        let mut mentioned_names = Vec::new();
+        for word in text.split_whitespace() {
+            if let Some(name) = word.strip_prefix('@') {
+                if !name.is_empty() && name != "everyone" {
+                    mentioned_names.push(name.to_string());
+                }
+            }
+        }
+        let hint = HavenMessage::ChannelNotificationHint {
+            server_id: server_id.clone(),
+            channel_id: channel_id.clone(),
+            has_everyone,
+            mentioned_names,
+            is_reply: reply_to_mid.is_some(),
+        };
+        if let Ok(hint_bytes) = serde_json::to_vec(&hint) {
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
+                room_code: server_id.clone(),
+                data: hint_bytes,
+            });
+        }
+    }
+
     // Persist locally with same timestamp as sent.
     let data_dir = crate::identity::data_dir().unwrap_or_default();
     let db_path = data_dir.join("messages.db").to_string_lossy().to_string();

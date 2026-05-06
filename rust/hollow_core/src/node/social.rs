@@ -175,24 +175,29 @@ pub(crate) async fn handle_remove_friend(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     peer_id_str: String,
+    pending_friend_removals: &mut std::collections::HashSet<String>,
 ) {
     hollow_log!("[HOLLOW-FRIENDS] Removing friend {peer_id_str}");
 
-    {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-            let _ = store.remove_friend(&peer_id_str);
-        }
-    }
+    let data_dir = crate::identity::data_dir().unwrap_or_default();
+    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
+    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
 
     if peer_is_reachable(&ws_room_peers, &peer_id_str) {
         send_message_to_peer(
             &ws_cmd_tx, &ws_room_peers,
             &peer_id_str, HavenMessage::FriendRemove,
         );
+        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+            let _ = store.remove_friend(&peer_id_str);
+        }
+    } else {
+        pending_friend_removals.insert(peer_id_str.clone());
+        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+            let _ = store.save_friend(&peer_id_str, "removed", "outgoing", 0);
+        }
+        hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id_str} not reachable, queued friend removal for delivery");
     }
 
     let _ = event_tx.send(NetworkEvent::FriendRemoved {

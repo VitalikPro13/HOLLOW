@@ -141,13 +141,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     _itemPositionsListener.itemPositions.addListener(_onScrollPositionChanged);
   }
 
+  Timer? _fileRequestDebounce;
+
   void _onScrollPositionChanged() {
     final nearBottom = _isNearBottom;
     if (_showScrollPill == nearBottom) {
       setState(() => _showScrollPill = !nearBottom);
     }
     ref.read(chatAtBottomProvider.notifier).state = nearBottom;
-    // Auto-mark as read when user scrolls back to bottom.
     if (nearBottom) {
       final msgs = ref.read(channelChatProvider)[_stateKey];
       if (msgs != null && msgs.isNotEmpty) {
@@ -155,6 +156,24 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
               widget.serverId, widget.channelId, msgs.last.messageId);
       }
     }
+    _requestViewportFiles();
+  }
+
+  void _requestViewportFiles() {
+    _fileRequestDebounce?.cancel();
+    _fileRequestDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (!mounted) return;
+      final positions = _itemPositionsListener.itemPositions.value;
+      if (positions.isEmpty) return;
+      final indices = positions.map((p) => p.index);
+      final firstVisible = indices.reduce((a, b) => a < b ? a : b);
+      final lastVisible = indices.reduce((a, b) => a > b ? a : b);
+      final msgs = ref.read(channelChatProvider)[_stateKey] ?? [];
+      if (msgs.isEmpty) return;
+      ref.read(channelChatProvider.notifier).requestVisibleFiles(
+          widget.serverId, widget.channelId,
+          msgs, firstVisible, lastVisible);
+    });
   }
 
   bool _loadingHistory = false;
@@ -186,12 +205,16 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         : null;
     ref.read(unreadProvider.notifier)
         .markChannelSeen(widget.serverId, widget.channelId, latestId);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _requestViewportFiles();
+    });
   }
 
   @override
   void dispose() {
     _dismissMentionOverlay();
     _urlDebounce?.cancel();
+    _fileRequestDebounce?.cancel();
     _itemPositionsListener.itemPositions.removeListener(_onScrollPositionChanged);
     _controller.dispose();
     _focusNode.dispose();

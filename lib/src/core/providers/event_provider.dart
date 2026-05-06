@@ -61,6 +61,11 @@ class EventStreamNotifier extends Notifier<bool> {
   /// Maps share rootHash → file ID for bridging Share events to file transfer state.
   final Map<String, String> _shareToFileId = {};
 
+  /// Dedup: channels that received a live ChannelMessageReceived recently.
+  /// Prevents double-counting when ChannelNotificationHint arrives for subscribed channels.
+  final Set<String> _recentLiveChannels = {};
+  Timer? _recentLiveChannelsClearTimer;
+
   /// Servers that have completed their initial message sync.
   /// Share-backed files are only auto-downloaded for live messages (post-sync),
   /// not during the sync burst — prevents cache thrash on reconnection.
@@ -179,23 +184,27 @@ class EventStreamNotifier extends Notifier<bool> {
             .effectiveChannelLevel(serverId, channelId);
         final isChannelMuted =
             channelNotifLevel == NotificationLevel.nothing;
-        // For "mentions only", check if the message actually mentions us.
-        bool isMentionFiltered = false;
-        if (channelNotifLevel == NotificationLevel.mentions) {
-          final localPeerId = ref.read(identityProvider).peerId ?? '';
-          final localName = displayNameFor(
-              ref.read(profileProvider), localPeerId);
-          final localNick =
-              ref.read(serverNicknamesProvider(serverId))[localPeerId];
-          final isMentioned = text.contains('@everyone') ||
-              text.contains('@$localName') ||
-              (localNick != null && text.contains('@$localNick')) ||
-              replyToMid != null;
-          isMentionFiltered = !isMentioned;
-        }
+        final localPeerId = ref.read(identityProvider).peerId ?? '';
+        final localName = displayNameFor(
+            ref.read(profileProvider), localPeerId);
+        final localNick =
+            ref.read(serverNicknamesProvider(serverId))[localPeerId];
+        final isMentioned = text.contains('@everyone') ||
+            text.contains('@$localName') ||
+            (localNick != null && text.contains('@$localNick')) ||
+            replyToMid != null;
+        final isMentionFiltered = channelNotifLevel == NotificationLevel.mentions && !isMentioned;
         if (!isChannelMuted && !isMentionFiltered) {
           ref.read(unreadProvider.notifier).onChannelMessage(
-              serverId, channelId, messageId, isViewingChannel);
+              serverId, channelId, messageId, isViewingChannel,
+              isMention: isMentioned);
+        }
+        // Always track live messages for dedup (even if mention-filtered).
+        if (!isChannelMuted) {
+          _recentLiveChannels.add('$serverId:$channelId');
+          _recentLiveChannelsClearTimer?.cancel();
+          _recentLiveChannelsClearTimer = Timer(
+            const Duration(seconds: 2), () => _recentLiveChannels.clear());
         }
         // System notification for channel message.
         if (!isViewingChannel && !isChannelMuted && !isMentionFiltered) {
@@ -428,22 +437,19 @@ class EventStreamNotifier extends Notifier<bool> {
               .loadPins(serverId, selectedChannel);
         }
 
-        // After message sync, request any missing files.
-        if (newMessageCount > 0) {
-          _requestMissingFiles(serverId);
-        }
+        // Files are now downloaded on-demand when visible in viewport.
+        // See channel_chat_pane.dart _requestViewportFiles().
 
-        // Always recompute unread counts from DB after sync completes for
-        // non-viewed servers. loadAll() runs before the node starts, so its
-        // snapshot is stale once sync finishes. Even with newMessageCount == 0,
-        // live events during sync may have added messages to DB.
-        if (selectedServer != serverId) {
-          crdt_api.getServerChannels(serverId: serverId).then((channels) {
-            final channelIds = channels.map((c) => c.channelId).toList();
-            ref.read(unreadProvider.notifier).recomputeServerUnread(
-                serverId, channelIds);
-          }).catchError((_) {});
-        }
+        // Recompute unread counts from DB after sync — respects notification levels.
+        debugPrint('[HOLLOW] Triggering recomputeServerUnread for $serverId (newMsgCount=$newMessageCount)');
+        crdt_api.getServerChannels(serverId: serverId).then((channels) {
+          final channelIds = channels.map((c) => c.channelId).toList();
+          debugPrint('[HOLLOW] recomputeServerUnread: ${channelIds.length} channels for $serverId');
+          ref.read(unreadProvider.notifier).recomputeServerUnread(
+              serverId, channelIds);
+        }).catchError((e) {
+          debugPrint('[HOLLOW] recomputeServerUnread failed: $e');
+        });
 
       case NetworkEvent_MessageSyncFailed(:final serverId, :final error):
         debugPrint('[HOLLOW] Message sync failed for $serverId: $error');
@@ -590,6 +596,43 @@ class EventStreamNotifier extends Notifier<bool> {
         if (splitState.isSplit && splitState.rightPane?.peerId == peerId) {
           ref.read(splitViewProvider.notifier).closeSplit();
         }
+
+      // -- Channel notification hints (unsubscribed channel awareness) --
+      case NetworkEvent_ChannelNotificationHint(
+            :final serverId, :final channelId, :final fromPeer,
+            :final hasEveryone, :final mentionedNames, :final isReply):
+        // Ignore own hints.
+        final localPeerId = ref.read(identityProvider).peerId ?? '';
+        if (fromPeer == localPeerId) break;
+        // Skip if viewing this channel (live messages handle it).
+        final isViewingChannel =
+            ref.read(selectedServerProvider) == serverId &&
+            ref.read(selectedChannelProvider) == channelId;
+        if (isViewingChannel) break;
+        // Skip if this channel is subscribed via topic routing (receives live
+        // ChannelMessageReceived events). Subscribed = selected channel OR
+        // any channel with existing unread count.
+        final isSubscribed = _recentLiveChannels.contains('$serverId:$channelId') ||
+            (ref.read(selectedServerProvider) == serverId &&
+             ref.read(unreadProvider.notifier).isChannelUnread(serverId, channelId));
+        if (isSubscribed) break;
+        final channelNotifLevel = ref
+            .read(notificationSettingsProvider.notifier)
+            .effectiveChannelLevel(serverId, channelId);
+        if (channelNotifLevel == NotificationLevel.nothing) break;
+        final localName = displayNameFor(
+            ref.read(profileProvider), localPeerId);
+        final localNick =
+            ref.read(serverNicknamesProvider(serverId))[localPeerId];
+        final isMentioned = hasEveryone ||
+            mentionedNames.contains(localName) ||
+            (localNick != null && mentionedNames.contains(localNick)) ||
+            isReply;
+        if (channelNotifLevel == NotificationLevel.mentions && !isMentioned) break;
+        ref.read(unreadProvider.notifier).onChannelMessage(
+            serverId, channelId,
+            'hint-${DateTime.now().millisecondsSinceEpoch}',
+            false, isMention: isMentioned);
 
       // -- Typing indicator events (Phase 3.5) --
       case NetworkEvent_TypingStarted(

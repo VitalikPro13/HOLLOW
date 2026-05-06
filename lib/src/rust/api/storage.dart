@@ -160,6 +160,20 @@ Future<int> countAllUnreadChannel({
   channelId: channelId,
 );
 
+/// Count unread and mention-containing messages for a channel.
+/// `mention_patterns` should include `@everyone`, `@DisplayName`, `@Nickname`.
+Future<UnreadMentionCount> countUnreadChannelWithMentions({
+  required String serverId,
+  required String channelId,
+  String? lastSeenMessageId,
+  required List<String> mentionPatterns,
+}) => RustLib.instance.api.crateApiStorageCountUnreadChannelWithMentions(
+  serverId: serverId,
+  channelId: channelId,
+  lastSeenMessageId: lastSeenMessageId,
+  mentionPatterns: mentionPatterns,
+);
+
 /// Get all distinct peer IDs that have DM messages in the local database.
 Future<List<String>> getDmPeerIds() =>
     RustLib.instance.api.crateApiStorageGetDmPeerIds();
@@ -679,6 +693,25 @@ class StoredReaction {
           emoji == other.emoji &&
           peerId == other.peerId &&
           addedAt == other.addedAt;
+}
+
+/// Unread + mention counts returned from the database.
+class UnreadMentionCount {
+  final int total;
+  final int mentions;
+
+  const UnreadMentionCount({required this.total, required this.mentions});
+
+  @override
+  int get hashCode => total.hashCode ^ mentions.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UnreadMentionCount &&
+          runtimeType == other.runtimeType &&
+          total == other.total &&
+          mentions == other.mentions;
 }
 
 /// A user profile returned to Dart.

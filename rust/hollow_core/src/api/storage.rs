@@ -454,6 +454,34 @@ pub fn count_all_unread_channel(server_id: String, channel_id: String) -> Result
     Ok(ms.count_all_unread_channel(&server_id, &channel_id))
 }
 
+/// Unread + mention counts returned from the database.
+pub struct UnreadMentionCount {
+    pub total: u32,
+    pub mentions: u32,
+}
+
+/// Count unread and mention-containing messages for a channel.
+/// `mention_patterns` should include `@everyone`, `@DisplayName`, `@Nickname`.
+#[frb]
+pub fn count_unread_channel_with_mentions(
+    server_id: String,
+    channel_id: String,
+    last_seen_message_id: Option<String>,
+    mention_patterns: Vec<String>,
+) -> Result<UnreadMentionCount, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    let (total, mentions) = ms.count_unread_channel_with_mentions(
+        &server_id,
+        &channel_id,
+        last_seen_message_id.as_deref(),
+        &mention_patterns,
+    );
+    hollow_log!("[HOLLOW-UNREAD] countWithMentions {channel_id} in {server_id}: total={total} mentions={mentions} lastSeen={last_seen_message_id:?} patterns={mention_patterns:?}");
+    Ok(UnreadMentionCount { total, mentions })
+}
+
 /// Get all distinct peer IDs that have DM messages in the local database.
 #[frb]
 pub fn get_dm_peer_ids() -> Result<Vec<String>, String> {

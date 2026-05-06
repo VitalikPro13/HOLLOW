@@ -169,6 +169,10 @@ pub enum NetworkEvent {
     FriendRequestAccepted { peer_id: String },
     FriendRequestRejected { peer_id: String },
     FriendRemoved { peer_id: String },
+    ChannelNotificationHint {
+        server_id: String, channel_id: String, from_peer: String,
+        has_everyone: bool, mentioned_names: Vec<String>, is_reply: bool,
+    },
     // -- Typing indicator events (Phase 3.5) --
     TypingStarted { peer_id: String, server_id: String, channel_id: String },
     // -- Presence events (Phase 6.75) --
@@ -478,6 +482,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::FriendRemoved { peer_id } => {
             hollow_log!("[HOLLOW] Friend removed: {peer_id}");
         }
+        node::NetworkEvent::ChannelNotificationHint { server_id, channel_id, from_peer, .. } => {
+            hollow_log!("[HOLLOW] Notification hint for {channel_id} in {server_id} from {from_peer}");
+        }
         node::NetworkEvent::TypingStarted { peer_id, server_id, .. } => {
             hollow_log!("[HOLLOW] Typing started: {peer_id} in {server_id}");
         }
@@ -628,6 +635,13 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::FriendRemoved { peer_id } => {
             NetworkEvent::FriendRemoved { peer_id }
+        }
+        node::NetworkEvent::ChannelNotificationHint {
+            server_id, channel_id, from_peer, has_everyone, mentioned_names, is_reply,
+        } => {
+            NetworkEvent::ChannelNotificationHint {
+                server_id, channel_id, from_peer, has_everyone, mentioned_names, is_reply,
+            }
         }
         node::NetworkEvent::TypingStarted { peer_id, server_id, channel_id } => {
             NetworkEvent::TypingStarted { peer_id, server_id, channel_id }
