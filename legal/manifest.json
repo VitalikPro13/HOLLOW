@@ -1,11 +1,11 @@
 {
-  "latest": "0.2.0",
+  "latest": "0.3.0",
   "versions": [
     {
-      "version": "0.2.0",
-      "date": "May 4, 2026",
-      "url": "https://anonlisten.com/hollow/releases/hollow-0.2.0-win64.zip",
-      "notes": "Roles & permissions, @mentions, labels, Twitch profile sync"
+      "version": "0.3.0",
+      "date": "May 6, 2026",
+      "url": "https://anonlisten.com/hollow/releases/hollow-0.3.0-win64.zip",
+      "notes": "Performance & quality overhaul — 60+ fixes across sync, voice, storage, relay, and UI"
     }
   ]
 }

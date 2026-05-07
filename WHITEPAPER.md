@@ -1,6 +1,6 @@
 # Hollow Protocol Whitepaper
 
-**Version 1.0 — Alpha**\
+**Version 0.3.0**\
 **Author: AnonListen**
 
 ---
@@ -154,7 +154,7 @@ DMs between two peers use the **Olm protocol** (Double Ratchet with Curve25519 k
 
 ### 3.3 State Persistence
 
-Olm session state is serialized ("pickled") to JSON and stored in SQLCipher. Sessions survive application restarts.
+Olm session state is serialized ("pickled") to JSON and stored in SQLCipher. Sessions survive application restarts. Stale sessions (unused for 7+ days) are automatically pruned to limit storage growth.
 
 ### 3.4 Key Exchange via Relay
 
@@ -195,6 +195,10 @@ MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
 1. Any authorized member generates a Commit via `group.remove_members()`.
 2. The commit is broadcast to all remaining members.
 3. The epoch advances, rotating all group keys. The removed member cannot derive the new group secret.
+4. Batch removal: when multiple members are removed simultaneously (e.g., recovery after prolonged offline), removals are batched into a single Commit (2 epoch advances total instead of 2 per member).
+
+**Rejoining after removal (ban/unban cycle):**
+A peer who was removed and later re-invited must drop its stale MLS group state and bootstrap from scratch. The rejoining peer sends a fresh KeyPackage to the coordinator. Without this, the rejoining peer's stale epoch causes one-way decryption failure.
 
 ### 4.3 Distributed Coordinator Model
 
@@ -204,9 +208,13 @@ MLS operations (add/remove) require a single member to generate the Commit. Holl
 
 Every membership change advances the MLS **epoch**. Each epoch derives fresh encryption keys. An attacker who compromises keys from one epoch cannot decrypt messages from other epochs.
 
-### 4.5 Reconnection Caveat
+### 4.5 Targeted Peer-to-Peer Encryption
 
-After a WebSocket reconnection, a peer's MLS epoch may be stale. Messages that must work immediately after reconnection — sync requests, shard coordination, voice channel state changes — are sent as plaintext `HavenMessage` envelopes. This is a deliberate design choice: these messages are idempotent probes that carry no sensitive content. Sensitive responses (shard data, sync payloads) fall back to Olm encryption when MLS decryption fails.
+Server-context operations that target a specific peer — shard requests/responses, sync payloads, file transfers, voice SDP/ICE signaling — use **Olm + direct send** instead of MLS broadcast. This is O(1) per operation instead of O(n) broadcast, and avoids churning the MLS group ratchet for peer-to-peer work. MLS broadcast is reserved for channel messages that all members need to see.
+
+### 4.6 Reconnection Caveat
+
+After a WebSocket reconnection, a peer's MLS epoch may be stale. Messages that must work immediately after reconnection — sync requests, shard coordination, voice channel state changes — are sent as plaintext `HavenMessage` envelopes. This is a deliberate design choice: these messages are idempotent probes that carry no sensitive content.
 
 ---
 
@@ -256,7 +264,11 @@ For peers behind symmetric NATs (~10-15% of users), a **TURN server** relays the
 - **Larger group (6+ participants):** Gossip-tree forwarding. Each participant forwards received audio/video to their connected subset of peers (6-12 neighbors). Covers large groups in 2-3 hops. No central media server. Zero VPS bandwidth for media.
 - **Transition:** Automatic with hysteresis — mesh below 6 participants, gossip at 6+, back to mesh at 4.
 
-### 5.6 SFrame Key Memory Handling
+### 5.6 Key Index Synchronization
+
+SFrame cryptors must be initialized with the correct key index corresponding to the current MLS epoch (`epoch % 16`). New keys are applied via key rotation (not replacement) to update all existing cryptor indices atomically. The key index is explicitly set per peer after every cryptor creation. Without this, cryptors default to key index 0 and silently fail to decrypt frames encrypted under a non-zero epoch index.
+
+### 5.7 SFrame Key Memory Handling
 
 SFrame keys are zeroed in memory after use. Key bytes are cleared via `fillRange(0, length, 0)` in `finally` blocks at every site where keys are set or consumed.
 
@@ -427,14 +439,15 @@ Header:
 | Data Type | Tier | Default Retention |
 |-----------|------|-------------------|
 | All files | Standard (1.0× parity) | 365 days |
+| Channel messages | Configurable via CRDT | 365 days (default) |
 
-Retention is forward-only: changing the retention setting only affects new uploads. Existing files keep their original retention. This prevents retroactive evidence destruction.
+Retention is forward-only: changing the retention setting only affects content created after the change. Existing files and messages keep their original retention. This prevents retroactive evidence destruction. Message retention is a per-server CRDT setting; file retention is per-tier.
 
 ### 8.7 Self-Healing and Rebalancing
 
 When a member departs:
 1. Surviving members detect under-replicated content by comparing confirmed placements against online peers.
-2. The coordinator (lowest online peer ID) computes a repair plan: which missing shards to regenerate and where to place them.
+2. The vault coordinator (2nd-lowest online peer ID) computes a repair plan: which missing shards to regenerate and where to place them. The vault coordinator is intentionally separated from the MLS coordinator (lowest peer ID) to distribute work across peers.
 3. Peers with sufficient shards reconstruct the missing ones via Reed-Solomon decoding and redistribute them.
 
 When a new member joins:
@@ -487,10 +500,11 @@ CrdtOp {
 
 | Category | Operations |
 |----------|-----------|
-| Server | ServerCreated, ServerRenamed, ServerSettingChanged |
+| Server | ServerCreated, ServerRenamed, ServerSettingChanged (includes retention settings) |
 | Channels | ChannelAdded, ChannelRemoved, ChannelRenamed |
-| Members | MemberAdded, MemberRemoved |
+| Members | MemberAdded, MemberRemoved, MemberBanned, MemberUnbanned |
 | Roles | RoleChanged (owner/admin/moderator/member) |
+| Labels | LabelAdded, LabelRemoved, LabelUpdated, LabelAssigned, LabelUnassigned |
 | Messages | MessagePinned, MessageUnpinned |
 | Storage | StoragePledgeChanged |
 
@@ -532,7 +546,7 @@ CRDT operations are validated on receipt:
 
 The relay is a **zero-knowledge message router**. It routes encrypted blobs between peers based on room membership. It has no knowledge of message semantics, encryption keys, or application state. The relay source code is open-source.
 
-**Implementation:** uWebSockets C++ with native OpenSSL TLS termination (no reverse proxy). Memory footprint: ~14.5 KB per connection. TLS session resumption is enabled for fast reconnects.
+**Implementation:** uWebSockets C++ with native OpenSSL TLS termination (no reverse proxy). Memory footprint: ~13.4 KB per connection (~572k connections on 8 GB VPS, verified with 44.6k simultaneous connections). TLS session resumption is enabled for fast reconnects.
 
 **Privacy hardening:** The relay is configured with all logging disabled. No connection events, peer IDs, IP addresses, or timestamps are written to disk. System journal uses volatile (RAM-only) storage with 1-hour maximum retention. The TURN server (coturn) is configured with `log-file=/dev/null` and `no-stdout-log`. Rsyslog filters discard any relay or TURN messages from system log files.
 
@@ -552,22 +566,34 @@ The relay verifies the signature against the provided public key and checks that
 - Each server has a room (room ID = server ID).
 - Each DM pair has a room (room ID = deterministic hash of both peer IDs).
 - Messages can be broadcast to all room members or sent directly to a specific peer.
-- Max 100 rooms per peer.
-- Max 10 MB per WebSocket message.
+- Max 10,000 rooms per peer.
+- Max 64 MB per WebSocket binary message; 1 MB per text message (silently dropped if exceeded).
 
 ### 10.4 Binary Protocol
 
-Four binary frame types for efficient transport:
+Seven binary frame types for efficient transport. Input types (client → relay) are transformed into output types (relay → client):
 
-- **0x01 (Broadcast):** `[0x01][room_hash: 32 bytes][payload]` — forwarded to all room members. Used for WebRTC signaling.
-- **0x02 (Direct):** `[0x02][room\0][target_peer\0][payload]` — forwarded to a specific peer; relay replaces target with sender ID. Used for file streaming, shard transfers.
-- **0x03 (Msg Broadcast):** `[0x03][room\0][payload]` — bandwidth-optimized broadcast; relay prepends sender peer ID to payload. Used for encrypted channel messages (~25-42% bandwidth savings vs JSON).
-- **0x04 (Direct Msg):** `[0x04][room\0][target\0][payload]` — bandwidth-optimized direct message; relay replaces target with sender and strips framing. Used for encrypted DMs.
+**Input frames (client sends):**
+- **0x01 (Broadcast):** `[0x01][room_hash: 32 bytes][payload]` — forwarded to all room members as-is. Used for WebRTC signaling.
+- **0x02 (Direct):** `[0x02][room\0][target_peer\0][payload]` — forwarded to a specific peer. Used for file streaming, shard transfers.
+- **0x03 (Msg Broadcast):** `[0x03][room\0][payload]` — universal broadcast for non-channel messages (CRDT sync, key exchange, coordination). Forwarded as **0x05**.
+- **0x04 (Direct Msg):** `[0x04][room\0][target\0][payload]` — direct message to a specific peer. Forwarded as **0x06**.
+- **0x07 (Topic Broadcast):** `[0x07][room\0][topic\0][payload]` — topic-aware broadcast for channel messages. Only forwarded to peers subscribed to the topic (or wildcard subscribers). Forwarded as **0x08**.
 
-### 10.5 Rate Limiting and Resource Protection
+**Output frames (relay sends):**
+- **0x05 (Msg Broadcast, forwarded):** `[0x05][room\0][sender\0][payload]` — relay prepends the sender's peer ID.
+- **0x06 (Direct Msg, forwarded):** `[0x06][room\0][sender\0][payload]` — relay replaces target with sender.
+- **0x08 (Topic Broadcast, forwarded):** `[0x08][room\0][topic\0][sender\0][payload]` — relay prepends sender, preserves topic.
 
-- **Binary frame rate limiting:** Per-peer token bucket (100 burst, 20/sec).
-- **Message size limit:** 10 MB per WebSocket message. Oversized messages disconnect the peer.
+**Topic subscription:** Clients send a `subscribe` JSON command to set per-room topic filters. Peers with no subscription entry for a room receive all messages (wildcard, backwards compatible). Peers with a subscription set receive only messages matching a subscribed topic. Channel messages use 0x07 with `channel_id` as the topic; non-channel messages (CRDT, sync, keys) use 0x03 universal broadcast.
+
+### 10.5 Resource Protection
+
+- **No application-level rate limiting.** Soft backpressure and per-peer rate limits were removed because they silently dropped CRDT sync payloads and broke reconnection flows. Authenticated peers are trusted.
+- **Hard backpressure:** 64 MB per connection (uWebSockets built-in). Catches truly dead connections without interfering with legitimate traffic.
+- **Text frame cap:** 1 MB. Oversized text frames are silently dropped.
+- **Binary frame cap:** 64 MB (uWebSockets `maxPayloadLength`). Connections exceeding this are closed.
+- **DoS protection:** Ed25519 authentication + license key revocation. Only authenticated peers can send messages.
 - **Room membership enforcement:** Messages are only forwarded to peers in the same room. Non-members' messages are silently dropped.
 
 ### 10.6 TURN Credential Management
@@ -585,6 +611,7 @@ For peers behind symmetric NATs, the relay provides time-limited TURN credential
 |------|-----------------|
 | Peer IDs (in memory) | Yes (not logged to disk) |
 | Room membership (in memory) | Yes (not logged to disk) |
+| Topic subscriptions (in memory) | Yes — the relay knows which channel topics each peer subscribes to within a room (not logged to disk) |
 | Connection timestamps | **No** (relay logging is disabled; volatile journal with 1h retention) |
 | Message contents | **No** (encrypted) |
 | Encryption keys | **No** |
@@ -614,7 +641,7 @@ The relay exposes a `/server-stats` endpoint returning real-time operational met
 - Online user count (connected authenticated peers)
 - Bandwidth cap
 
-Statistics are cached for 2 seconds to avoid excessive filesystem reads. This endpoint is used by the client's home dashboard to display relay health.
+Statistics are cached for 5 seconds to avoid excessive filesystem reads. This endpoint is used by the client's home dashboard to display relay health.
 
 ---
 
@@ -682,7 +709,7 @@ hollow-msg:{type}:{context}:{sender}:{timestamp_ms}:{text}
 1. Decode the sender's Ed25519 public key from the protobuf-encoded bytes.
 2. Derive the peer ID from the public key (identity multihash → base58).
 3. Verify that the derived peer ID matches the claimed sender.
-4. Verify the Ed25519 signature over the canonical payload.
+4. Verify the Ed25519 signature over the canonical payload using strict verification (`verify_strict`), which rejects non-canonical signatures (small-order group elements, malleable S values).
 
 If any step fails, the message is rejected. This prevents impersonation: even if an attacker can inject messages into the encrypted channel, they cannot forge a valid signature without the sender's private key.
 
@@ -755,7 +782,7 @@ Peers are scored on four metrics:
 - **Bandwidth score:** Observed throughput on data transfers.
 - **Shard overlap:** Number of shared vault shards (high overlap = high value for shard retrieval).
 
-Every 5 minutes, the lowest-scoring peer is dropped and the highest-scoring unconnected peer is added. Max 1 rotation per cycle for stability.
+At adaptive intervals (120s/180s/240s, scaled by server member count), the lowest-scoring peer is dropped and the highest-scoring unconnected peer is added. Max 1 rotation per cycle for stability.
 
 ### 14.3 Gossip Broadcast
 
@@ -767,7 +794,7 @@ When a peer receives data tagged as broadcast (files, images, voice media), it r
 
 ### 14.4 Peer Exchange
 
-Connected peers share known peer lists for each server via `PeerExchange` messages. This enables peer discovery beyond the directly connected subset. Peer exchange is capped at 50 entries and only accepted from current gossip neighbors.
+Connected peers share known peer lists for each server via `PeerExchange` messages sent directly to each neighbor (not broadcast). This enables peer discovery beyond the directly connected subset. Peer exchange is capped at 50 entries and only accepted from current gossip neighbors.
 
 ---
 
@@ -866,7 +893,7 @@ After verification, a cryptographic proof is generated and broadcast to the serv
 | Evidence destruction | Decentralized storage + cryptographic signatures. No central authority can delete data from other users' devices. |
 | CRDT state manipulation | Author verification + role-based permission checks. Unauthorized operations rejected. |
 | Clock manipulation attacks | HLC drift bound (5 minutes). Far-future timestamps rejected to prevent LWW conflict gaming. |
-| Resource exhaustion | Per-peer rate limiting, message size limits, SDP size limits, connection limits. |
+| Resource exhaustion | Ed25519 authentication, license key revocation, message size limits (64 MB binary / 1 MB text), 64 MB hard backpressure, connection limits. |
 | Privilege escalation | Permission checks on all state-changing operations. CRDT author ≠ self-reported field — verified against actual sender. |
 
 ### 18.2 What Hollow Does Not Currently Defend Against

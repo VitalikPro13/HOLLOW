@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-05-06-v030",
+    "date": "May 6, 2026",
+    "title": "v0.3.0 — Performance & Quality Overhaul",
+    "body": "Over 60+ fixes across the entire app... my goodness. In short, tons of bugs and scailability issues + performance problems. Well, not it's fixed! The app keeps getting better every day, all for you! Full changelog [here.](https://anonlisten.com/hollow/releases/030_QA.txt)"
+  },
+  {
     "id": "2026-05-04-v020",
     "date": "May 4, 2026",
     "title": "v0.2.0 — Roles, Mentions & More",
