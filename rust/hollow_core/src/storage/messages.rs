@@ -694,6 +694,16 @@ impl MessageStore {
         Ok(MessageStore { conn })
     }
 
+    pub fn begin_transaction(&self) -> Result<(), String> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("BEGIN failed: {e}"))
+    }
+
+    pub fn commit_transaction(&self) -> Result<(), String> {
+        self.conn.execute_batch("COMMIT")
+            .map_err(|e| format!("COMMIT failed: {e}"))
+    }
+
     /// Check if a DM message with the given message_id exists.
     pub fn dm_message_exists(&self, message_id: &str) -> bool {
         self.conn
@@ -3020,6 +3030,54 @@ impl MessageStore {
             .ok();
 
         Ok(result)
+    }
+
+    pub fn get_file_metadata_batch(&self, file_ids: &[&str]) -> Result<std::collections::HashMap<String, StoredFile>, String> {
+        use std::collections::HashMap;
+        if file_ids.is_empty() { return Ok(HashMap::new()); }
+        let placeholders: String = file_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT file_id, file_name, file_ext, mime_type, size_bytes,
+                    chunk_count, chunks_received, is_image, width, height,
+                    message_id, context_type, context_id, sender_id, is_mine,
+                    created_at, completed_at, disk_path, hidden_at,
+                    video_thumb_json, expired_at
+             FROM files WHERE file_id IN ({})", placeholders
+        );
+        let mut stmt = self.conn.prepare(&sql)
+            .map_err(|e| format!("Failed to prepare batch file query: {e}"))?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = file_ids.iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok(StoredFile {
+                file_id: row.get(0)?,
+                file_name: row.get(1)?,
+                file_ext: row.get(2)?,
+                mime_type: row.get(3)?,
+                size_bytes: row.get::<_, i64>(4)? as u64,
+                chunk_count: row.get::<_, u32>(5)?,
+                chunks_received: row.get::<_, u32>(6)?,
+                is_image: row.get::<_, i32>(7)? != 0,
+                width: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
+                height: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
+                message_id: row.get(10)?,
+                context_type: row.get(11)?,
+                context_id: row.get(12)?,
+                sender_id: row.get(13)?,
+                is_mine: row.get::<_, i32>(14)? != 0,
+                created_at: row.get(15)?,
+                completed_at: row.get(16)?,
+                disk_path: row.get(17)?,
+                hidden_at: row.get(18)?,
+                expired_at: row.get(20)?,
+                video_thumb: Self::parse_video_thumb_json(row.get::<_, Option<String>>(19)?),
+            })
+        }).map_err(|e| format!("Failed to query batch file metadata: {e}"))?;
+        let mut map = HashMap::new();
+        for row in rows.flatten() {
+            map.insert(row.file_id.clone(), row);
+        }
+        Ok(map)
     }
 
     /// Get all files attached to a specific message.

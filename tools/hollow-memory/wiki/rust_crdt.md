@@ -378,10 +378,10 @@ StateVector {
 The protocol is symmetric — either peer can initiate:
 
 1. **Peer B sends its StateVector to Peer A.**
-2. **Peer A calls `sync.rs:compute_delta(our_ops, their_vector)`** — filters its op_log for ops that B is missing. An op is "missing" if:
+2. **Peer A calls `sync.rs:compute_delta(our_ops, their_vector)`** — returns `Vec<&CrdtOp>` (zero-copy references) of ops that B is missing. An op is "missing" if:
    - The op's author doesn't appear in B's state vector at all, OR
    - The op's HLC is strictly greater than B's latest for that author.
-3. **Peer A sends the delta ops to Peer B.**
+3. **Peer A serializes the delta refs directly** (serde handles `&CrdtOp` identically to `CrdtOp`) and sends to Peer B.
 4. **Peer B calls `sync.rs:merge_ops(state, incoming_ops)`** — applies each op via `state.apply_op()`. Duplicates are automatically skipped (idempotent). Returns the count of newly applied ops.
 5. **Repeat in reverse direction** (B sends delta to A) for full bidirectional sync.
 
@@ -404,6 +404,8 @@ There is no separate `store.rs` module. Op persistence and compaction are handle
 **In-memory compaction:** `MAX_OP_LOG = 1000`. After every successful apply, if the op_log exceeds 1000 entries, the oldest entries are drained: `op_log.drain(..excess)`. This prevents unbounded memory growth.
 
 **DB-level pruning:** The `crdt_ops` SQLCipher table is pruned every 30 minutes via `CrdtStore::prune_ops(1000)` (called from the rebalance_timer). Uses `ROW_NUMBER() OVER (PARTITION BY server_id ORDER BY hlc_ms DESC)` to keep only the latest 1000 per server.
+
+**Transaction batching:** The CrdtStore actor wraps each drain cycle (all process_cmd calls + pending state/blob flushes) in a single SQLite transaction (`BEGIN IMMEDIATE`/`COMMIT`), coalescing N fsyncs into 1.
 
 **Insertion order:** Ops are binary-search inserted by HLC into the op_log, maintaining deterministic sorted order. This is critical for `StateVector::from_op_log()` which scans for the latest HLC per author, and for `compute_delta()` which filters by HLC comparison.
 

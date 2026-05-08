@@ -518,12 +518,12 @@ ServerState serialized to JSON twice and two `save_state` messages sent within t
 8. **H5: Box fat enum variants** — `#[serde(flatten)] inner: Box<XxxPayload>` for DirectMessage, ChannelMessage, FileHeader, ShardStore. ~405→~136 bytes per enum instance. 21 sites updated. DONE.
 9. **M15: Lazy envelope_json** — Moved into Olm-only branches, skipped on MLS success path. DONE.
 
-### Phase 4: Sync performance
-10. **M1: Transaction-wrap sync batch inserts** — 10-50x faster batch ingest.
-11. **M5: Cache PeerId derivation in sync batches** — 99% less work.
-12. **M2: Batch file metadata query** — Single IN query instead of per-message.
-13. **M3: compute_delta without cloning** — Serialize from references.
-14. **M4: CrdtStore flush in single transaction** — Coalesce fsyncs.
+### Phase 4: Sync performance — DONE
+10. **M1: Transaction-wrap sync batch inserts** — `begin_transaction()`/`commit_transaction()` around ChannelSyncBatch + DmSyncBatch loops. 10-50x faster batch ingest. DONE.
+11. **M5: Cache PeerId derivation in sync batches** — `verify_message_signature_cached()` with `HashMap<String, Vec<u8>>` pk cache. ~99% less derivation work. DONE.
+12. **M2: Batch file metadata query** — `get_file_metadata_batch()` with single `IN (...)` query. 4 call sites updated. DONE.
+13. **M3: compute_delta without cloning** — Returns `Vec<&CrdtOp>` instead of `Vec<CrdtOp>`. Zero-copy delta. DONE.
+14. **M4: CrdtStore flush in single transaction** — Wrap entire drain cycle (process_cmd + flush) in one transaction. DONE.
 
 ### Phase 5: FFI optimization
 15. **C4: Batch FFI get_server_info()** — 7x fewer DB opens per server switch.

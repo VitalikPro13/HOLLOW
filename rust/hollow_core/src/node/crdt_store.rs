@@ -42,6 +42,8 @@ impl CrdtStore {
             let mut pending_blobs: HashMap<(String, String), String> = HashMap::new();
 
             while let Some(cmd) = cmd_rx.blocking_recv() {
+                let _ = store.begin_transaction();
+
                 // Process first command
                 Self::process_cmd(&store, cmd, &mut pending_states, &mut pending_blobs);
 
@@ -61,6 +63,8 @@ impl CrdtStore {
                         hollow_log!("CrdtStore: failed to save blob {key} for {sid}: {e}");
                     }
                 }
+
+                let _ = store.commit_transaction();
             }
         });
 

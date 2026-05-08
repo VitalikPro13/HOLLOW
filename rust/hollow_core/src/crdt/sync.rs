@@ -43,7 +43,7 @@ impl StateVector {
 /// An op is "missing" if:
 /// - The actor isn't in their state vector at all, or
 /// - The op's HLC is strictly greater than their latest for that actor
-pub fn compute_delta(our_ops: &[CrdtOp], their_vector: &StateVector) -> Vec<CrdtOp> {
+pub fn compute_delta<'a>(our_ops: &'a [CrdtOp], their_vector: &StateVector) -> Vec<&'a CrdtOp> {
     our_ops
         .iter()
         .filter(|op| {
@@ -52,7 +52,6 @@ pub fn compute_delta(our_ops: &[CrdtOp], their_vector: &StateVector) -> Vec<Crdt
                 Some(their_latest) => op.hlc > *their_latest,
             }
         })
-        .cloned()
         .collect()
 }
 

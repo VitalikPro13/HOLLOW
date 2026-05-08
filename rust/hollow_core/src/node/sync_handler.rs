@@ -1833,6 +1833,8 @@ pub(crate) async fn flush_pending_sync_requests(
                 hollow_log!("[HOLLOW-SYNC] Retry: sending {} messages for {channel_id} to {peer_str}", messages.len());
                 let msg_ids: Vec<String> = messages.iter().filter_map(|m| m.message_id.clone()).collect();
                 let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
+                let file_ids: Vec<&str> = messages.iter().filter_map(|m| m.file_id.as_deref()).collect();
+                let file_meta_map = store.get_file_metadata_batch(&file_ids).unwrap_or_default();
 
                 let items: Vec<SyncMessageItem> = messages.iter().map(|m| {
                     let reactions = m.message_id.as_ref()
@@ -1842,19 +1844,19 @@ pub(crate) async fn flush_pending_sync_requests(
                         }).collect())
                         .unwrap_or_default();
                     let file_meta = m.file_id.as_ref().and_then(|fid| {
-                        store.get_file_metadata(fid).ok().flatten().map(|f| SyncFileMetaItem {
-                            fid: f.file_id,
-                            name: f.file_name,
-                            ext: f.file_ext,
-                            mime: f.mime_type,
+                        file_meta_map.get(fid.as_str()).map(|f| SyncFileMetaItem {
+                            fid: f.file_id.clone(),
+                            name: f.file_name.clone(),
+                            ext: f.file_ext.clone(),
+                            mime: f.mime_type.clone(),
                             size: f.size_bytes,
                             img: f.is_image,
                             w: f.width,
                             h: f.height,
-                            mid: f.message_id,
+                            mid: f.message_id.clone(),
                             ts: f.created_at,
-                            sender: f.sender_id,
-                            vthumb: f.video_thumb,
+                            sender: f.sender_id.clone(),
+                            vthumb: f.video_thumb.clone(),
                         })
                     });
                     SyncMessageItem {
@@ -2223,6 +2225,8 @@ pub(crate) async fn handle_envelope_channel_sync_req(
         if let Ok(messages) = msgs_result {
             let msg_ids: Vec<String> = messages.iter().filter_map(|m| m.message_id.clone()).collect();
             let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
+            let file_ids: Vec<&str> = messages.iter().filter_map(|m| m.file_id.as_deref()).collect();
+            let file_meta_map = store.get_file_metadata_batch(&file_ids).unwrap_or_default();
             let items: Vec<SyncMessageItem> = messages.iter().map(|m| {
                 let reactions = m.message_id.as_ref()
                     .and_then(|mid| reactions_map.get(mid))
@@ -2231,11 +2235,11 @@ pub(crate) async fn handle_envelope_channel_sync_req(
                     }).collect())
                     .unwrap_or_default();
                 let file_meta = m.file_id.as_ref().and_then(|fid| {
-                    store.get_file_metadata(fid).ok().flatten().map(|f| SyncFileMetaItem {
-                        fid: f.file_id, name: f.file_name, ext: f.file_ext, mime: f.mime_type,
+                    file_meta_map.get(fid.as_str()).map(|f| SyncFileMetaItem {
+                        fid: f.file_id.clone(), name: f.file_name.clone(), ext: f.file_ext.clone(), mime: f.mime_type.clone(),
                         size: f.size_bytes, img: f.is_image, w: f.width, h: f.height,
-                        mid: f.message_id, ts: f.created_at, sender: f.sender_id,
-                        vthumb: f.video_thumb,
+                        mid: f.message_id.clone(), ts: f.created_at, sender: f.sender_id.clone(),
+                        vthumb: f.video_thumb.clone(),
                     })
                 });
                 SyncMessageItem {

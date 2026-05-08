@@ -76,6 +76,51 @@ pub(crate) fn verify_message_signature(
         .unwrap_or(false)
 }
 
+/// Batch-optimized variant that caches decoded+verified pk_bytes across calls.
+/// The cache maps pk_b64 → pk_bytes (only inserted after PeerId derivation succeeds).
+pub(crate) fn verify_message_signature_cached(
+    sender_peer_str: &str,
+    sig_b64: Option<&str>,
+    pk_b64: Option<&str>,
+    payload: &str,
+    pk_cache: &mut HashMap<String, Vec<u8>>,
+) -> bool {
+    use crate::identity::native_identity::NativeKeypair;
+
+    let (sig, pk) = match (sig_b64, pk_b64) {
+        (Some(s), Some(p)) => (s, p),
+        _ => return false,
+    };
+
+    let pk_bytes = if let Some(cached) = pk_cache.get(pk) {
+        cached.clone()
+    } else {
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(pk) else {
+            return false;
+        };
+        if bytes.len() >= 36 && bytes[0] == 0x08 && bytes[1] == 0x01 {
+            let mut multihash = Vec::with_capacity(2 + bytes.len());
+            multihash.push(0x00);
+            multihash.push(bytes.len() as u8);
+            multihash.extend_from_slice(&bytes);
+            let derived_pid = bs58::encode(&multihash).with_alphabet(bs58::Alphabet::BITCOIN).into_string();
+            if derived_pid != sender_peer_str {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        pk_cache.insert(pk.to_string(), bytes.clone());
+        bytes
+    };
+
+    let Ok(sig_bytes) = base64::engine::general_purpose::STANDARD.decode(sig) else {
+        return false;
+    };
+    NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, payload.as_bytes())
+        .unwrap_or(false)
+}
+
 /// Persist MLS state (signer + credential + storage) via the CryptoStore actor.
 pub(crate) fn persist_mls_state(mls: &MlsManager, crypto_store: &crate::crypto::CryptoStore) {
     let signer = match mls.signer_bytes() {

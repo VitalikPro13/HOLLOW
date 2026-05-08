@@ -442,7 +442,7 @@ Flow per entry:
 3. Query messages: `get_channel_messages_since_per_sender()` or `get_channel_messages_since()` (limit 200)
 4. Build `SyncMessageItem` list with: sender, text, timestamp, signature, public_key, message_id, edited_at, reply_to, file_id, file_meta, hidden_at, reactions
 5. Load reactions via `store.load_reactions_for_sync(&msg_ids)`
-6. Load file metadata via `store.get_file_metadata(fid)` for each message with a file_id
+6. Load file metadata via `store.get_file_metadata_batch(&file_ids)` — single `IN (...)` query for all files in batch
 7. Count total messages to determine `has_more` flag (true if items >= 200 and total > 200)
 8. Wrap in `MessageEnvelope::ChannelSyncBatch { sid, cid, messages, total, has_more, target: None }`
 9. Send via `send_encrypted_message()` (Olm)
@@ -595,6 +595,8 @@ Flow:
 ## handle_envelope_channel_sync_batch()
 
 `sync_handler.rs:handle_envelope_channel_sync_batch()` — Processes incoming `MessageEnvelope::ChannelSyncBatch` via MLS. Inserts received messages into local DB.
+
+The entire batch is wrapped in a SQLite transaction (`begin_transaction()`/`commit_transaction()`) for 10-50x faster ingest vs individual autocommits. Signature verification uses `verify_message_signature_cached()` with a `HashMap<String, Vec<u8>>` pk cache to avoid redundant PeerId derivation across messages from the same sender.
 
 Flow per message in batch:
 1. Insert via `store.insert_channel_message()` — returns 1 if new (deduplication by message_id)

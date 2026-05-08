@@ -16,7 +16,7 @@ use super::signaling::{self, SignalingCmd, SignalingEvent};
 use super::types::*;
 
 use super::crypto_handler::{
-    message_signing_payload, sign_message, verify_message_signature,
+    message_signing_payload, sign_message, verify_message_signature, verify_message_signature_cached,
     persist_mls_state, persist_crypto_state, persist_olm_session,
     peer_is_reachable, is_mls_coordinator, is_vault_coordinator, ws_room_for_peer,
     send_mls_broadcast, send_encrypted_message,
@@ -3214,6 +3214,8 @@ async fn handle_incoming_request(
                     let received_count = messages.len() as u32;
 
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        let _ = store.begin_transaction();
+                        let mut pk_cache: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
                         for msg in &messages {
                             // Verify signature on each synced message.
                             // Skip edited messages — the stored signature was created
@@ -3222,7 +3224,7 @@ async fn handle_incoming_request(
                                 let payload = message_signing_payload(
                                     "ch", &format!("{sid}:{cid}"), &msg.s, msg.ts, &msg.t,
                                 );
-                                if !verify_message_signature(&msg.s, msg.sig.as_deref(), msg.pk.as_deref(), &payload) {
+                                if !verify_message_signature_cached(&msg.s, msg.sig.as_deref(), msg.pk.as_deref(), &payload, &mut pk_cache) {
                                     hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for synced msg from {} ts={} text_len={} has_pk={}", msg.s, msg.ts, msg.t.len(), msg.pk.is_some());
                                 }
                             }
@@ -3278,6 +3280,7 @@ async fn handle_incoming_request(
                                 }
                             }
                         }
+                        let _ = store.commit_transaction();
 
                         // Pagination: if has_more, send a follow-up ChannelSyncRequest
                         // with updated per-sender timestamps from our DB.
@@ -3386,6 +3389,8 @@ async fn handle_incoming_request(
                     let mut new_count = 0u32;
 
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        let _ = store.begin_transaction();
+                        let mut pk_cache: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
                         for msg in &messages {
                             // All sync items are messages the peer SENT to us
                             // (get_dm_messages_since only returns is_mine=1 from their DB).
@@ -3398,7 +3403,7 @@ async fn handle_incoming_request(
                                 let payload = message_signing_payload(
                                     "dm", &local_peer, &peer_str, msg.ts, &msg.t,
                                 );
-                                if !verify_message_signature(&peer_str, msg.sig.as_deref(), msg.pk.as_deref(), &payload) {
+                                if !verify_message_signature_cached(&peer_str, msg.sig.as_deref(), msg.pk.as_deref(), &payload, &mut pk_cache) {
                                     hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for DM sync msg from {peer_str} ts={} text_len={} has_pk={}", msg.ts, msg.t.len(), msg.pk.is_some());
                                 }
                             }
@@ -3483,6 +3488,7 @@ async fn handle_incoming_request(
                                 }
                             }
                         }
+                        let _ = store.commit_transaction();
 
                         // Pagination: if has_more, send follow-up DmSyncRequest.
                         if has_more == Some(true) {
@@ -5257,6 +5263,8 @@ async fn handle_incoming_request(
                         // Load reactions for all messages in the batch.
                         let msg_ids: Vec<String> = messages.iter().filter_map(|m| m.message_id.clone()).collect();
                         let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
+                        let file_ids: Vec<&str> = messages.iter().filter_map(|m| m.file_id.as_deref()).collect();
+                        let file_meta_map = store.get_file_metadata_batch(&file_ids).unwrap_or_default();
 
                         let items: Vec<SyncMessageItem> = messages.iter().map(|m| {
                             let reactions = m.message_id.as_ref()
@@ -5265,21 +5273,20 @@ async fn handle_incoming_request(
                                     e: e.clone(), p: p.clone(), ts: *ts, sig: sig.clone(), pk: pk.clone(),
                                 }).collect())
                                 .unwrap_or_default();
-                            // Attach file metadata so late joiners can create file cards.
                             let file_meta = m.file_id.as_ref().and_then(|fid| {
-                                store.get_file_metadata(fid).ok().flatten().map(|f| SyncFileMetaItem {
-                                    fid: f.file_id,
-                                    name: f.file_name,
-                                    ext: f.file_ext,
-                                    mime: f.mime_type,
+                                file_meta_map.get(fid.as_str()).map(|f| SyncFileMetaItem {
+                                    fid: f.file_id.clone(),
+                                    name: f.file_name.clone(),
+                                    ext: f.file_ext.clone(),
+                                    mime: f.mime_type.clone(),
                                     size: f.size_bytes,
                                     img: f.is_image,
                                     w: f.width,
                                     h: f.height,
-                                    mid: f.message_id,
+                                    mid: f.message_id.clone(),
                                     ts: f.created_at,
-                                    sender: f.sender_id,
-                                    vthumb: f.video_thumb,
+                                    sender: f.sender_id.clone(),
+                                    vthumb: f.video_thumb.clone(),
                                 })
                             });
                             SyncMessageItem {
@@ -5424,6 +5431,8 @@ async fn handle_incoming_request(
                         hollow_log!("[HOLLOW-SYNC] Sending {} DM sync messages to {peer_str}", messages.len());
                         let msg_ids: Vec<String> = messages.iter().filter_map(|m| m.message_id.clone()).collect();
                         let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
+                        let file_ids: Vec<&str> = messages.iter().filter_map(|m| m.file_id.as_deref()).collect();
+                        let file_meta_map = store.get_file_metadata_batch(&file_ids).unwrap_or_default();
 
                         let items: Vec<DmSyncItem> = messages.iter().map(|m| {
                             let reactions = m.message_id.as_ref()
@@ -5433,19 +5442,19 @@ async fn handle_incoming_request(
                                 }).collect())
                                 .unwrap_or_default();
                             let file_meta = m.file_id.as_ref().and_then(|fid| {
-                                store.get_file_metadata(fid).ok().flatten().map(|f| SyncFileMetaItem {
-                                    fid: f.file_id,
-                                    name: f.file_name,
-                                    ext: f.file_ext,
-                                    mime: f.mime_type,
+                                file_meta_map.get(fid.as_str()).map(|f| SyncFileMetaItem {
+                                    fid: f.file_id.clone(),
+                                    name: f.file_name.clone(),
+                                    ext: f.file_ext.clone(),
+                                    mime: f.mime_type.clone(),
                                     size: f.size_bytes,
                                     img: f.is_image,
                                     w: f.width,
                                     h: f.height,
-                                    mid: f.message_id,
+                                    mid: f.message_id.clone(),
                                     ts: f.created_at,
-                                    sender: f.sender_id,
-                                    vthumb: f.video_thumb,
+                                    sender: f.sender_id.clone(),
+                                    vthumb: f.video_thumb.clone(),
                                 })
                             });
                             DmSyncItem {
