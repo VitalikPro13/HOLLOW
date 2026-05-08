@@ -45,14 +45,16 @@ pub(crate) async fn handle_send_message(
     );
     let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
     let envelope = MessageEnvelope::DirectMessage {
-        text: text.clone(),
-        ts: dm_timestamp,
-        sig: sig.clone(),
-        pk: pk.clone(),
-        mid: Some(message_id.clone()),
-        reply_to: reply_to_mid.clone(),
-        file_id: None,
-        link_preview: link_preview.clone(),
+        inner: Box::new(DirectMessagePayload {
+            text: text.clone(),
+            ts: dm_timestamp,
+            sig: sig.clone(),
+            pk: pk.clone(),
+            mid: Some(message_id.clone()),
+            reply_to: reply_to_mid.clone(),
+            file_id: None,
+            link_preview: link_preview.clone(),
+        }),
     };
     let envelope_json = serde_json::to_string(&envelope)
         .unwrap_or_else(|_| text.clone());
@@ -170,16 +172,18 @@ pub(crate) async fn handle_send_channel_message(
     let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
 
     let envelope = MessageEnvelope::ChannelMessage {
-        sid: server_id.clone(),
-        cid: channel_id.clone(),
-        text: text.clone(),
-        ts: timestamp,
-        sig: sig.clone(),
-        pk: pk.clone(),
-        mid: Some(message_id.clone()),
-        reply_to: reply_to_mid.clone(),
-        file_id: None,
-        link_preview: link_preview.clone(),
+        inner: Box::new(ChannelMessagePayload {
+            sid: server_id.clone(),
+            cid: channel_id.clone(),
+            text: text.clone(),
+            ts: timestamp,
+            sig: sig.clone(),
+            pk: pk.clone(),
+            mid: Some(message_id.clone()),
+            reply_to: reply_to_mid.clone(),
+            file_id: None,
+            link_preview: link_preview.clone(),
+        }),
     };
     // MLS path: encrypt once → single WS broadcast to room.
     let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&server_id));

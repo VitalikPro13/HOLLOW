@@ -268,14 +268,16 @@ pub(crate) async fn handle_send_file(
     if let Some(peer_str) = peer_id {
         // DM path
         let envelope = MessageEnvelope::DirectMessage {
-            text: signing_payload_text.clone(),
-            ts: timestamp,
-            sig: sig.clone(),
-            pk: pk.clone(),
-            mid: Some(message_id.clone()),
-            reply_to: None,
-            file_id: Some(file_id.clone()),
-            link_preview: None,
+            inner: Box::new(DirectMessagePayload {
+                text: signing_payload_text.clone(),
+                ts: timestamp,
+                sig: sig.clone(),
+                pk: pk.clone(),
+                mid: Some(message_id.clone()),
+                reply_to: None,
+                file_id: Some(file_id.clone()),
+                link_preview: None,
+            }),
         };
         let envelope_json = serde_json::to_string(&envelope)
             .unwrap_or_else(|_| signing_payload_text.clone());
@@ -314,26 +316,28 @@ pub(crate) async fn handle_send_file(
 
                     // Send FileHeader via Olm (carries AES key — tiny, secure).
                     let header = MessageEnvelope::FileHeader {
-                        fid: file_id.clone(),
-                        name: original_name.clone(),
-                        ext: final_ext.clone(),
-                        mime: final_mime.clone(),
-                        size: file_size,
-                        chunks: 0, // 0 = streamed transfer
-                        img: is_image,
-                        w: width,
-                        h: height,
-                        mid: Some(message_id.clone()),
-                        sid: None,
-                        cid: None,
-                        ts: timestamp,
-                        sig: None,
-                        pk: None,
-                        aes_key: Some(aes_key_hex),
-                        aes_nonce: Some(aes_nonce_hex),
-                        target: None,
-                        vthumb: vthumb.clone(),
-                        share_ref: None,
+                        inner: Box::new(FileHeaderPayload {
+                            fid: file_id.clone(),
+                            name: original_name.clone(),
+                            ext: final_ext.clone(),
+                            mime: final_mime.clone(),
+                            size: file_size,
+                            chunks: 0,
+                            img: is_image,
+                            w: width,
+                            h: height,
+                            mid: Some(message_id.clone()),
+                            sid: None,
+                            cid: None,
+                            ts: timestamp,
+                            sig: None,
+                            pk: None,
+                            aes_key: Some(aes_key_hex),
+                            aes_nonce: Some(aes_nonce_hex),
+                            target: None,
+                            vthumb: vthumb.clone(),
+                            share_ref: None,
+                        }),
                     };
                     let header_json = serde_json::to_string(&header).unwrap_or_default();
                     send_encrypted_message(
@@ -360,16 +364,18 @@ pub(crate) async fn handle_send_file(
     } else if let (Some(sid), Some(cid)) = (server_id, channel_id) {
         // Channel path — broadcast via MLS.
         let envelope = MessageEnvelope::ChannelMessage {
-            sid: sid.clone(),
-            cid: cid.clone(),
-            text: signing_payload_text.clone(),
-            ts: timestamp,
-            sig: sig.clone(),
-            pk: pk.clone(),
-            mid: Some(message_id.clone()),
-            reply_to: None,
-            file_id: Some(file_id.clone()),
-            link_preview: None,
+            inner: Box::new(ChannelMessagePayload {
+                sid: sid.clone(),
+                cid: cid.clone(),
+                text: signing_payload_text.clone(),
+                ts: timestamp,
+                sig: sig.clone(),
+                pk: pk.clone(),
+                mid: Some(message_id.clone()),
+                reply_to: None,
+                file_id: Some(file_id.clone()),
+                link_preview: None,
+            }),
         };
         let envelope_json = serde_json::to_string(&envelope)
             .unwrap_or_else(|_| signing_payload_text.clone());
@@ -423,26 +429,28 @@ pub(crate) async fn handle_send_file(
             let aes_nonce_hex = hex::encode(&enc.nonce);
 
             let header = MessageEnvelope::FileHeader {
-                fid: file_id.clone(),
-                name: original_name.clone(),
-                ext: final_ext.clone(),
-                mime: final_mime.clone(),
-                size: file_size,
-                chunks: 0,
-                img: is_image,
-                w: width,
-                h: height,
-                mid: Some(message_id.clone()),
-                sid: Some(sid.clone()),
-                cid: Some(cid.clone()),
-                ts: timestamp,
-                sig: None,
-                pk: None,
-                aes_key: Some(aes_key_hex),
-                aes_nonce: Some(aes_nonce_hex),
-                target: None,
-                vthumb: vthumb.clone(),
-                share_ref: share_ref.clone(),
+                inner: Box::new(FileHeaderPayload {
+                    fid: file_id.clone(),
+                    name: original_name.clone(),
+                    ext: final_ext.clone(),
+                    mime: final_mime.clone(),
+                    size: file_size,
+                    chunks: 0,
+                    img: is_image,
+                    w: width,
+                    h: height,
+                    mid: Some(message_id.clone()),
+                    sid: Some(sid.clone()),
+                    cid: Some(cid.clone()),
+                    ts: timestamp,
+                    sig: None,
+                    pk: None,
+                    aes_key: Some(aes_key_hex),
+                    aes_nonce: Some(aes_nonce_hex),
+                    target: None,
+                    vthumb: vthumb.clone(),
+                    share_ref: share_ref.clone(),
+                }),
             };
             let header_json = serde_json::to_string(&header).unwrap_or_default();
 

@@ -984,6 +984,98 @@ pub(crate) struct ShareManifest {
     pub note: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DirectMessagePayload {
+    pub text: String,
+    #[serde(default)]
+    pub ts: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sig: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pk: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_preview: Option<LinkPreviewRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ChannelMessagePayload {
+    pub sid: String,
+    pub cid: String,
+    pub text: String,
+    pub ts: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sig: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pk: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_preview: Option<LinkPreviewRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FileHeaderPayload {
+    pub fid: String,
+    pub name: String,
+    pub ext: String,
+    pub mime: String,
+    pub size: u64,
+    pub chunks: u32,
+    #[serde(default)]
+    pub img: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub w: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cid: Option<String>,
+    pub ts: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sig: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pk: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aes_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aes_nonce: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vthumb: Option<VideoThumbRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_ref: Option<ShareRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ShardStorePayload {
+    pub sid: String,
+    pub cid: String,
+    pub si: u16,
+    pub sk: String,
+    pub k: u16,
+    pub m: u16,
+    pub total_size: u64,
+    pub tier: String,
+    pub data: String,
+    pub chunks: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
 /// Envelope for the plaintext body inside an Encrypted message.
 /// Legacy DMs are raw text (no JSON). New messages use this envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -991,56 +1083,13 @@ pub(crate) struct ShareManifest {
 pub(crate) enum MessageEnvelope {
     #[serde(rename = "dm")]
     DirectMessage {
-        text: String,
-        /// Sender-generated timestamp (millis since epoch).
-        #[serde(default)]
-        ts: i64,
-        /// Ed25519 signature (base64) over canonical payload.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sig: Option<String>,
-        /// Sender's Ed25519 public key (base64 protobuf).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pk: Option<String>,
-        /// Unique message ID (UUID, sender-generated).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mid: Option<String>,
-        /// Message ID this is replying to (optional).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reply_to: Option<String>,
-        /// File attachment ID (optional).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        file_id: Option<String>,
-        /// Link preview for the first URL in the message (Phase 6.75).
-        /// None when the message has no URL or OG fetch failed.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        link_preview: Option<LinkPreviewRef>,
+        #[serde(flatten)]
+        inner: Box<DirectMessagePayload>,
     },
     #[serde(rename = "ch")]
     ChannelMessage {
-        sid: String,
-        cid: String,
-        text: String,
-        /// Sender-generated timestamp (millis since epoch).
-        ts: i64,
-        /// Ed25519 signature (base64) over canonical payload.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sig: Option<String>,
-        /// Sender's Ed25519 public key (base64 protobuf).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pk: Option<String>,
-        /// Unique message ID (UUID, sender-generated).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mid: Option<String>,
-        /// Message ID this is replying to (optional).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reply_to: Option<String>,
-        /// File attachment ID (optional).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        file_id: Option<String>,
-        /// Link preview for the first URL in the message (Phase 6.75).
-        /// None when the message has no URL or OG fetch failed.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        link_preview: Option<LinkPreviewRef>,
+        #[serde(flatten)]
+        inner: Box<ChannelMessagePayload>,
     },
     #[serde(rename = "ch_sync")]
     ChannelSyncBatch {
@@ -1145,65 +1194,10 @@ pub(crate) enum MessageEnvelope {
 
     // -- File sharing (Phase 3.5) --
 
-    /// File metadata header — sent before file chunks.
     #[serde(rename = "file_hdr")]
     FileHeader {
-        /// Unique file ID (32-char hex).
-        fid: String,
-        /// Original file name.
-        name: String,
-        /// File extension.
-        ext: String,
-        /// MIME type.
-        mime: String,
-        /// Total size in bytes.
-        size: u64,
-        /// Number of chunks (0 for streamed transfers).
-        chunks: u32,
-        /// Is this an image?
-        #[serde(default)]
-        img: bool,
-        /// Image width (if image).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        w: Option<u32>,
-        /// Image height (if image).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        h: Option<u32>,
-        /// Message ID this file is attached to.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mid: Option<String>,
-        /// Server ID (for channel files).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sid: Option<String>,
-        /// Channel ID (for channel files).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cid: Option<String>,
-        ts: i64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sig: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pk: Option<String>,
-        /// AES-256-GCM key (hex). Present → file bytes arrive via /hollow/stream/1.0.0.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        aes_key: Option<String>,
-        /// AES-256-GCM nonce (hex). Present with aes_key for streamed transfers.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        aes_nonce: Option<String>,
-        /// Target peer (only that peer processes; others decrypt but discard).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<String>,
-        /// Video thumbnail back-reference (Phase 6.75 video preview).
-        /// When present, this file is a thumbnail image for a vault-stored video;
-        /// `vthumb.cid` points to the vault content_id of the actual video bytes.
-        /// Old clients lacking this field deserialize it as None.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        vthumb: Option<VideoThumbRef>,
-        /// Hidden Share back-reference for large files / video streaming.
-        /// When present, file bytes are delivered via Share P2P infrastructure
-        /// instead of a direct binary stream. Receiver joins the share swarm
-        /// using root_hash + key to download chunks.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        share_ref: Option<ShareRef>,
+        #[serde(flatten)]
+        inner: Box<FileHeaderPayload>,
     },
 
     /// A single file chunk (base64-encoded data).
@@ -1219,21 +1213,10 @@ pub(crate) enum MessageEnvelope {
 
     // -- Vault shard store (Phase 4) --
 
-    /// Vault shard store request (header + optional inline data).
     #[serde(rename = "shard_store")]
     ShardStore {
-        sid: String,
-        cid: String,
-        si: u16,
-        sk: String,
-        k: u16,
-        m: u16,
-        total_size: u64,
-        tier: String,
-        data: String,
-        chunks: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<String>,
+        #[serde(flatten)]
+        inner: Box<ShardStorePayload>,
     },
 
     /// Vault shard chunk (for shards > 256KB).
@@ -1613,8 +1596,6 @@ impl MessageEnvelope {
     pub(crate) fn target(&self) -> Option<&str> {
         match self {
             Self::ChannelSyncBatch { target, .. }
-            | Self::FileHeader { target, .. }
-            | Self::ShardStore { target, .. }
             | Self::ShardStoreAck { target, .. }
             | Self::ShardRequest { target, .. }
             | Self::ShardResponse { target, .. }
@@ -1638,6 +1619,8 @@ impl MessageEnvelope {
             | Self::VoiceChannelRenegOffer { target, .. }
             | Self::VoiceChannelRenegAnswer { target, .. }
             | Self::VoiceChannelCameraState { target, .. } => target.as_deref(),
+            Self::FileHeader { inner } => inner.target.as_deref(),
+            Self::ShardStore { inner } => inner.target.as_deref(),
             _ => None,
         }
     }

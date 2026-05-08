@@ -347,14 +347,16 @@ pub(crate) async fn handle_vault_upload_file(
                                     if peer_is_reachable(&ws_room_peers, &placement.target_peer) {
                                         // Send ShardStore metadata via MLS or Olm.
                                         let envelope = MessageEnvelope::ShardStore {
-                                            sid: server_id.clone(), cid: content_id.clone(),
-                                            si: placement.shard_index, sk: placement.shard_key.clone(),
-                                            k: plan.manifest.k, m: plan.manifest.m,
-                                            total_size: plan.manifest.original_size,
-                                            tier: plan.manifest.storage_tier.clone(),
-                                            data: String::new(), // empty — data comes via stream
-                                            chunks: 0,
-                                            target: None,
+                                            inner: Box::new(ShardStorePayload {
+                                                sid: server_id.clone(), cid: content_id.clone(),
+                                                si: placement.shard_index, sk: placement.shard_key.clone(),
+                                                k: plan.manifest.k, m: plan.manifest.m,
+                                                total_size: plan.manifest.original_size,
+                                                tier: plan.manifest.storage_tier.clone(),
+                                                data: String::new(),
+                                                chunks: 0,
+                                                target: None,
+                                            }),
                                         };
                                         let json = serde_json::to_string(&envelope).unwrap_or_default();
                                         send_encrypted_message(
@@ -571,17 +573,19 @@ pub(crate) async fn handle_store_shard_on_peer(
         } else {
             // Send ShardStore metadata via MLS or Olm fallback.
             let envelope = MessageEnvelope::ShardStore {
-                sid: server_id.clone(),
-                cid: content_id.clone(),
-                si: shard_index,
-                sk: shard_key.clone(),
-                k,
-                m,
-                total_size: total_data_size,
-                tier: storage_tier.clone(),
-                data: String::new(),
-                chunks: 0,
-                target: None,
+                inner: Box::new(ShardStorePayload {
+                    sid: server_id.clone(),
+                    cid: content_id.clone(),
+                    si: shard_index,
+                    sk: shard_key.clone(),
+                    k,
+                    m,
+                    total_size: total_data_size,
+                    tier: storage_tier.clone(),
+                    data: String::new(),
+                    chunks: 0,
+                    target: None,
+                }),
             };
             let json = serde_json::to_string(&envelope).unwrap_or_default();
             send_encrypted_message(

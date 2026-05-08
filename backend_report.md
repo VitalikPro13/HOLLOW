@@ -513,9 +513,9 @@ ServerState serialized to JSON twice and two `save_state` messages sent within t
 5. **H1: Debounce persist_mls_state** — 2s dirty-flag timer, epoch-change ops still immediate. DONE.
 6. **H2: Split Olm persist** — persist_olm_session (ratchet only) for per-message, full persist on session lifecycle. DONE.
 
-### Phase 3: Serialization reduction — PARTIAL (H5 deferred)
+### Phase 3: Serialization reduction — DONE
 7. **H3: Skip op_log in ServerState serialization** — `#[serde(skip_serializing)]` + restore_op_log from DB at startup. DONE.
-8. **H5: Box fat enum variants** — Deferred to fresh session with plan mode (30-50 match sites to update).
+8. **H5: Box fat enum variants** — `#[serde(flatten)] inner: Box<XxxPayload>` for DirectMessage, ChannelMessage, FileHeader, ShardStore. ~405→~136 bytes per enum instance. 21 sites updated. DONE.
 9. **M15: Lazy envelope_json** — Moved into Olm-only branches, skipped on MLS success path. DONE.
 
 ### Phase 4: Sync performance

@@ -3139,7 +3139,8 @@ async fn handle_incoming_request(
             // Detect message envelope and route accordingly.
             let text = String::from_utf8_lossy(&plaintext).to_string();
             match serde_json::from_str::<MessageEnvelope>(&text) {
-                Ok(MessageEnvelope::ChannelMessage { sid, cid, text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview }) => {
+                Ok(MessageEnvelope::ChannelMessage { inner }) => {
+                    let ChannelMessagePayload { sid, cid, text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview } = *inner;
                     // SECURITY: Verify sender is a member of the claimed server.
                     if let Some(state) = server_states.get(&sid) {
                         if !state.members.contains_key(peer_str) {
@@ -3322,7 +3323,8 @@ async fn handle_incoming_request(
                         // to avoid interfering with the message sync pipeline.
                     }
                 }
-                Ok(MessageEnvelope::DirectMessage { text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview }) => {
+                Ok(MessageEnvelope::DirectMessage { inner }) => {
+                    let DirectMessagePayload { text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview } = *inner;
                     // SECURITY: Enforce 4,000 character limit on message text.
                     let msg_text = if msg_text.len() > 4000 { msg_text[..4000].to_string() } else { msg_text };
 
@@ -3681,7 +3683,8 @@ async fn handle_incoming_request(
                     }
                 }
                 // -- File transfer receive handlers --
-                Ok(MessageEnvelope::FileHeader { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref, .. }) => {
+                Ok(MessageEnvelope::FileHeader { inner }) => {
+                    let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref, .. } = *inner;
                     use crate::node::file_transfer;
                     hollow_log!("[HOLLOW-FILE] FileHeader received: {fid} ({name}, {size} bytes, {chunks} chunks, share_ref={})", share_ref.is_some());
 
@@ -3837,7 +3840,8 @@ async fn handle_incoming_request(
                 }
 
                 // -- Vault shard receive handlers (Phase 4) --
-                Ok(MessageEnvelope::ShardStore { sid, cid, si, sk, k, m, total_size, tier, data, chunks, .. }) => {
+                Ok(MessageEnvelope::ShardStore { inner }) => {
+                    let ShardStorePayload { sid, cid, si, sk, k, m, total_size, tier, data, chunks, .. } = *inner;
                     hollow_log!("[HOLLOW-VAULT] ShardStore received: cid={cid} si={si} chunks={chunks} from {peer_str}");
 
                     // Verify sender is a member of the server
@@ -5565,7 +5569,8 @@ async fn handle_incoming_request(
                         }
 
                         match envelope {
-                            MessageEnvelope::ChannelMessage { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview } => {
+                            MessageEnvelope::ChannelMessage { inner } => {
+                                let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview } = *inner;
                                 message_ops::handle_envelope_channel_message(
                                     event_tx, bundle_keypair, &local_peer,
                                     sender_peer_id, sid, cid, text, ts,
@@ -5601,7 +5606,8 @@ async fn handle_incoming_request(
                                     db_path, db_passphrase,
                                 ).await;
                             }
-                            MessageEnvelope::FileHeader { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref, .. } => {
+                            MessageEnvelope::FileHeader { inner } => {
+                                let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref, .. } = *inner;
                                 file_handler::handle_envelope_file_header(
                                     server_states, pending_file_streams, pending_shard_streams,
                                     early_file_streams, bundle_keypair, event_tx,
@@ -5724,7 +5730,8 @@ async fn handle_incoming_request(
 
                             // -- Vault/shard envelopes via MLS (same logic as Olm handlers) --
 
-                            MessageEnvelope::ShardStore { sid, cid, si, sk, k, m, total_size, tier, data, chunks, .. } => {
+                            MessageEnvelope::ShardStore { inner } => {
+                                let ShardStorePayload { sid, cid, si, sk, k, m, total_size, tier, data, chunks, .. } = *inner;
                                 vault_ops::handle_envelope_shard_store(
                                     server_states, pending_shard_streams, olm,
                                     bundle_keypair, crypto_store, event_tx, ws_cmd_tx,
@@ -6414,26 +6421,28 @@ async fn handle_incoming_request(
                                             (None, None)
                                         };
                                         let header = MessageEnvelope::FileHeader {
-                                            fid: file_id.clone(),
-                                            name: file_meta.file_name.clone(),
-                                            ext: file_meta.file_ext.clone(),
-                                            mime: file_meta.mime_type.clone(),
-                                            size: file_meta.size_bytes,
-                                            chunks: 0,
-                                            img: file_meta.is_image,
-                                            w: file_meta.width,
-                                            h: file_meta.height,
-                                            mid: file_meta.message_id.clone(),
-                                            sid: resp_sid,
-                                            cid: resp_cid,
-                                            ts: file_meta.created_at,
-                                            sig: None,
-                                            pk: None,
-                                            aes_key: Some(hex::encode(enc.key)),
-                                            aes_nonce: Some(hex::encode(enc.nonce)),
-                                            target: None,
-                                            vthumb: file_meta.video_thumb.clone(),
-                                            share_ref: None,
+                                            inner: Box::new(FileHeaderPayload {
+                                                fid: file_id.clone(),
+                                                name: file_meta.file_name.clone(),
+                                                ext: file_meta.file_ext.clone(),
+                                                mime: file_meta.mime_type.clone(),
+                                                size: file_meta.size_bytes,
+                                                chunks: 0,
+                                                img: file_meta.is_image,
+                                                w: file_meta.width,
+                                                h: file_meta.height,
+                                                mid: file_meta.message_id.clone(),
+                                                sid: resp_sid,
+                                                cid: resp_cid,
+                                                ts: file_meta.created_at,
+                                                sig: None,
+                                                pk: None,
+                                                aes_key: Some(hex::encode(enc.key)),
+                                                aes_nonce: Some(hex::encode(enc.nonce)),
+                                                target: None,
+                                                vthumb: file_meta.video_thumb.clone(),
+                                                share_ref: None,
+                                            }),
                                         };
                                         // Send FileHeader via Olm (targeted) + SendDirect.
                                             let header_json = serde_json::to_string(&header).unwrap_or_default();
