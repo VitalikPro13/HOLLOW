@@ -44,6 +44,8 @@ pub(crate) async fn handle_send_file(
     webrtc_peers: &std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
     gossip_overlays: &mut HashMap<String, gossip::GossipOverlay>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-FILE] SendFile: {file_path} mid={message_id}");
 
@@ -105,11 +107,7 @@ pub(crate) async fn handle_send_file(
     let is_image = file_transfer::is_image_mime(&mime);
 
     let webp_quality = {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        crate::storage::MessageStore::open(&db_path, &passphrase)
+        crate::storage::MessageStore::open(db_path, db_passphrase)
             .ok()
             .and_then(|s| s.load_setting("image_quality").ok().flatten())
             .map(|s| image_convert::WebpQuality::from_setting(&s))
@@ -207,11 +205,7 @@ pub(crate) async fn handle_send_file(
     }
 
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.insert_file_metadata(
                 &file_id, &original_name, &final_ext, &final_mime,
                 file_size, total_chunks, is_image,
@@ -288,11 +282,7 @@ pub(crate) async fn handle_send_file(
 
         // Store the text message.
         {
-            let data_dir = crate::identity::data_dir().unwrap_or_default();
-            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 let _ = store.insert(
                     &peer_str, &signing_payload_text, true, timestamp,
                     sig.as_deref(), pk.as_deref(), Some(&message_id),
@@ -386,11 +376,7 @@ pub(crate) async fn handle_send_file(
 
         // Store the text message.
         {
-            let data_dir = crate::identity::data_dir().unwrap_or_default();
-            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 let _ = store.insert_channel_message(
                     &sid, &cid, &local_peer, &signing_payload_text, true, timestamp,
                     sig.as_deref(), pk.as_deref(), Some(&message_id),
@@ -593,6 +579,8 @@ pub(crate) async fn handle_webrtc_transfer_complete(
     event_tx: &mpsc::Sender<NetworkEvent>,
     gossip_overlays: &mut HashMap<String, gossip::GossipOverlay>,
     webrtc_peers: &std::collections::HashSet<String>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-WEBRTC] Transfer complete: {transfer_id} from {sender_peer_id}");
     let stream_kind = if kind == "shard" {
@@ -617,6 +605,8 @@ pub(crate) async fn handle_webrtc_transfer_complete(
         early_file_streams,
         bundle_keypair,
         event_tx,
+        db_path,
+        db_passphrase,
     ).await;
 
     // Gossip relay: if this file has a pending relay, forward to neighbors.
@@ -718,6 +708,8 @@ pub(crate) async fn handle_completed_stream(
     early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     use ws_stream_transfer::StreamKind;
 
@@ -742,14 +734,9 @@ pub(crate) async fn handle_completed_stream(
                             Ok(plaintext) => {
                                 let final_path = file_transfer::final_file_path(&file_id, &pfs.ext);
                                 if let Ok(()) = std::fs::write(&final_path, &plaintext) {
-                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                            let disk_path = final_path.to_string_lossy().to_string();
-                                            let _ = store.mark_file_complete(&file_id, &disk_path);
-                                        }
+                                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                                        let disk_path = final_path.to_string_lossy().to_string();
+                                        let _ = store.mark_file_complete(&file_id, &disk_path);
                                     }
                                     let disk_path = final_path.to_string_lossy().to_string();
                                     hollow_log!("[HOLLOW-STREAM] File {file_id} complete: {disk_path}");
@@ -787,11 +774,8 @@ pub(crate) async fn handle_completed_stream(
             if let Some(pss) = pending_shard_streams.remove(&key) {
                 if let Ok(shard_bytes) = std::fs::read(&request.temp_path) {
                     let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                     let vault_dir = data_dir.join("vault");
-                    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                    if let Ok(content_store) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                    if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
                         let tier = crate::vault::content_store::StorageTier::from_str(&pss.tier);
                         let _ = content_store.store_shard(
                             &pss.server_id, &pss.content_id, pss.shard_index,
@@ -983,6 +967,8 @@ pub(crate) async fn handle_envelope_file_header(
     aes_nonce: Option<String>,
     vthumb: Option<VideoThumbRef>,
     share_ref: Option<super::types::ShareRef>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-FILE] MLS FileHeader: {fid} ({name}, {size} bytes, {chunks} chunks, share_ref={})", share_ref.is_some());
 
@@ -1005,11 +991,7 @@ pub(crate) async fn handle_envelope_file_header(
         _ => server_id.to_string(),
     };
 
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let _ = store.insert_file_metadata(
             &fid, &name, &ext, &mime,
             size, chunks, img,
@@ -1053,6 +1035,7 @@ pub(crate) async fn handle_envelope_file_header(
                 pending_file_streams, pending_shard_streams,
                 &mut empty_vault_dl, early_file_streams,
                 bundle_keypair, event_tx,
+                db_path, db_passphrase,
             ).await;
         }
     }
@@ -1080,6 +1063,8 @@ pub(crate) async fn handle_envelope_file_chunk(
     fid: String,
     idx: u32,
     data: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let chunk_bytes = match base64::engine::general_purpose::STANDARD.decode(&data) {
         Ok(b) => b,
@@ -1092,11 +1077,7 @@ pub(crate) async fn handle_envelope_file_chunk(
     if let Err(e) = file_transfer::write_chunk(&fid, idx, &chunk_bytes) {
         hollow_log!("[HOLLOW-FILE] {e}");
     } else {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             if let Ok(received) = store.mark_chunk_received(&fid, idx) {
                 if let Ok(Some(file_meta)) = store.get_file_metadata(&fid) {
                     let _ = event_tx.send(NetworkEvent::FileProgress {

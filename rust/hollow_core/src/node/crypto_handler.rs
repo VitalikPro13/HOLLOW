@@ -194,7 +194,7 @@ pub(crate) fn send_mls_broadcast(
     let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
     let ciphertext = mls.encrypt(server_id, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
-    persist_mls_state(mls, crypto_store);
+    // MLS state persisted by the debounce timer — not per-message.
     let msg = HavenMessage::MlsChannelMessage {
         server_id: server_id.to_string(),
         body: body_b64,
@@ -221,7 +221,7 @@ pub(crate) fn send_mls_broadcast_topic(
     let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
     let ciphertext = mls.encrypt(server_id, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
-    persist_mls_state(mls, crypto_store);
+    // MLS state persisted by the debounce timer — not per-message.
     let msg = HavenMessage::MlsChannelMessage {
         server_id: server_id.to_string(),
         body: body_b64,
@@ -255,7 +255,6 @@ pub(crate) fn send_mls_to_peer(
     let json = serde_json::to_string(&json_value).map_err(|e| format!("re-serialize: {e}"))?;
     let ciphertext = mls.encrypt(server_id, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
-    persist_mls_state(mls, crypto_store);
     let msg = HavenMessage::MlsChannelMessage {
         server_id: server_id.to_string(),
         body: body_b64,
@@ -281,7 +280,7 @@ pub(crate) async fn send_encrypted_message(
 ) -> bool {
     match olm.encrypt(peer_id_str, text.as_bytes()) {
         Ok((msg_type, ciphertext)) => {
-            persist_crypto_state(olm, crypto_store, peer_id_str);
+            persist_olm_session(olm, crypto_store, peer_id_str);
 
             if msg_type == 0 {
                 hollow_log!("[HOLLOW-CRYPTO] Sending PreKey (type 0) to {peer_id_str}");
@@ -325,10 +324,19 @@ pub(crate) async fn send_encrypted_message(
 }
 
 /// Persist both account and session state to DB (fire-and-forget).
+/// Use for session creation/destruction events where account state changes.
 pub(crate) fn persist_crypto_state(olm: &OlmManager, crypto_store: &CryptoStore, peer_id: &str) {
     if let Ok(account_json) = olm.account_pickle_json() {
         crypto_store.save_account(account_json);
     }
+    if let Ok(Some(session_json)) = olm.session_pickle_json(peer_id) {
+        crypto_store.save_session(peer_id.to_string(), session_json);
+    }
+}
+
+/// Persist only the session ratchet state (skip account pickle).
+/// Use for per-message encrypt/decrypt where only the ratchet advances.
+pub(crate) fn persist_olm_session(olm: &OlmManager, crypto_store: &CryptoStore, peer_id: &str) {
     if let Ok(Some(session_json)) = olm.session_pickle_json(peer_id) {
         crypto_store.save_session(peer_id.to_string(), session_json);
     }

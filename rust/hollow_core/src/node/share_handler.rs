@@ -1047,6 +1047,7 @@ pub async fn tick(
     event_tx: &mpsc::Sender<NetworkEvent>,
     bundle_keypair: &NativeKeypair,
 ) {
+    if registry.is_empty() { return; }
     let now = Instant::now();
     let root_hashes: Vec<String> = registry.keys().cloned().collect();
 

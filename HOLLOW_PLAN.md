@@ -1919,6 +1919,15 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [ ] LRU-eviction (optimization for loading only what you can see on the screen such as friends profiles or avatars)
 - [ ] **Theme system** — structured theme manifest (colors, fonts, spacing, radii, optional cosmetics like profile decorations/nickname accents), `.hollow-theme` bundle format (manifest + asset files, signed for integrity), in-app import/export UI with live preview, curated community gallery repo on GitHub. Per-user local only — themes never travel with messages. Data-only schema (no HTML/CSS/JS, no arbitrary code execution) so community-shared themes are provably safe to apply. Absorbs the old "hearts/sparkles on profiles + custom fonts" idea as one set of knobs among many. Build on existing `HollowTheme` ThemeExtension by making it loadable from a manifest instead of hardcoded.
 
+### Open-Source & Sustainability
+- [ ] Add self-hosting support (configurable relay URL in app settings)
+- [ ] Improve relay-uws setup docs (Docker Compose + Let's Encrypt guide)
+- [ ] Pursue OTF security audit (free, major credibility signal — no Discord alternative has done this)
+- [ ] Open-source client under AGPL-3.0 + commercial dual license
+  - AGPL: forks must publish source (kills closed-fork theft)
+  - Commercial: contact dev@anonlisten.com for proprietary/enterprise embedding
+- [ ] Add LICENSE and commercial licensing notice to README
+
 📋 INFRASTRUCTURE MASTER PLAN: "The Swarm"
 
 CORE PHILOSOPHY:

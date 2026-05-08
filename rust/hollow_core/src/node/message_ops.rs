@@ -29,6 +29,8 @@ pub(crate) async fn handle_send_message(
     message_id: String,
     reply_to_mid: Option<String>,
     link_preview: Option<LinkPreviewRef>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-SWARM] SendMessage received for {peer_id_str} mid={message_id}");
 
@@ -58,11 +60,7 @@ pub(crate) async fn handle_send_message(
     // Persist sent DM locally with the same Rust-generated timestamp.
     // This ensures DM sync timestamps are consistent (no Dart DateTime.now() mismatch).
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.insert(
                 &peer_id_str, &text, true, dm_timestamp,
                 sig.as_deref(), pk.as_deref(), Some(&message_id),
@@ -136,6 +134,8 @@ pub(crate) async fn handle_send_channel_message(
     message_id: String,
     reply_to_mid: Option<String>,
     link_preview: Option<LinkPreviewRef>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-SWARM] SendChannelMessage for channel {channel_id} in server {server_id} mid={message_id}");
 
@@ -246,11 +246,7 @@ pub(crate) async fn handle_send_channel_message(
     }
 
     // Persist locally with same timestamp as sent.
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let _ = store.insert_channel_message(
             &server_id, &channel_id, &local_peer, &text, true, timestamp,
             sig.as_deref(), pk.as_deref(), Some(&message_id),
@@ -292,6 +288,8 @@ pub(crate) async fn handle_edit_channel_message(
     channel_id: String,
     message_id: String,
     new_text: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-SWARM] EditChannelMessage {message_id} in {server_id}/{channel_id}");
 
@@ -325,11 +323,7 @@ pub(crate) async fn handle_edit_channel_message(
 
     // Update local DB (preserves old text in message_edits table).
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.edit_channel_message(
                 &message_id, &new_text, edit_timestamp,
                 sig.as_deref(), pk.as_deref(),
@@ -411,6 +405,8 @@ pub(crate) async fn handle_edit_dm_message(
     peer_id_str: String,
     message_id: String,
     new_text: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-SWARM] EditDmMessage {message_id} for {peer_id_str}");
 
@@ -434,11 +430,7 @@ pub(crate) async fn handle_edit_dm_message(
 
     // Update local DB.
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.edit_dm_message(
                 &message_id, &new_text, edit_timestamp,
                 sig.as_deref(), pk.as_deref(),
@@ -495,6 +487,8 @@ pub(crate) async fn handle_delete_channel_message(
     server_id: String,
     channel_id: String,
     message_id: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-SWARM] DeleteChannelMessage {message_id} in {server_id}/{channel_id}");
 
@@ -520,11 +514,7 @@ pub(crate) async fn handle_delete_channel_message(
     // replayed as a send signature. Fetches current text
     // from DB so the archive viewer (later) can verify the
     // delete against the same state the exporter saw.
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    let current_text = crate::storage::MessageStore::open(&db_path, &passphrase)
+    let current_text = crate::storage::MessageStore::open(db_path, db_passphrase)
         .ok()
         .and_then(|store| store.get_channel_message_text(&message_id))
         .unwrap_or_default();
@@ -540,7 +530,7 @@ pub(crate) async fn handle_delete_channel_message(
 
     // Hide in local DB (preserves text in message_deletions table).
     {
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.hide_channel_message(
                 &message_id, delete_timestamp,
                 sig.as_deref(), pk.as_deref(),
@@ -615,6 +605,8 @@ pub(crate) async fn handle_delete_dm_message(
     local_peer_str: &str,
     peer_id_str: String,
     message_id: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-SWARM] DeleteDmMessage {message_id} for {peer_id_str}");
 
@@ -627,11 +619,7 @@ pub(crate) async fn handle_delete_dm_message(
     // Sign the deletion using the canonical payload format
     // with the text at deletion time. Uses "dm-delete" msg
     // type — distinct from "dm" to prevent replay.
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    let current_text = crate::storage::MessageStore::open(&db_path, &passphrase)
+    let current_text = crate::storage::MessageStore::open(db_path, db_passphrase)
         .ok()
         .and_then(|store| store.get_dm_message_text(&message_id))
         .unwrap_or_default();
@@ -647,7 +635,7 @@ pub(crate) async fn handle_delete_dm_message(
 
     // Hide in local DB.
     {
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.hide_dm_message(
                 &message_id, delete_timestamp,
                 sig.as_deref(), pk.as_deref(),
@@ -700,6 +688,8 @@ pub(crate) async fn handle_add_channel_reaction(
     channel_id: String,
     message_id: String,
     emoji: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-SWARM] AddChannelReaction {emoji} on {message_id} in {server_id}/{channel_id}");
 
@@ -724,11 +714,7 @@ pub(crate) async fn handle_add_channel_reaction(
 
     // Save to local DB.
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.add_reaction(
                 &message_id, &emoji, &local_peer, reaction_ts,
                 sig.as_deref(), pk.as_deref(),
@@ -805,6 +791,8 @@ pub(crate) async fn handle_add_dm_reaction(
     peer_id_str: String,
     message_id: String,
     emoji: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-SWARM] AddDmReaction {emoji} on {message_id} for {peer_id_str}");
 
@@ -819,11 +807,7 @@ pub(crate) async fn handle_add_dm_reaction(
 
     // Save to local DB.
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.add_reaction(
                 &message_id, &emoji, &local_peer, reaction_ts,
                 sig.as_deref(), pk.as_deref(),
@@ -878,6 +862,8 @@ pub(crate) async fn handle_remove_channel_reaction(
     channel_id: String,
     message_id: String,
     emoji: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-SWARM] RemoveChannelReaction {emoji} on {message_id} in {server_id}/{channel_id}");
 
@@ -902,11 +888,7 @@ pub(crate) async fn handle_remove_channel_reaction(
 
     // Remove from local DB.
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.remove_reaction(
                 &message_id, &emoji, &local_peer, remove_ts,
                 sig.as_deref(), pk.as_deref(),
@@ -983,6 +965,8 @@ pub(crate) async fn handle_remove_dm_reaction(
     peer_id_str: String,
     message_id: String,
     emoji: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-SWARM] RemoveDmReaction {emoji} on {message_id} for {peer_id_str}");
 
@@ -997,11 +981,7 @@ pub(crate) async fn handle_remove_dm_reaction(
 
     // Remove from local DB.
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.remove_reaction(
                 &message_id, &emoji, &local_peer, remove_ts,
                 sig.as_deref(), pk.as_deref(),
@@ -1056,6 +1036,8 @@ pub(crate) async fn handle_envelope_channel_message(
     reply_to: Option<String>,
     file_id: Option<String>,
     link_preview: Option<LinkPreviewRef>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let signing_payload = message_signing_payload(
         "ch", &format!("{}:{}", sid, cid),
@@ -1070,11 +1052,7 @@ pub(crate) async fn handle_envelope_channel_message(
 
     let is_mine = sender_peer_id == local_peer;
 
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let rows = store.insert_channel_message(
             &sid, &cid, &sender_peer_id, &text, is_mine, ts,
             sig.as_deref(), pk.as_deref(), mid.as_deref(),
@@ -1116,13 +1094,11 @@ pub(crate) async fn handle_envelope_edit_message(
     pk: Option<String>,
     sid: Option<String>,
     cid: Option<String>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
     let mut edit_applied = false;
-    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let sender = store.get_channel_message_sender(&mid);
         if sender.as_deref() == Some(peer_str) {
             let _ = store.edit_channel_message(
@@ -1161,12 +1137,10 @@ pub(crate) async fn handle_envelope_delete_message(
     pk: Option<String>,
     sid: Option<String>,
     cid: Option<String>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let sender = store.get_channel_message_sender(&mid);
         if sender.as_deref() != Some(sender_peer_id) {
             hollow_log!("[HOLLOW-SECURITY] REJECTED MLS DeleteMessage from {sender_peer_id} — not the sender of {mid}");
@@ -1200,12 +1174,10 @@ pub(crate) async fn handle_envelope_add_reaction(
     pk: Option<String>,
     sid: Option<String>,
     cid: Option<String>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let _ = store.add_reaction(
             &mid, &emoji, peer_str, ts,
             sig.as_deref(), pk.as_deref(),
@@ -1236,12 +1208,10 @@ pub(crate) async fn handle_envelope_remove_reaction(
     pk: Option<String>,
     sid: Option<String>,
     cid: Option<String>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let _ = store.remove_reaction(
             &mid, &emoji, peer_str, ts,
             sig.as_deref(), pk.as_deref(),

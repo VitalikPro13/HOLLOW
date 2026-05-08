@@ -25,17 +25,16 @@ pub(crate) async fn handle_vault_download_file(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     server_id: String,
     content_id: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-VAULT] VaultDownloadFile: cid={content_id} in {server_id}");
 
     let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
     let vault_dir = data_dir.join("vault");
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
 
     let result: Result<String, String> = (|| {
-        let cs = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir)?;
+        let cs = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir)?;
 
         // Load manifest
         let manifest = cs.load_manifest(&content_id)?
@@ -222,6 +221,8 @@ pub(crate) async fn handle_vault_upload_file(
     aes_nonce: Vec<u8>,
     original_size: u64,
     content_id: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-VAULT] VaultUploadFile: {file_name} cid={content_id} in {server_id}/{channel_id}");
 
@@ -272,11 +273,8 @@ pub(crate) async fn handle_vault_upload_file(
 
         // Open ContentStore for local operations
         let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
         let vault_dir = data_dir.join("vault");
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        let cs = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir)?;
+        let cs = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir)?;
 
         // Store local shards
         let tier = crate::vault::content_store::StorageTier::from_str(&plan.manifest.storage_tier);
@@ -415,11 +413,7 @@ pub(crate) async fn handle_vault_upload_file(
 
                 // Link vault content_id to the file record via message_id.
                 if !message_id.is_empty() {
-                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                    if let Ok(ms) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                    if let Ok(ms) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         let _ = ms.set_file_content_id(&message_id, &content_id);
                     }
                 }
@@ -443,10 +437,11 @@ pub(crate) async fn handle_delete_vault_content(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
     content_id: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     if let Some(state) = server_states.get(&server_id) {
         let local_peer = local_peer_str.to_string();
@@ -459,11 +454,8 @@ pub(crate) async fn handle_delete_vault_content(
 
         // Delete local shards and placements
         let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
         let vault_dir = data_dir.join("vault");
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+        if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
             let _ = cs.delete_content(&server_id, &content_id);
             let _ = cs.delete_placements(&content_id);
         }
@@ -622,10 +614,11 @@ pub(crate) async fn handle_initiate_recovery_pool(
     recovery_pool_state: &mut Option<crate::node::recovery_pool::RecoveryPoolState>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
     token: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let room_code = format!("recovery:{}:{}", server_id, token);
     hollow_log!("[RECOVERY-POOL] Initiating pool for server {} — room {}", server_id, room_code);
@@ -637,11 +630,8 @@ pub(crate) async fn handle_initiate_recovery_pool(
 
     // Build local shard inventory.
     let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
     let vault_dir = data_dir.join("vault");
-    let inventory = if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+    let inventory = if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
         crate::node::recovery_pool::build_local_inventory(&cs, &server_id)
     } else {
         crate::node::recovery_pool::MemberInventory::empty()
@@ -657,7 +647,7 @@ pub(crate) async fn handle_initiate_recovery_pool(
         inventory,
     );
     // Populate manifest metadata for transfer plan computation.
-    if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+    if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
         pool.populate_from_content_store(&cs);
     }
     *recovery_pool_state = Some(pool);
@@ -674,10 +664,11 @@ pub(crate) async fn handle_join_recovery_pool(
     recovery_pool_state: &mut Option<crate::node::recovery_pool::RecoveryPoolState>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
     token: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let room_code = format!("recovery:{}:{}", server_id, token);
     hollow_log!("[RECOVERY-POOL] Joining pool for server {} — room {}", server_id, room_code);
@@ -689,11 +680,8 @@ pub(crate) async fn handle_join_recovery_pool(
 
     // Build local inventory and send RecoveryHello.
     let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
     let vault_dir = data_dir.join("vault");
-    let inventory = if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+    let inventory = if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
         crate::node::recovery_pool::build_local_inventory(&cs, &server_id)
     } else {
         crate::node::recovery_pool::MemberInventory::empty()
@@ -719,7 +707,7 @@ pub(crate) async fn handle_join_recovery_pool(
         local_peer_str.to_string(),
         inventory,
     );
-    if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+    if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
         pool.populate_from_content_store(&cs);
     }
     *recovery_pool_state = Some(pool);
@@ -779,6 +767,8 @@ pub(crate) async fn handle_envelope_shard_store(
     tier: String,
     data: String,
     chunks: u32,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-MLS-VAULT] ShardStore: cid={cid} si={si} from {sender_peer_id}");
     let is_member = server_states.get(&sid).map(|s| s.members.contains_key(&sender_peer_id)).unwrap_or(false);
@@ -794,11 +784,8 @@ pub(crate) async fn handle_envelope_shard_store(
         // Inline shard — store directly.
         if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
             let data_dir = crate::identity::data_dir().unwrap_or_default();
-            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
             let vault_dir = data_dir.join("vault");
-            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-            if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+            if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
                 let tier_enum = crate::vault::content_store::StorageTier::from_str(&tier);
                 let _ = cs.store_shard(&sid, &cid, si, k, m, total_size, tier_enum, &shard_bytes);
             }
@@ -849,11 +836,12 @@ pub(crate) async fn handle_envelope_shard_store_ack(
 /// Handle `MessageEnvelope::ShardDelete` (MLS path) — requires MANAGE_SERVER permission.
 pub(crate) async fn handle_envelope_shard_delete(
     server_states: &HashMap<String, ServerState>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
     sender_peer_id: &str,
     sid: String,
     cid: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let has_perm = server_states.get(&sid).map(|s| {
         let role = s.get_role(sender_peer_id);
@@ -862,11 +850,8 @@ pub(crate) async fn handle_envelope_shard_delete(
     }).unwrap_or(false);
     if !has_perm { return; }
     let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
     let vault_dir = data_dir.join("vault");
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+    if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
         let _ = cs.delete_content(&sid, &cid);
     }
     let _ = event_tx.send(NetworkEvent::ShardDeleted {
@@ -892,16 +877,15 @@ pub(crate) async fn handle_envelope_shard_request(
     cid: String,
     si: u16,
     sk: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-MLS-VAULT] ShardRequest: cid={cid} si={si} from {sender_peer_id}");
     let is_member = server_states.get(&sid).map(|s| s.members.contains_key(&sender_peer_id)).unwrap_or(false);
     if !is_member { return; }
     let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
     let vault_dir = data_dir.join("vault");
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+    if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
         match cs.read_shard_unchecked(&sid, &sk) {
             Ok(shard_data) => {
                 let resp = MessageEnvelope::ShardResponse {
@@ -982,16 +966,15 @@ pub(crate) async fn handle_envelope_shard_probe(
     sender_peer_id: String,
     sid: String,
     cid: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let is_member = server_states.get(&sid).map(|s| s.members.contains_key(&sender_peer_id)).unwrap_or(false);
     if !is_member { return; }
     let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
     let vault_dir = data_dir.join("vault");
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
     let mut indices = Vec::new();
-    if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+    if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
         if let Ok(records) = cs.list_content_shards(&sid, &cid) {
             indices = records.iter().map(|r| r.shard_index).collect();
         }
@@ -1015,24 +998,22 @@ pub(crate) async fn handle_envelope_shard_probe_response(
 
 /// Handle `MessageEnvelope::VaultManifestBroadcast` (MLS path).
 pub(crate) async fn handle_envelope_vault_manifest_broadcast(
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     sid: String,
     _cid: String,
     chid: String,
     manifest: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-MLS-VAULT] VaultManifestBroadcast: cid={_cid} in {chid}");
     if let Ok(manifest_obj) = serde_json::from_str::<crate::vault::pipeline::VaultManifest>(&manifest) {
         let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
         let vault_dir = data_dir.join("vault");
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+        if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
             let _ = cs.save_manifest(&sid, &chid, &manifest_obj);
         }
         if !manifest_obj.message_id.is_empty() {
-            if let Ok(ms) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+            if let Ok(ms) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 let _ = ms.set_file_content_id(&manifest_obj.message_id, &manifest_obj.content_id);
             }
         }
@@ -1043,23 +1024,21 @@ pub(crate) async fn handle_envelope_vault_manifest_broadcast(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_shard_migrate(
     server_states: &HashMap<String, ServerState>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     sender_peer_id: &str,
     sid: String,
     cid: String,
     si: u16,
     _sk: String,
     data: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let is_member = server_states.get(&sid).map(|s| s.members.contains_key(sender_peer_id)).unwrap_or(false);
     if !is_member { return; }
     if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
         let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
         let vault_dir = data_dir.join("vault");
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+        if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
             let tier = crate::vault::content_store::StorageTier::Standard;
             let _ = cs.store_shard(&sid, &cid, si, 0, 0, 0, tier, &shard_bytes);
         }

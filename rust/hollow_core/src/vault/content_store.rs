@@ -346,7 +346,7 @@ impl ContentStore {
         // First collect shard keys to delete files
         let mut stmt = self
             .conn
-            .prepare("SELECT shard_key FROM vault_shards WHERE server_id = ?1 AND content_id = ?2")
+            .prepare_cached("SELECT shard_key FROM vault_shards WHERE server_id = ?1 AND content_id = ?2")
             .map_err(|e| format!("Failed to prepare query: {e}"))?;
 
         let keys: Vec<String> = stmt
@@ -692,7 +692,7 @@ impl ContentStore {
     ) -> Result<Option<super::pipeline::VaultManifest>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT manifest_json FROM vault_manifests WHERE content_id = ?1")
+            .prepare_cached("SELECT manifest_json FROM vault_manifests WHERE content_id = ?1")
             .map_err(|e| format!("Failed to prepare manifest query: {e}"))?;
 
         let mut rows = stmt

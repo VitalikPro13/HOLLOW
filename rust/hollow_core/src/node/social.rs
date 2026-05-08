@@ -18,9 +18,10 @@ pub(crate) async fn handle_send_friend_request(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     pending_friend_requests: &mut HashMap<String, i64>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     peer_id_str: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-FRIENDS] Sending friend request to {peer_id_str}");
 
@@ -31,11 +32,7 @@ pub(crate) async fn handle_send_friend_request(
 
     // Save as pending outgoing.
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.save_friend(&peer_id_str, "pending", "outgoing", now);
         }
     }
@@ -87,19 +84,16 @@ pub(crate) async fn handle_accept_friend_request(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     peer_id_str: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-FRIENDS] Accepting friend request from {peer_id_str}");
 
     // Update to accepted.
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -140,18 +134,15 @@ pub(crate) async fn handle_reject_friend_request(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     peer_id_str: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-FRIENDS] Rejecting friend request from {peer_id_str}");
 
     // Remove from friends table.
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.remove_friend(&peer_id_str);
         }
     }
@@ -173,28 +164,24 @@ pub(crate) async fn handle_remove_friend(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     peer_id_str: String,
     pending_friend_removals: &mut std::collections::HashSet<String>,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-FRIENDS] Removing friend {peer_id_str}");
-
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
 
     if peer_is_reachable(&ws_room_peers, &peer_id_str) {
         send_message_to_peer(
             &ws_cmd_tx, &ws_room_peers,
             &peer_id_str, HavenMessage::FriendRemove,
         );
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.remove_friend(&peer_id_str);
         }
     } else {
         pending_friend_removals.insert(peer_id_str.clone());
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.save_friend(&peer_id_str, "removed", "outgoing", 0);
         }
         hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id_str} not reachable, queued friend removal for delivery");
@@ -286,7 +273,6 @@ pub(crate) async fn handle_update_profile(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     mls: &mut Option<MlsManager>,
     server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     crypto_store: &crate::crypto::CryptoStore,
     local_peer_str: &str,
     display_name: String,
@@ -296,6 +282,8 @@ pub(crate) async fn handle_update_profile(
     banner_bytes: Option<Vec<u8>>,
     is_invisible: bool,
     twitch_username: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -316,11 +304,7 @@ pub(crate) async fn handle_update_profile(
 
     // Save our own profile to DB.
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(db) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             if let Err(e) = db.save_profile(
                 &local_peer_str, &display_name, &status, &about_me, now,
                 avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
@@ -396,16 +380,13 @@ pub(crate) async fn handle_update_profile(
 pub(crate) fn send_own_profile_to_peer(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     target_peer: &str,
     is_invisible: bool,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         if let Ok(Some(profile)) = store.load_profile(local_peer_str) {
             let avatar_b64 = profile.avatar_bytes
                 .as_ref()
@@ -448,7 +429,6 @@ pub(crate) async fn handle_envelope_typing(
 pub(crate) async fn handle_envelope_profile_update(
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_states: &mut HashMap<String, ServerState>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     sender_peer_id: String,
     display_name: String,
     status: String,
@@ -457,6 +437,8 @@ pub(crate) async fn handle_envelope_profile_update(
     avatar_b64: String,
     banner_b64: String,
     twitch_username: String,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     // Decode avatar/banner base64 (same logic as HavenMessage::ProfileUpdate handler).
     let avatar_bytes: Option<Vec<u8>> = if avatar_b64.is_empty() {
@@ -475,11 +457,7 @@ pub(crate) async fn handle_envelope_profile_update(
         base64::engine::general_purpose::STANDARD.decode(&banner_b64).ok()
             .filter(|b| b.len() <= 2_000_000)
     };
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let _ = store.save_profile(
             &sender_peer_id, &display_name, &status, &about_me, updated_at,
             avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,

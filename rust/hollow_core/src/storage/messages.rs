@@ -113,6 +113,13 @@ impl MessageStore {
         }
         let _ = conn.execute_batch("PRAGMA incremental_vacuum(100);");
 
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA cache_size = -8000;
+             PRAGMA temp_store = MEMORY;"
+        ).map_err(|e| format!("Failed to set performance PRAGMAs: {e}"))?;
+
         // Create messages table if it doesn't exist.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS messages (
@@ -663,13 +670,26 @@ impl MessageStore {
             eprintln!("[HOLLOW] FTS5 setup failed (non-fatal): {e}");
         });
 
-        // Backfill FTS for existing messages (idempotent — rebuild clears + re-inserts).
-        conn.execute_batch(
-            "INSERT OR IGNORE INTO messages_fts(messages_fts) VALUES('rebuild');
-             INSERT OR IGNORE INTO channel_messages_fts(channel_messages_fts) VALUES('rebuild');"
-        ).unwrap_or_else(|e| {
-            eprintln!("[HOLLOW] FTS5 rebuild failed (non-fatal): {e}");
-        });
+        // One-time FTS backfill for databases that existed before FTS was added.
+        let fts_done: bool = conn
+            .query_row(
+                "SELECT 1 FROM app_settings WHERE key = 'fts_backfilled'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !fts_done {
+            conn.execute_batch(
+                "INSERT OR IGNORE INTO messages_fts(messages_fts) VALUES('rebuild');
+                 INSERT OR IGNORE INTO channel_messages_fts(channel_messages_fts) VALUES('rebuild');"
+            ).unwrap_or_else(|e| {
+                eprintln!("[HOLLOW] FTS5 rebuild failed (non-fatal): {e}");
+            });
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('fts_backfilled', '1')",
+                [],
+            );
+        }
 
         Ok(MessageStore { conn })
     }
@@ -764,7 +784,7 @@ impl MessageStore {
     pub fn load_olm_account(&self) -> Result<Option<String>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT pickle FROM olm_account WHERE id = 1")
+            .prepare_cached("SELECT pickle FROM olm_account WHERE id = 1")
             .map_err(|e| format!("Failed to prepare olm_account query: {e}"))?;
         let mut rows = stmt
             .query_map([], |row| row.get(0))
@@ -793,7 +813,7 @@ impl MessageStore {
     pub fn load_olm_session(&self, peer_id: &str) -> Result<Option<String>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT pickle FROM olm_sessions WHERE peer_id = ?1")
+            .prepare_cached("SELECT pickle FROM olm_sessions WHERE peer_id = ?1")
             .map_err(|e| format!("Failed to prepare olm_sessions query: {e}"))?;
         let mut rows = stmt
             .query_map(params![peer_id], |row| row.get(0))
@@ -809,7 +829,7 @@ impl MessageStore {
     pub fn load_all_olm_sessions(&self) -> Result<Vec<(String, String)>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT peer_id, pickle FROM olm_sessions")
+            .prepare_cached("SELECT peer_id, pickle FROM olm_sessions")
             .map_err(|e| format!("Failed to prepare olm_sessions query: {e}"))?;
         let rows = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -962,7 +982,7 @@ impl MessageStore {
     pub fn load_server_state(&self, server_id: &str) -> Result<Option<String>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT state_json FROM servers WHERE server_id = ?1")
+            .prepare_cached("SELECT state_json FROM servers WHERE server_id = ?1")
             .map_err(|e| format!("Failed to prepare servers query: {e}"))?;
         let mut rows = stmt
             .query_map(params![server_id], |row| row.get(0))
@@ -978,7 +998,7 @@ impl MessageStore {
     pub fn load_all_servers(&self) -> Result<Vec<(String, String)>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT server_id, state_json FROM servers")
+            .prepare_cached("SELECT server_id, state_json FROM servers")
             .map_err(|e| format!("Failed to prepare servers query: {e}"))?;
         let rows = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -1053,7 +1073,7 @@ impl MessageStore {
     /// Load a server blob by key.
     pub fn load_server_blob(&self, server_id: &str, key: &str) -> Result<Option<String>, String> {
         let mut stmt = self.conn
-            .prepare("SELECT value FROM server_blobs WHERE server_id = ?1 AND key = ?2")
+            .prepare_cached("SELECT value FROM server_blobs WHERE server_id = ?1 AND key = ?2")
             .map_err(|e| format!("Failed to prepare server_blobs query: {e}"))?;
         let mut rows = stmt
             .query_map(params![server_id, key], |row| row.get(0))
@@ -1483,7 +1503,7 @@ impl MessageStore {
     pub fn get_dm_peer_ids(&self) -> Vec<String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT DISTINCT peer_id FROM messages")
+            .prepare_cached("SELECT DISTINCT peer_id FROM messages")
             .unwrap();
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
@@ -1664,7 +1684,7 @@ impl MessageStore {
     pub fn load_hlc_state(&self) -> Result<Option<(u64, u32, String)>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT physical_ms, counter, actor FROM hlc_state WHERE id = 1")
+            .prepare_cached("SELECT physical_ms, counter, actor FROM hlc_state WHERE id = 1")
             .map_err(|e| format!("Failed to prepare hlc_state query: {e}"))?;
         let mut rows = stmt
             .query_map([], |row| {
@@ -1709,7 +1729,7 @@ impl MessageStore {
     pub fn load_mls_identity(&self) -> Result<Option<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT signer_data, credential_data, storage_data FROM mls_identity WHERE id = 1")
+            .prepare_cached("SELECT signer_data, credential_data, storage_data FROM mls_identity WHERE id = 1")
             .map_err(|e| format!("Failed to prepare mls_identity query: {e}"))?;
         let mut rows = stmt
             .query_map([], |row| {
@@ -2775,7 +2795,7 @@ impl MessageStore {
     pub fn load_setting(&self, key: &str) -> Result<Option<String>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT value FROM app_settings WHERE key = ?1")
+            .prepare_cached("SELECT value FROM app_settings WHERE key = ?1")
             .map_err(|e| format!("Failed to prepare setting query: {e}"))?;
         let mut rows = stmt
             .query_map(params![key], |row| row.get::<_, String>(0))
@@ -2833,7 +2853,7 @@ impl MessageStore {
     pub fn get_verified_peers(&self) -> Result<Vec<(String, i64)>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT peer_id, verified_at FROM verified_peers ORDER BY verified_at DESC")
+            .prepare_cached("SELECT peer_id, verified_at FROM verified_peers ORDER BY verified_at DESC")
             .map_err(|e| format!("Failed to prepare verified_peers query: {e}"))?;
         let rows = stmt
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))

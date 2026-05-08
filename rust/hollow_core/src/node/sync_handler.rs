@@ -1508,6 +1508,8 @@ pub(crate) async fn handle_request_channel_sync(
     server_id: String,
     channel_id: String,
     _crdt_store: &CrdtStore,
+    db_path: &str,
+    db_passphrase: &str,
 ) -> bool {
     // On-demand sync when user opens a channel.
     // Dedup: skip if already synced this channel recently.
@@ -1517,33 +1519,28 @@ pub(crate) async fn handle_request_channel_sync(
     }
     channel_sync_sent.insert(dedup_key, std::time::Instant::now());
     if let Some(state) = server_states.get(&server_id) {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                let since = store
-                    .get_latest_channel_timestamp(&server_id, &channel_id)
-                    .unwrap_or(None)
-                    .unwrap_or(0);
-                let sender_ts = store
-                    .get_per_sender_timestamps(&server_id, &channel_id)
-                    .unwrap_or_default();
-                let local_peer = local_peer_str.to_string();
-                for member_peer_str in state.members.keys() {
-                    if member_peer_str == &local_peer { continue; }
-                        if peer_is_reachable(ws_room_peers, member_peer_str) {
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                member_peer_str, HavenMessage::ChannelSyncRequest {
-                                    server_id: server_id.clone(),
-                                    channel_id: channel_id.clone(),
-                                    since_timestamp: since,
-                                    sender_timestamps: sender_ts.clone(),
-                                },
-                            );
-                        }
-                }
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            let since = store
+                .get_latest_channel_timestamp(&server_id, &channel_id)
+                .unwrap_or(None)
+                .unwrap_or(0);
+            let sender_ts = store
+                .get_per_sender_timestamps(&server_id, &channel_id)
+                .unwrap_or_default();
+            let local_peer = local_peer_str.to_string();
+            for member_peer_str in state.members.keys() {
+                if member_peer_str == &local_peer { continue; }
+                    if peer_is_reachable(ws_room_peers, member_peer_str) {
+                        send_message_to_peer(
+                            ws_cmd_tx, ws_room_peers,
+                            member_peer_str, HavenMessage::ChannelSyncRequest {
+                                server_id: server_id.clone(),
+                                channel_id: channel_id.clone(),
+                                since_timestamp: since,
+                                sender_timestamps: sender_ts.clone(),
+                            },
+                        );
+                    }
             }
         }
     }
@@ -1804,6 +1801,8 @@ pub(crate) async fn flush_pending_sync_requests(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     _crdt_store: &CrdtStore,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let Some(entries) = pending_sync_requests.remove(peer_str) else {
         return;
@@ -1814,11 +1813,7 @@ pub(crate) async fn flush_pending_sync_requests(
 
     hollow_log!("[HOLLOW-SYNC] Flushing {} pending sync requests for {peer_str}", entries.len());
 
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let Ok(proto) = bundle_keypair.to_protobuf_encoding() else { return };
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) else { return };
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else { return };
 
     for (server_id, channel_id, since_timestamp) in entries {
         let _ = event_tx.send(NetworkEvent::MessageSyncStarted {
@@ -2215,13 +2210,11 @@ pub(crate) async fn handle_envelope_channel_sync_req(
     sender_timestamps: HashMap<String, i64>,
     crypto_store: &CryptoStore,
     _crdt_store: &CrdtStore,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     if !server_states.contains_key(&sid) { return; }
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let msgs_result = if !sender_timestamps.is_empty() {
             store.get_channel_messages_since_per_sender(&sid, &cid, &sender_timestamps, 200)
         } else {
@@ -2288,13 +2281,11 @@ pub(crate) async fn handle_envelope_channel_probe(
     sid: String,
     cid: String,
     _crdt_store: &CrdtStore,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     if !server_states.contains_key(&sid) { return; }
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let our_latest = store.get_latest_channel_timestamp(&sid, &cid)
             .unwrap_or(None).unwrap_or(0);
         let our_count = store.count_channel_messages(&sid, &cid);
@@ -2326,16 +2317,14 @@ pub(crate) async fn handle_envelope_channel_probe_resp(
     their_latest: i64,
     _msg_count: u32,
     _crdt_store: &CrdtStore,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let dedup_key = format!("{sid}:{cid}");
     if channel_sync_sent.get(&dedup_key).is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
         return;
     }
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let our_latest = store.get_latest_channel_timestamp(&sid, &cid)
             .unwrap_or(None).unwrap_or(0);
         let _our_count = store.count_channel_messages(&sid, &cid);
@@ -2373,12 +2362,10 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     has_more: Option<bool>,
     crypto_store: &CryptoStore,
     _crdt_store: &CrdtStore,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
-    let data_dir = crate::identity::data_dir().unwrap_or_default();
-    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let mut new_count = 0u32;
         for msg in &messages {
             let is_mine = msg.s == local_peer;

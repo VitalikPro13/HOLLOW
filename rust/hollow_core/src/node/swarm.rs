@@ -17,7 +17,7 @@ use super::types::*;
 
 use super::crypto_handler::{
     message_signing_payload, sign_message, verify_message_signature,
-    persist_mls_state, persist_crypto_state,
+    persist_mls_state, persist_crypto_state, persist_olm_session,
     peer_is_reachable, is_mls_coordinator, is_vault_coordinator, ws_room_for_peer,
     send_mls_broadcast, send_encrypted_message,
     send_message_to_peer,
@@ -178,15 +178,21 @@ async fn run_event_loop(
     // Auto-rejoin every share row with seeding=1 so we keep serving across restarts.
     super::share_handler::auto_rejoin_seeders(&mut share_registry, &bundle_keypair, &ws_cmd_tx);
 
+    // Derive DB path/passphrase once — used throughout for MessageStore opens.
+    let db_path = {
+        let data_dir = crate::identity::data_dir().unwrap_or_default();
+        data_dir.join("messages.db").to_string_lossy().to_string()
+    };
+    let db_passphrase = {
+        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+        hex::encode(&proto[..32.min(proto.len())])
+    };
+
     // -- CRDT state (Phase 3) --
     // Server states keyed by server_id. Reload from DB so servers survive restarts.
     let mut server_states: HashMap<String, ServerState> = HashMap::new();
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
             match store.load_all_servers() {
                 Ok(rows) => {
                     for (server_id, json) in rows {
@@ -224,11 +230,7 @@ async fn run_event_loop(
 
     // -- MLS state --
     let mut mls: Option<MlsManager> = {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
             match store.load_mls_identity() {
                 Ok(Some((signer_data, credential_data, storage_data))) => {
                     let server_ids: Vec<String> = server_states.keys().cloned().collect();
@@ -267,11 +269,7 @@ async fn run_event_loop(
                 if let Ok(signer) = mgr.signer_bytes() {
                     if let Ok(cred) = mgr.credential_bytes() {
                         if let Ok(storage) = mgr.serialize_storage() {
-                            let data_dir = crate::identity::data_dir().unwrap_or_default();
-                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                 let _ = store.save_mls_identity(&signer, &cred, &storage);
                             }
                         }
@@ -294,11 +292,7 @@ async fn run_event_loop(
     // Pending friend removals: peer_ids whose FriendRemove wasn't delivered (peer offline).
     let mut pending_friend_removals: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
             if let Ok(friends) = store.load_friends(Some("pending")) {
                 for (peer_id, _status, direction, requested_at, _updated_at) in friends {
                     if direction == "outgoing" {
@@ -410,6 +404,11 @@ async fn run_event_loop(
     let mut share_tick_timer = tokio::time::interval(Duration::from_millis(50));
     share_tick_timer.tick().await; // consume immediate first tick
 
+    // MLS state debounce: persist dirty MLS state every 2s instead of per-message.
+    let mut mls_persist_timer = tokio::time::interval(Duration::from_secs(2));
+    mls_persist_timer.tick().await; // consume immediate first tick
+    let mut mls_dirty = false;
+
     loop {
         tokio::select! {
             // Handle commands from the FFI layer.
@@ -443,6 +442,7 @@ async fn run_event_loop(
                             &mut pending_messages, &mut key_request_in_flight,
                             &bundle_keypair, &pub_key_b64, &local_peer_str,
                             peer_id_str, text, message_id, reply_to_mid, link_preview,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -453,6 +453,7 @@ async fn run_event_loop(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &bundle_keypair, &pub_key_b64, &local_peer_str,
                             server_id, channel_id, text, message_id, reply_to_mid, link_preview,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -675,14 +676,16 @@ async fn run_event_loop(
                             &ws_room_peers, &bundle_keypair, &local_peer_str,
                             &mut channel_sync_sent, server_id, channel_id,
                             &crdt_store,
+                            &db_path, &db_passphrase,
                         ).await { continue; }
                     }
                     NodeCommand::UpdateProfile { display_name, status, about_me, avatar_bytes, banner_bytes, twitch_username } => {
                         social::handle_update_profile(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &mut mls, &server_states, &bundle_keypair,
+                            &mut mls, &server_states,
                             &crypto_store, &local_peer_str, display_name, status, about_me,
                             avatar_bytes, banner_bytes, is_invisible, twitch_username,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -692,6 +695,7 @@ async fn run_event_loop(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &bundle_keypair, &pub_key_b64, &local_peer_str,
                             server_id, channel_id, message_id, new_text,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -700,6 +704,7 @@ async fn run_event_loop(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &bundle_keypair, &pub_key_b64, &local_peer_str,
                             peer_id_str, message_id, new_text,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -709,6 +714,7 @@ async fn run_event_loop(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &bundle_keypair, &pub_key_b64, &local_peer_str,
                             server_id, channel_id, message_id,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -717,6 +723,7 @@ async fn run_event_loop(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &bundle_keypair, &pub_key_b64, &local_peer_str,
                             peer_id_str, message_id,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -726,6 +733,7 @@ async fn run_event_loop(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &bundle_keypair, &pub_key_b64, &local_peer_str,
                             server_id, channel_id, message_id, emoji,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -734,6 +742,7 @@ async fn run_event_loop(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &bundle_keypair, &pub_key_b64, &local_peer_str,
                             peer_id_str, message_id, emoji,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -743,6 +752,7 @@ async fn run_event_loop(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &bundle_keypair, &pub_key_b64, &local_peer_str,
                             server_id, channel_id, message_id, emoji,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -751,36 +761,41 @@ async fn run_event_loop(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &bundle_keypair, &pub_key_b64, &local_peer_str,
                             peer_id_str, message_id, emoji,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
                     NodeCommand::SendFriendRequest { peer_id: peer_id_str } => {
                         social::handle_send_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers, &sig_cmd_tx,
-                            &mut pending_friend_requests, &bundle_keypair,
+                            &mut pending_friend_requests,
                             &local_peer_str, peer_id_str,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
                     NodeCommand::AcceptFriendRequest { peer_id: peer_id_str } => {
                         social::handle_accept_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers, &sig_cmd_tx,
-                            &bundle_keypair, &local_peer_str, peer_id_str,
+                            &local_peer_str, peer_id_str,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
                     NodeCommand::RejectFriendRequest { peer_id: peer_id_str } => {
                         social::handle_reject_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &bundle_keypair, peer_id_str,
+                            peer_id_str,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
                     NodeCommand::RemoveFriend { peer_id: peer_id_str } => {
                         social::handle_remove_friend(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &bundle_keypair, peer_id_str,
+                            peer_id_str,
                             &mut pending_friend_removals,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -853,6 +868,7 @@ async fn run_event_loop(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &bundle_keypair,
                             server_id, content_id,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -867,6 +883,7 @@ async fn run_event_loop(
                             &bundle_keypair, &local_peer_str,
                             server_id, channel_id, file_name, mime_type, message_id,
                             ciphertext, aes_key, aes_nonce, original_size, content_id,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -874,8 +891,9 @@ async fn run_event_loop(
                         vault_ops::handle_delete_vault_content(
                             &server_states, &mut olm, &crypto_store, &mut mls,
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &bundle_keypair, &local_peer_str,
+                            &local_peer_str,
                             server_id, content_id,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -911,6 +929,7 @@ async fn run_event_loop(
                             &mut olm, &crypto_store, &mut mls,
                             &ws_cmd_tx, &ws_room_peers, &webrtc_peers, &mut pending_webrtc_sends,
                             &mut gossip_overlays,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -953,6 +972,7 @@ async fn run_event_loop(
                                 &mut pending_vault_downloads, &mut early_file_streams,
                                 &bundle_keypair, &event_tx,
                                 &mut gossip_overlays, &webrtc_peers,
+                                &db_path, &db_passphrase,
                             ).await;
                         }
                     }
@@ -1045,16 +1065,18 @@ async fn run_event_loop(
                         vault_ops::handle_initiate_recovery_pool(
                             &mut recovery_pool_state,
                             &event_tx, &ws_cmd_tx,
-                            &bundle_keypair, &local_peer_str,
+                            &local_peer_str,
                             server_id, token,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
                     NodeCommand::JoinRecoveryPool { server_id, token } => {
                         vault_ops::handle_join_recovery_pool(
                             &mut recovery_pool_state,
                             &event_tx, &ws_cmd_tx,
-                            &bundle_keypair, &local_peer_str,
+                            &local_peer_str,
                             server_id, token,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
                     NodeCommand::StopRecoveryPool { server_id } => {
@@ -1180,19 +1202,14 @@ async fn run_event_loop(
                         }
                         // Auto-join DM rooms for all accepted friends.
                         {
-                            let data_dir = crate::identity::data_dir().unwrap_or_default();
-                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                            if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                    if let Ok(friends) = store.load_friends(None) {
-                                        let local_peer = local_peer_str.to_string();
-                                        for (friend_pid, _, _, _, _) in &friends {
-                                            let room = dm_room_code(&local_peer, friend_pid);
-                                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
-                                                room_code: room,
-                                            });
-                                        }
+                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                if let Ok(friends) = store.load_friends(None) {
+                                    let local_peer = local_peer_str.to_string();
+                                    for (friend_pid, _, _, _, _) in &friends {
+                                        let room = dm_room_code(&local_peer, friend_pid);
+                                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                                            room_code: room,
+                                        });
                                     }
                                 }
                             }
@@ -1200,19 +1217,14 @@ async fn run_event_loop(
                         // Verify local shard integrity on startup.
                     // Removes DB records for shards whose files are missing or corrupt.
                     {
-                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                        let vault_dir = data_dir.join("vault");
-                        if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                            if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
-                                for server_id in server_states.keys() {
-                                    if let Ok(bad_keys) = cs.verify_server_shards(server_id) {
-                                        if !bad_keys.is_empty() {
-                                            hollow_log!("[HOLLOW-VAULT] {} corrupt/missing shards in {server_id}, cleaning DB records", bad_keys.len());
-                                            for key in &bad_keys {
-                                                let _ = cs.delete_shard(server_id, key);
-                                            }
+                        let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &db_passphrase, &vault_dir) {
+                            for server_id in server_states.keys() {
+                                if let Ok(bad_keys) = cs.verify_server_shards(server_id) {
+                                    if !bad_keys.is_empty() {
+                                        hollow_log!("[HOLLOW-VAULT] {} corrupt/missing shards in {server_id}, cleaning DB records", bad_keys.len());
+                                        for key in &bad_keys {
+                                            let _ = cs.delete_shard(server_id, key);
                                         }
                                     }
                                 }
@@ -1336,13 +1348,8 @@ async fn run_event_loop(
                                         &ws_cmd_tx, &ws_room_peers,
                                         &peer_id, HavenMessage::FriendRemove,
                                     );
-                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                            let _ = store.remove_friend(&peer_id);
-                                        }
+                                    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                        let _ = store.remove_friend(&peer_id);
                                     }
                                 }
 
@@ -1350,8 +1357,9 @@ async fn run_event_loop(
                                     // Send our profile (with invisible flag) to the new peer.
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
-                                        &bundle_keypair, &local_peer_str, &peer_id,
+                                        &local_peer_str, &peer_id,
                                         is_invisible,
+                                        &db_path, &db_passphrase,
                                     );
 
                                     // Proactive key exchange if no Olm session.
@@ -1375,6 +1383,7 @@ async fn run_event_loop(
                                             &bundle_keypair, &event_tx,
                                             &ws_cmd_tx, &ws_room_peers,
                                             &crdt_store,
+                                            &db_path, &db_passphrase,
                                         ).await;
                                     } else if !key_request_in_flight.contains(&peer_id) {
                                         // No Olm session — send KeyRequest via WS.
@@ -1405,22 +1414,17 @@ async fn run_event_loop(
 
                                             // Channel message sync via coordinator.
                                             {
-                                                let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                                if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                                                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                                    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                                        let channels_ts: Vec<(String, i64)> = state.channels.keys()
-                                                            .map(|cid| {
-                                                                let ts = store
-                                                                    .get_latest_channel_timestamp(sid, cid)
-                                                                    .unwrap_or(None)
-                                                                    .unwrap_or(0);
-                                                                (cid.clone(), ts)
-                                                            })
-                                                            .collect();
-                                                        sync_coordinator.register_peer(sid, &peer_id, channels_ts);
-                                                    }
+                                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                                    let channels_ts: Vec<(String, i64)> = state.channels.keys()
+                                                        .map(|cid| {
+                                                            let ts = store
+                                                                .get_latest_channel_timestamp(sid, cid)
+                                                                .unwrap_or(None)
+                                                                .unwrap_or(0);
+                                                            (cid.clone(), ts)
+                                                        })
+                                                        .collect();
+                                                    sync_coordinator.register_peer(sid, &peer_id, channels_ts);
                                                 }
                                             }
 
@@ -1468,22 +1472,17 @@ async fn run_event_loop(
 
                                     // DM sync.
                                     {
-                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                        if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                                let since = store
-                                                    .get_latest_dm_timestamp(&peer_id)
-                                                    .unwrap_or(None)
-                                                    .unwrap_or(0);
-                                                send_message_to_peer(
-                                                    &ws_cmd_tx, &ws_room_peers,
-                                                    &peer_id, HavenMessage::DmSyncRequest {
-                                                        since_timestamp: since,
-                                                    },
-                                                );
-                                            }
+                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                            let since = store
+                                                .get_latest_dm_timestamp(&peer_id)
+                                                .unwrap_or(None)
+                                                .unwrap_or(0);
+                                            send_message_to_peer(
+                                                &ws_cmd_tx, &ws_room_peers,
+                                                &peer_id, HavenMessage::DmSyncRequest {
+                                                    since_timestamp: since,
+                                                },
+                                            );
                                         }
                                     }
 
@@ -1637,8 +1636,9 @@ async fn run_event_loop(
                                 if pid != &local_peer {
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
-                                        &bundle_keypair, &local_peer_str, pid,
+                                        &local_peer_str, pid,
                                         is_invisible,
+                                        &db_path, &db_passphrase,
                                     );
                                 }
                             }
@@ -1660,17 +1660,14 @@ async fn run_event_loop(
                                     // Send our profile (with invisible flag) so the peer sees our display name.
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
-                                        &bundle_keypair, &local_peer_str, pid_str,
+                                        &local_peer_str, pid_str,
                                         is_invisible,
+                                        &db_path, &db_passphrase,
                                     );
 
                                     // Request their profile if we don't have it.
                                     {
-                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                             if let Ok(None) = store.load_profile(pid_str) {
                                                 hollow_log!("[HOLLOW-PROFILE] No profile for {pid_str} — sending ProfileRequest");
                                                 send_message_to_peer(
@@ -1700,22 +1697,17 @@ async fn run_event_loop(
                                             // Without this, the joining peer never probes for missed
                                             // channel messages and never gets MessageSyncCompleted.
                                             {
-                                                let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                                if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                                                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                                    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                                        let channels_ts: Vec<(String, i64)> = state.channels.keys()
-                                                            .map(|cid| {
-                                                                let ts = store
-                                                                    .get_latest_channel_timestamp(sid, cid)
-                                                                    .unwrap_or(None)
-                                                                    .unwrap_or(0);
-                                                                (cid.clone(), ts)
-                                                            })
-                                                            .collect();
-                                                        sync_coordinator.register_peer(sid, pid_str, channels_ts);
-                                                    }
+                                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                                    let channels_ts: Vec<(String, i64)> = state.channels.keys()
+                                                        .map(|cid| {
+                                                            let ts = store
+                                                                .get_latest_channel_timestamp(sid, cid)
+                                                                .unwrap_or(None)
+                                                                .unwrap_or(0);
+                                                            (cid.clone(), ts)
+                                                        })
+                                                        .collect();
+                                                    sync_coordinator.register_peer(sid, pid_str, channels_ts);
                                                 }
                                             }
                                         }
@@ -1737,13 +1729,8 @@ async fn run_event_loop(
                                             &ws_cmd_tx, &ws_room_peers,
                                             pid_str, HavenMessage::FriendRemove,
                                         );
-                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                        if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                                let _ = store.remove_friend(pid_str);
-                                            }
+                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                            let _ = store.remove_friend(pid_str);
                                         }
                                     }
 
@@ -1771,6 +1758,7 @@ async fn run_event_loop(
                                             &bundle_keypair, &event_tx,
                                             &ws_cmd_tx, &ws_room_peers,
                                             &crdt_store,
+                                            &db_path, &db_passphrase,
                                         ).await;
                                     } else if !key_request_in_flight.contains(pid_str) {
                                         hollow_log!("[HOLLOW-WS] RoomMembers: proactive key exchange for {pid_str}");
@@ -1783,22 +1771,17 @@ async fn run_event_loop(
 
                                     // DM sync: ask this peer for messages we missed.
                                     {
-                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                        if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                                let since = store
-                                                    .get_latest_dm_timestamp(pid_str)
-                                                    .unwrap_or(None)
-                                                    .unwrap_or(0);
-                                                send_message_to_peer(
-                                                    &ws_cmd_tx, &ws_room_peers,
-                                                    pid_str, HavenMessage::DmSyncRequest {
-                                                        since_timestamp: since,
-                                                    },
-                                                );
-                                            }
+                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                            let since = store
+                                                .get_latest_dm_timestamp(pid_str)
+                                                .unwrap_or(None)
+                                                .unwrap_or(0);
+                                            send_message_to_peer(
+                                                &ws_cmd_tx, &ws_room_peers,
+                                                pid_str, HavenMessage::DmSyncRequest {
+                                                    since_timestamp: since,
+                                                },
+                                            );
                                         }
                                     }
 
@@ -1833,6 +1816,7 @@ async fn run_event_loop(
                                 &mut early_file_streams,
                                 &bundle_keypair,
                                 &event_tx,
+                                &db_path, &db_passphrase,
                             ).await;
                         }
                     }
@@ -2048,13 +2032,9 @@ async fn run_event_loop(
                                                         hollow_log!("[RECOVERY-POOL] Processing {} transfer assignments", plan.len());
 
                                                         // Open ContentStore for shard I/O.
-                                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                                        let db_path_r = data_dir.join("messages.db").to_string_lossy().to_string();
-                                                        let proto_r = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                                                        let passphrase_r = hex::encode(&proto_r[..32.min(proto_r.len())]);
-                                                        let vault_dir_r = data_dir.join("vault");
+                                                        let vault_dir_r = crate::identity::data_dir().unwrap_or_default().join("vault");
 
-                                                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path_r, &passphrase_r, &vault_dir_r) {
+                                                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &db_passphrase, &vault_dir_r) {
                                                             for assignment in &plan {
                                                                 // Register incoming shards we're expecting to receive.
                                                                 if assignment.dest_peer == local_peer_str {
@@ -2194,6 +2174,8 @@ async fn run_event_loop(
                                         &mut voice_channel_participants,
                                         &mut voice_channel_gossip_mode,
                                         &mut vc_signal_rate_tokens,
+                                        &mut mls_dirty,
+                                        &db_path, &db_passphrase,
                                         &local_peer_str, &from, is_invisible, msg,
                                     ).await;
                             } else {
@@ -2393,14 +2375,7 @@ async fn run_event_loop(
                     );
 
                     // Open DB for message count queries.
-                    let sync_data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let sync_db_path = sync_data_dir.join("messages.db").to_string_lossy().to_string();
-                    let sync_store = if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                        let pass = hex::encode(&proto[..32.min(proto.len())]);
-                        crate::storage::MessageStore::open(&sync_db_path, &pass).ok()
-                    } else {
-                        None
-                    };
+                    let sync_store = crate::storage::MessageStore::open(&db_path, &db_passphrase).ok();
 
                     for (peer, channels) in assignments {
                         let peer_str = peer.to_string();
@@ -2471,13 +2446,9 @@ async fn run_event_loop(
                 crdt_store.prune_ops(1000);
                 hollow_log!("[HOLLOW-VAULT] Running rebalance + retention check");
                 let local_peer = local_peer_str.to_string();
-                let data_dir = crate::identity::data_dir().unwrap_or_default();
-                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                let vault_dir = data_dir.join("vault");
-                let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
 
-                if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &db_passphrase, &vault_dir) {
                     // 1. Update last_seen for all connected server members
                     let now_ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -2522,7 +2493,7 @@ async fn run_event_loop(
 
                     // 2c. Message retention: prune old messages per server setting.
                     // Forward-only: only prune messages sent after the policy was set.
-                    if let Ok(msg_store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                    if let Ok(msg_store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                         for (server_id, state) in &server_states {
                             let msg_policy = state.settings
                                 .get("retention_messages")
@@ -2653,13 +2624,9 @@ async fn run_event_loop(
                     let servers_to_check: Vec<String> = rebalance_pending.drain().collect();
                     hollow_log!("[HOLLOW-VAULT] Event-driven rebalance for {} servers", servers_to_check.len());
 
-                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                    let vault_dir = data_dir.join("vault");
-                    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                    let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
 
-                    if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                    if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &db_passphrase, &vault_dir) {
                         let online_peers: std::collections::HashSet<String> = ws_room_peers.values()
                             .flat_map(|peers| peers.iter().cloned())
                             .collect();
@@ -2811,6 +2778,16 @@ async fn run_event_loop(
                     .duration_since(last_message_traffic) < super::share_handler::COEXIST_PAUSE;
                 super::share_handler::tick(&mut share_registry, &ws_cmd_tx, messaging_active, &webrtc_peers, &event_tx, &bundle_keypair).await;
             }
+
+            // -- MLS state debounce (2s) --
+            _ = mls_persist_timer.tick() => {
+                if mls_dirty {
+                    if let Some(ref mls_mgr) = mls {
+                        persist_mls_state(mls_mgr, &crypto_store);
+                    }
+                    mls_dirty = false;
+                }
+            }
         }
     }
 
@@ -2854,6 +2831,9 @@ async fn handle_incoming_request(
     voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
     vc_signal_rate_tokens: &mut HashMap<String, (u32, std::time::Instant)>,
+    mls_dirty: &mut bool,
+    db_path: &str,
+    db_passphrase: &str,
     local_peer_str: &str,
     peer_str: &str,
     is_invisible: bool,
@@ -2922,6 +2902,7 @@ async fn handle_incoming_request(
                             olm, crypto_store, bundle_keypair, event_tx,
                             ws_cmd_tx, ws_room_peers,
                             crdt_store,
+                            db_path, db_passphrase,
                         ).await;
                     }
                     Err(e) => {
@@ -3007,6 +2988,7 @@ async fn handle_incoming_request(
                                         bundle_keypair, event_tx,
                                         ws_cmd_tx, ws_room_peers,
                                         crdt_store,
+                                        db_path, db_passphrase,
                                     ).await;
                                     pt
                                 }
@@ -3065,6 +3047,7 @@ async fn handle_incoming_request(
                                 bundle_keypair, event_tx,
                                 ws_cmd_tx, ws_room_peers,
                                 crdt_store,
+                                db_path, db_passphrase,
                             ).await;
                             pt
                         }
@@ -3144,8 +3127,8 @@ async fn handle_incoming_request(
                 }
             };
 
-            // Persist crypto state after decrypt.
-            persist_crypto_state(olm, crypto_store, &peer_str);
+            // Persist only session ratchet after decrypt (account unchanged).
+            persist_olm_session(olm, crypto_store, &peer_str);
 
             // Detect message envelope and route accordingly.
             let text = String::from_utf8_lossy(&plaintext).to_string();
@@ -3179,26 +3162,21 @@ async fn handle_incoming_request(
                     // Persist channel message using sender's timestamp.
                     // INSERT OR IGNORE deduplicates via UNIQUE(server_id, channel_id, sender_id, timestamp, text).
                     let mut is_new = true;
-                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                            match store.insert_channel_message(
-                                &sid, &cid, &peer_str, &msg_text, false, ts,
-                                sig.as_deref(), pk.as_deref(), mid.as_deref(),
-                                reply_to.as_deref(), file_id.as_deref(),
-                            ) {
-                                Ok(0) => { is_new = false; } // INSERT OR IGNORE skipped — duplicate
-                                Ok(_) => {}
-                                Err(_) => { is_new = false; }
-                            }
-                            // Persist link preview for this message if present (Phase 6.75).
-                            if is_new {
-                                if let (Some(lp), Some(message_id)) = (link_preview.as_ref(), mid.as_ref()) {
-                                    if let Ok(lp_json) = serde_json::to_string(lp) {
-                                        let _ = store.update_channel_link_preview(message_id, &lp_json);
-                                    }
+                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        match store.insert_channel_message(
+                            &sid, &cid, &peer_str, &msg_text, false, ts,
+                            sig.as_deref(), pk.as_deref(), mid.as_deref(),
+                            reply_to.as_deref(), file_id.as_deref(),
+                        ) {
+                            Ok(0) => { is_new = false; } // INSERT OR IGNORE skipped — duplicate
+                            Ok(_) => {}
+                            Err(_) => { is_new = false; }
+                        }
+                        // Persist link preview for this message if present (Phase 6.75).
+                        if is_new {
+                            if let (Some(lp), Some(message_id)) = (link_preview.as_ref(), mid.as_ref()) {
+                                if let Ok(lp_json) = serde_json::to_string(lp) {
+                                    let _ = store.update_channel_link_preview(message_id, &lp_json);
                                 }
                             }
                         }
@@ -3228,97 +3206,92 @@ async fn handle_incoming_request(
                     let mut new_count = 0u32;
                     let received_count = messages.len() as u32;
 
-                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                            for msg in &messages {
-                                // Verify signature on each synced message.
-                                // Skip edited messages — the stored signature was created
-                                // against the original text, not the edited text.
-                                if msg.sig.is_some() && msg.edited_at.is_none() {
-                                    let payload = message_signing_payload(
-                                        "ch", &format!("{sid}:{cid}"), &msg.s, msg.ts, &msg.t,
-                                    );
-                                    if !verify_message_signature(&msg.s, msg.sig.as_deref(), msg.pk.as_deref(), &payload) {
-                                        hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for synced msg from {} ts={} text_len={} has_pk={}", msg.s, msg.ts, msg.t.len(), msg.pk.is_some());
-                                    }
-                                }
-
-                                let is_mine = msg.s == local_peer;
-                                match store.insert_channel_message(
-                                    &sid, &cid, &msg.s, &msg.t, is_mine, msg.ts,
-                                    msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
-                                    msg.reply_to.as_deref(), msg.file_id.as_deref(),
-                                ) {
-                                    Ok(1) => { new_count += 1; }
-                                    _ => {} // Duplicate or error — skip.
-                                }
-
-                                // Apply deletion if the message was hidden on the syncing peer.
-                                if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
-                                    let _ = store.set_channel_message_hidden(mid, hidden_ts);
-                                }
-
-                                // Insert file metadata and emit FileHeaderReceived for late joiners.
-                                if let Some(ref fm) = msg.file_meta {
-                                    let ctx_id = format!("{sid}:{cid}");
-                                    let _ = store.insert_file_metadata(
-                                        &fm.fid, &fm.name, &fm.ext, &fm.mime,
-                                        fm.size, 0, fm.img, fm.w, fm.h,
-                                        fm.mid.as_deref(), "channel", &ctx_id,
-                                        &fm.sender, msg.s == local_peer, fm.ts,
-                                        fm.vthumb.as_ref(),
-                                    );
-                                    let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
-                                        file_id: fm.fid.clone(),
-                                        file_name: fm.name.clone(),
-                                        size_bytes: fm.size,
-                                        is_image: fm.img,
-                                        width: fm.w,
-                                        height: fm.h,
-                                        message_id: fm.mid.clone().unwrap_or_default(),
-                                        sender_id: fm.sender.clone(),
-                                        server_id: sid.clone(),
-                                        channel_id: cid.clone(),
-                                        video_thumb: fm.vthumb.clone(),
-                                        share_ref: None,
-                                    }).await;
-                                }
-
-                                // Sync reactions for this message (INSERT OR IGNORE — idempotent).
-                                if let Some(mid) = &msg.mid {
-                                    for r in &msg.reactions {
-                                        let _ = store.add_reaction(
-                                            mid, &r.e, &r.p, r.ts,
-                                            r.sig.as_deref(), r.pk.as_deref(),
-                                        );
-                                    }
-                                }
-                            }
-
-                            // Pagination: if has_more, send a follow-up ChannelSyncRequest
-                            // with updated per-sender timestamps from our DB.
-                            if has_more == Some(true) {
-                                let sender_ts = store
-                                    .get_per_sender_timestamps(&sid, &cid)
-                                    .unwrap_or_default();
-                                let since = store
-                                    .get_latest_channel_timestamp(&sid, &cid)
-                                    .unwrap_or(None)
-                                    .unwrap_or(0);
-                                hollow_log!("[HOLLOW-SYNC] Requesting next page for {cid} in {sid}");
-                                send_message_to_peer(
-                                    ws_cmd_tx, ws_room_peers,
-                                    peer_str, HavenMessage::ChannelSyncRequest {
-                                        server_id: sid.clone(),
-                                        channel_id: cid.clone(),
-                                        since_timestamp: since,
-                                        sender_timestamps: sender_ts,
-                                    },
+                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        for msg in &messages {
+                            // Verify signature on each synced message.
+                            // Skip edited messages — the stored signature was created
+                            // against the original text, not the edited text.
+                            if msg.sig.is_some() && msg.edited_at.is_none() {
+                                let payload = message_signing_payload(
+                                    "ch", &format!("{sid}:{cid}"), &msg.s, msg.ts, &msg.t,
                                 );
+                                if !verify_message_signature(&msg.s, msg.sig.as_deref(), msg.pk.as_deref(), &payload) {
+                                    hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for synced msg from {} ts={} text_len={} has_pk={}", msg.s, msg.ts, msg.t.len(), msg.pk.is_some());
+                                }
                             }
+
+                            let is_mine = msg.s == local_peer;
+                            match store.insert_channel_message(
+                                &sid, &cid, &msg.s, &msg.t, is_mine, msg.ts,
+                                msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
+                                msg.reply_to.as_deref(), msg.file_id.as_deref(),
+                            ) {
+                                Ok(1) => { new_count += 1; }
+                                _ => {} // Duplicate or error — skip.
+                            }
+
+                            // Apply deletion if the message was hidden on the syncing peer.
+                            if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
+                                let _ = store.set_channel_message_hidden(mid, hidden_ts);
+                            }
+
+                            // Insert file metadata and emit FileHeaderReceived for late joiners.
+                            if let Some(ref fm) = msg.file_meta {
+                                let ctx_id = format!("{sid}:{cid}");
+                                let _ = store.insert_file_metadata(
+                                    &fm.fid, &fm.name, &fm.ext, &fm.mime,
+                                    fm.size, 0, fm.img, fm.w, fm.h,
+                                    fm.mid.as_deref(), "channel", &ctx_id,
+                                    &fm.sender, msg.s == local_peer, fm.ts,
+                                    fm.vthumb.as_ref(),
+                                );
+                                let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
+                                    file_id: fm.fid.clone(),
+                                    file_name: fm.name.clone(),
+                                    size_bytes: fm.size,
+                                    is_image: fm.img,
+                                    width: fm.w,
+                                    height: fm.h,
+                                    message_id: fm.mid.clone().unwrap_or_default(),
+                                    sender_id: fm.sender.clone(),
+                                    server_id: sid.clone(),
+                                    channel_id: cid.clone(),
+                                    video_thumb: fm.vthumb.clone(),
+                                    share_ref: None,
+                                }).await;
+                            }
+
+                            // Sync reactions for this message (INSERT OR IGNORE — idempotent).
+                            if let Some(mid) = &msg.mid {
+                                for r in &msg.reactions {
+                                    let _ = store.add_reaction(
+                                        mid, &r.e, &r.p, r.ts,
+                                        r.sig.as_deref(), r.pk.as_deref(),
+                                    );
+                                }
+                            }
+                        }
+
+                        // Pagination: if has_more, send a follow-up ChannelSyncRequest
+                        // with updated per-sender timestamps from our DB.
+                        if has_more == Some(true) {
+                            let sender_ts = store
+                                .get_per_sender_timestamps(&sid, &cid)
+                                .unwrap_or_default();
+                            let since = store
+                                .get_latest_channel_timestamp(&sid, &cid)
+                                .unwrap_or(None)
+                                .unwrap_or(0);
+                            hollow_log!("[HOLLOW-SYNC] Requesting next page for {cid} in {sid}");
+                            send_message_to_peer(
+                                ws_cmd_tx, ws_room_peers,
+                                peer_str, HavenMessage::ChannelSyncRequest {
+                                    server_id: sid.clone(),
+                                    channel_id: cid.clone(),
+                                    since_timestamp: since,
+                                    sender_timestamps: sender_ts,
+                                },
+                            );
                         }
                     }
 
@@ -3362,26 +3335,21 @@ async fn handle_incoming_request(
                     // This ensures DM sync timestamps are consistent for deduplication.
                     let mut is_new = true;
                     {
-                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                        if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                                match store.insert(
-                                    &peer_str, &msg_text, false, ts,
-                                    sig.as_deref(), pk.as_deref(), mid.as_deref(),
-                                    reply_to.as_deref(), file_id.as_deref(),
-                                ) {
-                                    Ok(0) => { is_new = false; } // Duplicate
-                                    Ok(_) => {}
-                                    Err(_) => { is_new = false; }
-                                }
-                                // Persist link preview for this message if present (Phase 6.75).
-                                if is_new {
-                                    if let (Some(lp), Some(message_id)) = (link_preview.as_ref(), mid.as_ref()) {
-                                        if let Ok(lp_json) = serde_json::to_string(lp) {
-                                            let _ = store.update_link_preview(message_id, &lp_json);
-                                        }
+                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                            match store.insert(
+                                &peer_str, &msg_text, false, ts,
+                                sig.as_deref(), pk.as_deref(), mid.as_deref(),
+                                reply_to.as_deref(), file_id.as_deref(),
+                            ) {
+                                Ok(0) => { is_new = false; } // Duplicate
+                                Ok(_) => {}
+                                Err(_) => { is_new = false; }
+                            }
+                            // Persist link preview for this message if present (Phase 6.75).
+                            if is_new {
+                                if let (Some(lp), Some(message_id)) = (link_preview.as_ref(), mid.as_ref()) {
+                                    if let Ok(lp_json) = serde_json::to_string(lp) {
+                                        let _ = store.update_link_preview(message_id, &lp_json);
                                     }
                                 }
                             }
@@ -3409,123 +3377,118 @@ async fn handle_incoming_request(
                     let local_peer = local_peer_str.to_string();
                     let mut new_count = 0u32;
 
-                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                            for msg in &messages {
-                                // All sync items are messages the peer SENT to us
-                                // (get_dm_messages_since only returns is_mine=1 from their DB).
-                                // From our perspective, these are received messages (is_mine=false).
+                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        for msg in &messages {
+                            // All sync items are messages the peer SENT to us
+                            // (get_dm_messages_since only returns is_mine=1 from their DB).
+                            // From our perspective, these are received messages (is_mine=false).
 
-                                // Verify signature if present.
-                                // Skip edited messages — sig was against original text.
-                                if msg.sig.is_some() && msg.edited_at.is_none() {
-                                    // Sender=them, recipient=us
-                                    let payload = message_signing_payload(
-                                        "dm", &local_peer, &peer_str, msg.ts, &msg.t,
-                                    );
-                                    if !verify_message_signature(&peer_str, msg.sig.as_deref(), msg.pk.as_deref(), &payload) {
-                                        hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for DM sync msg from {peer_str} ts={} text_len={} has_pk={}", msg.ts, msg.t.len(), msg.pk.is_some());
-                                    }
+                            // Verify signature if present.
+                            // Skip edited messages — sig was against original text.
+                            if msg.sig.is_some() && msg.edited_at.is_none() {
+                                // Sender=them, recipient=us
+                                let payload = message_signing_payload(
+                                    "dm", &local_peer, &peer_str, msg.ts, &msg.t,
+                                );
+                                if !verify_message_signature(&peer_str, msg.sig.as_deref(), msg.pk.as_deref(), &payload) {
+                                    hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for DM sync msg from {peer_str} ts={} text_len={} has_pk={}", msg.ts, msg.t.len(), msg.pk.is_some());
                                 }
+                            }
 
-                                let already_exists = msg.mid.as_ref()
-                                    .map(|mid| store.dm_message_exists(mid))
-                                    .unwrap_or(false);
+                            let already_exists = msg.mid.as_ref()
+                                .map(|mid| store.dm_message_exists(mid))
+                                .unwrap_or(false);
 
-                                if !already_exists {
-                                    match store.insert(
-                                        &peer_str, &msg.t, false, msg.ts,
-                                        msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
-                                        msg.reply_to.as_deref(), msg.file_id.as_deref(),
-                                    ) {
-                                        Ok(id) if id > 0 => { new_count += 1; }
-                                        _ => {}
-                                    }
+                            if !already_exists {
+                                match store.insert(
+                                    &peer_str, &msg.t, false, msg.ts,
+                                    msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
+                                    msg.reply_to.as_deref(), msg.file_id.as_deref(),
+                                ) {
+                                    Ok(id) if id > 0 => { new_count += 1; }
+                                    _ => {}
                                 }
+                            }
 
-                                // Apply edit if the message was edited on the syncing peer.
-                                if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
-                                    let edit_result = store.edit_dm_message(
-                                        mid, &msg.t, edit_ts,
-                                        msg.sig.as_deref(),
-                                        msg.pk.as_deref(),
-                                    );
-                                    if edit_result.unwrap_or(false) {
-                                        let _ = event_tx.send(NetworkEvent::DmMessageEdited {
-                                            peer_id: peer_str.to_string(),
-                                            message_id: mid.clone(),
-                                            new_text: msg.t.clone(),
-                                            edited_at: edit_ts,
-                                            signature: msg.sig.clone(),
-                                            public_key: msg.pk.clone(),
-                                        }).await;
-                                    }
-                                }
-
-                                // Apply deletion if the message was hidden on the syncing peer.
-                                if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
-                                    if store.set_dm_message_hidden(mid, hidden_ts).is_ok() {
-                                        let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
-                                            peer_id: peer_str.to_string(),
-                                            message_id: mid.clone(),
-                                            deleted_at: hidden_ts,
-                                        }).await;
-                                    }
-                                }
-
-                                // Insert file metadata and emit FileHeaderReceived for late joiners.
-                                if let Some(ref fm) = msg.file_meta {
-                                    let _ = store.insert_file_metadata(
-                                        &fm.fid, &fm.name, &fm.ext, &fm.mime,
-                                        fm.size, 0, fm.img, fm.w, fm.h,
-                                        fm.mid.as_deref(), "dm", &peer_str,
-                                        &fm.sender, false, fm.ts,
-                                        fm.vthumb.as_ref(),
-                                    );
-                                    let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
-                                        file_id: fm.fid.clone(),
-                                        file_name: fm.name.clone(),
-                                        size_bytes: fm.size,
-                                        is_image: fm.img,
-                                        width: fm.w,
-                                        height: fm.h,
-                                        message_id: fm.mid.clone().unwrap_or_default(),
-                                        sender_id: fm.sender.clone(),
-                                        server_id: String::new(),
-                                        channel_id: peer_str.to_string(),
-                                        video_thumb: fm.vthumb.clone(),
-                                        share_ref: None,
+                            // Apply edit if the message was edited on the syncing peer.
+                            if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
+                                let edit_result = store.edit_dm_message(
+                                    mid, &msg.t, edit_ts,
+                                    msg.sig.as_deref(),
+                                    msg.pk.as_deref(),
+                                );
+                                if edit_result.unwrap_or(false) {
+                                    let _ = event_tx.send(NetworkEvent::DmMessageEdited {
+                                        peer_id: peer_str.to_string(),
+                                        message_id: mid.clone(),
+                                        new_text: msg.t.clone(),
+                                        edited_at: edit_ts,
+                                        signature: msg.sig.clone(),
+                                        public_key: msg.pk.clone(),
                                     }).await;
                                 }
+                            }
 
-                                // Sync reactions for this message (INSERT OR IGNORE — idempotent).
-                                if let Some(mid) = &msg.mid {
-                                    for r in &msg.reactions {
-                                        let _ = store.add_reaction(
-                                            mid, &r.e, &r.p, r.ts,
-                                            r.sig.as_deref(), r.pk.as_deref(),
-                                        );
-                                    }
+                            // Apply deletion if the message was hidden on the syncing peer.
+                            if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
+                                if store.set_dm_message_hidden(mid, hidden_ts).is_ok() {
+                                    let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
+                                        peer_id: peer_str.to_string(),
+                                        message_id: mid.clone(),
+                                        deleted_at: hidden_ts,
+                                    }).await;
                                 }
                             }
 
-                            // Pagination: if has_more, send follow-up DmSyncRequest.
-                            if has_more == Some(true) {
-                                let since = store
-                                    .get_latest_dm_timestamp(&peer_str)
-                                    .unwrap_or(None)
-                                    .unwrap_or(0);
-                                hollow_log!("[HOLLOW-SYNC] Requesting next DM page from {peer_str} since {since}");
-                                send_message_to_peer(
-                                    ws_cmd_tx, ws_room_peers,
-                                    peer_str, HavenMessage::DmSyncRequest {
-                                        since_timestamp: since,
-                                    },
+                            // Insert file metadata and emit FileHeaderReceived for late joiners.
+                            if let Some(ref fm) = msg.file_meta {
+                                let _ = store.insert_file_metadata(
+                                    &fm.fid, &fm.name, &fm.ext, &fm.mime,
+                                    fm.size, 0, fm.img, fm.w, fm.h,
+                                    fm.mid.as_deref(), "dm", &peer_str,
+                                    &fm.sender, false, fm.ts,
+                                    fm.vthumb.as_ref(),
                                 );
+                                let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
+                                    file_id: fm.fid.clone(),
+                                    file_name: fm.name.clone(),
+                                    size_bytes: fm.size,
+                                    is_image: fm.img,
+                                    width: fm.w,
+                                    height: fm.h,
+                                    message_id: fm.mid.clone().unwrap_or_default(),
+                                    sender_id: fm.sender.clone(),
+                                    server_id: String::new(),
+                                    channel_id: peer_str.to_string(),
+                                    video_thumb: fm.vthumb.clone(),
+                                    share_ref: None,
+                                }).await;
                             }
+
+                            // Sync reactions for this message (INSERT OR IGNORE — idempotent).
+                            if let Some(mid) = &msg.mid {
+                                for r in &msg.reactions {
+                                    let _ = store.add_reaction(
+                                        mid, &r.e, &r.p, r.ts,
+                                        r.sig.as_deref(), r.pk.as_deref(),
+                                    );
+                                }
+                            }
+                        }
+
+                        // Pagination: if has_more, send follow-up DmSyncRequest.
+                        if has_more == Some(true) {
+                            let since = store
+                                .get_latest_dm_timestamp(&peer_str)
+                                .unwrap_or(None)
+                                .unwrap_or(0);
+                            hollow_log!("[HOLLOW-SYNC] Requesting next DM page from {peer_str} since {since}");
+                            send_message_to_peer(
+                                ws_cmd_tx, ws_room_peers,
+                                peer_str, HavenMessage::DmSyncRequest {
+                                    since_timestamp: since,
+                                },
+                            );
                         }
                     }
 
@@ -3545,36 +3508,31 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-EDIT] Received edit for message {mid} from {peer_str}");
 
                     // Persist the edit to local DB (preserves old text).
-                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
                     let mut edit_applied = false;
-                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                            if sid.is_some() {
-                                // Channel edit — verify sender owns the message.
-                                let sender = store.get_channel_message_sender(&mid);
-                                if sender.as_deref() == Some(&peer_str) {
-                                    let _ = store.edit_channel_message(
-                                        &mid, &new_text, ts,
-                                        sig.as_deref(), pk.as_deref(),
-                                    );
-                                    edit_applied = true;
-                                } else {
-                                    hollow_log!("[HOLLOW-EDIT] Rejected: {peer_str} tried to edit message {mid} owned by {sender:?}");
-                                }
+                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        if sid.is_some() {
+                            // Channel edit — verify sender owns the message.
+                            let sender = store.get_channel_message_sender(&mid);
+                            if sender.as_deref() == Some(&peer_str) {
+                                let _ = store.edit_channel_message(
+                                    &mid, &new_text, ts,
+                                    sig.as_deref(), pk.as_deref(),
+                                );
+                                edit_applied = true;
                             } else {
-                                // DM edit — verify the message is NOT mine (i.e. it's from this peer).
-                                let is_mine = store.get_dm_message_is_mine(&mid);
-                                if is_mine == Some(false) {
-                                    let _ = store.edit_dm_message(
-                                        &mid, &new_text, ts,
-                                        sig.as_deref(), pk.as_deref(),
-                                    );
-                                    edit_applied = true;
-                                } else {
-                                    hollow_log!("[HOLLOW-EDIT] Rejected: {peer_str} tried to edit DM {mid} (is_mine={is_mine:?})");
-                                }
+                                hollow_log!("[HOLLOW-EDIT] Rejected: {peer_str} tried to edit message {mid} owned by {sender:?}");
+                            }
+                        } else {
+                            // DM edit — verify the message is NOT mine (i.e. it's from this peer).
+                            let is_mine = store.get_dm_message_is_mine(&mid);
+                            if is_mine == Some(false) {
+                                let _ = store.edit_dm_message(
+                                    &mid, &new_text, ts,
+                                    sig.as_deref(), pk.as_deref(),
+                                );
+                                edit_applied = true;
+                            } else {
+                                hollow_log!("[HOLLOW-EDIT] Rejected: {peer_str} tried to edit DM {mid} (is_mine={is_mine:?})");
                             }
                         }
                     }
@@ -3609,36 +3567,31 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-DELETE] Received delete for message {mid} from {peer_str}");
 
                     // Hide the message in local DB (preserves text in message_deletions).
-                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                            if sid.is_some() {
-                                // SECURITY: Verify sender owns the message before hiding.
-                                let sender = store.get_channel_message_sender(&mid);
-                                if sender.as_deref() != Some(&peer_str) {
-                                    hollow_log!("[HOLLOW-SECURITY] REJECTED DeleteMessage from {peer_str} — not the sender of message {mid}");
-                                    return;
-                                }
-                                let _ = store.hide_channel_message(
-                                    &mid, ts,
-                                    sig.as_deref(), pk.as_deref(),
-                                );
-                            } else {
-                                // SECURITY: Verify sender owns the DM message.
-                                let is_mine = store.get_dm_message_is_mine(&mid);
-                                if is_mine != Some(false) {
-                                    // If is_mine is true, it's OUR message (not the peer's).
-                                    // If is_mine is None, message not found. Either way, reject.
-                                    hollow_log!("[HOLLOW-SECURITY] REJECTED DeleteMessage (DM) from {peer_str} — not the sender of message {mid}");
-                                    return;
-                                }
-                                let _ = store.hide_dm_message(
-                                    &mid, ts,
-                                    sig.as_deref(), pk.as_deref(),
-                                );
+                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        if sid.is_some() {
+                            // SECURITY: Verify sender owns the message before hiding.
+                            let sender = store.get_channel_message_sender(&mid);
+                            if sender.as_deref() != Some(&peer_str) {
+                                hollow_log!("[HOLLOW-SECURITY] REJECTED DeleteMessage from {peer_str} — not the sender of message {mid}");
+                                return;
                             }
+                            let _ = store.hide_channel_message(
+                                &mid, ts,
+                                sig.as_deref(), pk.as_deref(),
+                            );
+                        } else {
+                            // SECURITY: Verify sender owns the DM message.
+                            let is_mine = store.get_dm_message_is_mine(&mid);
+                            if is_mine != Some(false) {
+                                // If is_mine is true, it's OUR message (not the peer's).
+                                // If is_mine is None, message not found. Either way, reject.
+                                hollow_log!("[HOLLOW-SECURITY] REJECTED DeleteMessage (DM) from {peer_str} — not the sender of message {mid}");
+                                return;
+                            }
+                            let _ = store.hide_dm_message(
+                                &mid, ts,
+                                sig.as_deref(), pk.as_deref(),
+                            );
                         }
                     }
 
@@ -3666,16 +3619,11 @@ async fn handle_incoming_request(
                     }
                     hollow_log!("[HOLLOW-REACTION] Received reaction {emoji} on {mid} from {peer_str}");
 
-                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                            let _ = store.add_reaction(
-                                &mid, &emoji, &peer_str, ts,
-                                sig.as_deref(), pk.as_deref(),
-                            );
-                        }
+                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        let _ = store.add_reaction(
+                            &mid, &emoji, &peer_str, ts,
+                            sig.as_deref(), pk.as_deref(),
+                        );
                     }
 
                     if let (Some(server_id), Some(channel_id)) = (sid, cid) {
@@ -3700,16 +3648,11 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::RemoveReaction { mid, emoji, ts, sig, pk, sid, cid }) => {
                     hollow_log!("[HOLLOW-REACTION] Received remove reaction {emoji} on {mid} from {peer_str}");
 
-                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                            let _ = store.remove_reaction(
-                                &mid, &emoji, &peer_str, ts,
-                                sig.as_deref(), pk.as_deref(),
-                            );
-                        }
+                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        let _ = store.remove_reaction(
+                            &mid, &emoji, &peer_str, ts,
+                            sig.as_deref(), pk.as_deref(),
+                        );
                     }
 
                     if let (Some(server_id), Some(channel_id)) = (sid, cid) {
@@ -3765,20 +3708,15 @@ async fn handle_incoming_request(
                     };
 
                     // Save file metadata to DB.
-                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                            let _ = store.insert_file_metadata(
-                                &fid, &name, &ext, &mime,
-                                size, chunks, img,
-                                w, h,
-                                mid.as_deref(), ctx_type, &ctx_id,
-                                &peer_str, false, ts,
-                                vthumb.as_ref(),
-                            );
-                        }
+                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        let _ = store.insert_file_metadata(
+                            &fid, &name, &ext, &mime,
+                            size, chunks, img,
+                            w, h,
+                            mid.as_deref(), ctx_type, &ctx_id,
+                            &peer_str, false, ts,
+                            vthumb.as_ref(),
+                        );
                     }
 
                     let mid_str = mid.unwrap_or_default();
@@ -3818,6 +3756,7 @@ async fn handle_incoming_request(
                                 pending_file_streams, pending_shard_streams,
                                 &mut empty_vault_dl, early_file_streams,
                                 bundle_keypair, event_tx,
+                                db_path, db_passphrase,
                             ).await;
                         }
                     }
@@ -3852,40 +3791,35 @@ async fn handle_incoming_request(
                     } else {
 
                     // Update DB.
-                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                    if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                            if let Ok(received) = store.mark_chunk_received(&fid, idx) {
-                                // Get total chunks from file metadata.
-                                if let Ok(Some(file_meta)) = store.get_file_metadata(&fid) {
-                                    let _ = event_tx.send(NetworkEvent::FileProgress {
-                                        file_id: fid.clone(),
-                                        chunks_received: received,
-                                        total_chunks: file_meta.chunk_count,
-                                    }).await;
+                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        if let Ok(received) = store.mark_chunk_received(&fid, idx) {
+                            // Get total chunks from file metadata.
+                            if let Ok(Some(file_meta)) = store.get_file_metadata(&fid) {
+                                let _ = event_tx.send(NetworkEvent::FileProgress {
+                                    file_id: fid.clone(),
+                                    chunks_received: received,
+                                    total_chunks: file_meta.chunk_count,
+                                }).await;
 
-                                    // Check if all chunks received.
-                                    if received >= file_meta.chunk_count {
-                                        let final_path = file_transfer::final_file_path(&fid, &file_meta.file_ext);
-                                        match file_transfer::assemble_file(&fid, file_meta.chunk_count, &final_path) {
-                                            Ok(()) => {
-                                                let disk_path = final_path.to_string_lossy().to_string();
-                                                let _ = store.mark_file_complete(&fid, &disk_path);
-                                                hollow_log!("[HOLLOW-FILE] File {fid} complete: {disk_path}");
-                                                let _ = event_tx.send(NetworkEvent::FileCompleted {
-                                                    file_id: fid,
-                                                    disk_path,
-                                                }).await;
-                                            }
-                                            Err(e) => {
-                                                hollow_log!("[HOLLOW-FILE] Assembly failed for {fid}: {e}");
-                                                let _ = event_tx.send(NetworkEvent::FileFailed {
-                                                    file_id: fid,
-                                                    error: e,
-                                                }).await;
-                                            }
+                                // Check if all chunks received.
+                                if received >= file_meta.chunk_count {
+                                    let final_path = file_transfer::final_file_path(&fid, &file_meta.file_ext);
+                                    match file_transfer::assemble_file(&fid, file_meta.chunk_count, &final_path) {
+                                        Ok(()) => {
+                                            let disk_path = final_path.to_string_lossy().to_string();
+                                            let _ = store.mark_file_complete(&fid, &disk_path);
+                                            hollow_log!("[HOLLOW-FILE] File {fid} complete: {disk_path}");
+                                            let _ = event_tx.send(NetworkEvent::FileCompleted {
+                                                file_id: fid,
+                                                disk_path,
+                                            }).await;
+                                        }
+                                        Err(e) => {
+                                            hollow_log!("[HOLLOW-FILE] Assembly failed for {fid}: {e}");
+                                            let _ = event_tx.send(NetworkEvent::FileFailed {
+                                                file_id: fid,
+                                                error: e,
+                                            }).await;
                                         }
                                     }
                                 }
@@ -3922,13 +3856,9 @@ async fn handle_incoming_request(
                             let pledge = server_states.get(&sid)
                                 .map(|s| s.get_storage_pledge(&local_peer))
                                 .unwrap_or(0);
-                            let data_dir = crate::identity::data_dir().unwrap_or_default();
-                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                            let vault_dir = data_dir.join("vault");
-                            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                            let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
 
-                            if let Ok(content_store) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                            if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
                                 let used = content_store.total_storage_used(&sid).unwrap_or(0);
                                 if pledge > 0 && used + shard_bytes.len() as u64 > pledge {
                                     hollow_log!("[HOLLOW-VAULT] Pledge exceeded for {sid} — rejecting shard");
@@ -4029,13 +3959,9 @@ async fn handle_incoming_request(
                                 }
 
                                 // Store via ContentStore
-                                let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                let vault_dir = data_dir.join("vault");
-                                let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                                let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
 
-                                if let Ok(content_store) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                                if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
                                     let tier_enum = crate::vault::content_store::StorageTier::from_str(&asm.tier);
                                     match content_store.store_shard(&asm.server_id, &asm.content_id, asm.shard_index, asm.k, asm.m, asm.total_size, tier_enum, &full_data) {
                                         Ok(_) => {
@@ -4093,12 +4019,8 @@ async fn handle_incoming_request(
 
                     // Mark placement as confirmed in DB
                     if ok {
-                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                        let vault_dir = data_dir.join("vault");
-                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(content_store) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                        let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+                        if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
                             let _ = content_store.confirm_placement(&cid, si);
                         }
                     }
@@ -4118,12 +4040,8 @@ async fn handle_incoming_request(
                     if !allowed {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED ShardDelete from {peer_str} — not authorized for {sid}");
                     } else {
-                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                        let vault_dir = data_dir.join("vault");
-                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                        let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
                             let _ = cs.delete_content(&sid, &cid);
                             let _ = cs.delete_placements(&cid);
                         }
@@ -4145,13 +4063,9 @@ async fn handle_incoming_request(
                     if !is_member {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED ShardRequest from {peer_str} — not a member of {sid}");
                     } else {
-                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                        let vault_dir = data_dir.join("vault");
-                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                        let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
 
-                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
                             match cs.read_shard_unchecked(&sid, &sk) {
                                 Ok(shard_data) => {
                                     // Send metadata via Olm, stream shard bytes.
@@ -4222,12 +4136,8 @@ async fn handle_incoming_request(
                     } else {
                         // Inline shard data (small shards) — decode and store immediately
                         if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
-                            let data_dir = crate::identity::data_dir().unwrap_or_default();
-                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                            let vault_dir = data_dir.join("vault");
-                            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                            if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                            let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+                            if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
                                 let tier = crate::vault::content_store::StorageTier::Standard;
                                 let _ = cs.store_shard(&sid, &cid, si, 0, 0, 0, tier, &shard_bytes);
                             }
@@ -4267,14 +4177,10 @@ async fn handle_incoming_request(
                         .map(|s| s.members.contains_key(peer_str))
                         .unwrap_or(false);
                     if is_member {
-                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                        let vault_dir = data_dir.join("vault");
-                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+                        let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
 
                         let mut indices = Vec::new();
-                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
                             if let Ok(records) = cs.list_content_shards(&sid, &cid) {
                                 indices = records.iter().map(|r| r.shard_index).collect();
                             }
@@ -4301,17 +4207,13 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::VaultManifestBroadcast { sid, cid, chid, manifest }) => {
                     hollow_log!("[HOLLOW-VAULT] VaultManifest received: cid={cid} in {sid}/{chid} from {peer_str}");
                     if let Ok(manifest_obj) = serde_json::from_str::<crate::vault::pipeline::VaultManifest>(&manifest) {
-                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                        let vault_dir = data_dir.join("vault");
-                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                        let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
                             let _ = cs.save_manifest(&sid, &chid, &manifest_obj);
                         }
                         // Link vault content_id to the file record via message_id.
                         if !manifest_obj.message_id.is_empty() {
-                            if let Ok(ms) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                            if let Ok(ms) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                                 let _ = ms.set_file_content_id(&manifest_obj.message_id, &manifest_obj.content_id);
                             }
                         }
@@ -4326,12 +4228,8 @@ async fn handle_incoming_request(
                         .unwrap_or(false);
                     if is_member {
                         if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
-                            let data_dir = crate::identity::data_dir().unwrap_or_default();
-                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                            let vault_dir = data_dir.join("vault");
-                            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                            if let Ok(content_store) = crate::vault::content_store::ContentStore::open(&db_path, &passphrase, &vault_dir) {
+                            let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+                            if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
                                 let tier = crate::vault::content_store::StorageTier::Standard;
                                 let _ = content_store.store_shard(&sid, &cid, si, 0, 0, 0, tier, &shard_bytes);
                                 hollow_log!("[HOLLOW-VAULT] Migrated shard stored: cid={cid} si={si}");
@@ -4356,11 +4254,7 @@ async fn handle_incoming_request(
                             if let Ok(()) = state.apply_op(&op) {
                                 state.op_log.push(op.clone());
                                 if let Ok(json) = serde_json::to_string(&*state) {
-                                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                                         let _ = store.save_server_state(&sid, &json);
                                         let _ = store.insert_crdt_op(&op);
                                     }
@@ -4397,11 +4291,7 @@ async fn handle_incoming_request(
                             if let Ok(applied) = crate::crdt::sync::merge_ops(state, incoming_ops) {
                                 if applied > 0 {
                                     if let Ok(json) = serde_json::to_string(&*state) {
-                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                                             let _ = store.save_server_state(&sid, &json);
                                         }
                                     }
@@ -4441,11 +4331,7 @@ async fn handle_incoming_request(
                         return;
                     }
                     if !server_states.contains_key(&sid) { return; }
-                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                    let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         let our_latest = store.get_latest_channel_timestamp(&sid, &cid)
                             .unwrap_or(None).unwrap_or(0);
                         if their_latest > our_latest || msg_count > store.count_channel_messages(&sid, &cid) {
@@ -4672,11 +4558,7 @@ async fn handle_incoming_request(
 
                         // Persist
                         if let Ok(json) = serde_json::to_string(&state) {
-                            let data_dir = crate::identity::data_dir().unwrap_or_default();
-                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                                 let _ = store.save_server_state(&server_id, &json);
                             }
                         }
@@ -4720,11 +4602,7 @@ async fn handle_incoming_request(
                                     let _ = state.apply_op(&pledge_op);
 
                                     if let Ok(json) = serde_json::to_string(&state) {
-                                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                                             let _ = store.save_server_state(&server_id, &json);
                                             let _ = store.insert_crdt_op(&pledge_op);
                                         }
@@ -4943,11 +4821,7 @@ async fn handle_incoming_request(
                 if state.op_log.len() > was_len {
                     // New op — persist and forward to other connected peers
                     if let Ok(json) = serde_json::to_string(&state) {
-                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                             let _ = store.save_server_state(&server_id, &json);
                             let _ = store.insert_crdt_op(&op);
                         }
@@ -5178,11 +5052,7 @@ async fn handle_incoming_request(
 
                     // Persist
                     if let Ok(json) = serde_json::to_string(&state) {
-                        let data_dir = crate::identity::data_dir().unwrap_or_default();
-                        let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                             let _ = store.save_server_state(&server_id, &json);
                             let _ = store.insert_crdt_op(&op);
                         }
@@ -5286,11 +5156,7 @@ async fn handle_incoming_request(
 
             if server_states.remove(&server_id).is_some() {
                 // Remove from DB.
-                let data_dir = crate::identity::data_dir().unwrap_or_default();
-                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                     let _ = store.delete_server_state(&server_id);
                 }
 
@@ -5331,11 +5197,7 @@ async fn handle_incoming_request(
 
             // Same cleanup as ServerDeleteBroadcast — remove ourselves from this server.
             if server_states.remove(&server_id).is_some() {
-                let data_dir = crate::identity::data_dir().unwrap_or_default();
-                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                     let _ = store.delete_server_state(&server_id);
                 }
 
@@ -5369,21 +5231,17 @@ async fn handle_incoming_request(
 
             hollow_log!("[HOLLOW-SYNC] ChannelSyncRequest from {peer_str} for {channel_id} in {server_id} since {since_timestamp} (per-sender: {} entries)", sender_timestamps.len());
 
-            let data_dir = crate::identity::data_dir().unwrap_or_default();
-            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-            if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                    // Use per-sender sync if available, fall back to legacy single-timestamp.
-                    let messages_result = if !sender_timestamps.is_empty() {
-                        store.get_channel_messages_since_per_sender(
-                            &server_id, &channel_id, &sender_timestamps, 200,
-                        )
-                    } else {
-                        store.get_channel_messages_since(
-                            &server_id, &channel_id, since_timestamp, 200,
-                        )
-                    };
+            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                // Use per-sender sync if available, fall back to legacy single-timestamp.
+                let messages_result = if !sender_timestamps.is_empty() {
+                    store.get_channel_messages_since_per_sender(
+                        &server_id, &channel_id, &sender_timestamps, 200,
+                    )
+                } else {
+                    store.get_channel_messages_since(
+                        &server_id, &channel_id, since_timestamp, 200,
+                    )
+                };
                     if let Ok(messages) = messages_result {
                         hollow_log!("[HOLLOW-SYNC] Sending {} sync messages for {channel_id}", messages.len());
                         // Load reactions for all messages in the batch.
@@ -5464,7 +5322,6 @@ async fn handle_incoming_request(
                             ws_cmd_tx, ws_room_peers,
                         ).await;
                     }
-                }
             }
         }
 
@@ -5478,32 +5335,27 @@ async fn handle_incoming_request(
                 return;
             }
 
-            let data_dir = crate::identity::data_dir().unwrap_or_default();
-            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-            if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                    let their_latest = store
-                        .get_latest_channel_timestamp(&server_id, &channel_id)
-                        .unwrap_or(None)
-                        .unwrap_or(0);
-                    let msg_count = store
-                        .count_channel_messages(&server_id, &channel_id);
+            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                let their_latest = store
+                    .get_latest_channel_timestamp(&server_id, &channel_id)
+                    .unwrap_or(None)
+                    .unwrap_or(0);
+                let msg_count = store
+                    .count_channel_messages(&server_id, &channel_id);
 
-                    hollow_log!(
-                        "[HOLLOW-SYNC] Probe from {peer_str} for {channel_id}: ours={their_latest} theirs={our_latest} (count={msg_count})"
-                    );
+                hollow_log!(
+                    "[HOLLOW-SYNC] Probe from {peer_str} for {channel_id}: ours={their_latest} theirs={our_latest} (count={msg_count})"
+                );
 
-                    send_message_to_peer(
-                        ws_cmd_tx, ws_room_peers,
-                        peer_str, HavenMessage::ChannelSyncProbeResponse {
-                            server_id,
-                            channel_id,
-                            their_latest,
-                            msg_count,
-                        },
-                    );
-                }
+                send_message_to_peer(
+                    ws_cmd_tx, ws_room_peers,
+                    peer_str, HavenMessage::ChannelSyncProbeResponse {
+                        server_id,
+                        channel_id,
+                        their_latest,
+                        msg_count,
+                    },
+                );
             }
         }
 
@@ -5511,49 +5363,44 @@ async fn handle_incoming_request(
             
 
             // Compare: if the peer has newer messages than us, fire a full sync request.
-            let data_dir = crate::identity::data_dir().unwrap_or_default();
-            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-            if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                    let our_latest = store
-                        .get_latest_channel_timestamp(&server_id, &channel_id)
-                        .unwrap_or(None)
-                        .unwrap_or(0);
-                    let our_msg_count = store.count_channel_messages(&server_id, &channel_id);
+            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                let our_latest = store
+                    .get_latest_channel_timestamp(&server_id, &channel_id)
+                    .unwrap_or(None)
+                    .unwrap_or(0);
+                let our_msg_count = store.count_channel_messages(&server_id, &channel_id);
 
-                    // Sync if: peer has newer messages (timestamp check only).
-                    // Dedup: skip if already syncing this channel recently.
-                    let dedup_key = format!("{server_id}:{channel_id}");
-                    let recently_synced = channel_sync_sent.get(&dedup_key)
-                        .is_some_and(|t| t.elapsed() < Duration::from_secs(5));
-                    if their_latest > our_latest && !recently_synced {
-                        channel_sync_sent.insert(dedup_key, std::time::Instant::now());
-                        let sender_ts = store
-                            .get_per_sender_timestamps(&server_id, &channel_id)
-                            .unwrap_or_default();
-                        hollow_log!(
-                            "[HOLLOW-SYNC] Probe response: {channel_id} needs sync (ts: ours={our_latest} peer={their_latest}, count: ours={our_msg_count} peer={msg_count}). Requesting from {peer_str}"
-                        );
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            peer_str, HavenMessage::ChannelSyncRequest {
-                                server_id: server_id.clone(),
-                                channel_id: channel_id.clone(),
-                                since_timestamp: our_latest,
-                                sender_timestamps: sender_ts,
-                            },
-                        );
-                    } else {
-                        hollow_log!(
-                            "[HOLLOW-SYNC] Probe response: {channel_id} is up to date (ts: ours={our_latest} peer={their_latest}, count: {our_msg_count}). Skipping."
-                        );
-                        // Emit completion for this channel so UI knows sync is done.
-                        let _ = event_tx.send(NetworkEvent::MessageSyncCompleted {
-                            server_id,
-                            new_message_count: 0,
-                        }).await;
-                    }
+                // Sync if: peer has newer messages (timestamp check only).
+                // Dedup: skip if already syncing this channel recently.
+                let dedup_key = format!("{server_id}:{channel_id}");
+                let recently_synced = channel_sync_sent.get(&dedup_key)
+                    .is_some_and(|t| t.elapsed() < Duration::from_secs(5));
+                if their_latest > our_latest && !recently_synced {
+                    channel_sync_sent.insert(dedup_key, std::time::Instant::now());
+                    let sender_ts = store
+                        .get_per_sender_timestamps(&server_id, &channel_id)
+                        .unwrap_or_default();
+                    hollow_log!(
+                        "[HOLLOW-SYNC] Probe response: {channel_id} needs sync (ts: ours={our_latest} peer={their_latest}, count: ours={our_msg_count} peer={msg_count}). Requesting from {peer_str}"
+                    );
+                    send_message_to_peer(
+                        ws_cmd_tx, ws_room_peers,
+                        peer_str, HavenMessage::ChannelSyncRequest {
+                            server_id: server_id.clone(),
+                            channel_id: channel_id.clone(),
+                            since_timestamp: our_latest,
+                            sender_timestamps: sender_ts,
+                        },
+                    );
+                } else {
+                    hollow_log!(
+                        "[HOLLOW-SYNC] Probe response: {channel_id} is up to date (ts: ours={our_latest} peer={their_latest}, count: {our_msg_count}). Skipping."
+                    );
+                    // Emit completion for this channel so UI knows sync is done.
+                    let _ = event_tx.send(NetworkEvent::MessageSyncCompleted {
+                        server_id,
+                        new_message_count: 0,
+                    }).await;
                 }
             }
         }
@@ -5562,12 +5409,8 @@ async fn handle_incoming_request(
             hollow_log!("[HOLLOW-SYNC] DmSyncRequest from {peer_str} since {since_timestamp}");
             
 
-            let data_dir = crate::identity::data_dir().unwrap_or_default();
-            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-            if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                    if let Ok(messages) = store.get_dm_messages_since(&peer_str, since_timestamp, 200) {
+            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                if let Ok(messages) = store.get_dm_messages_since(&peer_str, since_timestamp, 200) {
                         hollow_log!("[HOLLOW-SYNC] Sending {} DM sync messages to {peer_str}", messages.len());
                         let msg_ids: Vec<String> = messages.iter().filter_map(|m| m.message_id.clone()).collect();
                         let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
@@ -5630,7 +5473,6 @@ async fn handle_incoming_request(
                             ).await;
                         }
                     }
-                }
             }
         }
 
@@ -5694,7 +5536,7 @@ async fn handle_incoming_request(
 
                 match mls_mgr.decrypt(&server_id, &ciphertext) {
                     Ok((plaintext, sender_peer_id)) => {
-                        persist_mls_state(mls_mgr, crypto_store);
+                        *mls_dirty = true;
                         mls_decrypt_failures.remove(&server_id); // Reset failure counter on success.
 
                         // Parse the plaintext as a MessageEnvelope.
@@ -5722,30 +5564,35 @@ async fn handle_incoming_request(
                                     event_tx, bundle_keypair, &local_peer,
                                     sender_peer_id, sid, cid, text, ts,
                                     sig, pk, mid, reply_to, file_id, link_preview,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
                             MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, sid, cid } => {
                                 message_ops::handle_envelope_edit_message(
                                     event_tx, bundle_keypair, peer_str,
                                     mid, new_text, ts, sig, pk, sid, cid,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
                             MessageEnvelope::DeleteMessage { mid, ts, sig, pk, sid, cid } => {
                                 message_ops::handle_envelope_delete_message(
                                     event_tx, bundle_keypair, &sender_peer_id,
                                     mid, ts, sig, pk, sid, cid,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
                             MessageEnvelope::AddReaction { mid, emoji, ts, sig, pk, sid, cid } => {
                                 message_ops::handle_envelope_add_reaction(
                                     event_tx, bundle_keypair, peer_str,
                                     mid, emoji, ts, sig, pk, sid, cid,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
                             MessageEnvelope::RemoveReaction { mid, emoji, ts, sig, pk, sid, cid } => {
                                 message_ops::handle_envelope_remove_reaction(
                                     event_tx, bundle_keypair, peer_str,
                                     mid, emoji, ts, sig, pk, sid, cid,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
                             MessageEnvelope::FileHeader { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref, .. } => {
@@ -5755,11 +5602,13 @@ async fn handle_incoming_request(
                                     &server_id, sender_peer_id,
                                     fid, name, ext, mime, size, chunks, img, w, h,
                                     mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
                             MessageEnvelope::FileChunk { fid, idx, data } => {
                                 file_handler::handle_envelope_file_chunk(
                                     bundle_keypair, event_tx, fid, idx, data,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
 
@@ -5803,9 +5652,10 @@ async fn handle_incoming_request(
                                     }).await;
                                 }
                                 super::social::handle_envelope_profile_update(
-                                    event_tx, server_states, bundle_keypair,
+                                    event_tx, server_states,
                                     sender_peer_id, display_name, status, about_me,
                                     updated_at, avatar_b64, banner_b64, twitch_username,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
 
@@ -5832,6 +5682,7 @@ async fn handle_incoming_request(
                                     ws_cmd_tx, ws_room_peers,
                                     &sender_peer_id, sid, cid, since_timestamp, sender_timestamps,
                                     crypto_store, crdt_store,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
 
@@ -5841,6 +5692,7 @@ async fn handle_incoming_request(
                                     bundle_keypair, event_tx, ws_cmd_tx, ws_room_peers,
                                     sender_peer_id, sid, cid,
                                     crdt_store,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
 
@@ -5850,6 +5702,7 @@ async fn handle_incoming_request(
                                     channel_sync_sent, sender_peer_id,
                                     sid, cid, their_latest, msg_count,
                                     crdt_store,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
 
@@ -5859,6 +5712,7 @@ async fn handle_incoming_request(
                                     ws_room_peers, &local_peer, &sender_peer_id,
                                     sid, cid, messages, total, has_more,
                                     crypto_store, crdt_store,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
 
@@ -5870,6 +5724,7 @@ async fn handle_incoming_request(
                                     bundle_keypair, crypto_store, event_tx, ws_cmd_tx,
                                     ws_room_peers, sender_peer_id,
                                     sid, cid, si, sk, k, m, total_size, tier, data, chunks,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
 
@@ -5885,8 +5740,9 @@ async fn handle_incoming_request(
 
                             MessageEnvelope::ShardDelete { sid, cid } => {
                                 vault_ops::handle_envelope_shard_delete(
-                                    server_states, bundle_keypair, event_tx,
+                                    server_states, event_tx,
                                     &sender_peer_id, sid, cid,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
 
@@ -5896,6 +5752,7 @@ async fn handle_incoming_request(
                                     bundle_keypair, event_tx, ws_cmd_tx, ws_room_peers,
                                     webrtc_peers, pending_webrtc_sends,
                                     &server_id, sender_peer_id, sid, cid, si, sk,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
 
@@ -5915,6 +5772,7 @@ async fn handle_incoming_request(
                                     server_states, olm, crypto_store,
                                     bundle_keypair, event_tx, ws_cmd_tx, ws_room_peers,
                                     sender_peer_id, sid, cid,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
 
@@ -5926,14 +5784,16 @@ async fn handle_incoming_request(
 
                             MessageEnvelope::VaultManifestBroadcast { sid, cid, chid, manifest } => {
                                 vault_ops::handle_envelope_vault_manifest_broadcast(
-                                    bundle_keypair, sid, cid, chid, manifest,
+                                    sid, cid, chid, manifest,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
 
                             MessageEnvelope::ShardMigrate { sid, cid, si, sk, data, .. } => {
                                 vault_ops::handle_envelope_shard_migrate(
-                                    server_states, bundle_keypair, &sender_peer_id,
+                                    server_states, &sender_peer_id,
                                     sid, cid, si, sk, data,
+                                    db_path, db_passphrase,
                                 ).await;
                             }
 
@@ -6212,11 +6072,7 @@ async fn handle_incoming_request(
                         // Now that MLS is established, send direct sync requests for channels
                         // we missed (the initial sync attempt may have failed without Olm/MLS).
                         if let Some(state) = server_states.get(&server_id) {
-                            let data_dir = crate::identity::data_dir().unwrap_or_default();
-                            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                            let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-                            let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                            if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+                            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                                 for cid in state.channels.keys() {
                                     let our_latest = store.get_latest_channel_timestamp(&server_id, cid)
                                         .unwrap_or(None).unwrap_or(0);
@@ -6348,13 +6204,8 @@ async fn handle_incoming_request(
 
             // Save as pending incoming.
             {
-                let data_dir = crate::identity::data_dir().unwrap_or_default();
-                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                        let _ = store.save_friend(&peer_str, "pending", "incoming", requested_at);
-                    }
+                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    let _ = store.save_friend(&peer_str, "pending", "incoming", requested_at);
                 }
             }
 
@@ -6379,17 +6230,12 @@ async fn handle_incoming_request(
 
             // Update our outgoing request to accepted.
             {
-                let data_dir = crate::identity::data_dir().unwrap_or_default();
-                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as i64;
-                        let _ = store.save_friend(&peer_str, "accepted", "", now);
-                    }
+                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    let _ = store.save_friend(&peer_str, "accepted", "", now);
                 }
             }
 
@@ -6414,13 +6260,8 @@ async fn handle_incoming_request(
 
             // Remove our outgoing request.
             {
-                let data_dir = crate::identity::data_dir().unwrap_or_default();
-                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                        let _ = store.remove_friend(&peer_str);
-                    }
+                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    let _ = store.remove_friend(&peer_str);
                 }
             }
 
@@ -6434,13 +6275,8 @@ async fn handle_incoming_request(
             hollow_log!("[HOLLOW-FRIENDS] Friend removed by {peer_str}");
 
             {
-                let data_dir = crate::identity::data_dir().unwrap_or_default();
-                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                        let _ = store.remove_friend(&peer_str);
-                    }
+                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    let _ = store.remove_friend(&peer_str);
                 }
             }
 
@@ -6521,17 +6357,12 @@ async fn handle_incoming_request(
 
             // Save to local DB (upsert with timestamp check — only update if newer).
             {
-                let data_dir = crate::identity::data_dir().unwrap_or_default();
-                let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-                if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                    if let Ok(db) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                        if let Err(e) = db.save_profile(
-                            &peer_str, &display_name, &status, &about_me, updated_at,
-                            avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
-                        ) {
-                            hollow_log!("[HOLLOW-SWARM] Failed to save peer profile: {e}");
-                        }
+                if let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    if let Err(e) = db.save_profile(
+                        &peer_str, &display_name, &status, &about_me, updated_at,
+                        avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
+                    ) {
+                        hollow_log!("[HOLLOW-SWARM] Failed to save peer profile: {e}");
                     }
                 }
             }
@@ -6557,12 +6388,8 @@ async fn handle_incoming_request(
             use crate::node::file_transfer;
             hollow_log!("[HOLLOW-FILE] FileRequest from {peer_str} for {file_id}");
 
-            let data_dir = crate::identity::data_dir().unwrap_or_default();
-            let db_path = data_dir.join("messages.db").to_string_lossy().to_string();
-            if let Ok(proto) = bundle_keypair.to_protobuf_encoding() {
-                let passphrase = hex::encode(&proto[..32.min(proto.len())]);
-                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
-                    if let Ok(Some(file_meta)) = store.get_file_metadata(&file_id) {
+            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                if let Ok(Some(file_meta)) = store.get_file_metadata(&file_id) {
                         if let Some(ref disk_path) = file_meta.disk_path {
                             if let Ok(file_data) = std::fs::read(disk_path) {
                                 // AES-encrypt and stream the file.
@@ -6635,7 +6462,6 @@ async fn handle_incoming_request(
                                 }
                             }
                         }
-                    }
                 }
             }
         }
@@ -6888,8 +6714,9 @@ async fn handle_incoming_request(
             hollow_log!("[HOLLOW-PROFILE] ProfileRequest from {peer_str} — sending our profile");
             social::send_own_profile_to_peer(
                 ws_cmd_tx, ws_room_peers,
-                bundle_keypair, local_peer_str, peer_str,
+                local_peer_str, peer_str,
                 is_invisible,
+                db_path, db_passphrase,
             );
         }
 
