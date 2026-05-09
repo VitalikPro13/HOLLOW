@@ -1,6 +1,6 @@
 # Hollow Protocol Whitepaper
 
-**Version 0.3.0**\
+**Version 0.3.1**\
 **Author: AnonListen**
 
 ---
@@ -782,14 +782,14 @@ Peers are scored on four metrics:
 - **Bandwidth score:** Observed throughput on data transfers.
 - **Shard overlap:** Number of shared vault shards (high overlap = high value for shard retrieval).
 
-At adaptive intervals (120s/180s/240s, scaled by server member count), the lowest-scoring peer is dropped and the highest-scoring unconnected peer is added. Max 1 rotation per cycle for stability.
+Neighbor rotation runs every 300 seconds (5 minutes). The lowest-scoring peer is dropped and the highest-scoring unconnected peer is added. Max 1 rotation per cycle for stability. Separately, peer list exchange runs at adaptive intervals (120s/180s/240s, scaled by server member count) to share known peers with neighbors.
 
 ### 14.3 Gossip Broadcast
 
-When a peer receives data tagged as broadcast (files, images, voice media), it re-forwards to its connected WebRTC subset (minus the source). This creates a gossip tree that covers 1000+ members in ~3 hops (~600ms), with zero relay bandwidth.
+When a peer receives data tagged as broadcast (files, images), it re-forwards to its connected WebRTC subset (minus the source). This creates a gossip tree that covers 1000+ members in ~3 hops (~600ms), with zero relay bandwidth. Voice and video media flow over WebRTC media tracks (DTLS-SRTP, peer-to-peer) and are not gossip-relayed.
 
 - **Broadcast deduplication:** Each broadcast carries a unique ID. Peers track recent IDs and drop duplicates.
-- **TTL / hop limit:** 4-5 hops maximum to prevent infinite propagation. Default TTL is included in the broadcast metadata.
+- **TTL / hop limit:** 4 hops maximum to prevent infinite propagation. Default TTL is included in the broadcast metadata.
 - **Fallback:** Fewer than 6 reachable peers → connect to all available.
 
 ### 14.4 Peer Exchange
@@ -924,4 +924,4 @@ The relay operator is **not trusted** with: message contents, encryption keys, f
 
 ---
 
-*This document describes the Hollow protocol as implemented in the Alpha release. The protocol is subject to change. The relay server source code is open-source. The client application source code is proprietary.*
+*This document describes the Hollow protocol as implemented in the Alpha release. The protocol is subject to change. The relay server is open-source under the MIT License. The client application is open-source under the GNU Affero General Public License v3.0 (AGPL-3.0).*

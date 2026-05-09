@@ -1924,7 +1924,7 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 **Licensing:**
 - [ ] Open-source client under AGPL-3.0 (forks must publish source — kills closed-fork theft)
 - [X] Relay stays MIT (thin uWebSockets glue, encourages self-hosting adoption)
-- [ ] Dual license: AGPL default, commercial license for companies that don't want copyleft obligations
+- [X] Dual license: AGPL default, commercial license for companies that don't want copyleft obligations
   - Small business / startup: ~$1k/year (non-AGPL license, no source disclosure requirement)
   - Enterprise: custom pricing (SSO/SAML, 2FA integration, priority support, custom stuff), contact collab@anonlisten.com
 - [X] Add LICENSE (AGPL-3.0) to repo root + MIT LICENSE in relay-uws/
@@ -1932,19 +1932,18 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 **Self-hosting:**
 - [X] Add configurable relay URL in app settings (self-hosted relay = isolated network, no cross-contamination with official)
 - [X] Docker Compose one-command setup: relay + certbot (auto Let's Encrypt) + coturn (TURN)
-- [ ] Self-hosting documentation (docs/self-hosting.md or repo wiki)
+- [X] Self-hosting documentation (docs/self-hosting.md or repo wiki)
 
 **Sustainability (donation-funded, no feature gates):**
 - [ ] Credits tab in Settings — Blender-style donor/sponsor wall (tiered: Supporters, Sponsors, Contributors)
 - [ ] Patreon / Ko-fi / GitHub Sponsors for individual donations
 - [ ] Infrastructure sponsor program (companies providing dedicated servers get logo in Credits)
-- [ ] No paywalls, no cosmetic microtransactions, no user-facing limits — full app for everyone
+- [X] No paywalls, no cosmetic microtransactions, no user-facing limits — full app for everyone
 
 **Credibility & launch:**
-- [ ] Proper README with feature grid, architecture diagram, screenshots (visual repo presentation)
+- [X] Proper README with feature grid, architecture diagram, screenshots (visual repo presentation)
 - [ ] Apply for OTF Security Lab cryptographic audit (free, major credibility — no Discord alternative has this)
-- [ ] Clean repo pre-launch (remove secrets, debug hacks, dead code paths)
-- [ ] Target communities: r/SelfHosting, r/DiscordAlternatives, Hacker News, Twitter open-source accounts (streaming to twitch and at least doing some content instead of targeting, you silly-willy. weak ass devs use you for targeting with their bs products, but we're building actual software here. little self promotion is maybe alright, but not being a freaking spammer. i hate those)
+- [X] Clean repo pre-launch (remove secrets, debug hacks, dead code paths)
 
 📋 INFRASTRUCTURE MASTER PLAN: "The Swarm"
 
@@ -2065,8 +2064,6 @@ SCALING ROADMAP:
     - **~~Nginx~~ REMOVED (2026-04-29).** uWebSockets C++ relay handles TLS natively on port 443. Certbot uses `--standalone` with deploy hook.
 - [ ] **Post-quantum key exchange (ML-KEM / Kyber).** All current key exchanges use Curve25519. If quantum computers break elliptic curve crypto, intercepted ciphertext could be decrypted retroactively. **MLS side:** OpenMLS 0.8.x already ships an X-Wing ciphersuite (`MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`, ML-KEM + X25519 hybrid) via the `openmls_libcrux_crypto` provider — swap crypto backend + enable the ciphersuite. **DM side:** vodozemac has no PQ support; wrap Olm key exchange with a hybrid ML-KEM layer manually (use `ml-kem` crate). Key sizes grow (ML-KEM-768: ~1,184 B pubkey, ~1,088 B ciphertext vs 32 B for X25519) but only during session establishment — symmetric ratchet overhead unchanged after. Signal (PQXDH, 2023) and iMessage (PQ3, 2024) have shipped PQ for 1:1 chats, but no consumer app has shipped post-quantum MLS group ratcheting yet — Hollow would be first. Low priority, future consideration.
 - [ ] **Traffic analysis protection (theoretical, not planned).** TLS protects message *content* but not *timing and size patterns*. A network observer (ISP, state-level) watching both parties can correlate packet timing to infer who is chatting — even without decrypting. Mitigation would be constant-rate padding (dummy traffic), but at 572k connections even 1 pkt/sec padding = 572k pkt/sec of waste. No consumer chat app (Signal, WhatsApp, Telegram) implements this. **For censored regions, the proxy/tunnel approach (Phase ???) is the practical solution** — it hides *which service* you're using, which is a far more actionable threat than timing correlation. Not a launch blocker.
-
--[ ] Extract Rust tests into different file, not inside the main files
 
 **Deliverable:** Public release across all platforms.
 

@@ -1,6 +1,6 @@
 # Hollow — Terms of Use
 
-**Last updated: May 1, 2026**
+**Last updated: May 9, 2026**
 
 These Terms of Use ("Terms") govern your access to and use of the Hollow application and related services ("Services") provided by AnonListen ("we", "us", "our"). By using Hollow, you agree to these Terms.
 
@@ -31,7 +31,7 @@ You agree to use Hollow only for lawful purposes and in a manner consistent with
 - Distribute malware, viruses, or other harmful software
 - Attempt to compromise, disrupt, or gain unauthorized access to Hollow's relay infrastructure or other users' devices
 - Use automated means to create accounts, send messages, or interact with the Services in bulk
-- Resell, sublicense, or charge others for access to Hollow
+- Resell or sublicense Hollow in a manner that violates the applicable license terms
 
 ## 5. Content and conduct
 
@@ -51,11 +51,13 @@ If you become aware of any use of Hollow that violates these Terms, you may repo
 
 ## 6. Software ownership and your rights
 
-The Hollow application code, trademarks, and associated branding are the intellectual property of AnonListen (Vitalii Rovinskyi).
+Hollow is open-source software. The client application and core library are licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. The relay server is licensed under the **MIT License**. The full license texts are available in the source repository.
+
+For commercial use without AGPL obligations (proprietary modifications, embedding, or enterprise deployments), a separate commercial license is available — contact **collab@anonlisten.com**.
+
+The Hollow name, trademarks, logos, and associated branding are the property of AnonListen (Vitalii Rovinskyi) and are not covered by the open-source licenses.
 
 **You own your copy of Hollow.** Once you download Hollow, it is yours. We cannot remotely disable, lock, or revoke your installed copy of the application. Your data, your keys, and your messages belong to you — not to us.
-
-Hollow is intended to become fully open-source. In the event that AnonListen ceases to operate, the complete source code will be released under a permissive open-source license, ensuring that anyone can run, modify, and distribute Hollow independently.
 
 ## 7. Privacy
 

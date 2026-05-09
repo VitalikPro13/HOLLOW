@@ -1,6 +1,6 @@
 # Hollow — Privacy Policy
 
-**Last updated: May 1, 2026**
+**Last updated: May 9, 2026**
 
 Hollow is built on one principle: your conversations are yours. We cannot read your messages, listen to your calls, or identify you. This policy explains exactly what data exists, where it exists, and what we can and cannot access.
 
@@ -84,7 +84,7 @@ Because Hollow is designed with privacy by design, our ability to respond to dat
 
 We will comply with valid, binding court orders issued under applicable law (EU/French jurisdiction). We will notify affected users of any requests unless legally prohibited from doing so. We will challenge overbroad or legally questionable requests.
 
-We publish a transparency report documenting any government or law enforcement requests received.
+If we receive any government or law enforcement requests, we will publish a transparency report documenting them.
 
 ## Data stored on your device
 
@@ -101,7 +101,7 @@ This data never leaves your device in an unencrypted form. If you delete the Hol
 
 ## Third-party services
 
-Hollow does not integrate with any analytics, advertising, or tracking services. Hollow is a native desktop and mobile — it does not use cookies or any web-based tracking technology.
+Hollow does not integrate with any analytics, advertising, or tracking services. Hollow is a native desktop and mobile application — it does not use cookies or any web-based tracking technology.
 
 If you download Hollow from a third-party platform (e.g., GitHub), that platform's own privacy policy governs your interaction with their service.
 

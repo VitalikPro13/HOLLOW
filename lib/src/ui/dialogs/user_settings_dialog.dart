@@ -5042,63 +5042,6 @@ class _SvgBrandIconState extends State<_SvgBrandIcon> {
   }
 }
 
-class _KickBotIcon extends StatefulWidget {
-  final String tooltip;
-  final String url;
-
-  const _KickBotIcon({required this.tooltip, required this.url});
-
-  @override
-  State<_KickBotIcon> createState() => _KickBotIconState();
-}
-
-class _KickBotIconState extends State<_KickBotIcon> {
-  bool _hovering = false;
-
-  static const _kickBotGreen = Color(0xFFC0FF00);
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return HollowTooltip(
-      message: widget.tooltip,
-      child: MouseRegion(
-        onEnter: (_) => setState(() => _hovering = true),
-        onExit: (_) => setState(() => _hovering = false),
-        cursor: SystemMouseCursors.click,
-        child: GestureDetector(
-          onTap: () => launchUrl(
-            Uri.parse(widget.url),
-            mode: LaunchMode.externalApplication,
-          ),
-          child: AnimatedContainer(
-            duration: HollowDurations.fast,
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: _hovering ? hollow.elevated : Colors.transparent,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-            ),
-            child: AnimatedScale(
-              scale: _hovering ? 1.15 : 1.0,
-              duration: HollowDurations.fast,
-              child: SvgPicture.asset(
-                'assets/kickbot-logo.svg',
-                width: 20,
-                height: 20,
-                colorFilter: ColorFilter.mode(
-                  _hovering ? _kickBotGreen : hollow.textSecondary,
-                  BlendMode.srcIn,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 // ── Twitch Connection Widget ──────────────────────────────────────
 
 class _TwitchConnectionRow extends ConsumerStatefulWidget {
