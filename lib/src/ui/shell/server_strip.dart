@@ -250,14 +250,16 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
   }) {
     final server = ref.watch(serverListProvider)[serverId];
     final isSelected = serverId == selectedServerId;
-    final isServerMuted =
-        ref.watch(notificationSettingsProvider.notifier).isServerMuted(serverId);
+    final isServerMuted = ref.watch(notificationSettingsProvider
+        .select((s) => s.isServerMuted(serverId)));
     final serverUnreads = isServerMuted
         ? 0
-        : ref.watch(unreadProvider.notifier).serverUnreadCount(serverId);
+        : ref.watch(unreadProvider
+            .select((s) => s.serverUnreadCount(serverId)));
     final serverMentions = isServerMuted
         ? 0
-        : ref.watch(unreadProvider.notifier).serverMentionCount(serverId);
+        : ref.watch(unreadProvider
+            .select((s) => s.serverMentionCount(serverId)));
     final name = server?.name ?? '';
 
     Widget serverIconChild = Builder(builder: (_) {
@@ -345,11 +347,11 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
   }) {
     final isSelected = folder.serverIds.contains(selectedServerId);
     int folderUnreads = 0;
-    final notifS = ref.watch(notificationSettingsProvider.notifier);
+    final notifS = ref.watch(notificationSettingsProvider);
     for (final sid in folder.serverIds) {
       if (!notifS.isServerMuted(sid)) {
         folderUnreads +=
-            ref.watch(unreadProvider.notifier).serverUnreadCount(sid);
+            ref.watch(unreadProvider.select((s) => s.serverUnreadCount(sid)));
       }
     }
 

@@ -307,11 +307,13 @@ class _ImageCropDialogState extends State<_ImageCropDialog> {
 
                             // Dark overlay outside crop
                             Positioned.fill(
-                              child: CustomPaint(
-                                painter: _CropOverlayPainter(
-                                  cropRect: _cropRect,
-                                  overlayColor: Colors.black.withValues(alpha: 0.6),
-                                  borderColor: hollow.accent,
+                              child: RepaintBoundary(
+                                child: CustomPaint(
+                                  painter: _CropOverlayPainter(
+                                    cropRect: _cropRect,
+                                    overlayColor: Colors.black.withValues(alpha: 0.6),
+                                    borderColor: hollow.accent,
+                                  ),
                                 ),
                               ),
                             ),

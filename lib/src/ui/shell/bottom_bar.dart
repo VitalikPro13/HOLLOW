@@ -57,7 +57,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     final nodeState = ref.watch(nodeProvider);
     final servers = ref.watch(serverListProvider);
     final selectedServerId = ref.watch(selectedServerProvider);
-    final notifSettings = ref.watch(notificationSettingsProvider.notifier);
+    final notifSettings = ref.watch(notificationSettingsProvider);
 
     _initialServerIds ??= ref.read(serverStripLayoutProvider.notifier).allServerIds();
 
@@ -493,7 +493,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     final isServerMuted = notifSettings.isServerMuted(serverId);
     final serverUnreads = isServerMuted
         ? 0
-        : ref.watch(unreadProvider.notifier).serverUnreadCount(serverId);
+        : ref.watch(unreadProvider.select((s) => s.serverUnreadCount(serverId)));
     final serverAvatar = ref.watch(serverAvatarProvider)[serverId];
     final name = server?.name ?? '';
 
@@ -609,7 +609,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     for (final sid in folder.serverIds) {
       if (!notifSettings.isServerMuted(sid)) {
         folderUnreads +=
-            ref.watch(unreadProvider.notifier).serverUnreadCount(sid);
+            ref.watch(unreadProvider.select((s) => s.serverUnreadCount(sid)));
       }
     }
 

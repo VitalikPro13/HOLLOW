@@ -62,8 +62,7 @@ class HollowAvatar extends ConsumerWidget {
 
     Uint8List? bytes = imageBytes;
     if (bytes == null && peerId.isNotEmpty) {
-      final cache = ref.watch(avatarProvider);
-      bytes = cache[peerId];
+      bytes = ref.watch(avatarProvider.select((c) => c[peerId]));
       if (bytes == null) {
         Future.microtask(
             () => ref.read(avatarProvider.notifier).loadAvatar(peerId));

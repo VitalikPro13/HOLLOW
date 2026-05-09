@@ -860,8 +860,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               HollowAvatar(peerId: widget.peerId, size: 28),
               const SizedBox(width: HollowSpacing.sm),
               Builder(builder: (_) {
-                final isOnline = ref.watch(peersProvider).containsKey(widget.peerId) &&
-                    !ref.watch(invisiblePeersProvider).contains(widget.peerId);
+                final hasPeer = ref.watch(peersProvider.select((p) => p.containsKey(widget.peerId)));
+                final isInvisible = ref.watch(invisiblePeersProvider.select((inv) => inv.contains(widget.peerId)));
+                final isOnline = hasPeer && !isInvisible;
                 return StatusDot(
                   color: isOnline ? hollow.success : hollow.textSecondary,
                   size: 8,
@@ -1537,8 +1538,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       if (typingPeers.isNotEmpty)
         TypingIndicatorBar(
           names: typingPeers
-              .map((pid) =>
-                  displayNameFor(ref.watch(profileProvider), pid))
+              .map((pid) => displayNameForPeer(
+                  ref.watch(profileProvider.select((p) => p[pid])), pid))
               .toList(),
         ),
 

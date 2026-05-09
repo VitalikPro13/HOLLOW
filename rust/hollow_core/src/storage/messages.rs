@@ -694,6 +694,11 @@ impl MessageStore {
         Ok(MessageStore { conn })
     }
 
+    pub fn wal_checkpoint(&self) -> Result<(), String> {
+        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| format!("WAL checkpoint failed: {e}"))
+    }
+
     pub fn begin_transaction(&self) -> Result<(), String> {
         self.conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| format!("BEGIN failed: {e}"))

@@ -41,17 +41,19 @@ class StatusDot extends StatelessWidget {
       );
     }
 
-    return ValueListenableBuilder<double>(
-      valueListenable: SharedTickers.instance.pulse,
-      builder: (context, value, _) {
-        return CustomPaint(
-          size: Size(size, size),
-          painter: _PulseDotPainter(
-            pulseValue: value,
-            color: dotColor,
-          ),
-        );
-      },
+    return RepaintBoundary(
+      child: ValueListenableBuilder<double>(
+        valueListenable: SharedTickers.instance.pulse,
+        builder: (context, value, _) {
+          return CustomPaint(
+            size: Size(size, size),
+            painter: _PulseDotPainter(
+              pulseValue: value,
+              color: dotColor,
+            ),
+          );
+        },
+      ),
     );
   }
 }

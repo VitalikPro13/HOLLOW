@@ -40,11 +40,11 @@ class PeerCard extends ConsumerWidget {
     final peerProfile = ref.watch(profileProvider.select((p) => p[peerId]));
     final peerName = displayNameForPeer(peerProfile, peerId);
     final radius = BorderRadius.circular(hollow.radiusMd);
-    final isDmMuted = !ref.watch(notificationSettingsProvider.notifier)
-        .isDmEnabled(peerId);
+    final isDmMuted = !ref.watch(notificationSettingsProvider
+        .select((s) => s.isDmEnabled(peerId)));
     final hasUnread = !isSelected &&
         !isDmMuted &&
-        ref.watch(unreadProvider.notifier).isDmUnread(peerId);
+        ref.watch(unreadProvider.select((s) => s.isDmUnread(peerId)));
 
     Widget card = HollowPressable(
       onTap: onTap,

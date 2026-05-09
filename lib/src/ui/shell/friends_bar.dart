@@ -40,7 +40,7 @@ class FriendsBar extends ConsumerWidget {
     final invisiblePeers = ref.watch(invisiblePeersProvider);
     final profiles = ref.watch(profileProvider);
     final unreadState = ref.watch(unreadProvider);
-    final notifSettings = ref.watch(notificationSettingsProvider.notifier);
+    final notifSettings = ref.watch(notificationSettingsProvider);
     final selectedPeerId = ref.watch(selectedPeerProvider);
 
     return Container(

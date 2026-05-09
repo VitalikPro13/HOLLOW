@@ -259,7 +259,7 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
     final layout = ref.watch(serverStripLayoutProvider);
     final servers = ref.watch(serverListProvider);
     final avatars = ref.watch(serverAvatarProvider);
-    final notifSettings = ref.watch(notificationSettingsProvider.notifier);
+    final notifSettings = ref.watch(notificationSettingsProvider);
 
     // Find the current folder state (may have changed)
     final currentFolder = layout

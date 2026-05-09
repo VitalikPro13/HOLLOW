@@ -1423,13 +1423,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                       itemCount: _searchResults.length,
                       itemBuilder: (_, index) {
                         final msg = _searchResults[index];
-                        final profiles = ref.watch(profileProvider);
-                        final nicknames = ref.watch(
-                            serverNicknamesProvider(widget.serverId));
-                        final name = serverDisplayNameFor(
-                          profiles,
+                        final senderProfile = ref.watch(
+                            profileProvider.select((p) => p[msg.senderId]));
+                        final senderNickname = ref.watch(
+                            serverNicknamesProvider(widget.serverId)
+                                .select((n) => n[msg.senderId]));
+                        final name = serverDisplayNameForPeer(
+                          senderProfile,
                           msg.senderId,
-                          nickname: nicknames[msg.senderId] ?? '',
+                          nickname: senderNickname ?? '',
                         );
                         final time = DateTime.fromMillisecondsSinceEpoch(
                             msg.timestamp);

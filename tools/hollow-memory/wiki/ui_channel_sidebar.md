@@ -278,9 +278,9 @@ Watches `profileProvider` and resolves display name via `displayNameFor()`.
 
 ## Unread Dot Indicators
 
-Unread state is tracked per-channel via `unreadProvider`. The `_ChannelTile` watches `unreadProvider.notifier.isChannelUnread(serverId, channelId)` which returns true when the unread count is > 0. The unread dot is suppressed when:
+Unread state is tracked per-channel via `unreadProvider`. The `_ChannelTile` uses `.select()` for granular rebuilds: `ref.watch(unreadProvider.select((s) => s.isChannelUnread(serverId, channelId)))` — only rebuilds when THIS channel's unread state changes. Mute check uses `ref.watch(notificationSettingsProvider.select((s) => s.isChannelMuted(serverId, channelId)))`. The unread dot is suppressed when:
 - The channel is currently selected (`isSelected`).
-- The channel is muted (`isMuted` via `notificationSettingsProvider`).
+- The channel is muted.
 
 The dot itself is an 8x8 circle filled with `hollow.accent`. It appears at the right end of the channel tile row.
 

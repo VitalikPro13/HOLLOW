@@ -461,7 +461,6 @@ class _RecentConversationsColumn extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final friends = ref.watch(friendsProvider);
     final lastMessages = ref.watch(lastDmMessageProvider);
-    final profiles = ref.watch(profileProvider);
     final peerIds = ref.watch(peersProvider.select((p) => p.keys.toSet()));
     final invPeers = ref.watch(invisiblePeersProvider);
     final dmUnreads = ref.watch(unreadProvider.select((s) => s.dmUnreadCounts));
@@ -544,7 +543,9 @@ class _RecentConversationsColumn extends ConsumerWidget {
               padding: EdgeInsets.zero,
               itemBuilder: (context, index) {
                 final conv = conversations[index];
-                final name = displayNameFor(profiles, conv.peerId);
+                final name = displayNameForPeer(
+                    ref.watch(profileProvider.select((p) => p[conv.peerId])),
+                    conv.peerId);
 
                 return Padding(
                   padding: const EdgeInsets.only(
@@ -744,7 +745,6 @@ class _NetworkColumn extends ConsumerWidget {
     final nodeState = ref.watch(nodeProvider);
     final peers = ref.watch(peersProvider);
     final friends = ref.watch(friendsProvider);
-    final profiles = ref.watch(profileProvider);
     final relayStats = ref.watch(relayStatsProvider);
 
     final isOnline = nodeState.status == NodeStatus.connected;
@@ -856,7 +856,9 @@ class _NetworkColumn extends ConsumerWidget {
           _ConnectionRow(
             hollow: hollow,
             peerId: cs.peerId,
-            name: displayNameFor(profiles, cs.peerId),
+            name: displayNameForPeer(
+                ref.watch(profileProvider.select((p) => p[cs.peerId])),
+                cs.peerId),
             status: cs.label,
             statusColor: cs.stage == PeerConnectionStage.failed
                 ? hollow.error

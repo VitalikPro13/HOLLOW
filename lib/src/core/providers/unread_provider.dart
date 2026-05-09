@@ -385,6 +385,35 @@ class UnreadState {
       channelMentionCounts: channelMentionCounts ?? this.channelMentionCounts,
     );
   }
+
+  bool isChannelUnread(String serverId, String channelId) =>
+      (channelUnreadCounts['$serverId:$channelId'] ?? 0) > 0;
+
+  int channelUnreadCount(String serverId, String channelId) =>
+      channelUnreadCounts['$serverId:$channelId'] ?? 0;
+
+  int channelMentions(String serverId, String channelId) =>
+      channelMentionCounts['$serverId:$channelId'] ?? 0;
+
+  bool isDmUnread(String peerId) => (dmUnreadCounts[peerId] ?? 0) > 0;
+
+  int dmUnreadCount(String peerId) => dmUnreadCounts[peerId] ?? 0;
+
+  int serverUnreadCount(String serverId) {
+    int total = 0;
+    for (final entry in channelUnreadCounts.entries) {
+      if (entry.key.startsWith('$serverId:')) total += entry.value;
+    }
+    return total;
+  }
+
+  int serverMentionCount(String serverId) {
+    int total = 0;
+    for (final entry in channelMentionCounts.entries) {
+      if (entry.key.startsWith('$serverId:')) total += entry.value;
+    }
+    return total;
+  }
 }
 
 final unreadProvider =
@@ -394,10 +423,10 @@ final unreadProvider =
 /// Replaces manual O(n) loops in bottom_bar.dart and server_strip.dart.
 final dmUnreadBadgeProvider = Provider<int>((ref) {
   final unread = ref.watch(unreadProvider);
-  final notifSettings = ref.watch(notificationSettingsProvider.notifier);
+  final notifSettings = ref.watch(notificationSettingsProvider);
   int total = 0;
   for (final entry in unread.dmUnreadCounts.entries) {
-    if (notifSettings.isDmEnabled(entry.key)) total += entry.value;
+    if (notifSettings.dmEnabled[entry.key] ?? true) total += entry.value;
   }
   return total;
 });

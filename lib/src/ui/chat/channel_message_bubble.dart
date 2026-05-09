@@ -52,12 +52,14 @@ class ChannelMessageBubble extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final profiles = ref.watch(profileProvider);
-    final nicknames = ref.watch(serverNicknamesProvider(serverId));
-    final senderName = serverDisplayNameFor(
-      profiles,
+    final senderProfile = ref.watch(
+        profileProvider.select((p) => p[message.senderId]));
+    final senderNickname = ref.watch(
+        serverNicknamesProvider(serverId).select((n) => n[message.senderId]));
+    final senderName = serverDisplayNameForPeer(
+      senderProfile,
       message.senderId,
-      nickname: nicknames[message.senderId] ?? '',
+      nickname: senderNickname ?? '',
     );
     final isMe = message.isMe;
     final time =

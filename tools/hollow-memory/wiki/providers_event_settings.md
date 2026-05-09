@@ -647,6 +647,11 @@ Immutable state holding three maps:
 - `channelOverrides: Map<String, ChannelNotificationLevel>` -- Per-channel overrides, keyed as `'serverId:channelId'`.
 - `dmEnabled: Map<String, bool>` -- Per-DM-peer toggle.
 
+**Instance convenience methods** (for use with `ref.watch(notificationSettingsProvider.select(...))`):
+- `isDmEnabled(peerId)` -- Returns `dmEnabled[peerId] ?? true`.
+- `isServerMuted(serverId)` -- Returns `true` if server level is `nothing`.
+- `isChannelMuted(serverId, channelId)` -- Checks channel override first, falls back to server mute.
+
 ### Storage Keys
 - `notif:{serverId}` -- `"all"` / `"mentions"` / `"nothing"`
 - `notif:{serverId}:{channelId}` -- `"inherit"` / `"all"` / `"mentions"` / `"nothing"`

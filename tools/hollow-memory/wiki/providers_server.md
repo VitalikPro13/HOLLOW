@@ -533,6 +533,15 @@ Seven maps:
 
 All default to empty `const {}`. The `copyWith` method supports all seven fields.
 
+**Instance convenience methods** (for use with `ref.watch(unreadProvider.select(...))`):
+- `isChannelUnread(serverId, channelId)` -- `channelUnreadCounts > 0`.
+- `channelUnreadCount(serverId, channelId)` -- Raw count.
+- `channelMentions(serverId, channelId)` -- Mention count.
+- `isDmUnread(peerId)` -- `dmUnreadCounts > 0`.
+- `dmUnreadCount(peerId)` -- Raw count.
+- `serverUnreadCount(serverId)` -- Sum of all channel counts for a server.
+- `serverMentionCount(serverId)` -- Sum of all channel mention counts for a server.
+
 ### Notification-Aware Unread Counting
 
 `recomputeServerUnread()` respects notification levels via `countUnreadChannelWithMentions()` Rust FFI. For "Mentions Only" channels, only messages containing @mentions or replies count as unread. For "Nothing" channels, unread is always 0. The function takes `max(dbCount, existingInMemoryCount)` to preserve hint-based increments.

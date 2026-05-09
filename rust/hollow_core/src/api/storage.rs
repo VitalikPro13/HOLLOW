@@ -896,6 +896,11 @@ pub fn export_backup(output_path: String, include_vault: bool, include_files: bo
 
         let db_path = data_dir.join("messages.db");
         if db_path.exists() {
+            if let Ok(store) = crate::storage::MessageStore::open(
+                db_path.to_str().unwrap_or_default(), &passphrase,
+            ) {
+                let _ = store.wal_checkpoint();
+            }
             let data = std::fs::read(&db_path).map_err(|e| format!("Failed to read messages.db: {e}"))?;
             zip.start_file("messages.db", options).map_err(|e| format!("Zip error: {e}"))?;
             zip.write_all(&data).map_err(|e| format!("Zip write error: {e}"))?;

@@ -135,6 +135,7 @@ class _SectionDivider extends StatelessWidget {
   final Color? glowColor;
 
   const _SectionDivider({
+    super.key,
     required this.label,
     required this.count,
     required this.isOnline,
@@ -464,6 +465,7 @@ class _ServerMemberContent extends ConsumerWidget {
                             final entry = entries[index];
                             if (entry.isDivider) {
                               return _SectionDivider(
+                                key: ValueKey('div-${entry.label}'),
                                 label: entry.label!,
                                 count: entry.count!,
                                 isOnline: entry.isOnline,
@@ -473,6 +475,7 @@ class _ServerMemberContent extends ConsumerWidget {
                               );
                             }
                             return _ServerMemberTile(
+                              key: ValueKey('mem-${entry.peerId}'),
                               peerId: entry.peerId!,
                               displayName: entry.displayName!,
                               role: entry.role!,
@@ -561,6 +564,7 @@ class _ServerMemberTile extends ConsumerWidget {
   final List<crdt_api.LabelFfi> labels;
 
   const _ServerMemberTile({
+    super.key,
     required this.peerId,
     required this.displayName,
     required this.role,

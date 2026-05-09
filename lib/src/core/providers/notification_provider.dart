@@ -209,6 +209,21 @@ class NotificationSettingsState {
       dmEnabled: dmEnabled ?? this.dmEnabled,
     );
   }
+
+  bool isDmEnabled(String peerId) => dmEnabled[peerId] ?? true;
+
+  bool isServerMuted(String serverId) =>
+      (serverLevels[serverId] ?? NotificationLevel.all) ==
+      NotificationLevel.nothing;
+
+  bool isChannelMuted(String serverId, String channelId) {
+    final key = '$serverId:$channelId';
+    final override = channelOverrides[key];
+    if (override != null && override != ChannelNotificationLevel.inherit) {
+      return override == ChannelNotificationLevel.nothing;
+    }
+    return isServerMuted(serverId);
+  }
 }
 
 final notificationSettingsProvider = NotifierProvider<

@@ -379,12 +379,14 @@ class _ServerContentState extends State<_ServerContent> {
     for (final channel in unplaced) {
       if (channel.channelType == ChannelType.voice) {
         widgets.add(_VoiceChannelTile(
+          key: ValueKey('uch-${channel.channelId}'),
           channel: channel,
           serverId: w.serverId,
           onChannelSelected: w.onChannelSelected,
         ));
       } else {
         widgets.add(_ChannelTile(
+          key: ValueKey('uch-${channel.channelId}'),
           channel: channel,
           serverId: w.serverId,
           isSelected: channel.channelId == w.selectedChannelId,
@@ -859,6 +861,7 @@ class _ChannelTile extends ConsumerWidget {
   final VoidCallback onTap;
 
   const _ChannelTile({
+    super.key,
     required this.channel,
     required this.serverId,
     required this.isSelected,
@@ -869,15 +872,15 @@ class _ChannelTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final radius = BorderRadius.circular(hollow.radiusMd);
-    final isMuted = ref.watch(notificationSettingsProvider.notifier)
-        .isChannelMuted(serverId, channel.channelId);
+    final isMuted = ref.watch(notificationSettingsProvider
+        .select((s) => s.isChannelMuted(serverId, channel.channelId)));
     final hasUnread = !isSelected &&
         !isMuted &&
-        ref.watch(unreadProvider.notifier).isChannelUnread(
-            serverId, channel.channelId);
+        ref.watch(unreadProvider
+            .select((s) => s.isChannelUnread(serverId, channel.channelId)));
     final mentionCount = isSelected ? 0 :
-        ref.watch(unreadProvider.notifier).channelMentionCount(
-            serverId, channel.channelId);
+        ref.watch(unreadProvider
+            .select((s) => s.channelMentions(serverId, channel.channelId)));
 
     Widget tile = HollowPressable(
       onTap: onTap,
@@ -972,6 +975,7 @@ class _VoiceChannelTile extends ConsumerStatefulWidget {
   final ValueChanged<String> onChannelSelected;
 
   const _VoiceChannelTile({
+    super.key,
     required this.channel,
     required this.serverId,
     required this.onChannelSelected,

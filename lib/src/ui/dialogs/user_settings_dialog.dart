@@ -1598,40 +1598,6 @@ class _SecurityTabState extends State<_SecurityTab> {
 
           // Include vault checkbox
           GestureDetector(
-            onTap: () => setState(() => _includeVault = !_includeVault),
-            child: Row(
-              children: [
-                Container(
-                  width: 18,
-                  height: 18,
-                  decoration: BoxDecoration(
-                    color: _includeVault ? hollow.accent : Colors.transparent,
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(
-                      color: _includeVault ? hollow.accent : hollow.border,
-                      width: 1.5,
-                    ),
-                  ),
-                  child: _includeVault
-                      ? Icon(LucideIcons.check, size: 12, color: Colors.white)
-                      : null,
-                ),
-                const SizedBox(width: HollowSpacing.sm),
-                Text(
-                  'Include vault shard data',
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontSize: 13,
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: HollowSpacing.sm),
-
-          // Include downloaded files checkbox
-          GestureDetector(
             onTap: () => setState(() => _includeFiles = !_includeFiles),
             child: Row(
               children: [
@@ -1653,6 +1619,39 @@ class _SecurityTabState extends State<_SecurityTab> {
                 const SizedBox(width: HollowSpacing.sm),
                 Text(
                   'Include downloaded files',
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: HollowSpacing.sm),
+
+          GestureDetector(
+            onTap: () => setState(() => _includeVault = !_includeVault),
+            child: Row(
+              children: [
+                Container(
+                  width: 18,
+                  height: 18,
+                  decoration: BoxDecoration(
+                    color: _includeVault ? hollow.accent : Colors.transparent,
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                      color: _includeVault ? hollow.accent : hollow.border,
+                      width: 1.5,
+                    ),
+                  ),
+                  child: _includeVault
+                      ? Icon(LucideIcons.check, size: 12, color: Colors.white)
+                      : null,
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                Text(
+                  'Include vault shard data',
                   style: HollowTypography.body.copyWith(
                     color: hollow.textPrimary,
                     fontSize: 13,

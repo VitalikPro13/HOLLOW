@@ -667,7 +667,7 @@ File: `lib/src/ui/components/hollow_avatar.dart`
 
 **Avatar resolution order:**
 1. If `imageBytes` is passed (non-null), use it directly (for archive data or explicit overrides).
-2. Otherwise, read from `avatarProvider` cache. If not yet cached, schedules `loadAvatar(peerId)` via `Future.microtask`.
+2. Otherwise, read from `avatarProvider` cache using `.select((c) => c[peerId])` (rebuilds only when THIS peer's avatar changes, not all). If not yet cached, schedules `loadAvatar(peerId)` via `Future.microtask`.
 
 **With image:**
 - `animate: true` — renders `AnimatedGifImage` (for GIF avatar support in profile cards, DM panel, settings).

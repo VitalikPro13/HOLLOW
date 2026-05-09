@@ -737,10 +737,12 @@ class _ChannelRow extends StatelessWidget {
             SizedBox(
               width: 16,
               height: 32,
-              child: CustomPaint(
-                painter: _TreeConnectorPainter(
-                  color: hollow.border,
-                  isLast: isLast,
+              child: RepaintBoundary(
+                child: CustomPaint(
+                  painter: _TreeConnectorPainter(
+                    color: hollow.border,
+                    isLast: isLast,
+                  ),
                 ),
               ),
             ),
