@@ -162,13 +162,13 @@ mod tests {
         // Sync: A → B
         let sv_b = StateVector::from_server_state(&state_b);
         let delta_a_to_b = compute_delta(&state_a.op_log, &sv_b);
-        let applied_b = merge_ops(&mut state_b, delta_a_to_b).unwrap();
+        let applied_b = merge_ops(&mut state_b, delta_a_to_b.into_iter().cloned().collect()).unwrap();
         assert_eq!(applied_b, 1);
 
         // Sync: B → A
         let sv_a = StateVector::from_server_state(&state_a);
         let delta_b_to_a = compute_delta(&state_b.op_log, &sv_a);
-        let applied_a = merge_ops(&mut state_a, delta_b_to_a).unwrap();
+        let applied_a = merge_ops(&mut state_a, delta_b_to_a.into_iter().cloned().collect()).unwrap();
         assert_eq!(applied_a, 1);
 
         // Both have the same state

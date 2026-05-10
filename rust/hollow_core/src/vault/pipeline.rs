@@ -466,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_upload_audio_low_tier() {
+    fn prepare_upload_audio_standard_tier() {
         let data = b"audio file";
         let encrypted = aes_encrypt(data).unwrap();
         let cid = content_id(&encrypted.ciphertext);
@@ -479,10 +479,8 @@ mod tests {
             "peer_0", &members, &pledges, "test_msg",
         ).unwrap();
 
-        assert_eq!(plan.manifest.storage_tier, "low");
-        // Low tier: k=3, m adjusted from 2 → ceil(2*0.6)=2 (min 1, 0.6*2=1.2→2)
+        assert_eq!(plan.manifest.storage_tier, "standard");
         assert_eq!(plan.manifest.k, 3);
-        // m = ceil(2 * 0.6) = ceil(1.2) = 2
         assert_eq!(plan.manifest.m, 2);
     }
 
