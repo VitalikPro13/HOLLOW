@@ -1,6 +1,32 @@
 [env]
-# Point to pre-installed Win64 OpenSSL for SQLCipher linking
+# Windows OpenSSL for SQLCipher (desktop builds).
+# libsqlite3-sys checks TARGET-prefixed vars first, so Android overrides below win.
 OPENSSL_DIR = "C:\\Program Files\\OpenSSL-Win64"
 OPENSSL_LIB_DIR = "C:\\Program Files\\OpenSSL-Win64\\lib\\VC\\x64\\MD"
 OPENSSL_INCLUDE_DIR = "C:\\Program Files\\OpenSSL-Win64\\include"
-OPENSSL_NO_VENDOR = "1"
+# Android: static OpenSSL 1.1.1w (prebuilt in .cargo/android-openssl-headers/)
+X86_64_LINUX_ANDROID_OPENSSL_STATIC = "1"
+AARCH64_LINUX_ANDROID_OPENSSL_STATIC = "1"
+ARMV7_LINUX_ANDROIDEABI_OPENSSL_STATIC = "1"
+I686_LINUX_ANDROID_OPENSSL_STATIC = "1"
+X86_64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR = "C:\\Users\\Jabun\\Documents\\Coding\\HOLLOW\\rust\\hollow_core\\.cargo\\android-openssl-headers\\include"
+AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR = "C:\\Users\\Jabun\\Documents\\Coding\\HOLLOW\\rust\\hollow_core\\.cargo\\android-openssl-headers\\include"
+ARMV7_LINUX_ANDROIDEABI_OPENSSL_INCLUDE_DIR = "C:\\Users\\Jabun\\Documents\\Coding\\HOLLOW\\rust\\hollow_core\\.cargo\\android-openssl-headers\\include"
+I686_LINUX_ANDROID_OPENSSL_INCLUDE_DIR = "C:\\Users\\Jabun\\Documents\\Coding\\HOLLOW\\rust\\hollow_core\\.cargo\\android-openssl-headers\\include"
+X86_64_LINUX_ANDROID_OPENSSL_LIB_DIR = "C:\\Users\\Jabun\\Documents\\Coding\\HOLLOW\\rust\\hollow_core\\.cargo\\android-openssl-headers\\lib\\x86_64"
+AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR = "C:\\Users\\Jabun\\Documents\\Coding\\HOLLOW\\rust\\hollow_core\\.cargo\\android-openssl-headers\\lib\\aarch64"
+ARMV7_LINUX_ANDROIDEABI_OPENSSL_LIB_DIR = "C:\\Users\\Jabun\\Documents\\Coding\\HOLLOW\\rust\\hollow_core\\.cargo\\android-openssl-headers\\lib\\armv7"
+I686_LINUX_ANDROID_OPENSSL_LIB_DIR = "C:\\Users\\Jabun\\Documents\\Coding\\HOLLOW\\rust\\hollow_core\\.cargo\\android-openssl-headers\\lib\\i686"
+
+# Android NDK cross-compilation targets
+[target.aarch64-linux-android]
+linker = "C:\\Users\\Jabun\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\aarch64-linux-android21-clang.cmd"
+
+[target.armv7-linux-androideabi]
+linker = "C:\\Users\\Jabun\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\armv7a-linux-androideabi21-clang.cmd"
+
+[target.x86_64-linux-android]
+linker = "C:\\Users\\Jabun\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\x86_64-linux-android21-clang.cmd"
+
+[target.i686-linux-android]
+linker = "C:\\Users\\Jabun\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\i686-linux-android21-clang.cmd"

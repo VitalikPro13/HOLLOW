@@ -154,11 +154,11 @@ Future<void> main() async {
 
   await RustLib.init();
 
-  // Phase 6.75 video preview: register fvp as the platform implementation for
-  // video_player on Windows/Linux (where the official video_player has no
-  // native backend). On Android/iOS/macOS the official video_player works
-  // natively and registerWith() is a no-op for those platforms.
-  fvp.registerWith();
+  // fvp provides the video_player backend on Windows/Linux (where the official
+  // plugin has no native support). Skip on mobile — official plugin works natively.
+  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+    fvp.registerWith();
+  }
 
   final container = ProviderContainer();
   _container = container;

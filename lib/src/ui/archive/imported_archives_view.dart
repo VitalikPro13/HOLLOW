@@ -160,10 +160,7 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
 
         // ── Archive list with drag-drop ──
         Expanded(
-          child: DropTarget(
-            onDragEntered: (_) => setState(() => _dragging = true),
-            onDragExited: (_) => setState(() => _dragging = false),
-            onDragDone: _handleDrop,
+          child: _wrapDropTarget(
             child: Stack(
               children: [
                 pathsAsync.when(
@@ -258,6 +255,16 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _wrapDropTarget({required Widget child}) {
+    if (Platform.isAndroid || Platform.isIOS) return child;
+    return DropTarget(
+      onDragEntered: (_) => setState(() => _dragging = true),
+      onDragExited: (_) => setState(() => _dragging = false),
+      onDragDone: _handleDrop,
+      child: child,
     );
   }
 }

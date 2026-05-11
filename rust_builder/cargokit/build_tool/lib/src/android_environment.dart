@@ -114,7 +114,11 @@ class AndroidEnvironment {
     final ccKey = 'CC_${target.rust}';
     final ccValue = path.join(toolchainPath, 'clang$exe');
     final cfFlagsKey = 'CFLAGS_${target.rust}';
-    final cFlagsValue = targetArg;
+    // Append OpenSSL headers for SQLCipher bundled build on Android.
+    final opensslHeaders = Platform.environment['HOLLOW_ANDROID_OPENSSL_INCLUDE'] ?? '';
+    final cFlagsValue = opensslHeaders.isNotEmpty
+        ? '$targetArg -I$opensslHeaders'
+        : targetArg;
 
     final cxxKey = 'CXX_${target.rust}';
     final cxxValue = path.join(toolchainPath, 'clang++$exe');
@@ -129,7 +133,22 @@ class AndroidEnvironment {
 
     final ndkVersionParsed = Version.parse(ndkVersion);
     final rustFlagsKey = 'CARGO_ENCODED_RUSTFLAGS';
-    final rustFlagsValue = _libGccWorkaround(targetTempDir, ndkVersionParsed);
+    var rustFlagsValue = _libGccWorkaround(targetTempDir, ndkVersionParsed);
+
+    // Append stub libcrypto search path for SQLCipher linking on Android.
+    // Stubs are per-architecture: lib/aarch64/, lib/armv7/, lib/x86_64/, lib/i686/
+    final opensslLibBase = Platform.environment['HOLLOW_ANDROID_OPENSSL_LIB'];
+    if (opensslLibBase != null && opensslLibBase.isNotEmpty) {
+      final archMap = {
+        'aarch64-linux-android': 'aarch64',
+        'armv7-linux-androideabi': 'armv7',
+        'x86_64-linux-android': 'x86_64',
+        'i686-linux-android': 'i686',
+      };
+      final arch = archMap[target.rust] ?? target.rust;
+      final libDir = path.join(opensslLibBase, arch);
+      rustFlagsValue = '$rustFlagsValue\x1f-L\x1f$libDir';
+    }
 
     final runRustTool =
         Platform.isWindows ? 'run_build_tool.cmd' : 'run_build_tool.sh';

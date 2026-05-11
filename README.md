@@ -62,8 +62,8 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 | Windows | [Download latest release](https://anonlisten.com) |
 | macOS | Coming soon |
 | Linux | Coming soon |
-| Android | Coming soon |
-| iOS | Coming soon |
+| Android | In progress |
+| iOS | In progress |
 | Web | Not planned |
 
 ## Tech Stack
@@ -99,6 +99,7 @@ In the Hollow app, enter your relay domain during setup or in Settings. See [rel
 - [Privacy Policy](legal/PRIVACY_POLICY.md) -- what data exists, where, and what we can access (nothing)
 - [Terms of Use](legal/TERMS_OF_USE.md) -- plain-language terms
 - [Relay Documentation](relay-uws/README.md) -- relay architecture, benchmarks, deployment
+- [Mobile Port Plan](MobilePort_Plan.md) -- Android/iOS build setup, OpenSSL cross-compilation, contributor guide
 
 ## Building from Source
 

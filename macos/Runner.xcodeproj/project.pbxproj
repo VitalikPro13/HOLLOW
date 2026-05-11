@@ -388,7 +388,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.anonlisten.hollow.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hollow.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/haven";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hollow.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/hollow";
 			};
 			name = Debug;
 		};
@@ -402,7 +402,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.anonlisten.hollow.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hollow.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/haven";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hollow.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/hollow";
 			};
 			name = Release;
 		};
@@ -416,7 +416,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.anonlisten.hollow.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hollow.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/haven";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/hollow.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/hollow";
 			};
 			name = Profile;
 		};

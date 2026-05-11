@@ -64,6 +64,10 @@ class _ChatDropZoneState extends State<ChatDropZone> {
 
   @override
   Widget build(BuildContext context) {
+    if (Platform.isAndroid || Platform.isIOS) {
+      return widget.child;
+    }
+
     final hollow = HollowTheme.of(context);
 
     return DropTarget(
