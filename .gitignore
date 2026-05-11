@@ -83,6 +83,9 @@ yt_videos/
 # Claude Code
 .claude/
 
+# Forked flutter_webrtc prebuilt binaries (downloaded by build system)
+packages/flutter_webrtc/third_party/
+
 # Hollow Memory (semantic search tool)
 tools/hollow-memory/models/
 tools/hollow-memory/*.db

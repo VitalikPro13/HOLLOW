@@ -57,6 +57,7 @@ HOLLOW/
 │       └── storage/      # SQLCipher message store
 ├── relay/                # Signaling HTTP + WS room router (Rust, legacy — superseded by relay-uws)
 ├── relay-uws/            # Production relay (uWebSockets C++, native TLS, deployed on OVH VPS)
+├── packages/flutter_webrtc/ # Forked flutter_webrtc 1.4.1 (WASAPI loopback patch for Windows screen share audio)
 ├── rust_builder/         # flutter_rust_bridge build system (cargokit)
 ├── vendor/ffmpeg/        # Bundled native binaries (gitignored, see fetch_ffmpeg.ps1)
 ├── legal/                # Privacy Policy, Terms of Use, version manifest (manifest.json)
@@ -152,7 +153,7 @@ All UI uses custom Hollow widgets — no Material defaults.
 - **HollowTooltip: always use `_dismiss()` pattern** — immediate overlay removal, no reverse animation.
 - **`scrollable_positioned_list: ^0.3.8`** — sentinel pattern with `itemCount: messages.length + 1`. Do not remove this package.
 - **`showHollowDialog` overlays need a `Material` ancestor** for `Text` widgets, otherwise yellow debug underline.
-- **Forked `flutter_webrtc` at `../flutter-webrtc-1.4.1/`** — pubspec points at the sibling folder via `path:`. The fork adds WASAPI loopback capture inside `getDisplayMedia({audio: true})` on Windows. The captured audio track must NOT be attached to the returned MediaStream (`stream->AddTrack` crashes libwebrtc's sender iteration); Dart calls `pc.addTrack(audioTrack, stream)` on the screen-share PC instead. When iterating on the fork's native C++, delete `build/windows/x64/plugins/flutter_webrtc/` before rebuilding, and **always build `--release` if testing from the Release folder** (Vitalik does).
+- **Forked `flutter_webrtc` at `packages/flutter_webrtc/`** — pubspec points at the sibling folder via `path:`. The fork adds WASAPI loopback capture inside `getDisplayMedia({audio: true})` on Windows. The captured audio track must NOT be attached to the returned MediaStream (`stream->AddTrack` crashes libwebrtc's sender iteration); Dart calls `pc.addTrack(audioTrack, stream)` on the screen-share PC instead. When iterating on the fork's native C++, delete `build/windows/x64/plugins/flutter_webrtc/` before rebuilding, and **always build `--release` if testing from the Release folder** (Vitalik does).
 
 ## Semantic Memory Search (hollow-memory MCP)
 - **Tool:** `memory_search(query, limit=5)` — semantic vector search across all memory files, HOLLOW_PLAN.md, WHITEPAPER.md, CLAUDE.md. Use it proactively when you need to recall decisions, patterns, or context by meaning rather than exact filename.
