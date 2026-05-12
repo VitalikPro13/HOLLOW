@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/video_thumbnail_service.dart';
 
 /// Windows' Media Foundation (which `audioplayers_windows` wraps) cannot
@@ -71,11 +72,8 @@ class AudioTranscodeService {
     String inputPath,
     DateTime mtime,
   ) async {
-    final appData = Platform.environment['APPDATA'] ??
-        Platform.environment['HOME'] ??
-        '.';
     final sep = Platform.pathSeparator;
-    final dir = Directory('$appData${sep}Hollow$sep$_cacheSubdir');
+    final dir = Directory('$hollowDataDir$sep$_cacheSubdir');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }

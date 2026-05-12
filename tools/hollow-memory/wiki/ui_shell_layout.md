@@ -190,24 +190,29 @@ Key differences from classic:
 
 ## Mobile Layout
 
-`_buildMobileLayout()` renders a single-panel view with bottom navigation:
+Mobile layout is fully decoupled from the desktop shell. When `width < 600px`, `HollowShell.build()` returns `const MobileShell()` — the old `_buildMobileLayout()` method has been deleted.
 
-```
-Scaffold
-  └── Column
-      ├── Expanded: active tab content
-      └── MobileNav (56px bottom nav bar)
-```
+**Files:** `lib/src/ui/mobile/mobile_shell.dart`, `lib/src/ui/mobile/mobile_nav_bar.dart`, `lib/src/ui/mobile/mobile_chat_route.dart`, `lib/src/ui/mobile/tabs/*.dart`.
 
-Tab content is selected by `mobileTabProvider` (StateProvider<int>, default 0):
-- **Tab 0 (Home):** `ChannelSidebar` with `width: null` (full width).
-- **Tab 1 (Chat):** `AmbientBackground` + `AnimatedSwitcher` + `_buildChatOrEmpty()`.
-- **Tab 2 (Members):** `MemberPanel(width: null)` (full width).
-- **Tab 3 (Settings):** `_buildSettingsPlaceholder()` (placeholder text).
+**MobileShell** (`ConsumerWidget`): Uses a `Stack` of `AnimatedOpacity` widgets (one per tab, 150ms fade) with `IgnorePointer` on inactive tabs. All tabs stay mounted to preserve scroll state.
 
-The `MobileNav` widget renders 4 tabs: Home (house icon), Chat (message icon), Members (users icon), Settings (gear icon). Each tab uses `HollowPressable` for tap handling. Active tab gets accent color; inactive gets `textSecondary`.
+**MobileNavBar** (`ConsumerWidget`): 56px, `hollow.surface` bg, top border. 4 tabs:
+- **Tab 0 (Chats):** `LucideIcons.messageCircle`. Badge: total DM + channel unread count.
+- **Tab 1 (Friends):** `LucideIcons.users`. Badge: pending incoming friend request count.
+- **Tab 2 (Archive):** `LucideIcons.archive`. No badge.
+- **Tab 3 (Settings):** `LucideIcons.settings`. No badge.
 
-When a peer or channel is selected via the sidebar, `mobileTabProvider` is automatically set to `1` (Chat tab) to navigate the user to the chat view.
+Active tab: `hollow.accent` + w600. Inactive: `hollow.textSecondary` + w400. Badge: red pill (top-right of icon), shows count or "99+".
+
+**MobileChatsTab** (`ConsumerStatefulWidget`): Telegram-style unified list mixing DMs and servers. DMs show avatar + status dot + name + last message preview + timestamp + unread dot. Servers show icon + name + member count + unread badge pill + expand chevron. Tap DM → push `MobileChatRoute`. Tap server → animated accordion with channels loaded on demand via `ChannelListNotifier.fetchChannels()`. FAB "+" button opens Create/Join Server + Add Friend dialog.
+
+**MobileFriendsTab** (`ConsumerWidget`): Add Friend button, REQUESTS section (incoming with accept/reject, outgoing with cancel), FRIENDS section (sorted online-first, tap → push chat route).
+
+**MobileSettingsTab** (`ConsumerWidget`): Profile avatar + status, peer ID with tap-to-copy, Network status, About section. Uses ASOT-style section dividers.
+
+**Chat navigation:** `MobileChatRoute` pushes onto root navigator (`Navigator.of(context, rootNavigator: true).push()`), so the bottom nav disappears. System back pops the route. Uses `_MobileChatHeader` (48px, back arrow + avatar + name). Currently wraps desktop `ChatPane`/`ChannelChatPane` — needs mobile-specific rewrite.
+
+**Provider:** `mobileTabProvider` (StateProvider<int>, default 0, defined in `mobile_nav.dart`) is reused.
 
 ## Split View System
 

@@ -70,6 +70,7 @@ import 'package:hollow/src/ui/share/share_dashboard.dart';
 import 'package:hollow/src/ui/shell/home_dashboard.dart';
 import 'package:hollow/src/ui/shell/member_panel.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
+import 'package:hollow/src/ui/mobile/mobile_shell.dart';
 import 'package:hollow/src/ui/shell/server_strip.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 import 'package:window_manager/window_manager.dart';
@@ -669,28 +670,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
     );
   }
 
-  Widget _buildSettingsPlaceholder(HollowTheme hollow) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            LucideIcons.settings,
-            size: 64,
-            color: hollow.textSecondary.withValues(alpha: 0.3),
-          ),
-          const SizedBox(height: HollowSpacing.lg),
-          Text(
-            'Settings coming soon',
-            style: HollowTypography.body.copyWith(
-              color: hollow.textSecondary,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   /// Wraps the chat pane with a fade for the startup reveal.
   /// Always keeps the FadeTransition in the tree so the child's State
   /// (e.g. AmbientBackground's AnimationController) is preserved when
@@ -734,18 +713,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
         final isMobile = width < _kTabletBreakpoint;
 
         if (isMobile) {
-          return _buildMobileLayout(
-            hollow: hollow,
-            peers: peers,
-            lastMessages: lastMessages,
-            selectedPeerId: selectedPeerId,
-            nodeStatus: nodeState.status,
-
-            selectedServer: selectedServer,
-            channels: channels,
-            selectedChannelId: selectedChannelId,
-            channelLayoutJson: channelLayout,
-          );
+          return const MobileShell();
         }
 
         final isDesktopPlatform =
@@ -1115,76 +1083,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
     );
   }
 
-  Widget _buildMobileLayout({
-    required HollowTheme hollow,
-    required Map<String, dynamic> peers,
-    required Map<String, ChatMessage> lastMessages,
-    required String? selectedPeerId,
-    required NodeStatus nodeStatus,
-
-    required ServerInfo? selectedServer,
-    required Map<String, ChannelInfo> channels,
-    required String? selectedChannelId,
-    required String channelLayoutJson,
-  }) {
-    final currentTab = ref.watch(mobileTabProvider);
-
-    Widget body;
-    switch (currentTab) {
-      case 0: // Home — channel sidebar content (full width on mobile)
-        body = _buildChannelSidebar(
-          peers: peers,
-          lastMessages: lastMessages,
-          selectedPeerId: selectedPeerId,
-          nodeStatus: nodeStatus,
-
-          selectedServer: selectedServer,
-          channels: channels,
-          selectedChannelId: selectedChannelId,
-          channelLayoutJson: channelLayoutJson,
-          width: null,
-        );
-      case 1: // Chat
-        body = AmbientBackground(
-          color1: hollow.accent,
-          color2: const Color(0xFF6366F1),
-          child: AnimatedSwitcher(
-            duration: HollowDurations.normal,
-            switchInCurve: HollowCurves.enter,
-            switchOutCurve: HollowCurves.exit,
-            child: Container(
-              key: ValueKey(ref.watch(archiveTabOpenProvider)
-                  ? 'archive'
-                  : selectedChannelId ?? selectedPeerId ?? 'empty'),
-              color: hollow.background,
-              child: _buildChatOrEmpty(
-                hollow: hollow,
-                selectedPeerId: selectedPeerId,
-                peers: peers,
-                selectedChannelId: selectedChannelId,
-                channels: channels,
-              ),
-            ),
-          ),
-        );
-      case 2: // Members (full width on mobile)
-        body = const MemberPanel(width: null);
-      case 3: // Settings
-        body = _buildSettingsPlaceholder(hollow);
-      default:
-        body = const SizedBox.shrink();
-    }
-
-    return Scaffold(
-      backgroundColor: hollow.background,
-      body: Column(
-        children: [
-          Expanded(child: body),
-          const MobileNav(),
-        ],
-      ),
-    );
-  }
 }
 
 /// Animates the member panel sliding in/out from the right edge.

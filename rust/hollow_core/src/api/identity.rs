@@ -9,6 +9,13 @@ pub struct IdentityInfo {
     pub mnemonic: Option<String>,
 }
 
+/// Set the data directory path (Android/iOS: pass app documents dir).
+/// Must be called before load_or_create_identity() or start_node().
+#[frb]
+pub fn set_data_dir(path: String) -> Result<(), String> {
+    crate::identity::set_data_dir(path)
+}
+
 /// Load the saved identity from disk, or create a new one if none exists.
 /// On first run, returns the mnemonic phrase for the user to back up.
 /// On subsequent runs, returns just the peer ID (mnemonic is not stored).

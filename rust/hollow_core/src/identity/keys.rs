@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use bip39::Mnemonic;
 use super::native_identity::NativeKeypair;
@@ -11,11 +12,22 @@ pub(crate) struct IdentityData {
     pub mnemonic: Option<String>,
 }
 
+static DATA_DIR_OVERRIDE: OnceLock<String> = OnceLock::new();
+
+/// Set the data directory path from Dart (Android/iOS pass their app data dir).
+/// Must be called before any identity or storage operations.
+pub fn set_data_dir(path: String) -> Result<(), String> {
+    DATA_DIR_OVERRIDE
+        .set(path)
+        .map_err(|_| "Data dir already set".to_string())
+}
+
 /// Get the Hollow data directory.
-/// Checks HOLLOW_DATA_DIR env var first (for multi-instance testing),
-/// then falls back to %APPDATA%/hollow on Windows.
+/// Priority: set_data_dir() override → HOLLOW_DATA_DIR env var → dirs::data_dir().
 pub fn data_dir() -> Result<PathBuf, String> {
-    let dir = if let Ok(custom) = std::env::var("HOLLOW_DATA_DIR") {
+    let dir = if let Some(override_path) = DATA_DIR_OVERRIDE.get() {
+        PathBuf::from(override_path)
+    } else if let Ok(custom) = std::env::var("HOLLOW_DATA_DIR") {
         PathBuf::from(custom)
     } else {
         let base = dirs::data_dir().ok_or("Could not find app data directory")?;

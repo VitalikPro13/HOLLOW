@@ -6,6 +6,11 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+/// Set the data directory path (Android/iOS: pass app documents dir).
+/// Must be called before load_or_create_identity() or start_node().
+Future<void> setDataDir({required String path}) =>
+    RustLib.instance.api.crateApiIdentitySetDataDir(path: path);
+
 /// Load the saved identity from disk, or create a new one if none exists.
 /// On first run, returns the mnemonic phrase for the user to back up.
 /// On subsequent runs, returns just the peer ID (mnemonic is not stored).

@@ -2,8 +2,8 @@
 
 ## Status
 
-**Android: boots and renders UI.** Rust library compiles and loads, networking connects,
-mobile layout displays. Remaining work is data directory plumbing and UI adaptation.
+**Android: fully functional.** Rust backend, E2E encrypted messaging, WebSocket relay,
+identity, friends, servers — all working. Mobile UI redesign in progress.
 
 **iOS: untested.** Should work once macOS is available for building. Same Rust core, same
 Flutter codebase. Cargokit + Podspec are configured.
@@ -20,32 +20,149 @@ Flutter codebase. Cargokit + Podspec are configured.
 - [x] Forked flutter_webrtc vendored into `packages/flutter_webrtc/`
 - [x] Rust cross-compilation for Android (NDK linker config, OpenSSL 1.1.1w static linking)
 - [x] Cargokit patched to pass OpenSSL headers and lib path via env vars
+- [x] Android data directory — `set_data_dir()` FFI + `hollowDataDir` Dart utility
+- [x] Crash logging path — `path_provider` on mobile
+- [x] TLS root certs — `tokio-tungstenite` switched to `webpki-roots` (Android can't read Java KeyStore)
+- [x] WebSocket relay connection verified working on Android
+- [x] E2E encrypted messaging verified (Olm key exchange + message flow between Android ↔ Windows)
 
 ## What's left
 
 ### Must fix (app runs but broken)
-1. **Android data directory** — Rust `dirs` crate returns `None` on Android. The `_bootstrap()` in
-   `hollow_shell.dart` fails with "Could not find app data directory". Need to pass the Android
-   app data path from Dart to Rust via FFI before `start_node()`.
-2. **Crash logging path** — `_initCrashLogging()` in `main.dart` uses `APPDATA`/`HOME` env vars
-   (desktop-only). On Android, use `getApplicationDocumentsDirectory()` from `path_provider`.
-   Also fix the `StreamSink` cascade: guard writes with null check on the sink.
+1. ~~**Android data directory**~~ — **DONE.** Added `set_data_dir()` FFI (Rust `OnceLock<String>`
+   override in `identity/keys.rs`). Dart calls `identity_api.setDataDir()` in `main()` after
+   `RustLib.init()` on Android/iOS, using `getApplicationDocumentsDirectory()` from `path_provider`.
+2. ~~**Crash logging path**~~ — **DONE.** `_initCrashLogging()` now uses `getApplicationDocumentsDirectory()`
+   on Android/iOS instead of `APPDATA`/`HOME` env vars.
 
-### Mobile UX work
-3. **Layout overflow** — `home_dashboard.dart:118` Row overflows on narrow screens. The desktop
-   layout renders on mobile because `_bootstrap()` fails before the layout mode is determined.
-   Once data dir is fixed, the mobile breakpoints should kick in.
-4. **Touch targets & safe areas** — audit all interactive elements for 48px minimum touch targets,
-   respect system status bar and navigation bar insets.
-5. **Keyboard handling** — text fields need `adjustResize` behavior (already set in AndroidManifest).
-6. **File picker** — replace desktop drag-drop with `file_picker` on mobile (already a dependency).
-7. **Notifications** — `local_notifier` is desktop-only. Mobile needs FCM (Android) / APNs (iOS).
+### Mobile UX redesign (complete rewrite of mobile layout)
 
-### Post-launch
+The desktop UI crammed into 360px is unusable. Mobile needs a fundamentally different
+navigation model — touch-first, single-panel, designed for Hollow's aesthetic.
+
+#### Design decisions (agreed 2026-05-12, refined 2026-05-12)
+
+**Navigation model: Telegram-style unified list + expandable servers**
+
+4 bottom tabs:
+- **Chats** — unified conversation list mixing DMs and servers
+- **Friends** — friend list, add friend, friend requests
+- **Archive** — My Data (export per-DM/channel/server) + Imported Archives (browse, verify, view)
+- **Settings** — profile card at top, ASOT-style section dividers, scrollable
+
+**Chats tab — the unified conversation list:**
+- Two item types in one scrollable list, ordered by most recent activity:
+  - **DM rows:** avatar + name + last message preview + timestamp + unread badge
+  - **Server rows:** server icon + name + unread count across all channels
+- Tap a DM → full-screen chat view (push navigation)
+- Tap a server → animated accordion expansion showing channels inline:
+  - Text channels (indented, tap → full-screen chat)
+  - Voice channels (show active member count, join button)
+- Long-press a server row → context menu (Settings, Invite, Members, Leave)
+- Pinned items stick to top of list
+- This gives: 1 tap to any DM, 2 taps to any channel (same depth as Discord mobile)
+
+**Chat view (full-screen, pushed from Chats list):**
+- Chat header bar: back arrow + channel/DM name + icons (call, member panel, more)
+- Tap channel name in header → slide-down sheet with:
+  - Member list
+  - Pinned messages
+  - Media/files/links tabs (new feature — build on mobile first, backport to desktop)
+  - Search
+- Message input at bottom with attach button (uses `file_picker` on mobile, not drag-drop)
+- Swipe right from left edge → back to conversation list
+
+**Member panel:** slide-out bottom sheet (not a permanent side panel)
+
+**Settings tab — ASOT-style divider layout:**
+```
+──────── Profile ────────
+[avatar, name, status, edit button]
+
+──────── Appearance ────────
+[theme, accent color, animations toggle]
+
+──────── Network ────────
+[relay domain, relay list, connection status]
+
+──────── Data ────────
+[backup/restore, storage usage]
+
+──────── About ────────
+[version, licenses, links]
+```
+Full-width horizontal line with centered section text. No Material cards or grouped lists.
+
+**Voice channel view — mobile redesign:**
+- Portrait by default, landscape unlock when viewing remote screen share or video
+- Participant grid that adapts to orientation
+- Floating control pill (mute, deafen, camera, leave) — auto-hide in landscape
+- Remote screen share: full-bleed with pinch-to-zoom, overlay controls auto-hide
+- Camera supported, screen sharing NOT supported (sending — receiving is fine)
+
+**Home dashboard (news/relay stats):** section in Settings tab under Network or About.
+Not a dedicated tab.
+
+#### Feature scope
+
+**Ported (Rust logic exists, mobile UI needed):**
+- DM + channel messaging (send/receive/edit/delete, reactions, reply)
+- Server CRUD (create, join via invite, leave, settings)
+- Channel CRUD (create, edit, delete)
+- Friend system (add, accept, remove, block)
+- Identity (create, restore from mnemonic, backup phrase)
+- Profiles (display name, bio, avatar, banner, status)
+- Roles & permissions (power roles + cosmetic labels)
+- Typing indicators, unread tracking, notification badges
+- Link previews (sender-generated)
+- Relay domain switching, license key entry
+- Emoji reactions, message signing / proof verification
+- 1:1 DM voice calls (WebRTC over TURN)
+- Server voice channels (WebRTC over TURN)
+- Camera in voice/calls (no screen share sending)
+- Viewing remote screen shares (with landscape + pinch-to-zoom)
+- Archive export/import (.hollow-archive)
+- Backup/restore (.hollow encrypted backup)
+- Vault (shard storage, for servers 6+ members)
+- Media/files/links browsing per channel (new — needs FFI queries)
+
+**Excluded from mobile:**
+- Hollow Share (STUN-only P2P — dead on mobile CGNAT networks)
+- Downloads tab (no Share = no downloads)
+- Screen share sending (explicitly excluded)
+- `win32audio` output device selection (desktop-only)
+- `desktop_drop` drag-and-drop (replaced with `file_picker`)
+- Tray/window management (OS handles lifecycle)
+- FFmpeg services (returns null on mobile, graceful skip)
+
+**STUN note:** STUN only works when at least one side has public/cone NAT (home routers).
+Mobile carriers use symmetric NAT/CGNAT — STUN fails mobile↔home and mobile↔mobile.
+TURN is the only reliable path. This is why Share (STUN-only) is excluded.
+
+#### Implementation order
+1. [x] New mobile navigation shell (4-tab `MobileShell` with animated tab fades)
+2. [x] Unified conversation list (`MobileChatsTab` — DM rows + server rows, sorted by activity)
+3. [x] Server accordion expansion (animated channel list, on-demand loading via FFI)
+4. [x] Full-screen chat view push route (`MobileChatRoute` — uses desktop ChatPane, needs mobile rewrite)
+5. [ ] Mobile chat view rewrite (full-width messages, mobile input bar, no profile sidebar)
+6. [ ] Chat header detail sheet (members, pins, media/files/links)
+7. [ ] Long-press context menus (server settings, message actions)
+8. [x] Friends tab (friend list, add friend dialog, incoming/outgoing requests, cancel)
+9. [ ] Archive tab (My Data + Imported Archives, touch-friendly)
+10. [x] Settings tab (profile card, peer ID copy, ASOT dividers, network status)
+11. [x] FAB "+" button on Chats tab (Create Server, Join Server, Add Friend dialog)
+12. [ ] Voice channel — mobile redesign (floating controls, participant grid)
+13. [ ] Voice/video orientation handling (portrait default, landscape for screen share viewing)
+14. [ ] File picker integration — attach button uses `file_picker` on mobile
+15. [ ] Touch targets & safe areas — 48px minimum, system inset respect
+16. [ ] Keyboard handling — `adjustResize` behavior (already set in AndroidManifest)
+
+#### Not in scope (post-launch)
+- Notifications — `local_notifier` is desktop-only. Mobile needs FCM (Android) / APNs (iOS)
 - Background voice calls (Android foreground service, iOS VoIP push)
 - App store publishing (Play Store + App Store)
 - Performance optimization for mobile (battery, network switching)
-- Screen share audio per-platform (CoreAudio macOS, PulseAudio Linux)
+- Screen share sending
 
 ## Architecture notes
 

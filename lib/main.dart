@@ -10,10 +10,12 @@ import 'package:fvp/fvp.dart' as fvp;
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/ui/app.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/ui/shader_warmup.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
@@ -97,10 +99,12 @@ IOSink? _crashLogSink;
 
 /// Initialize crash logging — captures Flutter framework errors and
 /// platform/async errors to hollow_crash.log alongside hollow_debug.log.
-void _initCrashLogging() {
+Future<void> _initCrashLogging() async {
   try {
-    final dataDir = Platform.environment['HOLLOW_DATA_DIR'] ??
-        '${Platform.environment['APPDATA'] ?? Platform.environment['HOME'] ?? '.'}${Platform.pathSeparator}Hollow';
+    final dataDir = hollowDataDir;
+    final dir = Directory(dataDir);
+    if (!dir.existsSync()) dir.createSync(recursive: true);
+
     final logFile = File('$dataDir${Platform.pathSeparator}hollow_crash.log');
 
     // Rotate if over 5MB.
@@ -152,7 +156,16 @@ Future<void> main() async {
   // shader compilation jank during animations.
   await HollowShaderWarmUp().execute();
 
+  // Resolve app data directory (async on mobile, sync on desktop).
+  // Must be called before RustLib.init crash logging or any file I/O.
+  await initHollowDataDir();
+
   await RustLib.init();
+
+  // On mobile, dirs crate returns None — pass the app data path to Rust.
+  if (Platform.isAndroid || Platform.isIOS) {
+    await identity_api.setDataDir(path: hollowDataDir);
+  }
 
   // fvp provides the video_player backend on Windows/Linux (where the official
   // plugin has no native support). Skip on mobile — official plugin works natively.
@@ -188,7 +201,7 @@ Future<void> main() async {
   }
 
   // Set up crash dump logging to hollow_crash.log.
-  _initCrashLogging();
+  await _initCrashLogging();
 
   // Start shared animation tickers (one ticker drives all decorative anims).
   // The disable-animations setting is restored in _bootstrap() after the DB

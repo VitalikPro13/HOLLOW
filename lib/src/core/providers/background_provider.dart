@@ -3,24 +3,14 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 const _opacityKey = 'bg_panel_opacity';
 const _bgFileName = 'custom_background.img';
 
-/// Get the hollow data directory (same as Rust uses).
-/// Checks HOLLOW_DATA_DIR env var first (for multi-instance testing).
 Directory _hollowDir() {
-  final customDir = Platform.environment['HOLLOW_DATA_DIR'];
-  if (customDir != null && customDir.isNotEmpty) {
-    final dir = Directory(customDir);
-    if (!dir.existsSync()) dir.createSync(recursive: true);
-    return dir;
-  }
-  final appData = Platform.environment['APPDATA'] ??
-      Platform.environment['HOME'] ??
-      '.';
-  final dir = Directory('$appData/hollow');
+  final dir = Directory(hollowDataDir);
   if (!dir.existsSync()) dir.createSync(recursive: true);
   return dir;
 }

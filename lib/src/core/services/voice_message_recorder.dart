@@ -3,6 +3,8 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:hollow/src/core/hollow_data_dir.dart';
+
 import 'package:record/record.dart' as rec;
 
 import 'package:hollow/src/core/services/video_thumbnail_service.dart';
@@ -231,11 +233,8 @@ class VoiceMessageRecorder {
   }
 
   static Future<String> _buildTempPath() async {
-    final appData = Platform.environment['APPDATA'] ??
-        Platform.environment['HOME'] ??
-        '.';
     final sep = Platform.pathSeparator;
-    final dir = Directory('$appData${sep}Hollow${sep}temp');
+    final dir = Directory('$hollowDataDir${sep}temp');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }

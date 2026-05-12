@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/rust/api/updater.dart' as updater_api;
 
 const kManifestUrl = 'https://anonlisten.com/hollow/releases/manifest.json';
@@ -124,8 +125,7 @@ class UpdateNotifier extends Notifier<UpdateState> {
   }
 
   Future<void> downloadVersion(VersionInfo version) async {
-    final dataDir = Platform.environment['HOLLOW_DATA_DIR'] ??
-        '${Platform.environment['APPDATA'] ?? Platform.environment['HOME'] ?? '.'}${Platform.pathSeparator}hollow';
+    final dataDir = hollowDataDir;
     final sep = Platform.pathSeparator;
     final destPath = '$dataDir${sep}updates$sep${version.version}.zip';
 
