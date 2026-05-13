@@ -44,19 +44,21 @@ Widget _cardContainer({
       onTap: onTap,
       borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: EdgeInsets.zero,
-      child: Container(
-        decoration: BoxDecoration(
-          color: hollow.elevated,
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          border: Border(
-            left: BorderSide(color: hollow.accent, width: 3),
-            top: BorderSide(color: hollow.border),
-            right: BorderSide(color: hollow.border),
-            bottom: BorderSide(color: hollow.border),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        child: Container(
+          decoration: BoxDecoration(
+            color: hollow.elevated,
+            border: Border(
+              left: BorderSide(color: hollow.accent, width: 3),
+              top: BorderSide(color: hollow.border),
+              right: BorderSide(color: hollow.border),
+              bottom: BorderSide(color: hollow.border),
+            ),
           ),
+          padding: const EdgeInsets.all(HollowSpacing.sm),
+          child: child,
         ),
-        padding: const EdgeInsets.all(HollowSpacing.sm),
-        child: child,
       ),
     ),
   );

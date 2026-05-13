@@ -20,8 +20,11 @@ import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/message_bubble.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
+import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
+import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -70,6 +73,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   String? _stagedFilePath;
   String? _stagedFileName;
   bool _stagedFileIsImage = false;
+  static final RegExp _urlRegex = RegExp(r'(?:https?|hollow)://[^\s<>"' "'" r')\]}]+');
+  String? _stagedPreviewUrl;
+  network_api.LinkPreviewRef? _stagedPreview;
+  bool _stagedPreviewLoading = false;
+  HollowLink? _stagedHollowLink;
+  Timer? _urlDebounce;
 
   @override
   void initState() {
@@ -100,6 +109,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
   @override
   void dispose() {
+    _urlDebounce?.cancel();
     _controller.dispose();
     _focusNode.dispose();
     _editController.dispose();
@@ -138,6 +148,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   void _onTextChanged(String text) {
+    _urlDebounce?.cancel();
+    _urlDebounce = Timer(const Duration(milliseconds: 600), _detectUrl);
+
     if (text.isEmpty || !widget.isDm) return;
     final now = DateTime.now();
     if (_lastTypingSent != null && now.difference(_lastTypingSent!).inSeconds < 3) return;
@@ -150,12 +163,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   Future<void> _handleSend() async {
     final text = _controller.text.trim();
     final filePath = _stagedFilePath;
+    final preview = _stagedPreview;
 
     if (text.isEmpty && filePath == null) return;
     _controller.clear();
     _lastTypingSent = null;
     _focusNode.requestFocus();
     final replyMid = _replyToMessageId;
+    _urlDebounce?.cancel();
     setState(() {
       _replyToMessageId = null;
       _replyToText = null;
@@ -163,6 +178,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       _stagedFilePath = null;
       _stagedFileName = null;
       _stagedFileIsImage = false;
+      _stagedPreviewUrl = null;
+      _stagedPreview = null;
+      _stagedPreviewLoading = false;
+      _stagedHollowLink = null;
     });
 
     if (filePath != null) {
@@ -186,6 +205,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             widget.peerId!,
             text,
             replyToMid: replyMid,
+            linkPreview: preview,
           );
     } else {
       await ref.read(channelChatProvider.notifier).sendMessage(
@@ -193,6 +213,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             widget.channelId!,
             text,
             replyToMid: replyMid,
+            linkPreview: preview,
           );
     }
     _scrollToBottom();
@@ -298,6 +319,59 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     }
   }
 
+  void _detectUrl() {
+    if (!mounted) return;
+    final text = _controller.text;
+    final match = _urlRegex.firstMatch(text);
+    final url = match?.group(0);
+    if (url == _stagedPreviewUrl) return;
+    if (url == null) {
+      setState(() {
+        _stagedPreviewUrl = null;
+        _stagedPreview = null;
+        _stagedPreviewLoading = false;
+        _stagedHollowLink = null;
+      });
+      return;
+    }
+
+    final hollowLinks = extractHollowLinks(url);
+    if (hollowLinks.isNotEmpty) {
+      setState(() {
+        _stagedPreviewUrl = url;
+        _stagedPreview = null;
+        _stagedPreviewLoading = false;
+        _stagedHollowLink = hollowLinks.first;
+      });
+      return;
+    }
+
+    setState(() {
+      _stagedPreviewUrl = url;
+      _stagedPreview = null;
+      _stagedPreviewLoading = true;
+      _stagedHollowLink = null;
+    });
+    _fetchPreview(url);
+  }
+
+  Future<void> _fetchPreview(String url) async {
+    try {
+      final preview = await network_api.fetchLinkPreview(url: url);
+      if (!mounted || _stagedPreviewUrl != url) return;
+      setState(() {
+        _stagedPreview = preview;
+        _stagedPreviewLoading = false;
+      });
+    } catch (_) {
+      if (!mounted || _stagedPreviewUrl != url) return;
+      setState(() {
+        _stagedPreviewUrl = null;
+        _stagedPreview = null;
+        _stagedPreviewLoading = false;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -329,6 +403,31 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                   _replyToText = null;
                   _replyToSenderName = null;
                 }),
+              ),
+            if (_stagedHollowLink != null)
+              StagedHollowLinkCard(
+                link: _stagedHollowLink!,
+                onDismiss: () {
+                  _urlDebounce?.cancel();
+                  setState(() {
+                    _stagedPreviewUrl = null;
+                    _stagedHollowLink = null;
+                  });
+                },
+              )
+            else if (_stagedPreviewUrl != null && _stagedHollowLink == null)
+              StagedLinkPreviewCard(
+                url: _stagedPreviewUrl!,
+                preview: _stagedPreview,
+                loading: _stagedPreviewLoading,
+                onDismiss: () {
+                  _urlDebounce?.cancel();
+                  setState(() {
+                    _stagedPreviewUrl = null;
+                    _stagedPreview = null;
+                    _stagedPreviewLoading = false;
+                  });
+                },
               ),
             if (_stagedFilePath != null)
               _StagedFilePreview(
