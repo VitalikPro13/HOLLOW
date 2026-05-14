@@ -9,7 +9,9 @@ import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
 class MobileNavBar extends ConsumerWidget {
-  const MobileNavBar({super.key});
+  final VoidCallback? onAdd;
+
+  const MobileNavBar({super.key, this.onAdd});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -53,6 +55,7 @@ class MobileNavBar extends ConsumerWidget {
                 onTap: () =>
                     ref.read(mobileTabProvider.notifier).state = 1,
               ),
+              _AddButton(onTap: onAdd),
               _NavTab(
                 icon: LucideIcons.archive,
                 label: 'Archive',
@@ -70,6 +73,41 @@ class MobileNavBar extends ConsumerWidget {
                     ref.read(mobileTabProvider.notifier).state = 3,
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AddButton extends StatelessWidget {
+  final VoidCallback? onTap;
+
+  const _AddButton({this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Expanded(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Center(
+          child: Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: hollow.accent,
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
+              boxShadow: [
+                BoxShadow(
+                  color: hollow.accent.withValues(alpha: 0.25),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Icon(LucideIcons.plus, size: 20, color: hollow.textOnAccent),
           ),
         ),
       ),

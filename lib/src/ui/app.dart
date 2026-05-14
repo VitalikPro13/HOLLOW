@@ -57,19 +57,26 @@ class HollowApp extends ConsumerWidget {
       debugShowCheckedModeBanner: false,
       theme: themeData,
       home: const HollowShell(),
-      builder: isDesktop
-          ? (context, child) => Material(
-                type: MaterialType.transparency,
-                child: Column(
-                  children: [
-                    const WindowTitleBar(),
-                    Expanded(
-                      child: ClipRect(child: child ?? const SizedBox.shrink()),
-                    ),
-                  ],
+      builder: (context, child) {
+        if (isDesktop) {
+          return Material(
+            type: MaterialType.transparency,
+            child: Column(
+              children: [
+                const WindowTitleBar(),
+                Expanded(
+                  child: ClipRect(child: child ?? const SizedBox.shrink()),
                 ),
-              )
-          : null,
+              ],
+            ),
+          );
+        }
+        return MediaQuery.withClampedTextScaling(
+          minScaleFactor: 0.8,
+          maxScaleFactor: 1.3,
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
     );
   }
 }

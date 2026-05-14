@@ -4,7 +4,8 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/mobile/mobile_nav_bar.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_archive_tab.dart';
-import 'package:hollow/src/ui/mobile/tabs/mobile_chats_tab.dart';
+import 'package:hollow/src/ui/mobile/tabs/mobile_chats_tab.dart'
+    show MobileChatsTab, showNewConversationDialog;
 import 'package:hollow/src/ui/mobile/tabs/mobile_friends_tab.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
@@ -43,7 +44,9 @@ class MobileShell extends ConsumerWidget {
           ],
         ),
       ),
-      bottomNavigationBar: const MobileNavBar(),
+      bottomNavigationBar: MobileNavBar(
+        onAdd: () => showNewConversationDialog(context),
+      ),
     );
   }
 }

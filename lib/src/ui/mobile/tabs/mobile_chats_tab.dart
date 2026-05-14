@@ -23,9 +23,12 @@ import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_server_settings_route.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:lucide_icons/lucide_icons.dart';
+import 'package:flutter/services.dart';
 
 class MobileChatsTab extends ConsumerStatefulWidget {
   const MobileChatsTab({super.key});
@@ -51,6 +54,31 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     Navigator.of(context, rootNavigator: true).push(
       MaterialPageRoute(
         builder: (_) => MobileChatRoute(peerId: peerId),
+      ),
+    );
+  }
+
+  void _showServerSheet(BuildContext context, String serverId, String serverName) {
+    final hollow = HollowTheme.of(context);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: hollow.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
+      ),
+      builder: (_) => SafeArea(
+        child: _ServerContextSheet(
+          serverId: serverId,
+          serverName: serverName,
+          onNavigateSettings: () {
+            Navigator.pop(context);
+            Navigator.of(context, rootNavigator: true).push(
+              MaterialPageRoute(
+                builder: (_) => MobileServerSettingsRoute(serverId: serverId),
+              ),
+            );
+          },
+        ),
       ),
     );
   }
@@ -124,86 +152,96 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       return a.name.compareTo(b.name);
     });
 
-    Widget content;
+    Widget body;
     if (items.isEmpty) {
-      content = Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              LucideIcons.messageCircle,
-              size: 48,
-              color: hollow.textSecondary.withValues(alpha: 0.4),
-            ),
-            const SizedBox(height: HollowSpacing.lg),
-            Text(
-              'No conversations yet',
-              style: HollowTypography.heading.copyWith(
-                color: hollow.textSecondary,
+      body = Expanded(
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                LucideIcons.messageCircle,
+                size: 48,
+                color: hollow.textSecondary.withValues(alpha: 0.4),
               ),
-            ),
-            const SizedBox(height: HollowSpacing.sm),
-            Text(
-              'Add a friend or join a server to start chatting',
-              style: HollowTypography.bodySmall,
-            ),
-          ],
+              const SizedBox(height: HollowSpacing.lg),
+              Text(
+                'No conversations yet',
+                style: HollowTypography.heading.copyWith(
+                  color: hollow.textSecondary,
+                ),
+              ),
+              const SizedBox(height: HollowSpacing.sm),
+              Text(
+                'Add a friend or join a server to start chatting',
+                style: HollowTypography.bodySmall,
+              ),
+            ],
+          ),
         ),
       );
     } else {
-      content = ListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
-      itemCount: items.length,
-      itemBuilder: (context, index) {
-        final item = items[index];
-        if (item.type == _ItemType.dm) {
-          return _DmRow(
-            peerId: item.id,
-            name: item.name,
-            lastMessage: item.lastMessage,
-            isOnline: item.isOnline,
-            formatTime: _formatTime,
-            onTap: () => _openDmChat(item.id),
-          );
-        } else {
-          return _ServerRow(
-            serverId: item.id,
-            name: item.name,
-            unreadCount: item.unreadCount,
-            memberCount: item.memberCount,
-            isExpanded: _expandedServers.contains(item.id),
-            onTap: () {
-              setState(() {
-                if (_expandedServers.contains(item.id)) {
-                  _expandedServers.remove(item.id);
-                } else {
-                  _expandedServers.add(item.id);
-                }
-              });
-            },
-            onChannelTap: (channel) => _openChannelChat(item.id, channel),
-          );
-        }
-      },
-    );
+      body = Expanded(
+        child: ListView.builder(
+          padding: const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
+          itemCount: items.length,
+          itemBuilder: (context, index) {
+            final item = items[index];
+            if (item.type == _ItemType.dm) {
+              return _DmRow(
+                peerId: item.id,
+                name: item.name,
+                lastMessage: item.lastMessage,
+                isOnline: item.isOnline,
+                formatTime: _formatTime,
+                onTap: () => _openDmChat(item.id),
+              );
+            } else {
+              return _ServerRow(
+                serverId: item.id,
+                name: item.name,
+                unreadCount: item.unreadCount,
+                memberCount: item.memberCount,
+                isExpanded: _expandedServers.contains(item.id),
+                onTap: () {
+                  setState(() {
+                    if (_expandedServers.contains(item.id)) {
+                      _expandedServers.remove(item.id);
+                    } else {
+                      _expandedServers.add(item.id);
+                    }
+                  });
+                },
+                onLongPress: () => _showServerSheet(context, item.id, item.name),
+                onChannelTap: (channel) => _openChannelChat(item.id, channel),
+              );
+            }
+          },
+        ),
+      );
     }
 
-    return Stack(
+    return Column(
       children: [
-        content,
-        Positioned(
-          right: HollowSpacing.lg,
-          bottom: HollowSpacing.lg,
-          child: _ChatsFab(onAction: () => _showNewDialog(context)),
+        Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.lg,
+            vertical: HollowSpacing.md,
+          ),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Hollow',
+              style: HollowTypography.heading.copyWith(
+                color: hollow.accent,
+                fontWeight: FontWeight.w700,
+                fontSize: 24,
+              ),
+            ),
+          ),
         ),
+        body,
       ],
-    );
-  }
-
-  void _showNewDialog(BuildContext context) {
-    showHollowDialog(
-      context: context,
-      builder: (_) => const _NewConversationDialog(),
     );
   }
 }
@@ -379,6 +417,7 @@ class _ServerRow extends ConsumerWidget {
   final int memberCount;
   final bool isExpanded;
   final VoidCallback onTap;
+  final VoidCallback onLongPress;
   final void Function(ChannelInfo) onChannelTap;
 
   const _ServerRow({
@@ -388,6 +427,7 @@ class _ServerRow extends ConsumerWidget {
     required this.memberCount,
     required this.isExpanded,
     required this.onTap,
+    required this.onLongPress,
     required this.onChannelTap,
   });
 
@@ -402,6 +442,7 @@ class _ServerRow extends ConsumerWidget {
         // Server header row
         HollowPressable(
           onTap: onTap,
+          onLongPress: onLongPress,
           subtle: true,
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.lg,
@@ -722,53 +763,26 @@ class _ChannelRow extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────
-// Floating action button
-// ─────────────────────────────────────────────────
-
-class _ChatsFab extends StatelessWidget {
-  final VoidCallback onAction;
-
-  const _ChatsFab({required this.onAction});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return GestureDetector(
-      onTap: onAction,
-      child: Container(
-        width: 52,
-        height: 52,
-        decoration: BoxDecoration(
-          color: hollow.accent,
-          borderRadius: BorderRadius.circular(hollow.radiusLg),
-          boxShadow: [
-            BoxShadow(
-              color: hollow.accent.withValues(alpha: 0.3),
-              blurRadius: 12,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: Icon(LucideIcons.plus, size: 24, color: hollow.textOnAccent),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────
 // New conversation dialog (Create/Join Server, Add Friend)
 // ─────────────────────────────────────────────────
 
-class _NewConversationDialog extends ConsumerStatefulWidget {
-  const _NewConversationDialog();
+void showNewConversationDialog(BuildContext context) {
+  showHollowDialog(
+    context: context,
+    builder: (_) => const NewConversationDialog(),
+  );
+}
+
+class NewConversationDialog extends ConsumerStatefulWidget {
+  const NewConversationDialog({super.key});
 
   @override
-  ConsumerState<_NewConversationDialog> createState() =>
+  ConsumerState<NewConversationDialog> createState() =>
       _NewConversationDialogState();
 }
 
 class _NewConversationDialogState
-    extends ConsumerState<_NewConversationDialog> {
+    extends ConsumerState<NewConversationDialog> {
   final _joinController = TextEditingController();
   final _createController = TextEditingController();
   final _friendController = TextEditingController();
@@ -1024,6 +1038,218 @@ class _InputRow extends StatelessWidget {
           child: Text(buttonLabel),
         ),
       ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────
+// Server long-press context sheet
+// ─────────────────────────────────────────────────
+
+class _ServerContextSheet extends ConsumerWidget {
+  final String serverId;
+  final String serverName;
+  final VoidCallback onNavigateSettings;
+
+  const _ServerContextSheet({
+    required this.serverId,
+    required this.serverName,
+    required this.onNavigateSettings,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final role = ref.watch(myRoleProvider(serverId)).valueOrNull ?? 'member';
+    final isOwner = role == 'owner';
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.md),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Handle
+          Container(
+            width: 36,
+            height: 4,
+            decoration: BoxDecoration(
+              color: hollow.textSecondary.withValues(alpha: 0.3),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          // Server name header
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+            child: Text(
+              serverName,
+              style: HollowTypography.heading.copyWith(color: hollow.textPrimary),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.lg),
+          // Actions
+          _SheetAction(
+            icon: LucideIcons.settings,
+            label: 'Server Settings',
+            onTap: onNavigateSettings,
+          ),
+          _SheetAction(
+            icon: LucideIcons.userPlus,
+            label: 'Invite',
+            onTap: () {
+              Navigator.pop(context);
+              final link = 'hollow://join?server=$serverId';
+              showInviteDialog(context, link, serverId);
+            },
+          ),
+          _SheetAction(
+            icon: LucideIcons.copy,
+            label: 'Copy Server ID',
+            onTap: () {
+              Clipboard.setData(ClipboardData(text: serverId));
+              Navigator.pop(context);
+              HollowToast.show(context, 'Server ID copied',
+                  type: HollowToastType.success);
+            },
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          Divider(color: hollow.border, height: 1, indent: HollowSpacing.lg, endIndent: HollowSpacing.lg),
+          const SizedBox(height: HollowSpacing.sm),
+          _SheetAction(
+            icon: isOwner ? LucideIcons.trash2 : LucideIcons.logOut,
+            label: isOwner ? 'Delete Server' : 'Leave Server',
+            danger: true,
+            onTap: () {
+              Navigator.pop(context);
+              _confirmLeaveOrDelete(context, ref, serverId, serverName, isOwner);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  static void _confirmLeaveOrDelete(
+    BuildContext context,
+    WidgetRef ref,
+    String serverId,
+    String serverName,
+    bool isOwner,
+  ) {
+    showHollowDialog(
+      context: context,
+      builder: (_) => Center(
+        child: Padding(
+          padding: const EdgeInsets.all(HollowSpacing.xl),
+          child: Material(
+            color: Colors.transparent,
+            child: Builder(builder: (ctx) {
+              final hollow = HollowTheme.of(ctx);
+              return Container(
+                constraints: const BoxConstraints(maxWidth: 360),
+                padding: const EdgeInsets.all(HollowSpacing.xl),
+                decoration: BoxDecoration(
+                  color: hollow.elevated,
+                  borderRadius: BorderRadius.circular(hollow.radiusLg),
+                  border: Border.all(color: hollow.border),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      isOwner ? 'Delete Server' : 'Leave Server',
+                      style: HollowTypography.heading.copyWith(color: hollow.textPrimary),
+                    ),
+                    const SizedBox(height: HollowSpacing.md),
+                    Text(
+                      isOwner
+                          ? 'Are you sure you want to delete "$serverName"? This cannot be undone.'
+                          : 'Are you sure you want to leave "$serverName"?',
+                      textAlign: TextAlign.center,
+                      style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+                    ),
+                    const SizedBox(height: HollowSpacing.xl),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: HollowButton.ghost(
+                            onPressed: () => Navigator.pop(ctx),
+                            child: const Text('Cancel'),
+                          ),
+                        ),
+                        const SizedBox(width: HollowSpacing.md),
+                        Expanded(
+                          child: HollowButton.danger(
+                            onPressed: () async {
+                              Navigator.pop(ctx);
+                              if (isOwner) {
+                                await crdt_api.deleteServer(serverId: serverId);
+                              } else {
+                                await crdt_api.leaveServer(serverId: serverId);
+                              }
+                              ref.read(selectedServerProvider.notifier).state = null;
+                              ref.read(selectedChannelProvider.notifier).state = null;
+                              ref.read(channelListProvider.notifier).clear();
+                              if (context.mounted) {
+                                HollowToast.show(
+                                  context,
+                                  isOwner ? 'Server deleted' : 'Left server',
+                                  type: HollowToastType.success,
+                                );
+                              }
+                            },
+                            child: Text(isOwner ? 'Delete' : 'Leave'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SheetAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool danger;
+
+  const _SheetAction({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.danger = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final color = danger ? hollow.error : hollow.textPrimary;
+    return HollowPressable(
+      onTap: onTap,
+      subtle: true,
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.lg,
+        vertical: HollowSpacing.md,
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: color),
+          const SizedBox(width: HollowSpacing.md),
+          Text(
+            label,
+            style: HollowTypography.body.copyWith(color: color),
+          ),
+        ],
+      ),
     );
   }
 }

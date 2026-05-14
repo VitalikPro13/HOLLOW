@@ -102,12 +102,12 @@
 | 52 | DM chat (1:1) | `chat_pane.dart` | Done | Full ChatPane | MobileChatRoute with all message features |
 | 53 | Channel chat (server text) | `channel_chat_pane.dart` | Done | Full ChannelChatPane | MobileChatRoute shared for DM + channel |
 | 54 | Chat header bar | `chat_pane.dart`, `channel_chat_pane.dart` | Done | Back + avatar + name + status | _MobileChatHeader, profile sheet on tap. Extra icons (call, members) are separate features |
-| 55 | Member panel toggle | `channel_chat_pane.dart` | Not impl | Click users icon | **Mobile per plan:** slide-out bottom sheet, not permanent side panel. Trigger from header icon or channel name sheet |
+| 55 | Member panel toggle | `channel_chat_pane.dart` | N/A | Click users icon | Duplicate → see #92 (Section 12). Mobile: bottom sheet |
 | 56 | DM profile panel | `chat_pane.dart` | Done | Tap header name | _ProfileSheet bottom sheet with avatar, name, peer ID, banner |
-| 57 | DM call buttons (voice) | `chat_pane.dart` | Not impl | Click phone icon | **Mobile:** phone icon in chat header bar |
-| 58 | DM call buttons (video) | `chat_pane.dart` | Not impl | Click video icon | **Mobile:** video icon in chat header bar |
-| 59 | Inline call panel (DM) | `chat_pane.dart` | Not impl | Slides down during call | **Mobile:** floating control pill (mute, camera, hangup) over chat |
-| 60 | Screen share overlay (DM) | `chat_pane.dart` | N/A | Click monitor icon | **Mobile per plan:** receiving screen shares OK (landscape + pinch-to-zoom), sending excluded |
+| 57 | DM call buttons (voice) | `chat_pane.dart` | N/A | Click phone icon | Duplicate → see #145 (Section 16) |
+| 58 | DM call buttons (video) | `chat_pane.dart` | N/A | Click video icon | Duplicate → see #149 (Section 16) |
+| 59 | Inline call panel (DM) | `chat_pane.dart` | N/A | Slides down during call | Duplicate → see #156 (Section 16) |
+| 60 | Screen share overlay (DM) | `chat_pane.dart` | N/A | Click monitor icon | Duplicate → see #152 (Section 16) |
 | 61 | Split view (dock mode) | `chat_pane.dart`, `hollow_shell.dart` | N/A | Ctrl+Shift+\ | Desktop dock layout only |
 
 ## 8. Chat — Input Bar
@@ -117,18 +117,18 @@
 | 62 | Text input field | `chat_pane.dart`, `channel_chat_pane.dart` | Done | Max 5 lines, auto-expand | 120px max, rounded pill style |
 | 63 | Attachment button | `chat_pane.dart`, `channel_chat_pane.dart` | Done | Paperclip → file picker | FilePicker.platform.pickFiles() |
 | 64 | Microphone button | `chat_pane.dart` | Done | Tap mic → VoiceRecorderBar | Disabled when file staged |
-| 65 | Emoji picker button | `message_action_bar.dart` | Not impl | Shows popup picker | **Mobile:** emoji grid already in long-press bottom sheet; optional smiley button in input bar |
+| 65 | Emoji picker button | `message_action_bar.dart` | Done | Shows popup picker | Mobile: smiley icon in input bar → bottom sheet with 30-emoji grid. Inserts at cursor position |
 | 66 | Send button | `chat_pane.dart`, `channel_chat_pane.dart` | Done | Tap send | Accent circle, always visible |
 
 ## 9. Chat — Permissions & Sync
 
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
-| 67 | Read permission gate | `channel_chat_pane.dart` | Not impl | Hide messages | UI-only check |
-| 68 | Post permission gate | `channel_chat_pane.dart` | Not impl | Disable input | Shows "no permission" |
-| 69 | Channel sync request | `channel_chat_pane.dart` | Not impl | Auto on open | Fire-and-forget |
-| 70 | Sync status indicator | `channel_chat_pane.dart` | Not impl | Spinner + text | Syncing/synced/failed |
-| 71 | Vault health indicator | `channel_chat_pane.dart` | Not impl | Icon + tooltip | 6+ member servers |
+| 67 | Read permission gate | `channel_chat_pane.dart` | Done | Hide messages | eyeOff icon + message when readMessages bit is 0 |
+| 68 | Post permission gate | `channel_chat_pane.dart` | Done | Disable input | Replaces input bar with "no permission" notice via canPostInChannelProvider |
+| 69 | Channel sync request | `channel_chat_pane.dart` | Done | Auto on open | Already works — loadHistory() calls requestChannelSync FFI |
+| 70 | Sync status indicator | `channel_chat_pane.dart` | Done | Spinner + text | Syncing/retrying/failed states with retry button below header |
+| 71 | Vault health indicator | `channel_chat_pane.dart` | N/A | Icon + tooltip | Deferred — needs server info sheet (6+ member servers only, low priority for mobile) |
 
 ---
 
@@ -136,16 +136,16 @@
 
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
-| 72 | Create server | `create_server_dialog.dart` | Not impl | Dialog (create/join tabs) | **Mobile:** FAB "+" on Chats tab → Create Server option (already wired in MobileChatsTab) |
-| 73 | Join server (invite code) | `create_server_dialog.dart` | Done | Dialog or `hollow://join` link | FAB "+" → Join Server on Chats tab. Also via hollow:// link cards in chat |
-| 74 | Leave server | `danger_zone_tab.dart` | Not impl | Settings → Danger Zone | **Mobile per plan:** long-press server row → context menu → Leave |
-| 75 | Delete server | `danger_zone_tab.dart` | Not impl | Settings → Danger Zone | **Mobile:** in server settings (full-screen push), Danger Zone section |
-| 76 | Server name edit | `overview_tab.dart` | Not impl | Text input, max 32 chars | `renameServer` CRDT call |
-| 77 | Server avatar | `overview_tab.dart`, `server_avatar_provider.dart` | Not impl | File picker + crop | 44×44 in strip, initials fallback |
-| 78 | Server description | `overview_tab.dart` | Not impl | Text field, max 256 chars | Multi-line |
-| 79 | Server ID display + copy | `overview_tab.dart` | Not impl | Selectable text | Copy button |
-| 80 | Server settings access | `channel_sidebar.dart`, `server_settings_panel.dart` | Not impl | Gear icon in header | **Mobile per plan:** long-press server row → Settings. Full-screen push with tabs |
-| 81 | Server export/import template | `overview_tab.dart`, `server_template.dart` | Not impl | Export/Import buttons | Layout, roles, channels as template |
+| 72 | Create server | `create_server_dialog.dart` | Done | Dialog (create/join tabs) | Nav bar "+" button → NewConversationDialog → Create Server |
+| 73 | Join server (invite code) | `create_server_dialog.dart` | Done | Dialog or `hollow://join` link | Nav bar "+" → Join Server. Also via hollow:// link cards in chat |
+| 74 | Leave server | `danger_zone_tab.dart` | Done | Settings → Danger Zone | Long-press server → Leave, or MobileServerSettingsRoute danger zone |
+| 75 | Delete server | `danger_zone_tab.dart` | Done | Settings → Danger Zone | MobileServerSettingsRoute danger zone (owner only). Confirmation dialog |
+| 76 | Server name edit | `overview_tab.dart` | Done | Text input, max 32 chars | MobileServerSettingsRoute, permission-gated (manageServer) |
+| 77 | Server avatar | `overview_tab.dart`, `server_avatar_provider.dart` | Done | File picker + crop | Tap avatar → pick + crop 1:1. Long-press to clear. Permission-gated |
+| 78 | Server description | `overview_tab.dart` | Done | Text field, max 256 chars | MobileServerSettingsRoute, multi-line, permission-gated |
+| 79 | Server ID display + copy | `overview_tab.dart` | Done | Selectable text | MobileServerSettingsRoute + long-press context sheet. Copy button |
+| 80 | Server settings access | `channel_sidebar.dart`, `server_settings_panel.dart` | Done | Gear icon in header | Long-press server row → Settings → full-screen MobileServerSettingsRoute |
+| 81 | Server export/import template | `overview_tab.dart`, `server_template.dart` | Not impl | Export/Import buttons | Low priority — template system rarely used |
 
 ## 11. Channel Management
 
@@ -401,7 +401,7 @@
 | 239 | Unread badge (home button) | `server_strip.dart` | Not impl | Pill on home icon | Total DM unread |
 | 240 | Notification level (server) | `notification_provider.dart` | Not impl | Dropdown | All/Mentions/Muted |
 | 241 | Notification level (channel) | `notification_provider.dart` | Not impl | Dropdown | Inherit/All/Mentions/Muted |
-| 242 | Mute DM notifications | `notification_provider.dart` | Not impl | Toggle | Per-DM |
+| 242 | Mute DM notifications | `notification_provider.dart` | Done | Toggle | Per-DM. Bell icon in DM header (implemented in Section 6 #51) |
 
 ---
 
@@ -409,16 +409,16 @@
 
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
-| 243 | Server strip (classic) | `server_strip.dart` | N/A | Vertical icon bar 72px | **Mobile per plan:** replaced by unified conversation list with server accordion expansion in Chats tab |
+| 243 | Server strip (classic) | `server_strip.dart` | N/A | Vertical icon bar 72px | Mobile: replaced by unified conversation list with server accordion in Chats tab |
 | 244 | Server strip reordering | `server_strip.dart` | N/A | Long-press drag | Desktop only — mobile uses conversation list ordering |
 | 245 | Server folders | `server_strip.dart`, `server_folder_popup.dart` | N/A | Drag server onto another | Desktop only |
 | 246 | Friends bar (dock) | `friends_bar.dart` | N/A | Horizontal 44px | Desktop dock only — mobile has Friends tab |
 | 247 | Bottom bar (dock) | `bottom_bar.dart` | N/A | Horizontal 56px | Desktop dock only — mobile has 4-tab MobileNavBar |
-| 248 | Channel sidebar | `channel_sidebar.dart` | Partial | Left panel 240px | Categories, search, context menus |
-| 249 | Member panel | `member_panel.dart` | Partial | Right panel 240px | Online/offline sections |
-| 250 | User bar (classic) | `user_bar.dart` | Partial | Bottom of sidebar | Avatar, name, status, settings gear |
+| 248 | Channel sidebar | `channel_sidebar.dart` | N/A | Left panel 240px | Desktop panel. Mobile equivalent is server accordion in Chats tab (Done, see #89) |
+| 249 | Member panel | `member_panel.dart` | N/A | Right panel 240px | Duplicate → see #92 (Section 12). Mobile: bottom sheet |
+| 250 | User bar (classic) | `user_bar.dart` | N/A | Bottom of sidebar | Desktop only. Mobile: peer ID + settings in Settings tab |
 | 251 | Home dashboard (dock) | `home_dashboard.dart` | Not impl | 3-column layout | **Mobile per plan:** demoted to section in Settings tab under Network/About, not a dedicated tab |
-| 252 | Voice channel panel | `voice_channel_panel.dart` | Not impl | Bottom of sidebar | Controls during voice |
+| 252 | Voice channel panel | `voice_channel_panel.dart` | N/A | Bottom of sidebar | Duplicate → see #178 (Section 17). Desktop sidebar element |
 | 253 | Mobile shell (4-tab) | `mobile_shell.dart` | Done | Bottom nav | Chats/Friends/Archive/Settings |
 | 254 | Mobile chat route | `mobile_chat_route.dart` | Done | Push onto navigator | Back button, input bar |
 
@@ -487,15 +487,16 @@
 
 | Category | Total | Done | Partial | Not Impl | N/A |
 |----------|-------|------|---------|----------|-----|
-| All features | 288 | 90 | 5 | 159 | 34 |
+| All features | 288 | 104 | 2 | 139 | 43 |
 
-**Actionable (excl. N/A): 254 total, 90 Done (35%), 5 Partial, 159 Not impl.**
+**Actionable (excl. N/A): 245 total, 104 Done (42%), 2 Partial, 139 Not impl.**
 
-*Updated 2026-05-14. Sections 1-8 done or audited. Section 6 complete. Voice messages, search, mute, unread badges (DM+channel+server), notification dedup rework all implemented.*
+*Updated 2026-05-14. Dedup pass: 8 duplicate items across Sections 7/28 marked N/A (canonical homes in Sections 12/16/17). #242 (per-DM mute) corrected to Done.*
 
-**Mobile coverage (excluding 34 N/A): 35% done (90), 2% partial (5), 63% not implemented (159)**
+**Mobile coverage (excluding 42 N/A): 37% done (91), 1% partial (2), 62% not implemented (153)**
 
 ### Session 2026-05-14 Progress
 - **Sections 1-8 complete or audited.** Section 6 fully done. Voice messages, search, mute, unread badges, notification dedup rework.
 - **Desktop fix:** Channel notification dedup reworked from timer-based to message-ID-based (Rust + Dart). Channel sidebar upgraded to red numbered badges.
 - **Mobile:** Full unread system (DM + channel + server), voice recording, in-channel search, per-DM mute, scroll-to-bottom pill, channel key fix, initial scroll fix, provider management fix.
+- **Dedup cleanup:** Removed 8 duplicate entries from Sections 7 and 28 (call buttons/panel → Sec 16, member panel → Sec 12, voice panel → Sec 17, channel sidebar/user bar → N/A desktop-only). #242 per-DM mute corrected to Done.

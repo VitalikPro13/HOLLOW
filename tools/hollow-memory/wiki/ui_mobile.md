@@ -22,9 +22,25 @@ Tab state: `mobileTabProvider` (`StateProvider<int>`, default 0) in `lib/src/ui/
 
 ### MobileNavBar
 **File:** `lib/src/ui/mobile/mobile_nav_bar.dart`
-Bottom bar (56px) with 4 `_NavTab` widgets. Badges:
+Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Layout:
 - Chats tab: total unread count (DM + channel)
 - Friends tab: pending incoming friend request count
+- **Center "+" button** (`_AddButton`): 40×40 accent-colored rounded container with plus icon. Opens `NewConversationDialog` (Create/Join Server, Add Friend). Passed via `onAdd` callback from `MobileShell`.
+- Archive tab
+- Settings tab
+
+### MobileChatsTab Header
+**File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart`
+Teal "Hollow" branded header (24px, w700, accent color) at top-left of the Chats tab. The FAB "+" was moved from the tab's bottom-right to the nav bar center.
+
+### Server Long-Press Context Sheet
+**File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_ServerContextSheet`)
+Long-press on a server row opens `showModalBottomSheet` with:
+- Handle bar + server name header
+- **Server Settings** → pushes `MobileServerSettingsRoute`
+- **Invite** → `showInviteDialog()` with `hollow://join?server=` link
+- **Copy Server ID** → clipboard + toast
+- **Leave/Delete Server** → confirmation dialog (`showHollowDialog`). Owner sees Delete, others see Leave. Post-action clears `selectedServerProvider`, `selectedChannelProvider`, `channelListProvider`.
 
 ---
 
@@ -77,7 +93,8 @@ Scaffold
 │       ├── _ReplyPreview (if replying)
 │       ├── StagedHollowLinkCard / StagedLinkPreviewCard (link preview)
 │       ├── _StagedFilePreview (if file staged)
-│       └── VoiceRecorderBar (if _isRecordingVoice) OR _MobileInputBar (paperclip + mic + text + send)
+│       ├── Post permission gate (channel only — replaces input bar when canPostInChannelProvider is false)
+│       └── VoiceRecorderBar (if _isRecordingVoice) OR _MobileInputBar (paperclip + text + emoji + mic + send)
 ```
 
 ### Message Rendering
@@ -105,6 +122,38 @@ Both DM and channel builders wire:
 - `onToggleReaction` on bubbles → reaction pills are tappable
 - Long-press → `_showDmActions()` / `_showChannelActions()` → bottom sheet
 - `onDownload` — shows when message has file attachment. Saves locally or requests from peer. Guards duplicate downloads via `fileTransferProvider`.
+
+### Channel Permission Gates
+- **Read gate:** If `myPermissionsProvider` `readMessages` bit is 0, replaces message list with eyeOff icon + "no permission" text. DMs unaffected.
+- **Post gate:** If `canPostInChannelProvider` returns false, replaces input bar with "no permission to send" notice. Checks bitmask AND channel posting mode.
+- **Sync indicator:** Below header for channel chats. Uses `serverSyncStatusProvider`. Shows spinner + "Syncing..."/"Retrying..." (warning color) / "Sync failed" with tappable "Retry" link. Hidden when idle/synced/connecting.
+
+### Emoji Picker in Input Bar
+Smiley icon (`LucideIcons.smile`) between mic and send buttons. Opens `showModalBottomSheet` with 30-emoji grid (from `kReactionEmojis`). Inserts selected emoji at cursor position via `_controller.text.replaceRange()`.
+
+---
+
+## MobileServerSettingsRoute
+
+**File:** `lib/src/ui/mobile/mobile_server_settings_route.dart`
+**Class:** `MobileServerSettingsRoute extends ConsumerStatefulWidget`
+**Purpose:** Full-screen server settings page, pushed from server long-press context sheet.
+
+### Constructor
+| Parameter | Type | Description |
+|---|---|---|
+| `serverId` | `String` | Server to configure |
+
+### UI Layout (ListView)
+- **Server avatar** — 80×80, tap to pick + crop (1:1, `showImageCropDialog`), long-press to clear. Permission-gated (`Permission.manageServer`).
+- **Server Name** — `HollowTextField` + Save button. `crdt_api.renameServer()`. Permission-gated.
+- **Description** — multi-line `HollowTextField` (maxLines:3, maxLength:256) + Save. `crdt_api.updateServerSetting(key: 'description')`. Permission-gated.
+- **Server ID** — `SelectableText` (mono font) + copy button. Always visible.
+- **Your Nickname** — `HollowTextField` + Save. `crdt_api.setNickname()`. Always visible.
+- **Danger Zone** — `_SectionDivider(danger: true)` + `HollowButton.danger()`. Owner: Delete Server (`crdt_api.deleteServer`). Member: Leave Server (`crdt_api.leaveServer`). Both show confirmation dialog and clear server/channel providers on success.
+
+### ASOT-Style Section Dividers
+`_SectionDivider` widget: `Row` with two `Divider`s flanking centered label text. Optional `danger: true` for red color.
 
 ---
 

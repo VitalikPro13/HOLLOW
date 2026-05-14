@@ -28,6 +28,7 @@ import 'package:hollow/src/ui/chat/message_bubble.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
 import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
+import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -344,6 +345,52 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     }
   }
 
+  void _showEmojiSheet() {
+    final hollow = HollowTheme.of(context);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: hollow.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
+      ),
+      builder: (_) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(HollowSpacing.md),
+          child: GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 6,
+              mainAxisSpacing: HollowSpacing.sm,
+              crossAxisSpacing: HollowSpacing.sm,
+            ),
+            itemCount: kReactionEmojis.length,
+            itemBuilder: (_, i) {
+              final emoji = kReactionEmojis[i];
+              return GestureDetector(
+                onTap: () {
+                  Navigator.pop(context);
+                  final sel = _controller.selection;
+                  final base = sel.isValid ? sel.baseOffset : _controller.text.length;
+                  final newText = _controller.text.replaceRange(
+                    base.clamp(0, _controller.text.length),
+                    (sel.isValid ? sel.extentOffset : base).clamp(0, _controller.text.length),
+                    emoji,
+                  );
+                  _controller.text = newText;
+                  final pos = base + emoji.length;
+                  _controller.selection = TextSelection.collapsed(offset: pos);
+                  _focusNode.requestFocus();
+                },
+                child: Center(child: Text(emoji, style: const TextStyle(fontSize: 28))),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _stageVoiceMessage(VoiceRecordingResult result) async {
     setState(() => _isRecordingVoice = false);
     final file = File(result.filePath);
@@ -528,6 +575,30 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             ),
             if (_searchOpen)
               _buildSearchBar(hollow),
+            if (!widget.isDm) _buildSyncIndicator(hollow),
+            if (!widget.isDm &&
+                (ref.watch(myPermissionsProvider(widget.serverId!)).valueOrNull ?? Permission.all) & Permission.readMessages == 0)
+              Expanded(
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(LucideIcons.eyeOff, size: 48,
+                          color: hollow.textSecondary.withValues(alpha: 0.3)),
+                      const SizedBox(height: HollowSpacing.md),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
+                        child: Text(
+                          'You don\'t have permission to read messages in this channel',
+                          textAlign: TextAlign.center,
+                          style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            else
             Expanded(
               child: Stack(
                 children: [
@@ -631,7 +702,29 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                   _stagedFileIsImage = false;
                 }),
               ),
-            _isRecordingVoice
+            if (!widget.isDm &&
+                !ref.watch(canPostInChannelProvider((
+                  serverId: widget.serverId!,
+                  channelId: widget.channelId!,
+                ))))
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.md,
+                  vertical: HollowSpacing.lg,
+                ),
+                decoration: BoxDecoration(
+                  color: hollow.surface,
+                  border: Border(top: BorderSide(color: hollow.border)),
+                ),
+                child: Center(
+                  child: Text(
+                    'You don\'t have permission to send messages in this channel',
+                    style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
+                  ),
+                ),
+              )
+            else
+              _isRecordingVoice
                 ? Padding(
                     padding: const EdgeInsets.symmetric(
                       horizontal: HollowSpacing.sm,
@@ -651,6 +744,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                     onMic: _stagedFilePath != null
                         ? null
                         : () => setState(() => _isRecordingVoice = true),
+                    onEmoji: _showEmojiSheet,
                     onChanged: _onTextChanged,
                     hasStagedFile: _stagedFilePath != null,
                   ),
@@ -658,6 +752,79 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         ),
       ),
     );
+  }
+
+  Widget _buildSyncIndicator(HollowTheme hollow) {
+    final status = ref.watch(serverSyncStatusProvider(widget.serverId!));
+    switch (status) {
+      case ServerSyncStatus.syncing:
+      case ServerSyncStatus.retrying:
+        final isRetrying = status == ServerSyncStatus.retrying;
+        return Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.md,
+            vertical: HollowSpacing.xs,
+          ),
+          color: hollow.surface,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.5,
+                  color: isRetrying ? hollow.warning : hollow.accent,
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              Text(
+                isRetrying ? 'Retrying sync...' : 'Syncing...',
+                style: HollowTypography.caption.copyWith(
+                  color: isRetrying ? hollow.warning : hollow.textSecondary,
+                ),
+              ),
+            ],
+          ),
+        );
+      case ServerSyncStatus.failed:
+        return Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.md,
+            vertical: HollowSpacing.xs,
+          ),
+          color: hollow.surface,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              StatusDot(color: hollow.error, size: 8),
+              const SizedBox(width: HollowSpacing.sm),
+              Text(
+                'Sync failed',
+                style: HollowTypography.caption.copyWith(color: hollow.error),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              GestureDetector(
+                onTap: () => network_api.requestChannelSync(
+                  serverId: widget.serverId!,
+                  channelId: widget.channelId!,
+                ),
+                child: Text(
+                  'Retry',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.accent,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      case ServerSyncStatus.synced:
+      case ServerSyncStatus.idle:
+      case ServerSyncStatus.connecting:
+        return const SizedBox.shrink();
+    }
   }
 
   Widget _buildDmMessages() {
@@ -1441,6 +1608,7 @@ class _MobileInputBar extends StatelessWidget {
   final VoidCallback onSend;
   final VoidCallback onPickFile;
   final VoidCallback? onMic;
+  final VoidCallback onEmoji;
   final ValueChanged<String> onChanged;
   final bool hasStagedFile;
 
@@ -1450,6 +1618,7 @@ class _MobileInputBar extends StatelessWidget {
     required this.onSend,
     required this.onPickFile,
     this.onMic,
+    required this.onEmoji,
     required this.onChanged,
     this.hasStagedFile = false,
   });
@@ -1504,6 +1673,13 @@ class _MobileInputBar extends StatelessWidget {
                 onChanged: onChanged,
               ),
             ),
+          ),
+          const SizedBox(width: HollowSpacing.xs),
+          HollowPressable(
+            onTap: onEmoji,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            padding: const EdgeInsets.all(HollowSpacing.sm),
+            child: Icon(LucideIcons.smile, color: hollow.textSecondary, size: 22),
           ),
           const SizedBox(width: HollowSpacing.xs),
           HollowPressable(
