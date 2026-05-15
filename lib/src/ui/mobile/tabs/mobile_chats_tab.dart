@@ -23,6 +23,8 @@ import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/core/shared_tickers.dart';
+import 'package:hollow/src/ui/animations/ambient_background.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_server_settings_route.dart';
@@ -221,27 +223,80 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       );
     }
 
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.lg,
-            vertical: HollowSpacing.md,
-          ),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              'Hollow',
-              style: HollowTypography.heading.copyWith(
-                color: hollow.accent,
-                fontWeight: FontWeight.w700,
-                fontSize: 24,
-              ),
+    return AmbientBackground(
+      color1: hollow.accent,
+      color2: hollow.accent,
+      opacity: 0.12,
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: HollowSpacing.lg,
+              vertical: HollowSpacing.md,
+            ),
+            child: Row(
+              children: [
+                Text(
+                  'Hollow',
+                  style: HollowTypography.heading.copyWith(
+                    color: hollow.accent,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 24,
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.md),
+                Expanded(child: _HeaderShimmerLine(hollow: hollow)),
+              ],
             ),
           ),
-        ),
-        body,
-      ],
+          body,
+        ],
+      ),
+    );
+  }
+}
+
+class _HeaderShimmerLine extends StatelessWidget {
+  final HollowTheme hollow;
+  const _HeaderShimmerLine({required this.hollow});
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: ValueListenableBuilder<double>(
+        valueListenable: SharedTickers.instance.ambient,
+        builder: (context, value, _) {
+          // 45s cycle, we use a sub-range for a ~10s ping-pong sweep
+          final sub = (value * 4.5) % 1.0;
+          final pingPong = sub < 0.5 ? sub * 2.0 : 2.0 - sub * 2.0;
+          final curved = Curves.easeInOut.transform(pingPong);
+          final t = -0.2 + curved * 1.4;
+          const glowWidth = 0.15;
+          return Container(
+            height: 1,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  hollow.border,
+                  hollow.accent.withValues(alpha: 0.5),
+                  hollow.border,
+                ],
+                stops: [
+                  (t - glowWidth).clamp(0.0, 1.0),
+                  t.clamp(0.0, 1.0),
+                  (t + glowWidth).clamp(0.0, 1.0),
+                ],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: hollow.accent.withValues(alpha: 0.15),
+                  blurRadius: 3,
+                ),
+              ],
+            ),
+          );
+        },
+      ),
     );
   }
 }
@@ -642,20 +697,92 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        for (final channel in channels)
-          _ChannelRow(
-            channel: channel,
+        for (int i = 0; i < channels.length; i++)
+          _TreeChannelRow(
+            channel: channels[i],
             serverId: widget.serverId,
-            unreadCount: unread.channelUnreadCount(widget.serverId, channel.channelId),
-            voiceParticipants: channel.channelType == ChannelType.voice
+            unreadCount: unread.channelUnreadCount(widget.serverId, channels[i].channelId),
+            voiceParticipants: channels[i].channelType == ChannelType.voice
                 ? (voiceState.participants[widget.serverId]
-                        ?[channel.channelId]
+                        ?[channels[i].channelId]
                         ?.length ??
                     0)
                 : 0,
-            onTap: () => widget.onChannelTap(channel),
+            isLast: i == channels.length - 1,
+            onTap: () => widget.onChannelTap(channels[i]),
           ),
         const SizedBox(height: HollowSpacing.xs),
+      ],
+    );
+  }
+}
+
+class _TreeChannelRow extends StatelessWidget {
+  final ChannelInfo channel;
+  final String serverId;
+  final int unreadCount;
+  final int voiceParticipants;
+  final bool isLast;
+  final VoidCallback onTap;
+
+  const _TreeChannelRow({
+    required this.channel,
+    required this.serverId,
+    required this.unreadCount,
+    required this.voiceParticipants,
+    required this.isLast,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final lineColor = hollow.textSecondary.withValues(alpha: 0.7);
+    // Tree connector aligned under the server avatar center (44/2 + lg padding)
+    const double treeLeft = HollowSpacing.lg + 22;
+
+    return Stack(
+      children: [
+        // Tree lines
+        Positioned(
+          left: treeLeft,
+          top: 0,
+          bottom: isLast ? null : 0,
+          child: SizedBox(
+            width: 1,
+            height: isLast ? null : double.infinity,
+            child: ColoredBox(color: lineColor),
+          ),
+        ),
+        // Branch connector
+        Positioned(
+          left: treeLeft,
+          top: 18,
+          child: SizedBox(
+            width: 12,
+            height: 1,
+            child: ColoredBox(color: lineColor),
+          ),
+        ),
+        // Vertical line segment for last item (only goes to the branch)
+        if (isLast)
+          Positioned(
+            left: treeLeft,
+            top: 0,
+            child: SizedBox(
+              width: 1,
+              height: 19,
+              child: ColoredBox(color: lineColor),
+            ),
+          ),
+        // Actual channel row
+        _ChannelRow(
+          channel: channel,
+          serverId: serverId,
+          unreadCount: unreadCount,
+          voiceParticipants: voiceParticipants,
+          onTap: onTap,
+        ),
       ],
     );
   }

@@ -37,42 +37,83 @@ class MobileNavBar extends ConsumerWidget {
         top: false,
         child: SizedBox(
           height: 56,
-          child: Row(
-            children: [
-              _NavTab(
-                icon: LucideIcons.messageCircle,
-                label: 'Chats',
-                isActive: currentTab == 0,
-                badge: totalUnread,
-                onTap: () =>
-                    ref.read(mobileTabProvider.notifier).state = 0,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final totalWidth = constraints.maxWidth;
+              final slotWidth = totalWidth / 5;
+              // Map tab index (0-3) to slot index (0,1 skip center 3,4)
+              final slotIndex = currentTab < 2 ? currentTab : currentTab + 1;
+              final glowLeft = slotIndex * slotWidth + slotWidth / 2 - 28;
+
+              return ClipRect(
+                child: Stack(
+                children: [
+                  // Animated glow behind active tab
+                  AnimatedPositioned(
+                    duration: const Duration(milliseconds: 300),
+                    curve: Curves.easeOutCubic,
+                    left: glowLeft - 14,
+                    top: -10,
+                    child: IgnorePointer(
+                      child: Container(
+                        width: 84,
+                        height: 76,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: RadialGradient(
+                            colors: [
+                              hollow.accent.withValues(alpha: 0.3),
+                              hollow.accent.withValues(alpha: 0.1),
+                              hollow.accent.withValues(alpha: 0.0),
+                            ],
+                            stops: const [0.0, 0.45, 1.0],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  // Tab row
+                  Row(
+                    children: [
+                      _NavTab(
+                        icon: LucideIcons.messageCircle,
+                        label: 'Chats',
+                        isActive: currentTab == 0,
+                        badge: totalUnread,
+                        onTap: () =>
+                            ref.read(mobileTabProvider.notifier).state = 0,
+                      ),
+                      _NavTab(
+                        icon: LucideIcons.users,
+                        label: 'Friends',
+                        isActive: currentTab == 1,
+                        badge: pendingFriends,
+                        onTap: () =>
+                            ref.read(mobileTabProvider.notifier).state = 1,
+                      ),
+                      _AddButton(onTap: onAdd),
+                      _NavTab(
+                        icon: LucideIcons.archive,
+                        label: 'Archive',
+                        isActive: currentTab == 2,
+                        badge: 0,
+                        onTap: () =>
+                            ref.read(mobileTabProvider.notifier).state = 2,
+                      ),
+                      _NavTab(
+                        icon: LucideIcons.settings,
+                        label: 'Settings',
+                        isActive: currentTab == 3,
+                        badge: 0,
+                        onTap: () =>
+                            ref.read(mobileTabProvider.notifier).state = 3,
+                      ),
+                    ],
+                  ),
+                ],
               ),
-              _NavTab(
-                icon: LucideIcons.users,
-                label: 'Friends',
-                isActive: currentTab == 1,
-                badge: pendingFriends,
-                onTap: () =>
-                    ref.read(mobileTabProvider.notifier).state = 1,
-              ),
-              _AddButton(onTap: onAdd),
-              _NavTab(
-                icon: LucideIcons.archive,
-                label: 'Archive',
-                isActive: currentTab == 2,
-                badge: 0,
-                onTap: () =>
-                    ref.read(mobileTabProvider.notifier).state = 2,
-              ),
-              _NavTab(
-                icon: LucideIcons.settings,
-                label: 'Settings',
-                isActive: currentTab == 3,
-                badge: 0,
-                onTap: () =>
-                    ref.read(mobileTabProvider.notifier).state = 3,
-              ),
-            ],
+              );
+            },
           ),
         ),
       ),

@@ -22,16 +22,22 @@ Tab state: `mobileTabProvider` (`StateProvider<int>`, default 0) in `lib/src/ui/
 
 ### MobileNavBar
 **File:** `lib/src/ui/mobile/mobile_nav_bar.dart`
-Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Layout:
+Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Uses `LayoutBuilder` + `Stack` for animated glow.
+- **Animated glow:** `AnimatedPositioned` radial gradient circle (accent 0.3→0.1→0.0, `RadialGradient`, 84×76) follows active tab with 300ms `easeOutCubic`. Wrapped in `ClipRect` to prevent bleed outside bar. Maps tab indices 0,1 to slots 0,1 and 2,3 to slots 3,4 (skipping center button slot).
 - Chats tab: total unread count (DM + channel)
 - Friends tab: pending incoming friend request count
 - **Center "+" button** (`_AddButton`): 40×40 accent-colored rounded container with plus icon. Opens `NewConversationDialog` (Create/Join Server, Add Friend). Passed via `onAdd` callback from `MobileShell`.
 - Archive tab
 - Settings tab
 
-### MobileChatsTab Header
+### MobileChatsTab — Ambient Background & Header
 **File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart`
-Teal "Hollow" branded header (24px, w700, accent color) at top-left of the Chats tab. The FAB "+" was moved from the tab's bottom-right to the nav bar center.
+- **Ambient blob:** Wraps tab in `AmbientBackground(color1: accent, color2: accent, opacity: 0.12)`. Both blobs teal (no purple like desktop). Uses `SharedTickers.instance.ambient` (45s figure-8 at ~15fps). Same `_AmbientPainter` radial gradients as desktop.
+- **Header:** Row with teal "Hollow" text (24px, w700) + `_HeaderShimmerLine` — ping-pong shimmer using `SharedTickers.instance.ambient` at ~10s cycle. Gradient: border→accent(0.5)→border with ±0.15 glow width + subtle boxShadow.
+
+### Channel Tree Connectors
+**File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_TreeChannelRow`)
+Expanded server channel list shows tree-style connectors (├── / └──). `_TreeChannelRow` wraps `_ChannelRow` in a `Stack` with vertical + horizontal `ColoredBox` lines. Vertical line aligned under server avatar center (`HollowSpacing.lg + 22`). Last channel uses `└──` (line stops at branch), others use `├──` (line continues). Line color: `hollow.textSecondary` at 0.7 alpha.
 
 ### Server Long-Press Context Sheet
 **File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_ServerContextSheet`)
