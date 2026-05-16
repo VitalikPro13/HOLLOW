@@ -31,7 +31,7 @@ image = { version = "0.25", default-features = false, features = ["webp", "png",
 webp-animation = "0.9"
 scraper = "0.26"
 reed-solomon-erasure = "6.0"
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 aes-gcm = "0.10"
 ed25519-dalek = { version = "2", features = ["pkcs8"] }
