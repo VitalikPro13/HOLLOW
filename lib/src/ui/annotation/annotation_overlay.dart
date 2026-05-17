@@ -5,36 +5,26 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/annotation_mode_provider.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
+import 'package:window_manager/window_manager.dart';
 
 import 'annotation_canvas.dart';
 import 'annotation_controller.dart';
 import 'annotation_toolbar.dart';
 
-/// Self-contained transparent overlay that lets the user draw freehand
-/// strokes, straight lines and arrows on top of every app on their screen.
-/// Toggled via [AnnotationOverlay.toggle].
-///
-/// While active the Hollow main window is reconfigured to be transparent,
-/// full-screen and always-on-top (via [_macAnnotationChannel]), and the
-/// chat UI is hidden via [annotationModeProvider]. The annotation
-/// [OverlayEntry] then naturally covers the entire desktop, so the user can
-/// annotate over PowerPoint / Keynote / a browser / anything else — the
-/// strokes are captured by screen-share and by the recording.
-///
-/// Keyboard: Esc to close, ⌘Z / Ctrl+Z to undo, ⇧⌘Z / Ctrl+⇧Z redo.
 class AnnotationOverlay {
   AnnotationOverlay._();
 
-  static const MethodChannel _macAnnotationChannel =
+  static const MethodChannel _nativeChannel =
       MethodChannel('FlutterWebRTC.Method');
 
   static OverlayEntry? _entry;
   static AnnotationController? _controller;
 
-  /// Whether the overlay is currently shown.
+  // Saved Windows state for restore.
+  static bool _wasMaximized = false;
+
   static bool get isShown => _entry != null;
 
-  /// Toggle the overlay open/closed.
   static void toggle(BuildContext context) {
     if (isShown) {
       hide();
@@ -43,10 +33,6 @@ class AnnotationOverlay {
     }
   }
 
-  /// Show the overlay. Reconfigures the main window to take over the screen
-  /// transparently and then inserts the drawing overlay into the root
-  /// [Overlay]. Falls back to the global [hollowNavigatorKey] when invoked
-  /// from a context (e.g. title-bar button) above the [Navigator].
   static Future<void> show(BuildContext context) async {
     if (isShown) return;
     final overlay = Overlay.maybeOf(context, rootOverlay: true) ??
@@ -54,6 +40,7 @@ class AnnotationOverlay {
     if (overlay == null) return;
 
     _controller = AnnotationController();
+
     _entry = OverlayEntry(
       builder: (_) => _AnnotationOverlayLayer(
         controller: _controller!,
@@ -64,16 +51,17 @@ class AnnotationOverlay {
 
     if (Platform.isMacOS) {
       try {
-        await _macAnnotationChannel.invokeMethod<bool>('hollowMacEnterAnnotationMode');
+        await _nativeChannel.invokeMethod<bool>('hollowMacEnterAnnotationMode');
       } catch (e) {
         debugPrint('[annotation] enter mode failed: $e');
       }
+    } else if (Platform.isWindows) {
+      await _enterWindowsAnnotation();
     }
 
     _setAnnotationMode(true);
   }
 
-  /// Hide the overlay, dispose the controller, restore window state.
   static Future<void> hide() async {
     _entry?.remove();
     _entry = null;
@@ -82,13 +70,42 @@ class AnnotationOverlay {
 
     if (Platform.isMacOS) {
       try {
-        await _macAnnotationChannel.invokeMethod<bool>('hollowMacExitAnnotationMode');
+        await _nativeChannel.invokeMethod<bool>('hollowMacExitAnnotationMode');
       } catch (e) {
         debugPrint('[annotation] exit mode failed: $e');
       }
+    } else if (Platform.isWindows) {
+      await _exitWindowsAnnotation();
     }
 
     _setAnnotationMode(false);
+  }
+
+  static Future<void> _enterWindowsAnnotation() async {
+    try {
+      _wasMaximized = await windowManager.isMaximized();
+      await windowManager.setSkipTaskbar(true);
+      await windowManager.setAlwaysOnTop(true);
+      await windowManager.setBackgroundColor(Colors.transparent);
+      if (!_wasMaximized) {
+        await windowManager.maximize();
+      }
+    } catch (e) {
+      debugPrint('[annotation] Windows enter failed: $e');
+    }
+  }
+
+  static Future<void> _exitWindowsAnnotation() async {
+    try {
+      await windowManager.setBackgroundColor(const Color(0xFF0D0F14));
+      await windowManager.setAlwaysOnTop(false);
+      await windowManager.setSkipTaskbar(false);
+      if (!_wasMaximized) {
+        await windowManager.unmaximize();
+      }
+    } catch (e) {
+      debugPrint('[annotation] Windows exit failed: $e');
+    }
   }
 
   /// Set the annotation-mode flag via the long-lived [ProviderContainer]

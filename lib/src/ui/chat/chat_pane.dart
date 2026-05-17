@@ -1925,7 +1925,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   Duration _duration = Duration.zero;
   double _videoHeight = 200; // Height of the video area (only when video active).
   static const _minVideoHeight = 80.0;
-  static const _maxVideoHeight = 4000.0;
+  static const _maxVideoHeight = 2000.0;
   String? _expandedRenderer; // null = side-by-side, 'local' or 'remote' = fullscreen
 
   /// Count active video sources in a DM call. Used to decide whether to
@@ -2125,7 +2125,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     // (~140 px). The user wants to be able to drag the video panel up to
     // nearly the full window height when focusing on one participant.
     final screenHeight = MediaQuery.of(context).size.height;
-    final maxH = (screenHeight - 140).clamp(_minVideoHeight, _maxVideoHeight);
+    final maxH = (screenHeight * 0.8).clamp(_minVideoHeight, _maxVideoHeight);
 
     return GestureDetector(
       onSecondaryTapUp: (details) {

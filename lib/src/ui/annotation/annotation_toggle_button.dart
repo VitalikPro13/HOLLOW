@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:lucide_icons/lucide_icons.dart';
 
 import 'annotation_overlay.dart';
 
@@ -59,7 +60,7 @@ class _AnnotationToggleButtonState extends State<AnnotationToggleButton> {
               ),
               SizedBox(
                 width: widget.size,
-                child: Icon(Icons.edit, size: 18, color: color),
+                child: Icon(LucideIcons.pencil, size: 18, color: color),
               ),
             ],
           ),

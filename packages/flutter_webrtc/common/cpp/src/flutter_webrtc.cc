@@ -3,6 +3,10 @@
 
 #include "flutter_webrtc/flutter_web_r_t_c_plugin.h"
 
+#ifdef _WIN32
+#include "../../../windows/win_screen_recorder.h"
+#endif
+
 namespace flutter_webrtc_plugin {
 
 static EventChannelProxy* eventChannelProxy = nullptr;
@@ -1287,7 +1291,41 @@ void FlutterWebRTC::HandleMethodCall(
       RTCLoggingSeverity severity = str2LogSeverity(severityStr);
       initLoggerCallback(severity);
     }
-  } else {
+  }
+#ifdef _WIN32
+  else if (method_call.method_name().compare("hollowWinStartScreenRecord") == 0) {
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    std::string path = findString(params, "path");
+    if (path.empty()) {
+      result->Error("BAD_PATH", "Output path missing");
+      return;
+    }
+    auto shared = std::shared_ptr<MethodResultProxy>(result.release());
+    WinScreenRecorder::GetInstance().Start(
+        path, [shared](const std::string& err) {
+          if (err.empty()) {
+            EncodableMap m;
+            m[EncodableValue("capturedSystemAudio")] = EncodableValue(
+                WinScreenRecorder::GetInstance().LastCapturedSystemAudio());
+            shared->Success(EncodableValue(m));
+          } else {
+            shared->Error("START_FAILED", err);
+          }
+        });
+  } else if (method_call.method_name().compare("hollowWinStopScreenRecord") == 0) {
+    auto shared = std::shared_ptr<MethodResultProxy>(result.release());
+    WinScreenRecorder::GetInstance().Stop(
+        [shared](const std::string& err) {
+          if (err.empty()) {
+            shared->Success(EncodableValue(true));
+          } else {
+            shared->Error("STOP_FAILED", err);
+          }
+        });
+  }
+#endif
+  else {
     if (HandleFrameCryptorMethodCall(method_call, std::move(result), &result)) {
       return;
     } else if (HandleDataPacketCryptorMethodCall(method_call, std::move(result),

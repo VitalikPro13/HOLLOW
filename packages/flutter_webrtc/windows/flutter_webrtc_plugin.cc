@@ -8,6 +8,9 @@
 
 const char* kChannelName = "FlutterWebRTC.Method";
 static flutter_webrtc_plugin::FlutterWebRTC* g_shared_instance = nullptr;
+static HWND g_flutter_window = nullptr;
+
+HWND GetFlutterWindowHWND() { return g_flutter_window; }
 
 namespace flutter_webrtc_plugin {
 
@@ -28,6 +31,13 @@ class FlutterWebRTCPluginImpl : public FlutterWebRTCPlugin {
         [plugin_pointer = plugin.get()](const auto& call, auto result) {
           plugin_pointer->HandleMethodCall(call, std::move(result));
         });
+
+    // Store the Flutter HWND for annotation mode and other native features.
+    auto* win_registrar =
+        static_cast<flutter::PluginRegistrarWindows*>(registrar);
+    if (auto* view = win_registrar->GetView()) {
+      g_flutter_window = GetAncestor(view->GetNativeWindow(), GA_ROOT);
+    }
 
     registrar->AddPlugin(std::move(plugin));
   }

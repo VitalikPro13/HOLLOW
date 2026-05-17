@@ -57,7 +57,7 @@ HOLLOW/
 │       └── storage/      # SQLCipher message store
 ├── relay/                # Signaling HTTP + WS room router (Rust, legacy — superseded by relay-uws)
 ├── relay-uws/            # Production relay (uWebSockets C++, native TLS, deployed on OVH VPS)
-├── packages/flutter_webrtc/ # Forked flutter_webrtc 1.4.1 (WASAPI loopback patch for Windows screen share audio)
+├── packages/flutter_webrtc/ # Forked flutter_webrtc 1.4.1 (WASAPI loopback, native screen recording, macOS ScreenCaptureKit screen share)
 ├── rust_builder/         # flutter_rust_bridge build system (cargokit)
 ├── vendor/ffmpeg/        # Bundled native binaries (gitignored, see fetch_ffmpeg.ps1)
 ├── legal/                # Privacy Policy, Terms of Use, version manifest (manifest.json)
@@ -173,6 +173,9 @@ All UI uses custom Hollow widgets — no Material defaults.
 - **Widget test framework:** `test/helpers/test_app.dart` — `pumpHollowMobile()` mocks all FFI-dependent providers at the Riverpod level (no native library loading). `test/helpers/test_data.dart` has fake peers/servers/friends. Tests run in ~1s without device. Add tests alongside new features.
 - **Feature matrix:** `reports/FEATURE_MATRIX.md` — 288 features inventoried across 33 sections. Used as the mobile port punch list. Work through sections in order.
 - **Forked `flutter_webrtc` at `packages/flutter_webrtc/`** — pubspec points at the sibling folder via `path:`. The fork adds WASAPI loopback capture inside `getDisplayMedia({audio: true})` on Windows. The captured audio track must NOT be attached to the returned MediaStream (`stream->AddTrack` crashes libwebrtc's sender iteration); Dart calls `pc.addTrack(audioTrack, stream)` on the screen-share PC instead. When iterating on the fork's native C++, delete `build/windows/x64/plugins/flutter_webrtc/` before rebuilding, and **always build `--release` if testing from the Release folder** (Vitalik does).
+- **Native screen recording:** macOS uses ScreenCaptureKit+AVAssetWriter (`MacScreenRecorder` in `packages/flutter_webrtc/macos/Classes/`). Windows uses Graphics Capture API+Media Foundation (`WinScreenRecorder` in `packages/flutter_webrtc/windows/`). Both produce MP4 (H.264+AAC) with system audio + mic. No ffmpeg for recording on macOS/Windows. Linux still uses ffmpeg. Dart `recording_service.dart` branches on platform.
+- **Native screen share (macOS only):** `FlutterScreenCaptureKitCapturer` in `packages/flutter_webrtc/macos/Classes/` replaces libwebrtc's desktop capturer with native ScreenCaptureKit on macOS. Feeds NV12 frames directly to WebRTC's `RTCVideoCapturerDelegate`. Windows still uses libwebrtc's built-in capturer (planned replacement).
+- **CRITICAL — Windows annotation mode: use `window_manager` maximize/unmaximize.** Never modify window styles directly via Win32 or use `setFullScreen` — both fight with `window_manager`'s internal state and cause squished layouts on restore. The correct sequence: `setSkipTaskbar(true)` → `setAlwaysOnTop(true)` → `setBackgroundColor(transparent)` → `maximize()`. Exit: reverse order with `unmaximize()`.
 
 ## Semantic Memory Search (hollow-memory MCP)
 - **Tool:** `memory_search(query, limit=5)` — semantic vector search across all memory files, HOLLOW_PLAN.md, WHITEPAPER.md, CLAUDE.md. Use it proactively when you need to recall decisions, patterns, or context by meaning rather than exact filename.

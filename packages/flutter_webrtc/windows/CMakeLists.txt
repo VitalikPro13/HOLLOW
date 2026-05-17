@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.15)
 set(PROJECT_NAME "flutter_webrtc")
 project(${PROJECT_NAME} LANGUAGES CXX)
 
+# C++20 for C++/WinRT (Windows.Graphics.Capture).
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
   cmake_policy(SET CMP0135 NEW)
 endif()
@@ -32,6 +36,7 @@ add_library(${PLUGIN_NAME} SHARED
   "flutter_webrtc_plugin.cc"
   "task_runner_windows.cc"
   "wasapi_loopback_capturer.cc"
+  "win_screen_recorder.cc"
 )
 
 include_directories(
@@ -50,11 +55,20 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
 )
-target_link_libraries(${PLUGIN_NAME} PRIVATE 
+target_link_libraries(${PLUGIN_NAME} PRIVATE
   flutter
   flutter_wrapper_plugin
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/win64/libwebrtc.dll.lib"
+  mfplat.lib
+  mfreadwrite.lib
+  mfuuid.lib
+  mf.lib
+  d3d11.lib
+  dxgi.lib
+  windowsapp.lib
 )
+
+target_compile_options(${PLUGIN_NAME} PRIVATE /await)
 
 # List of absolute paths to libraries that should be bundled with the plugin
 set(flutter_webrtc_bundled_libraries

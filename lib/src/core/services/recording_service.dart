@@ -81,12 +81,15 @@ class RecordingService {
     final outFile = p.join(dir.path, _timestampedFileName());
 
     // macOS uses the native ScreenCaptureKit + AVAssetWriter recorder —
-    // no ffmpeg subprocess. It produces a clean MP4 (H.264 + AAC) with
-    // mic + system audio mixed via Process Tap.
-    if (Platform.isMacOS) {
+    // macOS: ScreenCaptureKit + AVAssetWriter, Windows: Graphics Capture + MF.
+    // Both produce MP4 (H.264 + AAC) with mic + system audio natively.
+    if (Platform.isMacOS || Platform.isWindows) {
+      final method = Platform.isMacOS
+          ? 'hollowMacStartScreenRecord'
+          : 'hollowWinStartScreenRecord';
       try {
         final res = await _channel.invokeMethod<Map<Object?, Object?>>(
-          'hollowMacStartScreenRecord',
+          method,
           {'path': outFile},
         );
         _capturedSystemAudio = res?['capturedSystemAudio'] == true;
@@ -99,6 +102,7 @@ class RecordingService {
       return;
     }
 
+    // Linux fallback: ffmpeg.
     final ffmpeg = VideoThumbnailService.findFfmpegBinary();
     if (ffmpeg == null) {
       throw const RecordingException(
@@ -106,12 +110,7 @@ class RecordingService {
       );
     }
 
-    List<String> args;
-    if (Platform.isWindows) {
-      args = _windowsArgs(outFile);
-    } else {
-      args = _linuxArgs(outFile);
-    }
+    final args = _linuxArgs(outFile);
 
     debugPrint('[REC] spawn $ffmpeg ${args.join(" ")}');
 
@@ -153,10 +152,13 @@ class RecordingService {
     final capturedSystem = _capturedSystemAudio;
     if (filePath == null || startedAt == null) return null;
 
-    // macOS native path: ask the native recorder to flush & finalize.
+    // Native path (macOS/Windows): ask the native recorder to flush & finalize.
     if (_nativeRecording) {
+      final method = Platform.isMacOS
+          ? 'hollowMacStopScreenRecord'
+          : 'hollowWinStopScreenRecord';
       try {
-        await _channel.invokeMethod<bool>('hollowMacStopScreenRecord');
+        await _channel.invokeMethod<bool>(method);
       } on PlatformException catch (e) {
         debugPrint('[REC] native stop failed: ${e.message}');
       }
@@ -204,7 +206,7 @@ class RecordingService {
     }
 
     exitCode = await waitFor(const Duration(seconds: 2));
-    if (exitCode == null) {
+    if (exitCode == null && !Platform.isWindows) {
       proc.kill(ProcessSignal.sigint);
       exitCode = await waitFor(const Duration(seconds: 2));
     }
@@ -212,7 +214,7 @@ class RecordingService {
       proc.kill(ProcessSignal.sigterm);
       exitCode = await waitFor(const Duration(seconds: 1));
     }
-    if (exitCode == null) {
+    if (exitCode == null && !Platform.isWindows) {
       proc.kill(ProcessSignal.sigkill);
       exitCode = await waitFor(const Duration(seconds: 1));
     }
@@ -250,30 +252,6 @@ class RecordingService {
     );
   }
 
-  List<String> _windowsArgs(String outFile) {
-    // gdigrab captures the full primary desktop. dshow with the default mic
-    // (selectable later via settings). For v1, no system audio loopback —
-    // would require Screen-Capture-Recorder or WASAPI piping. TODO.
-    return [
-      '-y',
-      '-hide_banner',
-      '-loglevel', 'warning',
-      '-f', 'gdigrab',
-      '-framerate', '30',
-      '-i', 'desktop',
-      '-f', 'dshow',
-      '-i', 'audio=virtual-audio-capturer',
-      '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-tune', 'zerolatency',
-      '-pix_fmt', 'yuv420p',
-      '-c:a', 'aac',
-      '-b:a', '160k',
-      '-movflags', '+faststart',
-      outFile,
-    ];
-  }
-
   List<String> _linuxArgs(String outFile) {
     return [
       '-y',
@@ -294,8 +272,11 @@ class RecordingService {
     ];
   }
 
-  /// Whether recording is supported on this platform (ffmpeg located).
-  static bool get isAvailable => VideoThumbnailService.isAvailable;
+  /// Whether recording is supported on this platform.
+  static bool get isAvailable {
+    if (Platform.isMacOS || Platform.isWindows) return true;
+    return VideoThumbnailService.isAvailable;
+  }
 
   static String _lastLines(String text, int n) {
     final lines = text.split('\n');

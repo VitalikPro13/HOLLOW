@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -41,10 +43,10 @@ class WindowTitleBar extends StatelessWidget {
 
     Widget buttons = Row(
       mainAxisSize: MainAxisSize.min,
-      children: const [
-        AnnotationToggleButton(),
-        SizedBox(width: 4),
-        _MinimizeButton(),
+      children: [
+        if (Platform.isMacOS || Platform.isWindows) const AnnotationToggleButton(),
+        const SizedBox(width: 4),
+        const _MinimizeButton(),
         _MaximizeButton(),
         _CloseButton(),
       ],

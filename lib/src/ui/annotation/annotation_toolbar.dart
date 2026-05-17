@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:lucide_icons/lucide_icons.dart';
 
 import 'annotation_controller.dart';
 import 'annotation_models.dart';
@@ -53,10 +54,10 @@ class AnnotationToolbar extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              _toolButton(AnnotationTool.freehand, Icons.edit, 'Freehand'),
-              _toolButton(AnnotationTool.line, Icons.show_chart, 'Line'),
-              _toolButton(AnnotationTool.arrow, Icons.north_east, 'Arrow'),
-              _toolButton(AnnotationTool.eraser, Icons.cleaning_services_outlined, 'Eraser'),
+              _toolButton(AnnotationTool.freehand, LucideIcons.pencil, 'Freehand'),
+              _toolButton(AnnotationTool.line, LucideIcons.minus, 'Line'),
+              _toolButton(AnnotationTool.arrow, LucideIcons.arrowUpRight, 'Arrow'),
+              _toolButton(AnnotationTool.eraser, LucideIcons.eraser, 'Eraser'),
               const _Divider(),
               _styleButton(LineStyle.solid, 'Solid'),
               _styleButton(LineStyle.dashed, 'Dashed'),
@@ -76,14 +77,14 @@ class AnnotationToolbar extends StatelessWidget {
               const _Divider(),
               ..._palette.map(_colorSwatch),
               const _Divider(),
-              _iconButton(Icons.undo, 'Undo (⌘Z)',
+              _iconButton(LucideIcons.undo2, 'Undo (⌘Z)',
                   enabled: controller.canUndo, onPressed: controller.undo),
-              _iconButton(Icons.redo, 'Redo (⇧⌘Z)',
+              _iconButton(LucideIcons.redo2, 'Redo (⇧⌘Z)',
                   enabled: controller.canRedo, onPressed: controller.redo),
-              _iconButton(Icons.delete_outline, 'Clear',
+              _iconButton(LucideIcons.trash2, 'Clear',
                   enabled: controller.hasContent, onPressed: controller.clear),
               const _Divider(),
-              _iconButton(Icons.close, 'Close (Esc)', onPressed: onClose),
+              _iconButton(LucideIcons.x, 'Close (Esc)', onPressed: onClose),
             ],
           ),
         ),
@@ -156,7 +157,8 @@ class AnnotationToolbar extends StatelessWidget {
       child: InkResponse(
         radius: 18,
         onTap: enabled ? onPressed : null,
-        child: Opacity(
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 150),
           opacity: enabled ? 1.0 : 0.35,
           child: Container(
             width: 36,
