@@ -84,7 +84,8 @@ jobs:
             --enable-protocol=file \
             --enable-protocol=pipe \
             \
-            --enable-demuxer=s16le \
+            --enable-demuxer=pcm_s16le \
+            --enable-demuxer=pcm_f32le \
             --enable-demuxer=ogg \
             --enable-demuxer=opus \
             --enable-demuxer=wav \
