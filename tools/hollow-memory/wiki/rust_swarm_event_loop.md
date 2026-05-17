@@ -271,8 +271,8 @@ These are handled directly in `handle_incoming_request()`:
 - `DmSyncRequest` — queries DB for DM messages since timestamp, responds with `DmSyncBatch` via Olm.
 
 **MLS management:**
-- `MlsChannelMessage` — base64-decodes, MLS-decrypts, then dispatches the inner `MessageEnvelope` (see Layer 2). If group unknown, sends KeyPackage to owner for bootstrap. After 3 consecutive decrypt failures, drops group and requests re-bootstrap.
-- `MlsKeyPackage` — coordinator check (lowest online MLS member), cleans stale members, removes if already present (recovery re-add), queues for batch processing.
+- `MlsChannelMessage` — base64-decodes, MLS-decrypts, then dispatches the inner `MessageEnvelope` (see Layer 2). If group unknown, sends KeyPackage to coordinator (lowest online peer) for bootstrap. After 3 consecutive decrypt failures, drops group and requests re-bootstrap.
+- `MlsKeyPackage` — coordinator check (lowest online MLS member, **excluding the sender** — they don't have the group), cleans stale members, removes if already present (recovery re-add), queues for batch processing.
 - `MlsWelcome` — joins MLS group from Welcome, then sends ChannelSyncRequest for channels with no messages.
 - `MlsCommit` — processes commit to advance MLS epoch, emits MlsEpochChanged for SFrame rotation. On failure, drops group and requests re-bootstrap.
 - `MlsKeyPackageRequest` — responds with own KeyPackage if not already in the group.
@@ -408,11 +408,19 @@ The event loop coordinates all three transport layers:
 
 ### MLS decrypt failure
 1. Increment per-server failure counter.
-2. After 3 consecutive failures: drop the broken MLS group, send recovery KeyPackage to the server owner.
+2. After 3 consecutive failures: drop the broken MLS group, send recovery KeyPackage to the coordinator (lowest online peer).
 3. Reset counter on any successful decrypt.
 
+### MLS group loss (auto-recovery)
+Three paths detect and recover from a missing MLS group:
+1. **MlsChannelMessage unknown group** — sends KeyPackage to coordinator (not owner).
+2. **PeerJoined** — if we're missing a group for a shared server, sends KeyPackage to the joining peer.
+3. **RoomMembers (startup)** — checks all shared servers, sends KeyPackage for any missing groups.
+
+The KeyPackage handler excludes the sender from coordinator election (they sent it because they lost their group). Without this exclusion, the lowest-peer-ID member losing their group creates a deadlock.
+
 ### MLS commit failure
-Drop stale local group, send KeyPackage to owner for re-bootstrap.
+Drop stale local group, send KeyPackage to coordinator for re-bootstrap.
 
 ### WebRTC transfer failure
 `file_handler::handle_webrtc_transfer_failed()` removes peer from `webrtc_peers`, falls back to WS stream for the pending send.

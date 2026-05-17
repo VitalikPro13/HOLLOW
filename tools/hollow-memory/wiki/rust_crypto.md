@@ -149,6 +149,8 @@ Convenience wrapper: checks if a group exists for `server_id`, gets the member l
 
 The coordinator is responsible for processing MLS membership changes (adding/removing members via commits).
 
+**KeyPackage handler exception:** When processing an incoming KeyPackage, the sender is excluded from coordinator election (they sent it because they lost their group). The handler builds a custom candidate list filtering out `peer_str` instead of using `is_mls_coordinator()`. Without this, the lowest-peer-ID member losing their group creates a permanent recovery deadlock.
+
 ### Unit Tests
 
 Four tests verify coordinator election:

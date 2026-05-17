@@ -1431,7 +1431,8 @@ async fn run_event_loop(
                                                 }
                                             }
 
-                                            // MLS: request KeyPackage if we're the coordinator.
+                                            // MLS: request KeyPackage if we're the coordinator,
+                                            // or send our own KeyPackage if we lost our group.
                                             if let Some(ref mls_mgr) = mls {
                                                 if mls_mgr.has_group(sid) {
                                                     let mls_members = mls_mgr.group_members(sid);
@@ -1444,6 +1445,21 @@ async fn run_event_loop(
                                                                 },
                                                             );
                                                         }
+                                                    }
+                                                } else if !mls_bootstrap_requested.get(sid).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
+                                                    // We're a member but lost our MLS group — send
+                                                    // KeyPackage to this peer for re-bootstrap.
+                                                    hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {peer_id} for bootstrap (PeerJoined)");
+                                                    if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                                        let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                                        send_message_to_peer(
+                                                            &ws_cmd_tx, &ws_room_peers,
+                                                            &peer_id, HavenMessage::MlsKeyPackage {
+                                                                server_id: sid.clone(),
+                                                                key_package: kp_b64,
+                                                            },
+                                                        );
+                                                        mls_bootstrap_requested.insert(sid.clone(), std::time::Instant::now());
                                                     }
                                                 }
                                             }
@@ -1718,6 +1734,28 @@ async fn run_event_loop(
                                                         .collect();
                                                     sync_coordinator.register_peer(sid, pid_str, channels_ts);
                                                 }
+                                            }
+                                        }
+                                    }
+
+                                    // MLS: if we lost our group for any shared server,
+                                    // send KeyPackage to this peer for re-bootstrap.
+                                    if let Some(ref mls_mgr) = mls {
+                                        for (sid, srv_state) in server_states.iter() {
+                                            if !srv_state.members.contains_key(pid_str) { continue; }
+                                            if mls_mgr.has_group(sid) { continue; }
+                                            if mls_bootstrap_requested.get(sid.as_str()).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) { continue; }
+                                            hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {pid_str} for bootstrap (RoomMembers)");
+                                            if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                                let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                                send_message_to_peer(
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    pid_str, HavenMessage::MlsKeyPackage {
+                                                        server_id: sid.clone(),
+                                                        key_package: kp_b64,
+                                                    },
+                                                );
+                                                mls_bootstrap_requested.insert(sid.clone(), std::time::Instant::now());
                                             }
                                         }
                                     }
@@ -5524,32 +5562,28 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-MLS] Received MlsChannelMessage for unknown group {server_id}");
 
                     // If we're a member of this server but don't have the MLS group,
-                    // the Welcome was lost. Send KeyPackage to the owner to bootstrap.
-                    // Only do this once per server to avoid spamming the owner (expires after 60s).
+                    // the Welcome was lost. Send KeyPackage to the coordinator
+                    // (lowest online peer) for MLS bootstrap.
+                    // Only do this once per server to avoid spamming (expires after 60s).
                     if !mls_bootstrap_requested.get(&server_id).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
                         if let Some(state) = server_states.get(&server_id) {
                             let local_peer = local_peer_str.to_string();
-                            for member in state.members_list() {
-                                if member.peer_id == local_peer { continue; }
-                                let is_owner = state.roles.get(&member.peer_id)
-                                    .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
-                                    .unwrap_or(false);
-                                if is_owner {
-                                        if peer_is_reachable(ws_room_peers, &member.peer_id) {
-                                            hollow_log!("[HOLLOW-MLS] Sending KeyPackage to owner for MLS bootstrap (triggered by message)");
-                                            if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
-                                                let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                                send_message_to_peer(
-                                                    ws_cmd_tx, ws_room_peers,
-                                                    &member.peer_id, HavenMessage::MlsKeyPackage {
-                                                        server_id: server_id.clone(),
-                                                        key_package: kp_b64,
-                                                    },
-                                                );
-                                                mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
-                                            }
-                                        }
-                                    break;
+                            let mut online_members: Vec<&String> = state.members.keys()
+                                .filter(|p| p.as_str() != local_peer && peer_is_reachable(ws_room_peers, p))
+                                .collect();
+                            online_members.sort();
+                            if let Some(coordinator) = online_members.first() {
+                                hollow_log!("[HOLLOW-MLS] Sending KeyPackage to coordinator {} for MLS bootstrap (triggered by message)", coordinator);
+                                if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                    let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                    send_message_to_peer(
+                                        ws_cmd_tx, ws_room_peers,
+                                        coordinator, HavenMessage::MlsKeyPackage {
+                                            server_id: server_id.clone(),
+                                            key_package: kp_b64,
+                                        },
+                                    );
+                                    mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
                                 }
                             }
                         }
@@ -6011,12 +6045,19 @@ async fn handle_incoming_request(
             }
 
             // Distributed committer: lowest online MLS member processes KeyPackages.
-            // Any MLS group member can be coordinator — OpenMLS enforces only valid
-            // group members can commit. Falls back to owner if no MLS group exists yet.
+            // The sender is excluded from coordinator election — they sent the
+            // KeyPackage because they lost their group, so they can't be coordinator.
             if let Some(mls_mgr) = mls.as_ref() {
                 if mls_mgr.has_group(&server_id) {
-                    if !is_mls_coordinator(mls_mgr, &server_id, local_peer_str, &ws_room_peers) {
-                        hollow_log!("[HOLLOW-MLS] Not MLS coordinator for {server_id}, skipping KeyPackage");
+                    let members = mls_mgr.group_members(&server_id);
+                    let mut online: Vec<&str> = members.iter()
+                        .filter(|p| p.as_str() != peer_str)
+                        .filter(|p| p.as_str() == local_peer_str || peer_is_reachable(ws_room_peers, p))
+                        .map(|p| p.as_str())
+                        .collect();
+                    online.sort();
+                    if online.first().copied() != Some(local_peer_str) {
+                        hollow_log!("[HOLLOW-MLS] Not MLS coordinator for {server_id} (excluding sender), skipping KeyPackage");
                         return;
                     }
                 } else {
