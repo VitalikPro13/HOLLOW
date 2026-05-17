@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
@@ -516,6 +517,10 @@ class CallNotifier extends Notifier<CallState> {
           await _handleScreenAnswer(peerId, payload);
         case 'screen_ice':
           await _handleScreenIce(peerId, payload);
+        case 'recording_start':
+          ref.read(recordingProvider.notifier).onRemoteRecordingStart(peerId);
+        case 'recording_stop':
+          ref.read(recordingProvider.notifier).onRemoteRecordingStop(peerId);
       }
     } catch (e) {
       debugPrint('[HOLLOW-CALL] Signal error ($signalType from $peerId): $e');
@@ -524,6 +529,7 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Handle peer going offline — auto-end any call with them.
   Future<void> handlePeerDisconnected(String peerId) async {
+    ref.read(recordingProvider.notifier).onPeerDisconnected(peerId);
     if (state.peerId == peerId && state.status != CallStatus.idle) {
       debugPrint('[HOLLOW-CALL] Peer $peerId disconnected, ending call');
       await _service.endCall();

@@ -19,9 +19,11 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -1212,6 +1214,10 @@ class _VoiceParticipantRow extends ConsumerWidget {
     final isCameraOn = peerId == localPeerId
         ? vcState.isCameraOn
         : (vcState.peerCameraOn[peerId] ?? false);
+    final recState = ref.watch(recordingProvider);
+    final isRecording = peerId == localPeerId
+        ? recState.isMyRecording
+        : recState.remoteRecorders.contains(peerId);
 
     return GestureDetector(
       onSecondaryTapUp: isRemote
@@ -1262,6 +1268,11 @@ class _VoiceParticipantRow extends ConsumerWidget {
                 padding: const EdgeInsets.only(left: 2),
                 child: Icon(LucideIcons.headphones,
                     size: 12, color: hollow.error),
+              ),
+            if (isRecording)
+              const Padding(
+                padding: EdgeInsets.only(left: 4),
+                child: RecordingIndicator.compact(),
               ),
           ],
         ),

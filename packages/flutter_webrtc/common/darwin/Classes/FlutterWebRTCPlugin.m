@@ -30,6 +30,9 @@
 #if TARGET_OS_OSX
 #import "MacScreenShareAudioTap.h"
 #import "MacAudioDevices.h"
+#import "MacRecordingAudioDevice.h"
+#import "MacScreenRecorder.h"
+#import <objc/runtime.h>
 #endif
 
 #import "LocalTrack.h"
@@ -464,6 +467,187 @@ static FlutterWebRTCPlugin *sharedSingleton;
       @"input" : [MacAudioDevices inputDevices],
       @"output" : [MacAudioDevices outputDevices],
     });
+#else
+    result([FlutterError errorWithCode:@"ERROR" message:@"macOS only" details:nil]);
+#endif
+  } else if ([@"hollowMacStartRecordingAudio" isEqualToString:call.method]) {
+#if TARGET_OS_OSX
+    NSError *err = nil;
+    NSInteger audioIdx = [[MacRecordingAudioDevice sharedInstance] startWithError:&err];
+    NSInteger screenIdx = [MacRecordingAudioDevice screenCaptureIndex];
+    if (audioIdx >= 0) {
+      result(@{ @"audioIndex" : @(audioIdx), @"screenIndex" : @(screenIdx), @"hasSystemAudio" : @(YES) });
+    } else {
+      // Fall back to plain mic without system audio mixing.
+      NSInteger micIdx = [MacRecordingAudioDevice defaultMicIndex];
+      if (micIdx >= 0) {
+        result(@{ @"audioIndex" : @(micIdx), @"screenIndex" : @(screenIdx), @"hasSystemAudio" : @(NO) });
+      } else {
+        result([FlutterError errorWithCode:@"RECORDING_AUDIO_FAILED"
+                                   message:err.localizedDescription ?: @"No audio input available"
+                                   details:nil]);
+      }
+    }
+#else
+    result([FlutterError errorWithCode:@"ERROR" message:@"macOS only" details:nil]);
+#endif
+  } else if ([@"hollowMacStopRecordingAudio" isEqualToString:call.method]) {
+#if TARGET_OS_OSX
+    [[MacRecordingAudioDevice sharedInstance] stop];
+    result(@(YES));
+#else
+    result([FlutterError errorWithCode:@"ERROR" message:@"macOS only" details:nil]);
+#endif
+  } else if ([@"hollowMacStartScreenRecord" isEqualToString:call.method]) {
+#if TARGET_OS_OSX
+    NSString *path = call.arguments[@"path"];
+    if (![path isKindOfClass:NSString.class] || path.length == 0) {
+      result([FlutterError errorWithCode:@"BAD_PATH" message:@"Output path missing" details:nil]);
+      return;
+    }
+    [[MacScreenRecorder sharedInstance] startWithOutputPath:path completion:^(NSError *err) {
+      if (err) {
+        result([FlutterError errorWithCode:@"START_FAILED"
+                                   message:err.localizedDescription ?: @"Recording start failed"
+                                   details:nil]);
+      } else {
+        result(@{
+          @"capturedSystemAudio": @([MacScreenRecorder sharedInstance].lastRecordingCapturedSystemAudio),
+        });
+      }
+    }];
+#else
+    result([FlutterError errorWithCode:@"ERROR" message:@"macOS only" details:nil]);
+#endif
+  } else if ([@"hollowMacStopScreenRecord" isEqualToString:call.method]) {
+#if TARGET_OS_OSX
+    [[MacScreenRecorder sharedInstance] stopWithCompletion:^(NSError *err) {
+      if (err) {
+        result([FlutterError errorWithCode:@"STOP_FAILED"
+                                   message:err.localizedDescription ?: @"Recording stop failed"
+                                   details:nil]);
+      } else {
+        result(@(YES));
+      }
+    }];
+#else
+    result([FlutterError errorWithCode:@"ERROR" message:@"macOS only" details:nil]);
+#endif
+  } else if ([@"hollowMacEnterAnnotationMode" isEqualToString:call.method]) {
+#if TARGET_OS_OSX
+    NSWindow *window = NSApp.mainWindow ?: NSApp.windows.firstObject;
+    if (!window) {
+      result([FlutterError errorWithCode:@"NO_WINDOW" message:@"main window unavailable" details:nil]);
+      return;
+    }
+    // Save state into associated objects on the window so exit can restore.
+    objc_setAssociatedObject(window, "hollowSavedFrame",
+                             [NSValue valueWithRect:window.frame], OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(window, "hollowSavedLevel",
+                             @(window.level), OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(window, "hollowSavedOpaque",
+                             @(window.isOpaque), OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(window, "hollowSavedBackgroundColor",
+                             window.backgroundColor, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(window, "hollowSavedCollectionBehavior",
+                             @(window.collectionBehavior), OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(window, "hollowSavedHasShadow",
+                             @(window.hasShadow), OBJC_ASSOCIATION_RETAIN);
+
+    // The Flutter view itself is opaque by default — that's why annotation
+    // mode renders as a black sheet even when NSWindow is clearColor. Drop
+    // its background to clear, AND the NSView layer's background to clear
+    // (FlutterView uses a CAMetalLayer that ignores `backgroundColor`).
+    NSViewController *vc = window.contentViewController;
+    if (vc && [vc respondsToSelector:@selector(setBackgroundColor:)]) {
+      // FlutterViewController has a `backgroundColor` setter from Flutter SDK 3.13+.
+      NSColor *currentBg = nil;
+      if ([vc respondsToSelector:@selector(backgroundColor)]) {
+        currentBg = [vc valueForKey:@"backgroundColor"];
+      }
+      objc_setAssociatedObject(window, "hollowSavedFlutterBg",
+                               currentBg ?: NSNull.null, OBJC_ASSOCIATION_RETAIN);
+      [vc setValue:NSColor.clearColor forKey:@"backgroundColor"];
+    }
+    NSView *contentView = vc.view;
+    if (contentView) {
+      objc_setAssociatedObject(window, "hollowSavedContentWantsLayer",
+                               @(contentView.wantsLayer), OBJC_ASSOCIATION_RETAIN);
+      contentView.wantsLayer = YES;
+      if (contentView.layer) {
+        objc_setAssociatedObject(window, "hollowSavedLayerBg",
+                                 (__bridge id)contentView.layer.backgroundColor ?: NSNull.null,
+                                 OBJC_ASSOCIATION_RETAIN);
+        contentView.layer.backgroundColor = CGColorGetConstantColor(kCGColorClear);
+      }
+    }
+
+    window.opaque = NO;
+    window.backgroundColor = NSColor.clearColor;
+    window.hasShadow = NO;
+    window.level = NSStatusWindowLevel;
+    window.collectionBehavior = (NSWindowCollectionBehaviorCanJoinAllSpaces |
+                                 NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                 NSWindowCollectionBehaviorStationary |
+                                 NSWindowCollectionBehaviorIgnoresCycle);
+    NSScreen *screen = window.screen ?: NSScreen.mainScreen;
+    if (screen) {
+      [window setFrame:screen.frame display:YES animate:NO];
+    }
+    result(@(YES));
+#else
+    result([FlutterError errorWithCode:@"ERROR" message:@"macOS only" details:nil]);
+#endif
+  } else if ([@"hollowMacExitAnnotationMode" isEqualToString:call.method]) {
+#if TARGET_OS_OSX
+    NSWindow *window = NSApp.mainWindow ?: NSApp.windows.firstObject;
+    if (!window) {
+      result([FlutterError errorWithCode:@"NO_WINDOW" message:@"main window unavailable" details:nil]);
+      return;
+    }
+    NSValue *frameVal = objc_getAssociatedObject(window, "hollowSavedFrame");
+    NSNumber *levelVal = objc_getAssociatedObject(window, "hollowSavedLevel");
+    NSNumber *opaqueVal = objc_getAssociatedObject(window, "hollowSavedOpaque");
+    NSColor *bgVal = objc_getAssociatedObject(window, "hollowSavedBackgroundColor");
+    NSNumber *behaviorVal = objc_getAssociatedObject(window, "hollowSavedCollectionBehavior");
+    NSNumber *hasShadowVal = objc_getAssociatedObject(window, "hollowSavedHasShadow");
+    id flutterBgVal = objc_getAssociatedObject(window, "hollowSavedFlutterBg");
+    NSNumber *wantsLayerVal = objc_getAssociatedObject(window, "hollowSavedContentWantsLayer");
+    id layerBgVal = objc_getAssociatedObject(window, "hollowSavedLayerBg");
+
+    if (opaqueVal) window.opaque = opaqueVal.boolValue;
+    if (bgVal) window.backgroundColor = bgVal;
+    if (hasShadowVal) window.hasShadow = hasShadowVal.boolValue;
+    if (levelVal) window.level = (NSWindowLevel)levelVal.integerValue;
+    if (behaviorVal) window.collectionBehavior = (NSWindowCollectionBehavior)behaviorVal.unsignedIntegerValue;
+    if (frameVal) [window setFrame:frameVal.rectValue display:YES animate:NO];
+
+    NSViewController *vc = window.contentViewController;
+    if (vc && [vc respondsToSelector:@selector(setBackgroundColor:)] && flutterBgVal) {
+      NSColor *bg = (flutterBgVal == NSNull.null) ? nil : (NSColor *)flutterBgVal;
+      [vc setValue:bg forKey:@"backgroundColor"];
+    }
+    NSView *contentView = vc.view;
+    if (contentView) {
+      if (wantsLayerVal) contentView.wantsLayer = wantsLayerVal.boolValue;
+      if (contentView.layer && layerBgVal) {
+        CGColorRef cg = (layerBgVal == NSNull.null) ? NULL : (__bridge CGColorRef)layerBgVal;
+        contentView.layer.backgroundColor = cg;
+      }
+    }
+
+    // Clear saved values.
+    objc_setAssociatedObject(window, "hollowSavedFrame", nil, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(window, "hollowSavedLevel", nil, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(window, "hollowSavedOpaque", nil, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(window, "hollowSavedBackgroundColor", nil, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(window, "hollowSavedCollectionBehavior", nil, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(window, "hollowSavedHasShadow", nil, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(window, "hollowSavedFlutterBg", nil, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(window, "hollowSavedContentWantsLayer", nil, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(window, "hollowSavedLayerBg", nil, OBJC_ASSOCIATION_RETAIN);
+
+    result(@(YES));
 #else
     result([FlutterError errorWithCode:@"ERROR" message:@"macOS only" details:nil]);
 #endif

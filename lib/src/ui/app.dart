@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
+import 'package:hollow/src/core/providers/annotation_mode_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/theme/hollow_colors.dart';
@@ -61,13 +62,20 @@ class HollowApp extends ConsumerWidget {
         if (isDesktop) {
           return Material(
             type: MaterialType.transparency,
-            child: Column(
-              children: [
-                const WindowTitleBar(),
-                Expanded(
-                  child: ClipRect(child: child ?? const SizedBox.shrink()),
-                ),
-              ],
+            child: Consumer(
+              builder: (context, innerRef, _) {
+                final annotation = innerRef.watch(annotationModeProvider);
+                return Column(
+                  children: [
+                    if (!annotation) const WindowTitleBar(),
+                    Expanded(
+                      child: ClipRect(
+                        child: child ?? const SizedBox.shrink(),
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
           );
         }

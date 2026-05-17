@@ -485,7 +485,8 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
       child: Stack(
         clipBehavior: Clip.hardEdge,
         children: [
-          // Main video (full area)
+          // Main video (full area) — Contain to show the whole frame
+          // letterboxed rather than cropping the subject.
           Positioned.fill(
             child: renderer != null
                 ? RepaintBoundary(
@@ -493,7 +494,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                       renderer,
                       mirror: isLocal,
                       objectFit:
-                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                          RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
                     ),
                   )
                 : Container(color: hollow.elevated),

@@ -21,6 +21,8 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/recording_provider.dart';
+import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
@@ -1923,7 +1925,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   Duration _duration = Duration.zero;
   double _videoHeight = 200; // Height of the video area (only when video active).
   static const _minVideoHeight = 80.0;
-  static const _maxVideoHeight = 500.0;
+  static const _maxVideoHeight = 4000.0;
   String? _expandedRenderer; // null = side-by-side, 'local' or 'remote' = fullscreen
 
   /// Count active video sources in a DM call. Used to decide whether to
@@ -2119,9 +2121,11 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
       _expandedRenderer = null;
     }
 
-    // Max video height: leave room for controls + input bar.
+    // Max video height: leave just enough room for controls + input bar
+    // (~140 px). The user wants to be able to drag the video panel up to
+    // nearly the full window height when focusing on one participant.
     final screenHeight = MediaQuery.of(context).size.height;
-    final maxH = (screenHeight * 0.7).clamp(_minVideoHeight, _maxVideoHeight);
+    final maxH = (screenHeight - 140).clamp(_minVideoHeight, _maxVideoHeight);
 
     return GestureDetector(
       onSecondaryTapUp: (details) {
@@ -2478,14 +2482,16 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
       child: Stack(
         clipBehavior: Clip.hardEdge,
         children: [
-          // Main video (full area)
+          // Main video (full area) — Contain so the entire frame is visible
+          // when the user expands; letterbox bars are preferable to cropping
+          // someone's face/body out of the recording.
           Positioned.fill(
             child: mainRenderer != null
                 ? RepaintBoundary(
                     child: RTCVideoView(
                       mainRenderer,
                       mirror: isLocalExpanded,
-                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
                     ),
                   )
                 : Container(color: hollow.elevated),
@@ -2785,20 +2791,30 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     }
   }
 
-  /// Shared row of call controls: mute, camera, screen share, end call.
+  /// Shared row of call controls: mute, camera, screen share, record, end call.
   Widget _buildControls(CallState call, HollowTheme hollow) {
+    final rec = ref.watch(recordingProvider);
+    const iconSize = 20.0;
+    const buttonPadding = EdgeInsets.all(HollowSpacing.sm);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (rec.isMyRecording) ...[
+          RecordingIndicator(startedAt: rec.myStartedAt),
+          const SizedBox(width: HollowSpacing.sm),
+        ] else if (rec.remoteRecorders.isNotEmpty) ...[
+          const RecordingIndicator(),
+          const SizedBox(width: HollowSpacing.sm),
+        ],
         HollowTooltip(
           message: call.isMuted ? 'Unmute' : 'Mute',
           child: HollowPressable(
             onTap: () => ref.read(callProvider.notifier).toggleMute(),
             borderRadius: BorderRadius.circular(hollow.radiusSm),
-            padding: const EdgeInsets.all(HollowSpacing.xs),
+            padding: buttonPadding,
             child: Icon(
               call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
-              size: 16,
+              size: iconSize,
               color: call.isMuted ? hollow.error : hollow.textSecondary,
             ),
           ),
@@ -2813,12 +2829,12 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                 ? () => ref.read(callProvider.notifier).toggleVideo()
                 : null,
             borderRadius: BorderRadius.circular(hollow.radiusSm),
-            padding: const EdgeInsets.all(HollowSpacing.xs),
+            padding: buttonPadding,
             child: Icon(
               call.isVideoEnabled
                   ? LucideIcons.video
                   : LucideIcons.videoOff,
-              size: 16,
+              size: iconSize,
               color: (call.isVideoEnabled
                       ? hollow.accent
                       : hollow.textSecondary),
@@ -2837,14 +2853,42 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                   ? () => _handleScreenShareToggle(call)
                   : null,
               borderRadius: BorderRadius.circular(hollow.radiusSm),
-              padding: const EdgeInsets.all(HollowSpacing.xs),
+              padding: buttonPadding,
               child: Icon(
                 call.isScreenSharing
                     ? LucideIcons.monitorOff
                     : LucideIcons.monitor,
-                size: 16,
+                size: iconSize,
                 color: call.isScreenSharing
                     ? hollow.accent
+                    : hollow.textSecondary,
+              ),
+            ),
+          ),
+        ],
+        // Record (desktop only).
+        if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) ...[
+          const SizedBox(width: HollowSpacing.xs),
+          HollowTooltip(
+            message: rec.isMyRecording ? 'Stop recording' : 'Record this call',
+            child: HollowPressable(
+              onTap: () {
+                final notifier = ref.read(recordingProvider.notifier);
+                if (rec.isMyRecording) {
+                  notifier.stopRecording();
+                } else {
+                  notifier.startRecording();
+                }
+              },
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              padding: buttonPadding,
+              child: Icon(
+                rec.isMyRecording
+                    ? LucideIcons.stopCircle
+                    : LucideIcons.circle,
+                size: iconSize,
+                color: rec.isMyRecording
+                    ? const Color(0xFFE53935)
                     : hollow.textSecondary,
               ),
             ),
@@ -2862,8 +2906,8 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
             ),
             child: Container(
               padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.sm,
-                vertical: 4,
+                horizontal: HollowSpacing.md,
+                vertical: HollowSpacing.sm,
               ),
               decoration: BoxDecoration(
                 color: hollow.error.withValues(alpha: 0.15),
@@ -2871,7 +2915,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
               ),
               child: Icon(
                 LucideIcons.phoneOff,
-                size: 14,
+                size: iconSize,
                 color: hollow.error,
               ),
             ),

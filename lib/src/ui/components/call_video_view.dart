@@ -3,10 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
 /// Floating draggable video panel shown during a call when video is active.
@@ -38,6 +40,9 @@ class _CallVideoViewState extends ConsumerState<CallVideoView> {
 
     final remoteRenderer = voiceService?.remoteRenderer;
     final localRenderer = voiceService?.localRenderer;
+    final recState = ref.watch(recordingProvider);
+    final remoteRecording = recState.remoteRecorders.contains(peerId);
+    final selfRecording = recState.isMyRecording;
 
     return Positioned(
       left: _position.dx,
@@ -73,7 +78,7 @@ class _CallVideoViewState extends ConsumerState<CallVideoView> {
                       child: RTCVideoView(
                         remoteRenderer,
                         objectFit:
-                            RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                            RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
                       ),
                     ),
                   )
@@ -122,6 +127,20 @@ class _CallVideoViewState extends ConsumerState<CallVideoView> {
                           ],
                         ),
                       ),
+                    ),
+                  ),
+                if (remoteRecording || selfRecording)
+                  Positioned(
+                    top: 8,
+                    left: 8,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.55),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const RecordingIndicator(),
                     ),
                   ),
                 if (call.isVideoEnabled && localRenderer != null)

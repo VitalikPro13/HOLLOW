@@ -5,12 +5,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 
@@ -59,6 +62,28 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
   @override
   Widget build(BuildContext context) {
     final call = ref.watch(callProvider);
+    final rec = ref.watch(recordingProvider);
+
+    // Surface recording lifecycle as toast notifications.
+    ref.listen<RecordingState>(recordingProvider, (prev, next) {
+      if (next.lastFinished != null && next.lastFinished != prev?.lastFinished) {
+        HollowToast.show(
+          context,
+          'Recording saved to ${next.lastFinished!.filePath}',
+          type: HollowToastType.success,
+          duration: const Duration(seconds: 15),
+        );
+        ref.read(recordingProvider.notifier).acknowledgeLastFinished();
+      }
+      if (next.lastError != null && next.lastError != prev?.lastError) {
+        HollowToast.show(
+          context,
+          'Recording: ${next.lastError}',
+          type: HollowToastType.error,
+        );
+        ref.read(recordingProvider.notifier).acknowledgeLastError();
+      }
+    });
 
     // Only show during active or connecting states.
     final isVisible =
@@ -103,7 +128,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
             child: MouseRegion(
               cursor: SystemMouseCursors.move,
               child: Container(
-                height: 36,
+                height: 44,
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.md,
                 ),
@@ -152,6 +177,13 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                           fontFeatures: [const FontFeature.tabularFigures()],
                         ),
                       ),
+                      if (rec.isMyRecording) ...[
+                        const SizedBox(width: HollowSpacing.sm),
+                        RecordingIndicator(startedAt: rec.myStartedAt),
+                      ] else if (rec.remoteRecorders.isNotEmpty) ...[
+                        const SizedBox(width: HollowSpacing.sm),
+                        const RecordingIndicator(),
+                      ],
                     ],
                     const SizedBox(width: HollowSpacing.md),
                     HollowTooltip(
@@ -163,7 +195,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                         padding: const EdgeInsets.all(HollowSpacing.xs),
                         child: Icon(
                           call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
-                          size: 14,
+                          size: 18,
                           color: call.isMuted
                               ? hollow.error
                               : hollow.textSecondary,
@@ -186,7 +218,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                           call.isVideoEnabled
                               ? LucideIcons.video
                               : LucideIcons.videoOff,
-                          size: 14,
+                          size: 18,
                           color: call.isVideoEnabled
                               ? hollow.accent
                               : hollow.textSecondary,
@@ -214,10 +246,44 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                             call.isScreenSharing
                                 ? LucideIcons.monitorOff
                                 : LucideIcons.monitor,
-                            size: 14,
+                            size: 18,
                             color: call.isScreenSharing
                                 ? hollow.accent
                                 : hollow.textSecondary.withValues(alpha: 0.4),
+                          ),
+                        ),
+                      ),
+                    ],
+                    // Record button (desktop only — ffmpeg-driven). Always
+                    // shown; if ffmpeg isn't found the start call surfaces
+                    // a clear error toast instead of silently hiding it.
+                    if (Platform.isWindows ||
+                        Platform.isLinux ||
+                        Platform.isMacOS) ...[
+                      const SizedBox(width: HollowSpacing.xs),
+                      HollowTooltip(
+                        message: rec.isMyRecording
+                            ? 'Stop recording'
+                            : 'Record this call',
+                        child: HollowPressable(
+                          onTap: () {
+                            final notifier = ref.read(recordingProvider.notifier);
+                            if (rec.isMyRecording) {
+                              notifier.stopRecording();
+                            } else {
+                              notifier.startRecording();
+                            }
+                          },
+                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          padding: const EdgeInsets.all(HollowSpacing.xs),
+                          child: Icon(
+                            rec.isMyRecording
+                                ? LucideIcons.stopCircle
+                                : LucideIcons.circle,
+                            size: 18,
+                            color: rec.isMyRecording
+                                ? const Color(0xFFE53935)
+                                : hollow.textSecondary,
                           ),
                         ),
                       ),
@@ -231,7 +297,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                         padding: const EdgeInsets.all(HollowSpacing.xs),
                         child: Icon(
                           LucideIcons.phoneOff,
-                          size: 14,
+                          size: 18,
                           color: hollow.error,
                         ),
                       ),

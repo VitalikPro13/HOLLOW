@@ -8,6 +8,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
@@ -462,6 +463,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _onRemoteAudioState(peerId, payload);
       return;
     }
+    if (signalType == 'recording_start') {
+      ref.read(recordingProvider.notifier).onRemoteRecordingStart(peerId);
+      return;
+    }
+    if (signalType == 'recording_stop') {
+      ref.read(recordingProvider.notifier).onRemoteRecordingStop(peerId);
+      return;
+    }
     // Handle camera state signals.
     if (signalType == 'camera_state') {
       _handleCameraState(peerId, payload);
@@ -579,6 +588,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   /// Handle peer disconnect — remove from all voice channels.
   Future<void> onPeerDisconnected(String peerId) async {
+    ref.read(recordingProvider.notifier).onPeerDisconnected(peerId);
     final updated = _deepCopyParticipants();
     for (final serverChannels in updated.values) {
       for (final channelPeers in serverChannels.values) {

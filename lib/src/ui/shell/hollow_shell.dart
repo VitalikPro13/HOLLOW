@@ -18,7 +18,9 @@ import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/verified_peers_provider.dart';
+import 'package:hollow/src/core/providers/annotation_mode_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
@@ -41,6 +43,7 @@ import 'package:hollow/src/ui/chat/channel_chat_pane.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart';
 import 'package:hollow/src/ui/chat/voice_channel_pane.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/notification_overlay.dart';
 import 'package:hollow/src/ui/components/active_call_bar.dart';
@@ -150,11 +153,39 @@ class _HollowShellState extends ConsumerState<HollowShell>
     _bootstrap();
     _listenForLicenseErrors();
     _listenForNicknameChanges();
+    _listenForRecordingEvents();
   }
 
   void _listenForNicknameChanges() {
     ref.listenManual(localNicknameProvider, (_, next) {
       setLocalNicknamesRef(next);
+    });
+  }
+
+  void _listenForRecordingEvents() {
+    ref.listenManual<RecordingState>(recordingProvider, (prev, next) {
+      if (!mounted) return;
+      final profiles = ref.read(profileProvider);
+      final prevSet = prev?.remoteRecorders ?? const <String>{};
+      final added = next.remoteRecorders.difference(prevSet);
+      final removed = prevSet.difference(next.remoteRecorders);
+      for (final peerId in added) {
+        final name = displayNameForPeer(profiles[peerId], peerId);
+        HollowToast.show(
+          context,
+          '$name started recording the call',
+          type: HollowToastType.info,
+          duration: const Duration(seconds: 4),
+        );
+      }
+      for (final peerId in removed) {
+        final name = displayNameForPeer(profiles[peerId], peerId);
+        HollowToast.show(
+          context,
+          '$name stopped recording',
+          type: HollowToastType.info,
+        );
+      }
     });
   }
 
@@ -683,6 +714,13 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
   @override
   Widget build(BuildContext context) {
+    // Annotation mode hides the entire shell so the user sees the apps
+    // underneath through the now-transparent Hollow window. The annotation
+    // OverlayEntry (drawing surface + toolbar) sits in the root Navigator
+    // overlay and stays visible above this empty route content.
+    if (ref.watch(annotationModeProvider)) {
+      return const SizedBox.shrink();
+    }
     final hollow = HollowTheme.of(context);
 
     final nodeState = ref.watch(nodeProvider);
