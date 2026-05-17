@@ -1,0 +1,161 @@
+name: Build Minimal FFmpeg
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross-compilation toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 nasm pkg-config yasm autoconf automake libtool git
+
+      - name: Build libopus (static, Windows x64)
+        run: |
+          git clone --depth 1 --branch v1.5.2 https://github.com/xiph/opus.git /tmp/opus
+          cd /tmp/opus
+          ./autogen.sh
+          ./configure --host=x86_64-w64-mingw32 --prefix=/tmp/ffmpeg-deps \
+            --disable-shared --enable-static --disable-doc --disable-extra-programs
+          make -j$(nproc)
+          make install
+
+      - name: Build libwebp (static, Windows x64)
+        run: |
+          git clone --depth 1 --branch v1.5.0 https://github.com/nicehash/webmproject-libwebp.git /tmp/libwebp
+          cd /tmp/libwebp
+          autoreconf -fiv
+          ./configure --host=x86_64-w64-mingw32 --prefix=/tmp/ffmpeg-deps \
+            --disable-shared --enable-static --disable-wic --disable-gif \
+            --disable-tiff --disable-jpeg --disable-png --disable-sdl
+          make -j$(nproc)
+          make install
+
+      - name: Build libogg (static, Windows x64)
+        run: |
+          git clone --depth 1 --branch v1.3.5 https://github.com/xiph/ogg.git /tmp/ogg
+          cd /tmp/ogg
+          ./autogen.sh
+          ./configure --host=x86_64-w64-mingw32 --prefix=/tmp/ffmpeg-deps \
+            --disable-shared --enable-static
+          make -j$(nproc)
+          make install
+
+      - name: Build FFmpeg (minimal, static, Windows x64)
+        run: |
+          git clone --depth 1 --branch n7.1 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg
+          cd /tmp/ffmpeg
+
+          export PKG_CONFIG_PATH=/tmp/ffmpeg-deps/lib/pkgconfig
+
+          ./configure \
+            --arch=x86_64 \
+            --target-os=mingw32 \
+            --cross-prefix=x86_64-w64-mingw32- \
+            --prefix=/tmp/ffmpeg-out \
+            --pkg-config=pkg-config \
+            --enable-static \
+            --disable-shared \
+            --disable-debug \
+            --disable-doc \
+            --disable-htmlpages \
+            --disable-manpages \
+            --disable-podpages \
+            --disable-txtpages \
+            --disable-network \
+            --disable-autodetect \
+            --disable-programs \
+            --enable-ffmpeg \
+            --disable-ffplay \
+            --disable-ffprobe \
+            --enable-small \
+            \
+            --disable-everything \
+            \
+            --enable-protocol=file \
+            --enable-protocol=pipe \
+            \
+            --enable-demuxer=s16le \
+            --enable-demuxer=ogg \
+            --enable-demuxer=opus \
+            --enable-demuxer=wav \
+            --enable-demuxer=mov \
+            --enable-demuxer=matroska \
+            --enable-demuxer=mp4 \
+            --enable-demuxer=image2 \
+            --enable-demuxer=image2pipe \
+            \
+            --enable-muxer=ogg \
+            --enable-muxer=wav \
+            --enable-muxer=mp4 \
+            --enable-muxer=image2 \
+            --enable-muxer=image2pipe \
+            --enable-muxer=null \
+            \
+            --enable-decoder=opus \
+            --enable-decoder=vorbis \
+            --enable-decoder=pcm_s16le \
+            --enable-decoder=h264 \
+            --enable-decoder=hevc \
+            --enable-decoder=vp8 \
+            --enable-decoder=vp9 \
+            --enable-decoder=mjpeg \
+            --enable-decoder=png \
+            \
+            --enable-encoder=pcm_s16le \
+            --enable-encoder=aac \
+            --enable-encoder=libwebp \
+            --enable-encoder=libopus \
+            \
+            --enable-parser=opus \
+            --enable-parser=vorbis \
+            --enable-parser=h264 \
+            --enable-parser=hevc \
+            --enable-parser=vp8 \
+            --enable-parser=vp9 \
+            --enable-parser=mjpeg \
+            --enable-parser=png \
+            \
+            --enable-filter=scale \
+            --enable-filter=aresample \
+            --enable-filter=anull \
+            --enable-filter=null \
+            \
+            --enable-libopus \
+            --enable-libwebp \
+            \
+            --extra-cflags="-I/tmp/ffmpeg-deps/include" \
+            --extra-ldflags="-L/tmp/ffmpeg-deps/lib -static"
+
+          make -j$(nproc)
+          x86_64-w64-mingw32-strip ffmpeg.exe
+
+      - name: Package
+        run: |
+          mkdir -p /tmp/release
+          cp /tmp/ffmpeg/ffmpeg.exe /tmp/release/ffmpeg-win-x64.exe
+          ls -lh /tmp/release/ffmpeg-win-x64.exe
+          echo "SIZE=$(stat -c%s /tmp/release/ffmpeg-win-x64.exe)" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-win-x64-minimal
+          path: /tmp/release/ffmpeg-win-x64.exe
+
+      - name: Create release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ffmpeg-minimal-v1
+          name: "FFmpeg Minimal Build (Windows x64)"
+          body: |
+            Minimal static ffmpeg for Hollow.
+            Includes: libopus, libwebp, aac, pcm_s16le, scale filter.
+            Size: ${{ env.SIZE }} bytes
+          files: /tmp/release/ffmpeg-win-x64.exe
+          make_latest: false
