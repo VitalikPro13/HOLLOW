@@ -3,6 +3,7 @@
 
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <dxgi1_2.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -19,6 +20,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace flutter_webrtc_plugin {
 
@@ -36,6 +38,24 @@ class WinScreenRecorder {
   void Start(const std::string& output_path, Completion completion);
   void Stop(Completion completion);
 
+  // Live frame callback for screen sharing. Called on the capture thread
+  // with NV12 data (GPU-converted from BGRA via D3D11 Video Processor).
+  struct NV12Frame {
+    const uint8_t* data_y;
+    int stride_y;
+    const uint8_t* data_uv;
+    int stride_uv;
+    int width;
+    int height;
+  };
+  using FrameCallback = std::function<void(const NV12Frame& frame)>;
+
+  // Start capture-only mode (no file recording). Uses the same native
+  // Graphics Capture pipeline as recording.
+  bool StartCapture(HMONITOR monitor, uint32_t fps, FrameCallback callback);
+  void StopCapture();
+  bool IsCapturing() const { return capturing_.load(); }
+
   bool IsRecording() const { return recording_.load(); }
   bool LastCapturedSystemAudio() const { return captured_system_audio_; }
 
@@ -44,6 +64,7 @@ class WinScreenRecorder {
   ~WinScreenRecorder();
 
   bool InitD3D11();
+  bool InitVideoProcessor(UINT32 w, UINT32 h);
   bool InitSinkWriter(const std::wstring& path, UINT32 w, UINT32 h);
   bool InitGraphicsCapture(HMONITOR monitor, UINT32 w, UINT32 h);
   void StartAudioCapture();
@@ -58,13 +79,26 @@ class WinScreenRecorder {
   void Cleanup();
 
   std::atomic<bool> recording_{false};
+  std::atomic<bool> capturing_{false};
   bool captured_system_audio_ = false;
   std::mutex mtx_;
+  FrameCallback frame_callback_;
+  uint32_t capture_fps_ = 30;
 
   // D3D11
   ComPtr<ID3D11Device> device_;
   ComPtr<ID3D11DeviceContext> ctx_;
   ComPtr<ID3D11Texture2D> staging_tex_;
+
+  // D3D11 Video Processor (GPU BGRA→NV12 for screen share)
+  ComPtr<ID3D11VideoDevice> video_device_;
+  ComPtr<ID3D11VideoContext> video_ctx_;
+  ComPtr<ID3D11VideoProcessorEnumerator> vp_enum_;
+  ComPtr<ID3D11VideoProcessor> video_processor_;
+  ComPtr<ID3D11VideoProcessorOutputView> vp_output_view_;
+  ComPtr<ID3D11Texture2D> nv12_tex_;
+  ComPtr<ID3D11Texture2D> nv12_staging_tex_;
+  bool vp_available_ = false;
 
   // Media Foundation
   ComPtr<IMFSinkWriter> writer_;

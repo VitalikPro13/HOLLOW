@@ -99,3 +99,29 @@ Singleton. Three concurrent capture sources feeding one Media Foundation Sink Wr
 Shared D3D11 device (BGRA support + video support + multithread). QPC-based timestamps. Writer starts lazily on first video frame. Frame rate limited to 30fps via QPC interval check. Graceful degradation: if loopback fails → video+mic only, if mic fails → video+system only.
 
 CMake links: `mfplat`, `mfreadwrite`, `mfuuid`, `mf`, `d3d11`, `dxgi`, `windowsapp` (WinRT), `Mmdevapi`, `Avrt`. C++20 + `/await` for C++/WinRT.
+
+### Capture-Only Mode (Screen Share)
+
+`StartCapture(HMONITOR, fps, FrameCallback)` / `StopCapture()`. Reuses the same D3D11 + Graphics Capture pipeline as recording, but without Media Foundation Sink Writer. Instead of writing to file, delivers frames via callback.
+
+**D3D11 Video Processor** (GPU BGRA→NV12): `InitVideoProcessor()` creates `ID3D11VideoProcessor` + NV12 output/staging textures. In `OnFrameArrived()`, calls `VideoProcessorBlt()` to convert the WGC BGRA texture to NV12 on GPU, then `CopyResource` to staging + `Map` for CPU readback. Full-range BT.709 color space configured via `VideoProcessorSetStreamColorSpace`/`VideoProcessorSetOutputColorSpace`.
+
+Callback signature: `FrameCallback = function<void(const NV12Frame&)>` where `NV12Frame` has `data_y`, `stride_y`, `data_uv`, `stride_uv`, `width`, `height`.
+
+## WinScreenShareCapturer (C++)
+
+File: `packages/flutter_webrtc/windows/win_screen_share_capturer.h/.cc`
+
+Thin wrapper connecting `WinScreenRecorder::StartCapture()` to WebRTC. Receives NV12 frames from the capture callback, calls `RTCVideoFrame::CreateFromNV12()` (libyuv NV12→I420 inside the custom libwebrtc DLL), then `RTCVideoSource::OnCapturedFrame()` to push into the WebRTC encoder pipeline.
+
+Requires custom-built `libwebrtc.dll` with `OnCapturedFrame`/`CreateCustomVideoSource`/`CreateFromNV12` APIs (built from `D:\libwebrtc-build\`, WebRTC m144 + PR #138).
+
+Integrated in `FlutterScreenCapture::GetDisplayMedia()` — screen sources (type `kScreen`) use native `WinScreenShareCapturer`, window sources fall back to libwebrtc's `RTCDesktopCapturer`. Monitor resolved via `EnumDisplayMonitors` matching source index.
+
+`FlutterScreenCapture::DisposeStream(stream_id)` stops the capturer when the stream is disposed (called from `flutter_webrtc.cc` before `MediaStreamDispose`). This releases the Graphics Capture session and removes the yellow capture border.
+
+## CaptureLog (C++)
+
+File: `packages/flutter_webrtc/windows/capture_log.h`
+
+File-based diagnostic logger for native screen capture. Writes to `%APPDATA%\.hollow\capture_debug.log`. Singleton with mutex-protected file writes. QPC-based timestamps. Used via `CAPLOG(...)` macro throughout the capture pipeline.

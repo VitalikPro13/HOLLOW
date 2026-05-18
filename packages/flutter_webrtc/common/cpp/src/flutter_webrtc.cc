@@ -420,6 +420,7 @@ void FlutterWebRTC::HandleMethodCall(
     const EncodableMap params =
         GetValue<EncodableMap>(*method_call.arguments());
     const std::string stream_id = findString(params, "streamId");
+    DisposeStream(stream_id);
     MediaStreamDispose(stream_id, std::move(result));
   } else if (method_call.method_name().compare("mediaStreamTrackSetEnable") ==
              0) {

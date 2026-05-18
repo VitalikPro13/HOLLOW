@@ -12,6 +12,7 @@
 #if defined(_WIN32)
 namespace flutter_webrtc_plugin {
 class WasapiLoopbackCapturer;
+class WinScreenShareCapturer;
 }  // namespace flutter_webrtc_plugin
 #endif
 
@@ -25,6 +26,9 @@ class FlutterScreenCapture : public MediaListObserver,
 
   void GetDisplayMedia(const EncodableMap& constraints,
                        std::unique_ptr<MethodResultProxy> result);
+
+  // Stop and clean up native capturers for the given stream.
+  void DisposeStream(const std::string& stream_id);
 
   void GetDesktopSources(const EncodableList& types,
                          std::unique_ptr<MethodResultProxy> result);
@@ -64,10 +68,10 @@ class FlutterScreenCapture : public MediaListObserver,
   std::vector<scoped_refptr<MediaSource>> sources_;
 
 #if defined(_WIN32)
-  // Active loopback audio capturers, keyed by stream UUID. Kept alive for
-  // the lifetime of the screen-share stream. Cleared on plugin teardown.
   std::map<std::string, std::unique_ptr<WasapiLoopbackCapturer>>
       loopback_capturers_;
+  std::map<std::string, std::unique_ptr<WinScreenShareCapturer>>
+      screen_share_capturers_;
 #endif
 };
 

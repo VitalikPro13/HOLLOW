@@ -3,6 +3,7 @@
 #endif
 
 #include "win_screen_recorder.h"
+#include "capture_log.h"
 
 #include <audioclient.h>
 #include <avrt.h>
@@ -178,6 +179,122 @@ bool WinScreenRecorder::InitD3D11() {
 }
 
 // ---------------------------------------------------------------------------
+// D3D11 Video Processor (GPU BGRA→NV12)
+// ---------------------------------------------------------------------------
+
+bool WinScreenRecorder::InitVideoProcessor(UINT32 w, UINT32 h) {
+  vp_available_ = false;
+  CAPLOG("InitVideoProcessor: %ux%u", w, h);
+
+  HRESULT hr = device_.As(&video_device_);
+  if (FAILED(hr)) {
+    CAPLOG("VP: ID3D11VideoDevice QI failed: 0x%08X", hr);
+    return false;
+  }
+  CAPLOG("VP: ID3D11VideoDevice OK");
+
+  ComPtr<ID3D11DeviceContext> base_ctx;
+  device_->GetImmediateContext(&base_ctx);
+  hr = base_ctx.As(&video_ctx_);
+  if (FAILED(hr)) {
+    CAPLOG("VP: ID3D11VideoContext QI failed: 0x%08X", hr);
+    return false;
+  }
+  CAPLOG("VP: ID3D11VideoContext OK");
+
+  D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc = {};
+  desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+  desc.InputWidth = w;
+  desc.InputHeight = h;
+  desc.OutputWidth = w;
+  desc.OutputHeight = h;
+  desc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+
+  hr = video_device_->CreateVideoProcessorEnumerator(&desc, &vp_enum_);
+  if (FAILED(hr)) {
+    CAPLOG("VP: CreateVideoProcessorEnumerator failed: 0x%08X", hr);
+    return false;
+  }
+  CAPLOG("VP: enumerator OK");
+
+  hr = video_device_->CreateVideoProcessor(vp_enum_.Get(), 0,
+                                           &video_processor_);
+  if (FAILED(hr)) {
+    CAPLOG("VP: CreateVideoProcessor failed: 0x%08X", hr);
+    return false;
+  }
+  CAPLOG("VP: processor OK");
+
+  // Set full-range (0-255) color space for both input and output.
+  // Without this, the VP applies BT.601 limited range (16-235) which
+  // crushes blacks and dims the entire image.
+  D3D11_VIDEO_PROCESSOR_COLOR_SPACE cs = {};
+  cs.Usage = 0;          // playback
+  cs.RGB_Range = 0;      // 0 = full range (0-255)
+  cs.YCbCr_Matrix = 1;   // BT.709
+  cs.YCbCr_xvYCC = 0;
+  cs.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
+  video_ctx_->VideoProcessorSetStreamColorSpace(video_processor_.Get(), 0, &cs);
+  video_ctx_->VideoProcessorSetOutputColorSpace(video_processor_.Get(), &cs);
+  CAPLOG("VP: color space set to full range (0-255) BT.709");
+
+  // NV12 output texture — D3D11_BIND_RENDER_TARGET is required for
+  // VideoProcessorOutputView on most drivers.
+  D3D11_TEXTURE2D_DESC nv12_desc = {};
+  nv12_desc.Width = w;
+  nv12_desc.Height = h;
+  nv12_desc.MipLevels = 1;
+  nv12_desc.ArraySize = 1;
+  nv12_desc.Format = DXGI_FORMAT_NV12;
+  nv12_desc.SampleDesc.Count = 1;
+  nv12_desc.Usage = D3D11_USAGE_DEFAULT;
+  nv12_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+  hr = device_->CreateTexture2D(&nv12_desc, nullptr, &nv12_tex_);
+  if (FAILED(hr)) {
+    CAPLOG("VP: NV12 RT (BIND_RENDER_TARGET) failed: 0x%08X, retrying without", hr);
+    nv12_desc.BindFlags = 0;
+    hr = device_->CreateTexture2D(&nv12_desc, nullptr, &nv12_tex_);
+    if (FAILED(hr)) {
+      CAPLOG("VP: NV12 texture creation failed entirely: 0x%08X", hr);
+      return false;
+    }
+  }
+  CAPLOG("VP: NV12 output texture OK");
+
+  D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC ovd = {};
+  ovd.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+  ovd.Texture2D.MipSlice = 0;
+  hr = video_device_->CreateVideoProcessorOutputView(
+      nv12_tex_.Get(), vp_enum_.Get(), &ovd, &vp_output_view_);
+  if (FAILED(hr)) {
+    CAPLOG("VP: output view failed: 0x%08X", hr);
+    return false;
+  }
+  CAPLOG("VP: output view OK");
+
+  D3D11_TEXTURE2D_DESC staging_desc = {};
+  staging_desc.Width = w;
+  staging_desc.Height = h;
+  staging_desc.MipLevels = 1;
+  staging_desc.ArraySize = 1;
+  staging_desc.Format = DXGI_FORMAT_NV12;
+  staging_desc.SampleDesc.Count = 1;
+  staging_desc.Usage = D3D11_USAGE_STAGING;
+  staging_desc.BindFlags = 0;
+  staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  hr = device_->CreateTexture2D(&staging_desc, nullptr, &nv12_staging_tex_);
+  if (FAILED(hr)) {
+    CAPLOG("VP: NV12 staging failed: 0x%08X", hr);
+    return false;
+  }
+  CAPLOG("VP: NV12 staging texture OK");
+
+  vp_available_ = true;
+  CAPLOG("VP: fully initialized %ux%u BGRA→NV12 (GPU)", w, h);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Sink Writer
 // ---------------------------------------------------------------------------
 
@@ -341,7 +458,9 @@ bool WinScreenRecorder::InitGraphicsCapture(HMONITOR monitor,
 void WinScreenRecorder::OnFrameArrived(
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& pool,
     winrt::Windows::Foundation::IInspectable const&) {
-  if (!recording_.load()) return;
+  bool is_recording = recording_.load();
+  bool is_capturing = capturing_.load();
+  if (!is_recording && !is_capturing) return;
 
   auto frame = pool.TryGetNextFrame();
   if (!frame) return;
@@ -349,8 +468,10 @@ void WinScreenRecorder::OnFrameArrived(
   LARGE_INTEGER qpc;
   QueryPerformanceCounter(&qpc);
 
-  // Frame rate limiting: skip frames that arrive faster than kFps.
-  const INT64 min_interval = qpc_freq_.QuadPart / kFps;
+  // Frame rate limiting.
+  uint32_t effective_fps = is_capturing ? capture_fps_ : kFps;
+  const INT64 min_interval =
+      static_cast<INT64>(qpc_freq_.QuadPart) / effective_fps;
   if (last_frame_qpc_ != 0 && (qpc.QuadPart - last_frame_qpc_) < min_interval) {
     frame.Close();
     return;
@@ -358,10 +479,71 @@ void WinScreenRecorder::OnFrameArrived(
   last_frame_qpc_ = qpc.QuadPart;
 
   auto* tex = GetDXGITexture(frame, device_.Get());
-  if (tex) {
-    WriteVideoFrame(tex, qpc.QuadPart);
-    tex->Release();
+  if (!tex) {
+    frame.Close();
+    return;
   }
+
+  if (is_recording) {
+    WriteVideoFrame(tex, qpc.QuadPart);
+  }
+
+  if (is_capturing && frame_callback_ && vp_available_) {
+    static int frame_count = 0;
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC ivd = {};
+    ivd.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    ivd.Texture2D.MipSlice = 0;
+    ComPtr<ID3D11VideoProcessorInputView> input_view;
+    HRESULT hr = video_device_->CreateVideoProcessorInputView(
+        tex, vp_enum_.Get(), &ivd, &input_view);
+
+    if (FAILED(hr)) {
+      if (frame_count == 0) CAPLOG("Frame: InputView failed: 0x%08X", hr);
+    } else {
+      D3D11_VIDEO_PROCESSOR_STREAM stream_data = {};
+      stream_data.Enable = TRUE;
+      stream_data.pInputSurface = input_view.Get();
+      hr = video_ctx_->VideoProcessorBlt(
+          video_processor_.Get(), vp_output_view_.Get(), 0, 1, &stream_data);
+
+      if (FAILED(hr)) {
+        if (frame_count == 0) CAPLOG("Frame: VideoProcessorBlt failed: 0x%08X", hr);
+      } else {
+        ctx_->CopyResource(nv12_staging_tex_.Get(), nv12_tex_.Get());
+
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        hr = ctx_->Map(nv12_staging_tex_.Get(), 0, D3D11_MAP_READ, 0,
+                       &mapped);
+        if (FAILED(hr)) {
+          if (frame_count == 0) CAPLOG("Frame: Map NV12 staging failed: 0x%08X", hr);
+        } else {
+          int w = static_cast<int>(cap_w_);
+          int h = static_cast<int>(cap_h_);
+          auto* y_data = static_cast<const uint8_t*>(mapped.pData);
+          auto* uv_data = y_data + mapped.RowPitch * h;
+
+          NV12Frame nv12 = {};
+          nv12.data_y = y_data;
+          nv12.stride_y = static_cast<int>(mapped.RowPitch);
+          nv12.data_uv = uv_data;
+          nv12.stride_uv = static_cast<int>(mapped.RowPitch);
+          nv12.width = w;
+          nv12.height = h;
+
+          if (frame_count == 0) {
+            CAPLOG("Frame #0: VP Blt OK, NV12 %dx%d stride=%d, delivering to WebRTC",
+                   w, h, mapped.RowPitch);
+          }
+          frame_callback_(nv12);
+
+          ctx_->Unmap(nv12_staging_tex_.Get(), 0);
+          frame_count++;
+        }
+      }
+    }
+  }
+
+  tex->Release();
   frame.Close();
 }
 
@@ -696,6 +878,82 @@ void WinScreenRecorder::Stop(Completion completion) {
   Cleanup();
   std::cerr << "[WinRec] recording stopped\n";
   completion("");
+}
+
+bool WinScreenRecorder::StartCapture(HMONITOR monitor, uint32_t fps,
+                                     FrameCallback callback) {
+  if (capturing_.load() || recording_.load()) return false;
+  if (!callback) return false;
+
+  if (!IsGraphicsCaptureAvailable()) return false;
+
+  capture_fps_ = fps > 0 ? fps : 30;
+  frame_callback_ = std::move(callback);
+  last_frame_qpc_ = 0;
+
+  MONITORINFO mi = {sizeof(MONITORINFO)};
+  if (!GetMonitorInfoW(monitor, &mi)) return false;
+  cap_w_ = mi.rcMonitor.right - mi.rcMonitor.left;
+  cap_h_ = mi.rcMonitor.bottom - mi.rcMonitor.top;
+  // Ensure even dimensions for I420 conversion downstream.
+  cap_w_ &= ~1u;
+  cap_h_ &= ~1u;
+
+  if (!InitD3D11()) {
+    StopCapture();
+    return false;
+  }
+
+  CAPLOG("StartCapture: D3D11 OK, init VP %ux%u", cap_w_, cap_h_);
+  if (!InitVideoProcessor(cap_w_, cap_h_)) {
+    CAPLOG("StartCapture: VP init failed, aborting");
+    StopCapture();
+    return false;
+  }
+
+  if (!InitGraphicsCapture(monitor, cap_w_, cap_h_)) {
+    StopCapture();
+    return false;
+  }
+
+  capturing_.store(true);
+  session_.StartCapture();
+  std::cerr << "[WinRec] capture-only started " << cap_w_ << "x" << cap_h_
+            << " @ " << capture_fps_ << " fps (GPU NV12)\n";
+  return true;
+}
+
+void WinScreenRecorder::StopCapture() {
+  if (!capturing_.load()) return;
+  capturing_.store(false);
+
+  if (session_) {
+    session_.Close();
+    session_ = nullptr;
+  }
+  revoker_.revoke();
+  if (pool_) {
+    pool_.Close();
+    pool_ = nullptr;
+  }
+  item_ = nullptr;
+
+  frame_callback_ = nullptr;
+
+  // Release Video Processor resources.
+  vp_available_ = false;
+  vp_output_view_.Reset();
+  video_processor_.Reset();
+  vp_enum_.Reset();
+  nv12_staging_tex_.Reset();
+  nv12_tex_.Reset();
+  video_ctx_.Reset();
+  video_device_.Reset();
+
+  staging_tex_.Reset();
+  ctx_.Reset();
+  device_.Reset();
+  std::cerr << "[WinRec] capture-only stopped\n";
 }
 
 void WinScreenRecorder::Cleanup() {
