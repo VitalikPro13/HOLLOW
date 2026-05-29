@@ -30,6 +30,9 @@ Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Uses `LayoutBu
 - Archive tab
 - Settings tab
 
+### Floating Pill Layering
+`MobileShell` wraps its `Scaffold` in a `Stack` with `MobileActiveCallPill` and `MobileVoiceChannelPill` on top. These pills are also placed in `MobileChatRoute`'s Stack so they remain visible on pushed chat routes. Full-screen voice/call routes use `PageRouteBuilder` (slide-from-bottom) and cover the pills by being pushed on top in the navigator stack. **CRITICAL:** Pills must NOT go in `app.dart` builder — that layer is above the navigator and no route can cover it.
+
 ### MobileChatsTab — Ambient Background & Header
 **File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart`
 - **Ambient blob:** Wraps tab in `AmbientBackground(color1: accent, color2: accent, opacity: 0.12)`. Both blobs teal (no purple like desktop). Uses `SharedTickers.instance.ambient` (45s figure-8 at ~15fps). Same `_AmbientPainter` radial gradients as desktop.
@@ -435,3 +438,101 @@ All FFI-dependent providers are overridden with mock notifiers that return stati
 - `test/widget/desktop_shell_test.dart` — 5 tests (responsive breakpoints, themes)
 - `test/widget/mobile_nav_badge_test.dart` — 3 tests (unread badges, pending friends)
 - `test/widget_test.dart` — 1 smoke test
+
+---
+
+## MobileVoiceChannelRoute
+
+**File:** `lib/src/ui/mobile/mobile_voice_channel_route.dart`
+**Class:** `MobileVoiceChannelRoute extends ConsumerStatefulWidget`
+**Purpose:** Full-screen voice channel view (participants, video, controls). Pushed as `PageRouteBuilder` with slide-from-bottom transition.
+
+### Constructor
+| Parameter | Type | Description |
+|---|---|---|
+| `serverId` | `String` | Server ID |
+| `channelId` | `String` | Voice channel ID |
+| `channelName` | `String` | Display name |
+
+### Layout
+- Top bar: chevron-down (pops route) + `# channelName` + duration MM:SS
+- Center: `MobileClusteredAvatars` (audio mode) or video grid (camera/screen share mode)
+- Bottom controls: mute, deafen, camera, flip camera (mobile+camera on), leave (red)
+- Auto-pops when `voiceChannelProvider` changes to different channel or leaves
+
+### Video Modes
+1. **Remote screen share**: full-bleed `RTCVideoView` with `ObjectFitContain` + local camera PiP
+2. **Single local camera**: full self-view with mirror
+3. **Single remote camera**: full remote + local PiP
+4. **Multi-camera grid**: `Wrap` layout, tiles adapt to count
+
+### Navigation Pattern
+Voice channel tap in accordion (`mobile_chats_tab.dart`) pushes TWO routes:
+1. `MobileChatRoute` (text chat) — underneath
+2. `MobileVoiceChannelRoute` (voice view) — on top via `PageRouteBuilder` slide-from-bottom
+
+Popping the voice route reveals the text chat. User can then read/send messages in the channel.
+
+---
+
+## MobileVoiceChannelPill
+
+**File:** `lib/src/ui/mobile/mobile_voice_channel_pill.dart`
+**Class:** `MobileVoiceChannelPill extends ConsumerStatefulWidget`
+**Purpose:** Floating draggable pill shown when in a voice channel. Tap body returns to voice route.
+
+### Layering
+Lives in BOTH `MobileShell` Stack (visible on tabs) AND `MobileChatRoute` Stack (visible on chats). The voice route's `PageRouteBuilder` slide covers it when the full-screen view is active. **Never put in `app.dart` builder** — that layer is above the navigator and uncoverable.
+
+### Visibility
+- `vcState.isInVoiceChannel && callState.status == CallStatus.idle`
+- Channel name from `vcState.currentChannelName` (NOT `channelListProvider`)
+
+### Layout
+`Positioned(bottom: 80)` → draggable Container (height 48, pill shape, green border, shadow) with:
+- StatusDot (green, pulse) + `# channelName` + duration MM:SS + mute/deafen/leave buttons
+
+---
+
+## MobileVoiceAvatars (Shared Widgets)
+
+**File:** `lib/src/ui/mobile/mobile_voice_avatars.dart`
+**Purpose:** Shared avatar and control widgets extracted from `mobile_call_video_view.dart`, used by both DM calls and voice channels.
+
+### MobileClusteredAvatars
+Adaptive grid layout based on participant count (1→single, 2→row, 3→2+1, 4→2+2, 5→2+1+2, 6+→3 cols). Avatar size: 96 (≤2), 80 (≤4), 64 (>4).
+
+### MobileSpeakingAvatar
+`ConsumerStatefulWidget` with animated teal glow border (300ms easeOut). 3px border + 16px blur shadow when speaking. Muted badge (red micOff) at bottom-right.
+
+### MobileControlButton
+Circular button (configurable size/color). `AnimatedOpacity` 0.4 when disabled.
+
+---
+
+## Voice Channel Status Strip
+
+**Widget:** `_VoiceChannelStatusStrip` (private, in `mobile_chat_route.dart`)
+**Purpose:** Cross-server green strip shown in any chat when user is in a voice channel.
+
+### Layout
+Green bar (success color, 0.1 alpha background): dot + "In voice: #channelName" + "Tap to return" + chevronUp. Taps push `MobileVoiceChannelRoute` via `PageRouteBuilder` slide-from-bottom.
+
+### Visibility
+- `vcState.isInVoiceChannel` — shown in both DM and channel chats
+- Channel name from `vcState.currentChannelName`
+
+---
+
+## Audio Settings (System Tab)
+
+Added to `_SystemTab` in `mobile_settings_tab.dart`:
+
+### Voice & Audio Section
+- **Audio quality picker**: 3 pills (Voice/Music/Hi-Fi) with description label underneath. Reads/writes `audioQualityProvider`
+- **Mic gain slider**: 0.0–2.0, reads/writes `micGainProvider`
+- **Audio processing info**: Echo cancellation, noise suppression, AGC shown as "Auto" (always on)
+
+### Ringtone Section
+- **Ringtone picker**: file name + Choose button + clear (X). Reads/writes `ringtonePathProvider`
+- **Ringtone volume slider**: 0.0–1.0, reads/writes `ringtoneVolumeProvider`

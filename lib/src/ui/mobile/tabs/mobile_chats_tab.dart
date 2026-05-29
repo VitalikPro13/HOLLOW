@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
+import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
@@ -30,6 +31,7 @@ import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_channel_actions.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_server_settings_route.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -109,6 +111,121 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
         ref.read(selectedChannelProvider.notifier).state = null;
       }
     });
+  }
+
+  Future<void> _openVoiceChannel(String serverId, ChannelInfo channel) async {
+    final vcState = ref.read(voiceChannelProvider);
+    final callState = ref.read(callProvider);
+
+    if (callState.status != CallStatus.idle) {
+      if (mounted) {
+        HollowToast.show(context, 'Leave your call first',
+            type: HollowToastType.error);
+      }
+      return;
+    }
+
+    // Already in THIS voice channel — open text chat + voice route on top.
+    if (vcState.currentServerId == serverId &&
+        vcState.currentChannelId == channel.channelId) {
+      if (!mounted) return;
+      final nav = Navigator.of(context, rootNavigator: true);
+      ref.read(selectedServerProvider.notifier).state = serverId;
+      ref.read(selectedChannelProvider.notifier).state = channel.channelId;
+      nav.push(
+        MaterialPageRoute(
+          builder: (_) => MobileChatRoute(
+            serverId: serverId,
+            channelId: channel.channelId,
+            channelName: channel.name,
+          ),
+        ),
+      ).then((_) {
+        if (mounted) {
+          ref.read(selectedServerProvider.notifier).state = null;
+          ref.read(selectedChannelProvider.notifier).state = null;
+        }
+      });
+      nav.push(PageRouteBuilder(
+        pageBuilder: (_, __, ___) => MobileVoiceChannelRoute(
+          serverId: serverId,
+          channelId: channel.channelId,
+          channelName: channel.name,
+        ),
+        transitionsBuilder: (_, anim, __, child) => SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0, 1),
+            end: Offset.zero,
+          ).animate(CurvedAnimation(parent: anim, curve: Curves.easeOut)),
+          child: child,
+        ),
+      ));
+      return;
+    }
+
+    // Already in a DIFFERENT voice channel — confirm switch.
+    if (vcState.isInVoiceChannel) {
+      if (!mounted) return;
+      final confirmed = await showHollowDialog<bool>(
+        context: context,
+        builder: (ctx) {
+          final h = HollowTheme.of(ctx);
+          return HollowDialog(
+            title: 'Switch Voice Channel?',
+            content: Text(
+              'Leave current voice channel and join #${channel.name}?',
+              style: HollowTypography.body.copyWith(color: h.textSecondary),
+            ),
+            actions: [
+              HollowButton.ghost(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              HollowButton.filled(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Switch'),
+              ),
+            ],
+          );
+        },
+      );
+      if (confirmed != true || !mounted) return;
+    }
+
+    // Join and push: text chat first (so back arrow reveals it), then voice on top.
+    ref.read(voiceChannelProvider.notifier).joinChannel(serverId, channel.channelId);
+    if (!mounted) return;
+    final nav = Navigator.of(context, rootNavigator: true);
+    ref.read(selectedServerProvider.notifier).state = serverId;
+    ref.read(selectedChannelProvider.notifier).state = channel.channelId;
+    nav.push(
+      MaterialPageRoute(
+        builder: (_) => MobileChatRoute(
+          serverId: serverId,
+          channelId: channel.channelId,
+          channelName: channel.name,
+        ),
+      ),
+    ).then((_) {
+      if (mounted) {
+        ref.read(selectedServerProvider.notifier).state = null;
+        ref.read(selectedChannelProvider.notifier).state = null;
+      }
+    });
+    nav.push(PageRouteBuilder(
+      pageBuilder: (_, __, ___) => MobileVoiceChannelRoute(
+        serverId: serverId,
+        channelId: channel.channelId,
+        channelName: channel.name,
+      ),
+      transitionsBuilder: (_, anim, __, child) => SlideTransition(
+        position: Tween<Offset>(
+          begin: const Offset(0, 1),
+          end: Offset.zero,
+        ).animate(CurvedAnimation(parent: anim, curve: Curves.easeOut)),
+        child: child,
+      ),
+    ));
   }
 
   @override
@@ -227,7 +344,13 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                   });
                 },
                 onLongPress: () => _showServerSheet(context, item.id, item.name),
-                onChannelTap: (channel) => _openChannelChat(item.id, channel),
+                onChannelTap: (channel) {
+                  if (channel.channelType == ChannelType.voice) {
+                    _openVoiceChannel(item.id, channel);
+                  } else {
+                    _openChannelChat(item.id, channel);
+                  }
+                },
               );
             }
           },

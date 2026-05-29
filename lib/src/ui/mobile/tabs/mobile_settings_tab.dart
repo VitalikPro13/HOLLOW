@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -653,11 +654,274 @@ class _SystemTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // Image quality
-        _SectionLabel(label: 'Media'),
+        // Voice & Audio
+        _SectionLabel(label: 'Voice & Audio'),
         const SizedBox(height: HollowSpacing.sm),
-        Text('Image quality and data settings will be available in a future update.',
-            style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary)),
+        _AudioQualityPicker(),
+        const SizedBox(height: HollowSpacing.md),
+        _MicGainSlider(),
+        const SizedBox(height: HollowSpacing.md),
+        _AudioProcessingInfo(),
+
+        const SizedBox(height: HollowSpacing.xl),
+
+        // Ringtone
+        _SectionLabel(label: 'Ringtone'),
+        const SizedBox(height: HollowSpacing.sm),
+        _RingtonePicker(),
+        const SizedBox(height: HollowSpacing.md),
+        _RingtoneVolumeSlider(),
+      ],
+    );
+  }
+}
+
+class _AudioQualityPicker extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final asyncPreset = ref.watch(audioQualityProvider);
+    final current = asyncPreset.valueOrNull ?? AudioQualityPreset.voice;
+
+    const descriptions = {
+      AudioQualityPreset.voice: '32 kbps mono — speech',
+      AudioQualityPreset.music: '128 kbps stereo — music',
+      AudioQualityPreset.hifi: '256 kbps stereo — lossless',
+    };
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Audio Quality',
+            style: HollowTypography.bodySmall
+                .copyWith(color: hollow.textSecondary)),
+        const SizedBox(height: HollowSpacing.sm),
+        Row(
+          children: AudioQualityPreset.values.map((preset) {
+            final isSelected = preset == current;
+            return Padding(
+              padding: const EdgeInsets.only(right: HollowSpacing.sm),
+              child: HollowPressable(
+                onTap: () => ref
+                    .read(audioQualityProvider.notifier)
+                    .setPreset(preset),
+                borderRadius: BorderRadius.circular(20),
+                backgroundColor:
+                    isSelected ? hollow.accent : hollow.surface,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.md,
+                  vertical: HollowSpacing.sm,
+                ),
+                child: Text(
+                  preset.label,
+                  style: HollowTypography.caption.copyWith(
+                    color: isSelected
+                        ? hollow.textOnAccent
+                        : hollow.textSecondary,
+                    fontWeight:
+                        isSelected ? FontWeight.w600 : FontWeight.w400,
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+        Text(
+          descriptions[current] ?? '',
+          style: HollowTypography.caption.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 11,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MicGainSlider extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final asyncGain = ref.watch(micGainProvider);
+    final gain = asyncGain.valueOrNull ?? 1.0;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('Microphone Gain',
+                style: HollowTypography.bodySmall
+                    .copyWith(color: hollow.textSecondary)),
+            Text('${gain.toStringAsFixed(1)}x',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.accent,
+                  fontWeight: FontWeight.w600,
+                )),
+          ],
+        ),
+        Slider(
+          value: gain.clamp(0.0, 2.0),
+          min: 0.0,
+          max: 2.0,
+          divisions: 40,
+          activeColor: hollow.accent,
+          inactiveColor: hollow.border,
+          onChanged: (v) =>
+              ref.read(micGainProvider.notifier).setGain(v),
+        ),
+      ],
+    );
+  }
+}
+
+class _AudioProcessingInfo extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Audio Processing',
+            style: HollowTypography.bodySmall
+                .copyWith(color: hollow.textSecondary)),
+        const SizedBox(height: HollowSpacing.xs),
+        _ProcessingRow(label: 'Echo Cancellation', hollow: hollow),
+        _ProcessingRow(label: 'Noise Suppression', hollow: hollow),
+        _ProcessingRow(label: 'Auto Gain Control', hollow: hollow),
+      ],
+    );
+  }
+}
+
+class _ProcessingRow extends StatelessWidget {
+  final String label;
+  final HollowTheme hollow;
+  const _ProcessingRow({required this.label, required this.hollow});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label,
+              style: HollowTypography.bodySmall
+                  .copyWith(color: hollow.textPrimary)),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(LucideIcons.check, size: 14, color: hollow.success),
+              const SizedBox(width: 4),
+              Text('Auto',
+                  style: HollowTypography.caption
+                      .copyWith(color: hollow.textSecondary, fontSize: 11)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RingtonePicker extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final asyncPath = ref.watch(ringtonePathProvider);
+    final path = asyncPath.valueOrNull;
+
+    String displayName = 'Default';
+    if (path != null && path.isNotEmpty) {
+      displayName = path.split(Platform.pathSeparator).last;
+      if (displayName.length > 30) {
+        displayName = '${displayName.substring(0, 27)}...';
+      }
+    }
+
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Ringtone',
+                  style: HollowTypography.bodySmall
+                      .copyWith(color: hollow.textSecondary)),
+              const SizedBox(height: 2),
+              Text(displayName,
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textPrimary,
+                    fontWeight: FontWeight.w500,
+                  )),
+            ],
+          ),
+        ),
+        if (path != null && path.isNotEmpty)
+          HollowPressable(
+            onTap: () =>
+                ref.read(ringtonePathProvider.notifier).setPath(null),
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            padding: const EdgeInsets.all(HollowSpacing.xs),
+            child:
+                Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
+          ),
+        const SizedBox(width: HollowSpacing.sm),
+        HollowButton.ghost(
+          compact: true,
+          onPressed: () async {
+            final result = await FilePicker.platform
+                .pickFiles(type: FileType.audio);
+            if (result != null && result.files.single.path != null) {
+              ref
+                  .read(ringtonePathProvider.notifier)
+                  .setPath(result.files.single.path!);
+            }
+          },
+          child: const Text('Choose'),
+        ),
+      ],
+    );
+  }
+}
+
+class _RingtoneVolumeSlider extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final asyncVol = ref.watch(ringtoneVolumeProvider);
+    final volume = asyncVol.valueOrNull ?? 0.5;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('Ringtone Volume',
+                style: HollowTypography.bodySmall
+                    .copyWith(color: hollow.textSecondary)),
+            Text('${(volume * 100).round()}%',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.accent,
+                  fontWeight: FontWeight.w600,
+                )),
+          ],
+        ),
+        Slider(
+          value: volume.clamp(0.0, 1.0),
+          min: 0.0,
+          max: 1.0,
+          divisions: 20,
+          activeColor: hollow.accent,
+          inactiveColor: hollow.border,
+          onChanged: (v) =>
+              ref.read(ringtoneVolumeProvider.notifier).setVolume(v),
+        ),
       ],
     );
   }

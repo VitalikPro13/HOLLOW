@@ -11,11 +11,12 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/mobile/mobile_voice_avatars.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+
 
 /// Full-screen call overlay that slides up from the bottom inside a DM chat.
 /// Handles all call states: ringing, connecting, active (audio + video).
-/// Reusable for voice channels later (pass participant list).
 class MobileCallScreen extends ConsumerStatefulWidget {
   final String peerId;
   const MobileCallScreen({super.key, required this.peerId});
@@ -180,7 +181,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
   Widget _buildAudioView(
       HollowTheme hollow, CallState call, String localPeerId) {
     return Center(
-      child: _ClusteredAvatars(
+      child: MobileClusteredAvatars(
         participants: [localPeerId, widget.peerId],
         speakingSet: {
           if (call.isLocalSpeaking) localPeerId,
@@ -300,7 +301,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          _ControlButton(
+          MobileControlButton(
             icon: call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
             iconSize: iconSize,
             size: buttonSize,
@@ -312,7 +313,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                 ? () => ref.read(callProvider.notifier).toggleMute()
                 : null,
           ),
-          _ControlButton(
+          MobileControlButton(
             icon: call.isVideoEnabled
                 ? LucideIcons.video
                 : LucideIcons.videoOff,
@@ -327,7 +328,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                 ? () => ref.read(callProvider.notifier).toggleVideo()
                 : null,
           ),
-          _ControlButton(
+          MobileControlButton(
             icon: LucideIcons.phoneOff,
             iconSize: iconSize,
             size: buttonSize,
@@ -336,257 +337,6 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
             onTap: () => ref.read(callProvider.notifier).endCall(),
           ),
         ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────
-// Clustered avatar layout with speaking indicators
-// ─────────────────────────────────────────────────
-
-class _ClusteredAvatars extends StatelessWidget {
-  final List<String> participants;
-  final Set<String> speakingSet;
-  final Set<String> mutedSet;
-
-  const _ClusteredAvatars({
-    required this.participants,
-    required this.speakingSet,
-    this.mutedSet = const {},
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final count = participants.length;
-    final avatarSize = count <= 2 ? 96.0 : count <= 4 ? 80.0 : 64.0;
-    final gap = avatarSize * 0.25;
-
-    final List<List<String>> rows;
-    switch (count) {
-      case 1:
-        rows = [
-          [participants[0]]
-        ];
-      case 2:
-        rows = [participants];
-      case 3:
-        rows = [
-          participants.sublist(0, 2),
-          [participants[2]],
-        ];
-      case 4:
-        rows = [
-          participants.sublist(0, 2),
-          participants.sublist(2, 4),
-        ];
-      case 5:
-        rows = [
-          participants.sublist(0, 2),
-          [participants[2]],
-          participants.sublist(3, 5),
-        ];
-      default:
-        rows = [];
-        for (var i = 0; i < count; i += 3) {
-          rows.add(participants.sublist(i, (i + 3).clamp(0, count)));
-        }
-    }
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        for (int r = 0; r < rows.length; r++) ...[
-          if (r > 0) SizedBox(height: gap),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (int c = 0; c < rows[r].length; c++) ...[
-                if (c > 0) SizedBox(width: gap),
-                _SpeakingAvatar(
-                  peerId: rows[r][c],
-                  size: avatarSize,
-                  isSpeaking: speakingSet.contains(rows[r][c]),
-                  isMuted: mutedSet.contains(rows[r][c]),
-                ),
-              ],
-            ],
-          ),
-        ],
-      ],
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────
-// Single avatar with animated teal speaking glow (rounded square)
-// ─────────────────────────────────────────────────
-
-class _SpeakingAvatar extends ConsumerStatefulWidget {
-  final String peerId;
-  final double size;
-  final bool isSpeaking;
-  final bool isMuted;
-
-  const _SpeakingAvatar({
-    required this.peerId,
-    required this.size,
-    required this.isSpeaking,
-    this.isMuted = false,
-  });
-
-  @override
-  ConsumerState<_SpeakingAvatar> createState() => _SpeakingAvatarState();
-}
-
-class _SpeakingAvatarState extends ConsumerState<_SpeakingAvatar>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _glowController;
-  late Animation<double> _glowAnim;
-
-  @override
-  void initState() {
-    super.initState();
-    _glowController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 300),
-    );
-    _glowAnim = CurvedAnimation(
-      parent: _glowController,
-      curve: Curves.easeOut,
-    );
-    if (widget.isSpeaking) _glowController.forward();
-  }
-
-  @override
-  void didUpdateWidget(_SpeakingAvatar old) {
-    super.didUpdateWidget(old);
-    if (widget.isSpeaking && !old.isSpeaking) {
-      _glowController.forward();
-    } else if (!widget.isSpeaking && old.isSpeaking) {
-      _glowController.reverse();
-    }
-  }
-
-  @override
-  void dispose() {
-    _glowController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final profiles = ref.watch(profileProvider);
-    final displayName = displayNameFor(profiles, widget.peerId);
-    final localPeerId = ref.read(identityProvider).peerId ?? '';
-    final isMe = widget.peerId == localPeerId;
-    final radius = hollow.radiusMd;
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        AnimatedBuilder(
-          animation: _glowAnim,
-          builder: (context, child) {
-            return Container(
-              padding: const EdgeInsets.all(4),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(radius + 4),
-                border: Border.all(
-                  color: hollow.accent
-                      .withValues(alpha: _glowAnim.value * 0.9),
-                  width: 3 * _glowAnim.value,
-                ),
-                boxShadow: _glowAnim.value > 0.01
-                    ? [
-                        BoxShadow(
-                          color: hollow.accent
-                              .withValues(alpha: _glowAnim.value * 0.3),
-                          blurRadius: 16 * _glowAnim.value,
-                          spreadRadius: 2 * _glowAnim.value,
-                        ),
-                      ]
-                    : null,
-              ),
-              child: child,
-            );
-          },
-          child: Stack(
-            children: [
-              HollowAvatar(peerId: widget.peerId, size: widget.size),
-              if (widget.isMuted)
-                Positioned(
-                  right: 0,
-                  bottom: 0,
-                  child: Container(
-                    padding: const EdgeInsets.all(3),
-                    decoration: BoxDecoration(
-                      color: hollow.error,
-                      borderRadius: BorderRadius.circular(radius * 0.6),
-                      border:
-                          Border.all(color: hollow.background, width: 2),
-                    ),
-                    child: Icon(LucideIcons.micOff,
-                        size: 12, color: Colors.white),
-                  ),
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        Text(
-          isMe ? 'You' : displayName,
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
-            fontWeight: FontWeight.w500,
-          ),
-          overflow: TextOverflow.ellipsis,
-        ),
-      ],
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────
-// Circular control button
-// ─────────────────────────────────────────────────
-
-class _ControlButton extends StatelessWidget {
-  final IconData icon;
-  final double iconSize;
-  final double size;
-  final Color color;
-  final Color backgroundColor;
-  final VoidCallback? onTap;
-
-  const _ControlButton({
-    required this.icon,
-    required this.iconSize,
-    required this.size,
-    required this.color,
-    required this.backgroundColor,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedOpacity(
-        opacity: onTap != null ? 1.0 : 0.4,
-        duration: const Duration(milliseconds: 150),
-        child: Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(
-            color: backgroundColor,
-            shape: BoxShape.circle,
-          ),
-          child: Center(
-            child: Icon(icon, size: iconSize, color: color),
-          ),
-        ),
       ),
     );
   }
@@ -635,6 +385,7 @@ class MobileCallStatusStrip extends ConsumerWidget {
       onTap: () {
         Navigator.of(context).push(
           PageRouteBuilder(
+            settings: const RouteSettings(name: 'call-screen'),
             pageBuilder: (_, __, ___) =>
                 MobileCallScreen(peerId: peerId),
             transitionsBuilder: (_, anim, __, child) {

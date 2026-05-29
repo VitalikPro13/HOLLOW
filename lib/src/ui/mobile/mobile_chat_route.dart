@@ -33,12 +33,16 @@ import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
+import 'package:hollow/src/ui/mobile/mobile_active_call_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_video_view.dart';
 import 'package:hollow/src/ui/mobile/mobile_member_panel.dart';
+import 'package:hollow/src/ui/mobile/mobile_voice_channel_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_message_actions.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
+import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -537,12 +541,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    return Scaffold(
-      backgroundColor: hollow.background,
-      body: SafeArea(
-        child: Column(
-          children: [
-            _MobileChatHeader(
+    return Stack(
+      children: [
+        Scaffold(
+          backgroundColor: hollow.background,
+          body: SafeArea(
+            child: Column(
+              children: [
+                _MobileChatHeader(
               peerId: widget.peerId,
               serverId: widget.serverId,
               channelName: widget.channelName,
@@ -564,6 +570,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             ),
             if (widget.isDm)
               MobileCallStatusStrip(peerId: widget.peerId!),
+            const _VoiceChannelStatusStrip(),
             if (_searchOpen)
               _buildSearchBar(hollow),
             if (!widget.isDm) _buildSyncIndicator(hollow),
@@ -742,6 +749,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           ],
         ),
       ),
+    ),
+    const MobileActiveCallPill(),
+    const MobileVoiceChannelPill(),
+    ],
     );
   }
 
@@ -1822,6 +1833,7 @@ class _DmCallButtons extends ConsumerWidget {
       ref.read(callProvider.notifier).startCall(peerId, withVideo: withVideo);
       Navigator.of(context).push(
         PageRouteBuilder(
+          settings: const RouteSettings(name: 'call-screen'),
           pageBuilder: (_, __, ___) => MobileCallScreen(peerId: peerId),
           transitionsBuilder: (_, anim, __, child) {
             return SlideTransition(
@@ -1848,6 +1860,7 @@ class _DmCallButtons extends ConsumerWidget {
               : isCallWithThisPeer
                   ? () => Navigator.of(context).push(
                         PageRouteBuilder(
+                          settings: const RouteSettings(name: 'call-screen'),
                           pageBuilder: (_, __, ___) =>
                               MobileCallScreen(peerId: peerId),
                           transitionsBuilder: (_, anim, __, child) {
@@ -2100,6 +2113,94 @@ class _TypingBar extends ConsumerWidget {
         style: HollowTypography.caption.copyWith(
           color: hollow.textSecondary,
           fontStyle: FontStyle.italic,
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────
+// Green strip shown cross-server when in a voice channel
+// ─────────────────────────────────────────────────
+
+class _VoiceChannelStatusStrip extends ConsumerWidget {
+  const _VoiceChannelStatusStrip();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final vcState = ref.watch(voiceChannelProvider);
+    if (!vcState.isInVoiceChannel) return const SizedBox.shrink();
+
+    final hollow = HollowTheme.of(context);
+    final channelName = vcState.currentChannelName ?? 'Voice Channel';
+
+    return GestureDetector(
+      onTap: () {
+        Navigator.of(context).push(
+          PageRouteBuilder(
+            pageBuilder: (_, __, ___) => MobileVoiceChannelRoute(
+              serverId: vcState.currentServerId!,
+              channelId: vcState.currentChannelId!,
+              channelName: channelName,
+            ),
+            transitionsBuilder: (_, anim, __, child) => SlideTransition(
+              position: Tween<Offset>(
+                begin: const Offset(0, 1),
+                end: Offset.zero,
+              ).animate(CurvedAnimation(parent: anim, curve: Curves.easeOut)),
+              child: child,
+            ),
+          ),
+        );
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.md,
+          vertical: HollowSpacing.sm,
+        ),
+        decoration: BoxDecoration(
+          color: hollow.success.withValues(alpha: 0.1),
+          border: Border(
+            bottom: BorderSide(
+              color: hollow.success.withValues(alpha: 0.3),
+            ),
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: hollow.success,
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: HollowSpacing.sm),
+            Expanded(
+              child: Text(
+                'In voice: #$channelName',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.success,
+                  fontWeight: FontWeight.w500,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            Text(
+              'Tap to return',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.success.withValues(alpha: 0.7),
+                fontSize: 11,
+              ),
+            ),
+            const SizedBox(width: HollowSpacing.xs),
+            Icon(
+              LucideIcons.chevronUp,
+              size: 14,
+              color: hollow.success.withValues(alpha: 0.7),
+            ),
+          ],
         ),
       ),
     );

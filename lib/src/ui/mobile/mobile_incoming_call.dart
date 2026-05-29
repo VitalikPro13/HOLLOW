@@ -233,6 +233,7 @@ class _MobileIncomingCallOverlayState
                           if (peerId.isNotEmpty) {
                             Navigator.of(context, rootNavigator: true).push(
                               PageRouteBuilder(
+                                settings: const RouteSettings(name: 'call-screen'),
                                 pageBuilder: (_, __, ___) =>
                                     MobileCallScreen(peerId: peerId),
                                 transitionsBuilder: (_, anim, __, child) {

@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
@@ -17,6 +18,7 @@ import 'package:hollow/src/core/services/screen_audio_renderer.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/voice_channel_service.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
+import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 
 /// Audio state for a peer in a voice channel.
@@ -35,6 +37,7 @@ class VoiceChannelState {
   /// The voice channel the local user is currently in (null = not in any).
   final String? currentServerId;
   final String? currentChannelId;
+  final String? currentChannelName;
 
   /// Whether the local user's mic is muted.
   final bool isMuted;
@@ -89,6 +92,7 @@ class VoiceChannelState {
     this.participants = const {},
     this.currentServerId,
     this.currentChannelId,
+    this.currentChannelName,
     this.isMuted = false,
     this.isDeafened = false,
     this.peerAudioStates = const {},
@@ -140,6 +144,7 @@ class VoiceChannelState {
     Map<String, Map<String, Set<String>>>? participants,
     String? currentServerId,
     String? currentChannelId,
+    String? currentChannelName,
     bool? isMuted,
     bool? isDeafened,
     Map<String, PeerAudioState>? peerAudioStates,
@@ -166,6 +171,8 @@ class VoiceChannelState {
           clearCurrent ? null : (currentServerId ?? this.currentServerId),
       currentChannelId:
           clearCurrent ? null : (currentChannelId ?? this.currentChannelId),
+      currentChannelName:
+          clearCurrent ? null : (currentChannelName ?? this.currentChannelName),
       isMuted: clearCurrent ? false : (isMuted ?? this.isMuted),
       isDeafened: clearCurrent ? false : (isDeafened ?? this.isDeafened),
       peerAudioStates: clearCurrent
@@ -334,9 +341,22 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   /// Called after the local join event arrives to update state and start audio.
   Future<void> onLocalJoined(String serverId, String channelId) async {
+    // Resolve channel name: try provider first, then fall back to FFI.
+    String? channelName = ref.read(channelListProvider)[channelId]?.name;
+    if (channelName == null) {
+      try {
+        final channels = await crdt_api.getServerChannels(serverId: serverId);
+        channelName = channels
+            .where((c) => c.channelId == channelId)
+            .firstOrNull
+            ?.name;
+      } catch (_) {}
+    }
+
     state = state.copyWith(
       currentServerId: serverId,
       currentChannelId: channelId,
+      currentChannelName: channelName ?? 'Voice',
       isMuted: false,
       isDeafened: false,
       peerAudioStates: {},
@@ -729,6 +749,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       state = state.copyWith(isCameraOn: false);
       _broadcastCameraState(false);
     }
+  }
+
+  /// Switch between front and back camera (mobile).
+  Future<void> switchCamera() async {
+    if (_service == null || !state.isCameraOn || _leaving) return;
+    await _service!.switchCamera();
   }
 
   /// Broadcast our camera state to all peers in the current voice channel.

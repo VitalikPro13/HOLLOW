@@ -82,6 +82,7 @@ class VoiceChannelService {
   /// Shared local camera stream (captured once, added to all PCs).
   MediaStream? _localVideoStream;
   bool _isCameraOn = false;
+  bool _useFrontCamera = true;
 
   /// Per-peer RTCVideoRenderer for incoming video tracks.
   final Map<String, RTCVideoRenderer> _remoteVideoRenderers = {};
@@ -735,6 +736,16 @@ class VoiceChannelService {
       _localVideoStream = null;
     }
     _vcLog('[HOLLOW-VC] Camera stopped');
+  }
+
+  /// Switch front/back camera (mobile).
+  Future<void> switchCamera() async {
+    if (!_isCameraOn || _localVideoStream == null) return;
+    final videoTracks = _localVideoStream!.getVideoTracks();
+    if (videoTracks.isEmpty) return;
+    await Helper.switchCamera(videoTracks.first);
+    _useFrontCamera = !_useFrontCamera;
+    _vcLog('[HOLLOW-VC] Camera switched, front=$_useFrontCamera');
   }
 
   // ---------------------------------------------------------------

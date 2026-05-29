@@ -263,25 +263,25 @@
 
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
-| 160 | Join voice channel | `voice_channel_provider.dart`, `channel_sidebar.dart` | Not impl | Click voice channel tile | **Mobile per plan:** tap voice channel in server accordion → join. Show active member count |
-| 161 | Leave voice channel | `voice_channel_provider.dart`, `voice_channel_panel.dart` | Not impl | Disconnect button | **Mobile:** disconnect button in floating control pill |
-| 162 | Participant list | `voice_channel_provider.dart`, `member_panel.dart` | Not impl | Below channel in sidebar | **Mobile per plan:** participant grid adapts to orientation |
-| 163 | Mute/unmute | `voice_channel_provider.dart`, `voice_channel_panel.dart` | Not impl | Mic icon | |
-| 164 | Deafen/undeafen | `voice_channel_provider.dart`, `voice_channel_panel.dart` | Not impl | Headphones icon | No audio output |
-| 165 | Camera toggle | `voice_channel_provider.dart`, `voice_channel_panel.dart` | Not impl | Video icon | |
-| 166 | Video grid layout | `voice_channel_pane.dart` | Not impl | Adaptive grid | **Mobile per plan:** portrait default, landscape unlock. Grid adapts to orientation |
-| 167 | Video tile fullscreen | `voice_channel_pane.dart` | Not impl | Tap tile | PiP thumbnails at bottom |
-| 168 | Speaking indicator (VAD) | `voice_channel_pane.dart`, `voice_channel_service.dart` | Not impl | 2px accent border | audioLevel threshold 0.01 |
+| 160 | Join voice channel | `voice_channel_provider.dart`, `channel_sidebar.dart` | Done | Click voice channel tile | Mobile: tap voice channel in accordion → instant join + push MobileVoiceChannelRoute |
+| 161 | Leave voice channel | `voice_channel_provider.dart`, `voice_channel_panel.dart` | Done | Disconnect button | Mobile: leave button in voice route controls + pill |
+| 162 | Participant list | `voice_channel_provider.dart`, `member_panel.dart` | Done | Below channel in sidebar | Mobile: MobileClusteredAvatars grid with speaking indicators |
+| 163 | Mute/unmute | `voice_channel_provider.dart`, `voice_channel_panel.dart` | Done | Mic icon | Voice route + pill |
+| 164 | Deafen/undeafen | `voice_channel_provider.dart`, `voice_channel_panel.dart` | Done | Headphones icon | Voice route + pill |
+| 165 | Camera toggle | `voice_channel_provider.dart`, `voice_channel_panel.dart` | Done | Video icon | Voice route controls + front/back flip |
+| 166 | Video grid layout | `voice_channel_pane.dart` | Done | Adaptive grid | Mobile: Wrap grid, adapts to count. PiP for local when remote is main |
+| 167 | Video tile fullscreen | `voice_channel_pane.dart` | Done | Tap tile | Remote screen share full-bleed + local PiP |
+| 168 | Speaking indicator (VAD) | `voice_channel_pane.dart`, `voice_channel_service.dart` | Done | 2px accent border | MobileSpeakingAvatar with animated teal glow |
 | 169 | Screen share (start) | `voice_channel_provider.dart`, `voice_channel_panel.dart` | N/A | Monitor icon + dialog | Desktop only |
 | 170 | Screen share (stop) | `voice_channel_provider.dart`, `voice_channel_pane.dart` | N/A | Stop button | |
 | 171 | Screen share full-bleed | `voice_channel_pane.dart` | N/A | UI layout | Full-screen presentation |
-| 172 | Screen share quality label | `voice_channel_pane.dart` | Not impl | UI display | "1080p60", "4K30" etc. |
+| 172 | Screen share quality label | `voice_channel_pane.dart` | N/A | UI display | "1080p60", "4K30" etc. |
 | 173 | Screen share mixed mode | `voice_channel_pane.dart` | N/A | Source switcher tabs | Camera + screen |
-| 174 | Chat overlay in voice | `voice_channel_pane.dart` | Not impl | Slide-in 360px panel | Auto-hides after 1s |
-| 175 | Controls pill (floating) | `voice_channel_pane.dart` | Not impl | Bottom-center bar | **Mobile per plan:** floating pill (mute, deafen, camera, leave). Auto-hide in landscape. No screen share button |
-| 176 | Duration timer | `voice_channel_pane.dart` | Not impl | MM:SS in controls pill | Updates every 1s |
-| 177 | Connection status | `voice_channel_panel.dart` | Not impl | Green text | "Voice Connected" + channel name |
-| 178 | Voice channel panel | `voice_channel_panel.dart` | Not impl | Bottom of sidebar | Controls during voice session |
+| 174 | Chat overlay in voice | `voice_channel_pane.dart` | N/A | Slide-in 360px panel | Mobile: voice-only view by design, no chat overlay |
+| 175 | Controls pill (floating) | `voice_channel_pane.dart` | Done | Bottom-center bar | Mobile: MobileVoiceChannelPill (mute, deafen, leave). Tap returns to voice route |
+| 176 | Duration timer | `voice_channel_pane.dart` | Done | MM:SS in controls pill | In voice route top bar + pill |
+| 177 | Connection status | `voice_channel_panel.dart` | Done | Green text | Mobile: green status strip cross-server + pill StatusDot |
+| 178 | Voice channel panel | `voice_channel_panel.dart` | N/A | Bottom of sidebar | Desktop sidebar element. Mobile: replaced by pill + voice route |
 
 ## 18. Voice — Audio Settings
 
@@ -289,25 +289,25 @@
 |---|---------|-----------------|--------|-------------|-------|
 | 179 | Input device selection | `settings_provider.dart`, `user_settings_dialog.dart` | N/A | Dropdown | Mobile uses system default mic |
 | 180 | Output device selection | `settings_provider.dart`, `user_settings_dialog.dart` | N/A | Dropdown | Mobile uses system audio routing (speaker/earpiece/bluetooth) |
-| 181 | Camera device selection | `settings_provider.dart`, `user_settings_dialog.dart` | Not impl | Dropdown | **Mobile:** front/back camera toggle button in call UI |
-| 182 | Audio quality preset | `settings_provider.dart` | Not impl | Dropdown | Voice/Music/Hi-Fi |
-| 183 | Microphone gain | `settings_provider.dart` | Not impl | Slider 0.0-2.0 | Default 1.0 |
-| 184 | Echo cancellation | `voice_channel_service.dart`, `voice_service.dart` | Not impl | Audio constraint | getUserMedia flag |
-| 185 | Noise suppression | `voice_channel_service.dart`, `voice_service.dart` | Not impl | Audio constraint | getUserMedia flag |
-| 186 | Auto gain control | `voice_channel_service.dart`, `voice_service.dart` | Not impl | Audio constraint | getUserMedia flag |
-| 187 | Ringtone file picker | `settings_provider.dart` | Not impl | File picker | Custom audio file. **Mobile:** in Settings under Audio section |
-| 188 | Ringtone trim (start/end) | `settings_provider.dart` | Not impl | Slider | Clip range |
-| 189 | Ringtone volume | `settings_provider.dart` | Not impl | Slider 0.0-1.0 | Default 0.5. **Mobile:** in Settings under Audio section |
+| 181 | Camera device selection | `settings_provider.dart`, `user_settings_dialog.dart` | Done | Dropdown | Mobile: front/back flip button (switchCamera) in voice route + DM call |
+| 182 | Audio quality preset | `settings_provider.dart` | Done | Dropdown | Mobile: 3 pills in Settings > System > Voice & Audio |
+| 183 | Microphone gain | `settings_provider.dart` | Done | Slider 0.0-2.0 | Mobile: slider in Settings > System > Voice & Audio |
+| 184 | Echo cancellation | `voice_channel_service.dart`, `voice_service.dart` | Done | Audio constraint | Mobile: shown as "Auto" in Settings (always on) |
+| 185 | Noise suppression | `voice_channel_service.dart`, `voice_service.dart` | Done | Audio constraint | Mobile: shown as "Auto" in Settings (always on) |
+| 186 | Auto gain control | `voice_channel_service.dart`, `voice_service.dart` | Done | Audio constraint | Mobile: shown as "Auto" in Settings (always on) |
+| 187 | Ringtone file picker | `settings_provider.dart` | Done | File picker | Mobile: in Settings > System > Ringtone section |
+| 188 | Ringtone trim (start/end) | `settings_provider.dart` | Not impl | Slider | Low priority — desktop sliders work cross-platform |
+| 189 | Ringtone volume | `settings_provider.dart` | Done | Slider 0.0-1.0 | Mobile: slider in Settings > System > Ringtone section |
 
 ## 19. Voice — Encryption & WebRTC
 
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
-| 190 | SFrame E2EE (DM calls) | `call_provider.dart`, `frame_cryptor_service.dart` | Not impl | Transparent | AES-GCM, random key per call |
-| 191 | SFrame E2EE (voice channels) | `voice_channel_provider.dart`, `frame_cryptor_service.dart` | Not impl | Transparent | MLS epoch key, ring size 16 |
-| 192 | SFrame E2EE (screen share) | `call_provider.dart`, `voice_channel_provider.dart` | Not impl | Transparent | Dedicated PC |
-| 193 | ICE candidate handling | `voice_service.dart`, `voice_channel_service.dart` | Not impl | Queued flush | Max 100/peer |
-| 194 | TURN/STUN config | `ice_config_provider.dart` | Not impl | Auto-refresh 50min | HMAC-SHA1 creds |
+| 190 | SFrame E2EE (DM calls) | `call_provider.dart`, `frame_cryptor_service.dart` | Done | Transparent | Cross-platform — handled by providers |
+| 191 | SFrame E2EE (voice channels) | `voice_channel_provider.dart`, `frame_cryptor_service.dart` | Done | Transparent | Cross-platform — handled by providers |
+| 192 | SFrame E2EE (screen share) | `call_provider.dart`, `voice_channel_provider.dart` | Done | Transparent | Cross-platform — handled by providers |
+| 193 | ICE candidate handling | `voice_service.dart`, `voice_channel_service.dart` | Done | Queued flush | Cross-platform — handled by services |
+| 194 | TURN/STUN config | `ice_config_provider.dart` | Done | Auto-refresh 50min | Cross-platform — iceConfigProvider |
 
 ---
 
@@ -487,11 +487,17 @@
 
 | Category | Total | Done | Partial | Not Impl | N/A |
 |----------|-------|------|---------|----------|-----|
-| All features | 288 | 157 | 3 | 84 | 44 |
+| All features | 288 | 182 | 3 | 56 | 47 |
 
-**Actionable (excl. N/A): 244 total, 157 Done (64%), 3 Partial, 84 Not impl.**
+**Actionable (excl. N/A): 241 total, 182 Done (75%), 3 Partial, 56 Not impl.**
 
-*Updated 2026-05-28. Sections 12-16 complete.*
+*Updated 2026-05-29. Sections 12-19 complete.*
+
+### Session 2026-05-29 Progress
+- **Sections 17-19 complete.** Voice channels: join/leave/mute/deafen/camera/video/speaking indicators, floating pill, cross-server status strip. Audio settings in System tab. E2EE/WebRTC transparent cross-platform.
+- **New files:** mobile_voice_channel_route.dart, mobile_voice_channel_pill.dart, mobile_voice_avatars.dart (shared widgets extracted from DM call).
+- **Modified:** mobile_chats_tab.dart (voice channel tap → join), mobile_shell.dart (VC pill), mobile_chat_route.dart (VC status strip), mobile_settings_tab.dart (audio settings), mobile_call_video_view.dart (refactored to shared widgets), voice_channel_service.dart (switchCamera), voice_channel_provider.dart (switchCamera).
+- **Exclusions:** Screen share sending (#169-171, 173 → N/A), Chat overlay (#174 → N/A, voice-only view), Voice channel panel (#178 → N/A, replaced by pill), Ringtone trim (#188 → low priority).
 
 ### Session 2026-05-28 Progress (continued)
 - **Section 16 complete.** 1:1 DM calls: phone/video icons in header, full-screen incoming call overlay, floating active call pill, PiP video view.
