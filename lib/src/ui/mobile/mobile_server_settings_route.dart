@@ -1,4 +1,6 @@
-﻿import 'package:file_picker/file_picker.dart';
+﻿import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -18,6 +20,8 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
+import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_storage_route.dart';
 import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_members_route.dart';
@@ -171,12 +175,16 @@ class _MobileServerSettingsRouteState
     final bytes = await result.files.first.xFile.readAsBytes();
     if (!mounted) return;
 
-    final cropped = await showImageCropDialog(
-      context: context,
-      imageBytes: bytes,
-      aspectRatio: 1.0,
-      title: 'Crop Server Avatar',
-    );
+    final isMobile = Platform.isAndroid || Platform.isIOS;
+    final cropped = isMobile
+        ? await showMobileImageCrop(
+            context: context, imageBytes: bytes,
+            aspectRatio: 1.0, title: 'Crop Server Avatar',
+          )
+        : await showImageCropDialog(
+            context: context, imageBytes: bytes,
+            aspectRatio: 1.0, title: 'Crop Server Avatar',
+          );
     if (cropped == null || !mounted) return;
 
     try {
@@ -585,6 +593,16 @@ class _MobileServerSettingsRouteState
                       final link = 'hollow://join?server=${widget.serverId}';
                       showInviteDialog(context, link, widget.serverId);
                     },
+                  ),
+                  _NavRow(
+                    icon: LucideIcons.hardDrive,
+                    label: 'Storage',
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => MobileStorageRoute(serverId: widget.serverId),
+                      ),
+                    ),
                   ),
                   const SizedBox(height: HollowSpacing.xl),
 

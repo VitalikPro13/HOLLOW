@@ -25,6 +25,7 @@ import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
+import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
@@ -655,7 +656,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Load cached user profiles into memory.
     await ref.read(profileProvider.notifier).loadAll();
 
-    // Load accent color, background, local nicknames.
+    // Load theme mode, accent color, background, local nicknames.
+    await ref.read(themeModeProvider.notifier).load();
     await ref.read(accentHueProvider.notifier).load();
     await ref.read(backgroundProvider.notifier).load();
     await ref.read(accentPresetsProvider.notifier).load();

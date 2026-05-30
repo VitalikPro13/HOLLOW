@@ -30,6 +30,13 @@ Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Uses `LayoutBu
 - Archive tab
 - Settings tab
 
+### Background Image Layer
+`MobileShell` watches `backgroundProvider`. When `bg.hasBackground`:
+- Scaffold `backgroundColor` → `Colors.transparent`
+- Wraps scaffold in Stack: `Image.memory(bg.imageBytes!, fit: BoxFit.cover)` → darken overlay `Container(color: hollow.background.withValues(alpha: darkenAlpha))` → scaffold
+- `darkenAlpha = bg.panelOpacity.clamp(0.0, 0.92)` — user-controlled via Settings > Appearance > Panel Opacity slider
+- Same pattern must be applied in `MobileChatRoute` (and any other pushed full-screen route) since pushed routes fully cover the shell
+
 ### Floating Pill Layering
 `MobileShell` wraps its `Scaffold` in a `Stack` with `MobileActiveCallPill` and `MobileVoiceChannelPill` on top. These pills are also placed in `MobileChatRoute`'s Stack so they remain visible on pushed chat routes. Full-screen voice/call routes use `PageRouteBuilder` (slide-from-bottom) and cover the pills by being pushed on top in the navigator stack. **CRITICAL:** Pills must NOT go in `app.dart` builder — that layer is above the navigator and no route can cover it.
 
@@ -339,9 +346,18 @@ Horizontal scrollable `_PillTab` widgets: Profile, System, Security, About. Sele
 - Twitch connection row (disconnect works, connect deferred to desktop)
 - `_populated` flag ensures fields fill from `profileProvider` on first available build (not stale `initState`)
 
-### System Tab
-- Peer ID (copyable, mono font, accent color)
-- Network status (Connected/Connecting via `nodeProvider`)
+### System Tab (`_SystemTab` — `ConsumerStatefulWidget`)
+Sections in order:
+1. **Peer ID** — copyable (mono font, accent color, tap → clipboard)
+2. **Network** — relay domain management:
+   - Relay list from `savedRelayListProvider` (radio-style selection, official badge on default)
+   - Add relay: inline TextField + Add/Cancel
+   - Remove relay: X button on non-default relays
+   - "Apply & Close App" (conditional) → `relayDomainProvider.setDomain()` → `notifyShutdown()` → `SystemNavigator.pop()`
+3. **Appearance** — `_ThemeToggleRow` (dark/light switch, immediate apply via `themeModeProvider`), `_AccentHueSection` (rainbow slider 0-359° via `RainbowSliderTrackShape`, preset swatches 28x28 in Wrap, long-press to remove, + to save), `_BackgroundSection` (file picker → mobile crop 9:16 → `backgroundProvider.setImage()`, opacity slider 0.0–0.92), `_AnimationsToggleRow` (`disableAnimationsProvider` + `HollowDurations` + `SharedTickers`), `_InvisibleToggleRow` (`invisibleModeProvider`)
+4. **Voice & Audio** — audio quality pills, mic gain slider, audio processing info
+5. **Files** — `_ImageQualityPicker` (Lossless/Balanced/Small pills via `imageQualityProvider`), `_AutoDownloadSlider` (34-2048 MB), `_CacheCapSlider` (256-10240 MB, formatted as GB when ≥1024)
+6. **Ringtone** — ringtone picker + volume slider
 
 ### Security Tab
 - Password Protection: enable (with confirm dialog) / remove
@@ -349,7 +365,9 @@ Horizontal scrollable `_PillTab` widgets: Profile, System, Security, About. Sele
 - Recovery Phrase button (loads from identity or storage API)
 
 ### About Tab
-- Hollow branding + version (v0.4.2) + platform + license (AGPL-3.0) + links
+- Centered `hollow_logo_rounded.png` (96x96, ClipRRect rounded) + "Hollow" display text + tagline
+- Info section: version (v0.4.2), platform, license (AGPL-3.0)
+- Links section: anonlisten.com, github.com/AnonListen/Hollow
 
 ---
 
@@ -536,3 +554,59 @@ Added to `_SystemTab` in `mobile_settings_tab.dart`:
 ### Ringtone Section
 - **Ringtone picker**: file name + Choose button + clear (X). Reads/writes `ringtonePathProvider`
 - **Ringtone volume slider**: 0.0–1.0, reads/writes `ringtoneVolumeProvider`
+
+---
+
+## MobileImageCropRoute
+
+**File:** `lib/src/ui/mobile/mobile_image_crop_route.dart`
+**Entry point:** `showMobileImageCrop({context, imageBytes, aspectRatio, title})` → pushes route, returns `Uint8List?`
+
+### Design: Fixed Frame + Movable Image
+Standard mobile crop pattern (like iOS Photos). The crop frame is fixed in the center; the user drags and pinch-zooms the image underneath.
+
+### Layout
+- Scaffold (black background) → SafeArea → Column
+- Header: back arrow + title + "Pinch to zoom" hint
+- Expanded: `LayoutBuilder` → `GestureDetector(onScaleStart/Update/End)` → Stack with positioned image + IgnorePointer crop overlay
+- Bottom: Cancel (ghost) + Apply (filled)
+
+### Gesture Handling
+Manual `_scale`, `_offsetX`, `_offsetY` state (no `InteractiveViewer`). On every gesture update:
+- Scale: clamped 1.0–8.0, zooms around focal point
+- Pan: offset applied from gesture delta
+- **Clamping** (`_clampOffset`): image left edge ≤ crop left, image right ≥ crop right, same for top/bottom. Ensures crop frame NEVER shows empty space.
+
+### Crop Rendering
+1. Compute source rect: `(cropFrame - offset) / scale * (imgPixels / basePixels)`
+2. `PictureRecorder → Canvas.drawImageRect → picture.toImage → toByteData(format: png)`
+3. Safety clamp to image bounds
+
+### Aspect Ratios Used
+- Avatar: 1.0 (square)
+- Banner: 3.0 (wide)
+- Background: 9.0/16.0 on mobile (portrait), 16.0/9.0 on desktop (landscape)
+
+### Crop Overlay Painter
+`_CropOverlayPainter`: dark overlay outside crop (clipRect difference), 2px accent border, rule-of-thirds grid (0.3 alpha), corner brackets (3px stroke, 20px length).
+
+---
+
+## MobileStorageRoute
+
+**File:** `lib/src/ui/mobile/mobile_storage_route.dart`
+**Purpose:** Full-screen server storage dashboard, pushed from server settings Management section.
+
+### Data Loading
+- `crdt_api.getStorageStats(serverId:)` → `StorageStatsFfi`
+- `crdt_api.getServerSetting(serverId:, key: 'retention_files'/'retention_messages')`
+
+### Sections
+1. **Server Storage** — colored bar (green/yellow/red by fill %), used/total, vault mode label, member count. Full replication (<6) vs erasure coding (6+) with redundancy factor.
+2. **Your Storage** (6+ members) — pledge amount with edit button (HollowDialog), usage bar.
+3. **Retention Policy** — messages + files retention display. Admin can tap to edit (HollowDialog with radio-style options). Records `_since` timestamp for forward-only pruning.
+4. **Vault Health** — StatusDot + status text + shard count. Pulse animation on active transfers.
+5. **Member Pledges** (6+ members) — member count + average pledge.
+
+### Navigation
+Added as `_NavRow(icon: LucideIcons.hardDrive, label: 'Storage')` in `MobileServerSettingsRoute` Management section, visible to all members.

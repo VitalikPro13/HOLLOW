@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
@@ -540,11 +541,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final bg = ref.watch(backgroundProvider);
 
-    return Stack(
-      children: [
-        Scaffold(
-          backgroundColor: hollow.background,
+    Widget scaffold = Scaffold(
+          backgroundColor: bg.hasBackground ? Colors.transparent : hollow.background,
           body: SafeArea(
             child: Column(
               children: [
@@ -749,10 +749,40 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           ],
         ),
       ),
-    ),
-    const MobileActiveCallPill(),
-    const MobileVoiceChannelPill(),
-    ],
+    );
+
+    if (bg.hasBackground) {
+      final darkenAlpha = bg.panelOpacity.clamp(0.0, 0.92);
+      scaffold = Stack(
+        children: [
+          Positioned.fill(
+            child: Container(
+              color: Colors.black,
+              child: Image.memory(
+                bg.imageBytes!,
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                width: double.infinity,
+                height: double.infinity,
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: Container(
+              color: hollow.background.withValues(alpha: darkenAlpha),
+            ),
+          ),
+          scaffold,
+        ],
+      );
+    }
+
+    return Stack(
+      children: [
+        scaffold,
+        const MobileActiveCallPill(),
+        const MobileVoiceChannelPill(),
+      ],
     );
   }
 

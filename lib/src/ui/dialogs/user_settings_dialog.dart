@@ -27,6 +27,7 @@ import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/rainbow_slider_track.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -349,8 +350,8 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     final aboutMe = widget.aboutMeController.text.trim();
 
     // Apply theme change.
-    ref.read(themeModeProvider.notifier).state =
-        _pendingDarkMode ? ThemeMode.dark : ThemeMode.light;
+    ref.read(themeModeProvider.notifier).setMode(
+        _pendingDarkMode ? ThemeMode.dark : ThemeMode.light);
 
     // Apply minimize to tray change.
     if (_pendingMinimizeToTray != _initialMinimizeToTray) {
@@ -3979,7 +3980,7 @@ class _AccentColorPickerState extends ConsumerState<_AccentColorPicker> {
               ),
               thumbColor: Colors.white,
               overlayShape: SliderComponentShape.noOverlay,
-              trackShape: _RainbowSliderTrackShape(),
+              trackShape: RainbowSliderTrackShape(),
               activeTrackColor: Colors.transparent,
               inactiveTrackColor: Colors.transparent,
             ),
@@ -4102,61 +4103,8 @@ class _ColorSwatch extends StatelessWidget {
 }
 
 /// Custom slider track that renders a rainbow hue gradient.
-class _RainbowSliderTrackShape extends SliderTrackShape {
-  @override
-  Rect getPreferredRect({
-    required RenderBox parentBox,
-    Offset offset = Offset.zero,
-    required SliderThemeData sliderTheme,
-    bool isEnabled = true,
-    bool isDiscrete = false,
-  }) {
-    final trackHeight = sliderTheme.trackHeight ?? 14;
-    final trackTop =
-        offset.dy + (parentBox.size.height - trackHeight) / 2;
-    return Rect.fromLTWH(
-      offset.dx + 8,
-      trackTop,
-      parentBox.size.width - 16,
-      trackHeight,
-    );
-  }
-
-  @override
-  void paint(
-    PaintingContext context,
-    Offset offset, {
-    required RenderBox parentBox,
-    required SliderThemeData sliderTheme,
-    required Animation<double> enableAnimation,
-    required Offset thumbCenter,
-    Offset? secondaryOffset,
-    bool isEnabled = true,
-    bool isDiscrete = false,
-    required TextDirection textDirection,
-  }) {
-    final rect = getPreferredRect(
-      parentBox: parentBox,
-      offset: offset,
-      sliderTheme: sliderTheme,
-    );
-
-    final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(7));
-
-    // Rainbow gradient across the full hue spectrum
-    final gradient = LinearGradient(
-      colors: List.generate(
-        13,
-        (i) => HSLColor.fromAHSL(1.0, i * 30.0, 0.85, 0.5).toColor(),
-      ),
-    );
-
-    final paint = Paint()
-      ..shader = gradient.createShader(rect);
-
-    context.canvas.drawRRect(rrect, paint);
-  }
-}
+// _RainbowSliderTrackShape extracted to lib/src/ui/components/rainbow_slider_track.dart
+// as RainbowSliderTrackShape (public, shared between desktop and mobile).
 
 class _ImageRow extends StatelessWidget {
   final String label;

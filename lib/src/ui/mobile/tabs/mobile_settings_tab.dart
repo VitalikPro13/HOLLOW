@@ -5,12 +5,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/brand_icons.dart';
-import 'package:hollow/src/core/models/node_status.dart';
+import 'package:hollow/src/core/providers/accent_color_provider.dart';
+import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
-import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/providers/theme_provider.dart';
+import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -18,6 +21,7 @@ import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -25,8 +29,10 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/rainbow_slider_track.dart';
 import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
+import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -203,9 +209,14 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
       return;
     }
 
-    final cropped = await showImageCropDialog(
-      context: context, imageBytes: bytes, aspectRatio: 1.0, title: 'Crop Avatar',
-    );
+    final isMobile = Platform.isAndroid || Platform.isIOS;
+    final cropped = isMobile
+        ? await showMobileImageCrop(
+            context: context, imageBytes: bytes, aspectRatio: 1.0, title: 'Crop Avatar',
+          )
+        : await showImageCropDialog(
+            context: context, imageBytes: bytes, aspectRatio: 1.0, title: 'Crop Avatar',
+          );
     if (cropped == null || !mounted) return;
 
     try {
@@ -232,9 +243,14 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
       return;
     }
 
-    final cropped = await showImageCropDialog(
-      context: context, imageBytes: bytes, aspectRatio: 3.0, title: 'Crop Banner',
-    );
+    final isMobile = Platform.isAndroid || Platform.isIOS;
+    final cropped = isMobile
+        ? await showMobileImageCrop(
+            context: context, imageBytes: bytes, aspectRatio: 3.0, title: 'Crop Banner',
+          )
+        : await showImageCropDialog(
+            context: context, imageBytes: bytes, aspectRatio: 3.0, title: 'Crop Banner',
+          );
     if (cropped == null || !mounted) return;
 
     try {
@@ -593,20 +609,42 @@ class _TwitchRowState extends ConsumerState<_TwitchRow> {
 // System Tab
 // ─────────────────────────────────────────────────
 
-class _SystemTab extends ConsumerWidget {
+class _SystemTab extends ConsumerStatefulWidget {
   const _SystemTab({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_SystemTab> createState() => _SystemTabState();
+}
+
+class _SystemTabState extends ConsumerState<_SystemTab> {
+  bool _showAddRelay = false;
+  String _selectedRelay = '';
+  late String _initialRelay;
+  final _relayController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _initialRelay = ref.read(relayDomainProvider);
+    _selectedRelay = _initialRelay;
+  }
+
+  @override
+  void dispose() {
+    _relayController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final identity = ref.watch(identityProvider);
-    final nodeState = ref.watch(nodeProvider);
     final peerId = identity.peerId ?? '';
 
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        // Peer ID
+        // ── Peer ID ──
         _SectionLabel(label: 'Peer ID'),
         const SizedBox(height: HollowSpacing.sm),
         HollowPressable(
@@ -641,20 +679,29 @@ class _SystemTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // Network status
+        // ── Network ──
         _SectionLabel(label: 'Network'),
         const SizedBox(height: HollowSpacing.sm),
-        _InfoRow(
-          label: 'Node Status',
-          value: nodeState.status == NodeStatus.connected ? 'Connected' : 'Connecting...',
-          valueColor: nodeState.status == NodeStatus.connected ? hollow.success : hollow.warning,
-        ),
-        if (nodeState.error != null)
-          _InfoRow(label: 'Error', value: nodeState.error!),
+        _buildRelaySection(hollow),
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // Voice & Audio
+        // ── Appearance ──
+        _SectionLabel(label: 'Appearance'),
+        const SizedBox(height: HollowSpacing.sm),
+        const _ThemeToggleRow(),
+        const SizedBox(height: HollowSpacing.md),
+        const _AccentHueSection(),
+        const SizedBox(height: HollowSpacing.md),
+        const _BackgroundSection(),
+        const SizedBox(height: HollowSpacing.md),
+        const _AnimationsToggleRow(),
+        const SizedBox(height: HollowSpacing.md),
+        const _InvisibleToggleRow(),
+
+        const SizedBox(height: HollowSpacing.xl),
+
+        // ── Voice & Audio ──
         _SectionLabel(label: 'Voice & Audio'),
         const SizedBox(height: HollowSpacing.sm),
         _AudioQualityPicker(),
@@ -665,12 +712,721 @@ class _SystemTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        // Ringtone
+        // ── Files ──
+        _SectionLabel(label: 'Files'),
+        const SizedBox(height: HollowSpacing.sm),
+        const _ImageQualityPicker(),
+        const SizedBox(height: HollowSpacing.md),
+        const _AutoDownloadSlider(),
+        const SizedBox(height: HollowSpacing.md),
+        const _CacheCapSlider(),
+
+        const SizedBox(height: HollowSpacing.xl),
+
+        // ── Ringtone ──
         _SectionLabel(label: 'Ringtone'),
         const SizedBox(height: HollowSpacing.sm),
         _RingtonePicker(),
         const SizedBox(height: HollowSpacing.md),
         _RingtoneVolumeSlider(),
+
+        const SizedBox(height: HollowSpacing.xl),
+      ],
+    );
+  }
+
+  Widget _buildRelaySection(HollowTheme hollow) {
+    final relays = ref.watch(savedRelayListProvider);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Your relay determines your network. Friends on a different relay won\'t be reachable.',
+          style: HollowTypography.caption.copyWith(
+            color: hollow.textSecondary, fontSize: 11,
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+
+        // Relay list
+        for (final domain in relays) ...[
+          HollowPressable(
+            onTap: () => setState(() => _selectedRelay = domain),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: HollowSpacing.md, vertical: HollowSpacing.sm,
+              ),
+              decoration: BoxDecoration(
+                color: _selectedRelay == domain
+                    ? hollow.accentMuted
+                    : hollow.surface,
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
+                border: Border.all(
+                  color: _selectedRelay == domain
+                      ? hollow.accent.withValues(alpha: 0.5)
+                      : hollow.border,
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    _selectedRelay == domain
+                        ? LucideIcons.circleCheck
+                        : LucideIcons.circle,
+                    size: 16,
+                    color: _selectedRelay == domain
+                        ? hollow.accent
+                        : hollow.textSecondary,
+                  ),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(domain,
+                                  style: HollowTypography.bodySmall.copyWith(
+                                    color: hollow.textPrimary,
+                                  ),
+                                  maxLines: 1, overflow: TextOverflow.ellipsis),
+                            ),
+                            if (domain == kDefaultRelayDomain) ...[
+                              const SizedBox(width: HollowSpacing.xs),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 1,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: hollow.accent.withValues(alpha: 0.2),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text('Official',
+                                    style: HollowTypography.caption.copyWith(
+                                      color: hollow.accent,
+                                      fontSize: 9,
+                                      fontWeight: FontWeight.w600,
+                                    )),
+                              ),
+                            ],
+                          ],
+                        ),
+                        if (domain == _initialRelay)
+                          Text('Currently active',
+                              style: HollowTypography.caption.copyWith(
+                                color: hollow.textSecondary, fontSize: 10,
+                              )),
+                      ],
+                    ),
+                  ),
+                  if (domain != kDefaultRelayDomain)
+                    HollowPressable(
+                      onTap: () {
+                        ref.read(savedRelayListProvider.notifier).removeRelay(domain);
+                        if (_selectedRelay == domain) {
+                          setState(() => _selectedRelay = kDefaultRelayDomain);
+                        }
+                      },
+                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      padding: const EdgeInsets.all(HollowSpacing.xs),
+                      child: Icon(LucideIcons.x, size: 14, color: hollow.textSecondary),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.xs),
+        ],
+
+        const SizedBox(height: HollowSpacing.sm),
+
+        // Add relay
+        if (_showAddRelay) ...[
+          Row(
+            children: [
+              Expanded(
+                child: HollowTextField(
+                  controller: _relayController,
+                  hintText: 'relay.example.com',
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              HollowButton.filled(
+                compact: true,
+                onPressed: () {
+                  final domain = _relayController.text.trim();
+                  if (domain.isEmpty) return;
+                  if (relays.contains(domain)) {
+                    HollowToast.show(context, 'Already in list',
+                        type: HollowToastType.error);
+                    return;
+                  }
+                  ref.read(savedRelayListProvider.notifier).addRelay(domain);
+                  setState(() {
+                    _selectedRelay = domain;
+                    _relayController.clear();
+                    _showAddRelay = false;
+                  });
+                },
+                child: const Text('Add'),
+              ),
+              const SizedBox(width: HollowSpacing.xs),
+              HollowButton.ghost(
+                compact: true,
+                onPressed: () => setState(() => _showAddRelay = false),
+                child: const Text('Cancel'),
+              ),
+            ],
+          ),
+        ] else
+          HollowButton.ghost(
+            compact: true,
+            icon: const Icon(LucideIcons.plus, size: 14),
+            onPressed: () => setState(() => _showAddRelay = true),
+            child: const Text('Add Relay'),
+          ),
+
+        // Apply & Close (only when relay changed)
+        if (_selectedRelay != _initialRelay) ...[
+          const SizedBox(height: HollowSpacing.md),
+          HollowButton.filled(
+            expand: true,
+            onPressed: () async {
+              await ref.read(relayDomainProvider.notifier).setDomain(_selectedRelay);
+              try {
+                await network_api.notifyShutdown();
+              } catch (_) {}
+              await Future.delayed(const Duration(milliseconds: 200));
+              SystemNavigator.pop();
+            },
+            child: const Text('Apply & Close App'),
+          ),
+          Text(
+            'App will close. Reopen to connect to the new relay.',
+            textAlign: TextAlign.center,
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary, fontSize: 10,
+            ),
+          ),
+        ],
+
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────
+// Appearance widgets
+// ─────────────────────────────────────────────────
+
+class _ThemeToggleRow extends ConsumerWidget {
+  const _ThemeToggleRow();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final themeMode = ref.watch(themeModeProvider);
+    final isDark = themeMode == ThemeMode.dark;
+
+    return Row(
+      children: [
+        Icon(isDark ? LucideIcons.moon : LucideIcons.sun,
+            size: 18, color: hollow.textSecondary),
+        const SizedBox(width: HollowSpacing.md),
+        Expanded(
+          child: Text('Dark Mode', style: HollowTypography.body.copyWith(
+            color: hollow.textPrimary,
+          )),
+        ),
+        Switch(
+          value: isDark,
+          onChanged: (v) =>
+              ref.read(themeModeProvider.notifier).setMode(
+                  v ? ThemeMode.dark : ThemeMode.light),
+          activeTrackColor: hollow.accent,
+          activeColor: Colors.white,
+          inactiveTrackColor: hollow.border,
+        ),
+      ],
+    );
+  }
+}
+
+class _AccentHueSection extends ConsumerWidget {
+  const _AccentHueSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final currentHue = ref.watch(accentHueProvider);
+    final presets = ref.watch(accentPresetsProvider);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Label row with color preview
+        Row(
+          children: [
+            Icon(LucideIcons.palette, size: 18, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.md),
+            Text('Accent Color', style: HollowTypography.body.copyWith(
+              color: hollow.textPrimary,
+            )),
+            const Spacer(),
+            Container(
+              width: 24,
+              height: 24,
+              decoration: BoxDecoration(
+                color: accentFromHue(currentHue),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(
+                  color: Colors.white.withValues(alpha: 0.2),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+
+        // Rainbow hue slider
+        SizedBox(
+          height: 28,
+          child: SliderTheme(
+            data: SliderThemeData(
+              trackHeight: 16,
+              thumbShape: const RoundSliderThumbShape(
+                enabledThumbRadius: 10,
+                elevation: 2,
+              ),
+              thumbColor: Colors.white,
+              overlayShape: SliderComponentShape.noOverlay,
+              trackShape: RainbowSliderTrackShape(),
+              activeTrackColor: Colors.transparent,
+              inactiveTrackColor: Colors.transparent,
+            ),
+            child: Slider(
+              value: currentHue.clamp(0, 359),
+              min: 0,
+              max: 359,
+              onChanged: (value) =>
+                  ref.read(accentHueProvider.notifier).setHue(value),
+            ),
+          ),
+        ),
+
+        const SizedBox(height: HollowSpacing.sm),
+
+        // Preset swatches
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            // Default teal
+            _MobileColorSwatch(
+              hue: defaultAccentHue,
+              isSelected: (currentHue - defaultAccentHue).abs() < 1,
+              onTap: () => ref.read(accentHueProvider.notifier).setHue(defaultAccentHue),
+            ),
+            // Saved presets
+            for (final hue in presets)
+              _MobileColorSwatch(
+                hue: hue,
+                isSelected: (currentHue - hue).abs() < 1,
+                onTap: () => ref.read(accentHueProvider.notifier).setHue(hue),
+                onLongPress: () {
+                  ref.read(accentPresetsProvider.notifier).removePreset(hue);
+                  HollowToast.show(context, 'Preset removed',
+                      type: HollowToastType.info);
+                },
+              ),
+            // Save current button
+            if (!presets.any((h) => (h - currentHue).abs() < 1) &&
+                (currentHue - defaultAccentHue).abs() > 1)
+              GestureDetector(
+                onTap: () {
+                  ref.read(accentPresetsProvider.notifier).addPreset(currentHue);
+                  HollowToast.show(context, 'Preset saved',
+                      type: HollowToastType.success);
+                },
+                child: Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                      color: hollow.textSecondary.withValues(alpha: 0.4),
+                    ),
+                  ),
+                  child: Icon(LucideIcons.plus, size: 14, color: hollow.textSecondary),
+                ),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _MobileColorSwatch extends StatelessWidget {
+  final double hue;
+  final bool isSelected;
+  final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+
+  const _MobileColorSwatch({
+    required this.hue,
+    required this.isSelected,
+    required this.onTap,
+    this.onLongPress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      onLongPress: onLongPress,
+      child: Container(
+        width: 28,
+        height: 28,
+        decoration: BoxDecoration(
+          color: accentFromHue(hue),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: isSelected
+                ? Colors.white
+                : Colors.white.withValues(alpha: 0.15),
+            width: isSelected ? 2.5 : 1,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BackgroundSection extends ConsumerWidget {
+  const _BackgroundSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final bg = ref.watch(backgroundProvider);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(LucideIcons.image, size: 18, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.md),
+            Expanded(
+              child: Text('Background', style: HollowTypography.body.copyWith(
+                color: hollow.textPrimary,
+              )),
+            ),
+            HollowButton.ghost(
+              compact: true,
+              onPressed: () async {
+                final result = await FilePicker.platform.pickFiles(type: FileType.image);
+                if (result == null || result.files.isEmpty) return;
+                final bytes = await result.files.first.xFile.readAsBytes();
+                if (!context.mounted) return;
+
+                final isMobile = Platform.isAndroid || Platform.isIOS;
+                final bgAspect = isMobile ? 9.0 / 16.0 : 16.0 / 9.0;
+                final cropped = isMobile
+                    ? await showMobileImageCrop(
+                        context: context,
+                        imageBytes: bytes,
+                        aspectRatio: bgAspect,
+                        title: 'Crop Background',
+                      )
+                    : await showImageCropDialog(
+                        context: context,
+                        imageBytes: bytes,
+                        aspectRatio: bgAspect,
+                        title: 'Crop Background',
+                      );
+                if (cropped == null) return;
+                ref.read(backgroundProvider.notifier).setImage(cropped);
+              },
+              child: Text(bg.hasBackground ? 'Change' : 'Set Image'),
+            ),
+            if (bg.hasBackground) ...[
+              const SizedBox(width: HollowSpacing.xs),
+              HollowButton.ghost(
+                compact: true,
+                onPressed: () => ref.read(backgroundProvider.notifier).clearImage(),
+                child: const Text('Remove'),
+              ),
+            ],
+          ],
+        ),
+
+        // Opacity slider (only when background is set)
+        if (bg.hasBackground) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Panel Opacity', style: HollowTypography.bodySmall.copyWith(
+                color: hollow.textSecondary,
+              )),
+              Text('${(bg.panelOpacity * 100).round()}%',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.accent, fontWeight: FontWeight.w600,
+                  )),
+            ],
+          ),
+          Slider(
+            value: bg.panelOpacity.clamp(0.0, 0.92),
+            min: 0.0,
+            max: 0.92,
+            divisions: 23,
+            activeColor: hollow.accent,
+            inactiveColor: hollow.border,
+            onChanged: (v) => ref.read(backgroundProvider.notifier).setOpacity(v),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _AnimationsToggleRow extends ConsumerWidget {
+  const _AnimationsToggleRow();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final asyncVal = ref.watch(disableAnimationsProvider);
+    final disabled = asyncVal.valueOrNull ?? false;
+
+    return Row(
+      children: [
+        Icon(LucideIcons.zap, size: 18, color: hollow.textSecondary),
+        const SizedBox(width: HollowSpacing.md),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Disable Animations', style: HollowTypography.body.copyWith(
+                color: hollow.textPrimary,
+              )),
+              Text('Turn off UI transitions and effects',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary, fontSize: 11,
+                  )),
+            ],
+          ),
+        ),
+        Switch(
+          value: disabled,
+          onChanged: (v) {
+            ref.read(disableAnimationsProvider.notifier).setEnabled(v);
+            HollowDurations.animationsDisabled = v;
+            SharedTickers.instance.disabled = v;
+            if (v) {
+              SharedTickers.instance.pause();
+            } else {
+              SharedTickers.instance.start();
+              SharedTickers.instance.resume();
+            }
+          },
+          activeTrackColor: hollow.accent,
+          activeColor: Colors.white,
+          inactiveTrackColor: hollow.border,
+        ),
+      ],
+    );
+  }
+}
+
+class _InvisibleToggleRow extends ConsumerWidget {
+  const _InvisibleToggleRow();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final invisible = ref.watch(invisibleModeProvider);
+
+    return Row(
+      children: [
+        Icon(LucideIcons.eyeOff, size: 18, color: hollow.textSecondary),
+        const SizedBox(width: HollowSpacing.md),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Appear Invisible', style: HollowTypography.body.copyWith(
+                color: hollow.textPrimary,
+              )),
+              Text('Show as offline to other users',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary, fontSize: 11,
+                  )),
+            ],
+          ),
+        ),
+        Switch(
+          value: invisible,
+          onChanged: (v) =>
+              ref.read(invisibleModeProvider.notifier).setInvisible(v),
+          activeTrackColor: hollow.accent,
+          activeColor: Colors.white,
+          inactiveTrackColor: hollow.border,
+        ),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────
+// Files section widgets
+// ─────────────────────────────────────────────────
+
+class _ImageQualityPicker extends ConsumerWidget {
+  const _ImageQualityPicker();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final asyncQuality = ref.watch(imageQualityProvider);
+    final current = asyncQuality.valueOrNull ?? ImageQuality.balanced;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Image Quality', style: HollowTypography.bodySmall.copyWith(
+          color: hollow.textSecondary,
+        )),
+        const SizedBox(height: HollowSpacing.sm),
+        Row(
+          children: ImageQuality.values.map((q) {
+            final isSelected = q == current;
+            final shortLabel = switch (q) {
+              ImageQuality.lossless => 'Lossless',
+              ImageQuality.balanced => 'Balanced',
+              ImageQuality.small => 'Small',
+            };
+            return Padding(
+              padding: const EdgeInsets.only(right: HollowSpacing.sm),
+              child: HollowPressable(
+                onTap: () => ref.read(imageQualityProvider.notifier).setQuality(q),
+                borderRadius: BorderRadius.circular(20),
+                backgroundColor: isSelected ? hollow.accent : hollow.surface,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.md, vertical: HollowSpacing.sm,
+                ),
+                child: Text(shortLabel,
+                    style: HollowTypography.caption.copyWith(
+                      color: isSelected ? hollow.textOnAccent : hollow.textSecondary,
+                      fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+                    )),
+              ),
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+        Text(current.description,
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary, fontSize: 11,
+            )),
+      ],
+    );
+  }
+}
+
+class _AutoDownloadSlider extends ConsumerWidget {
+  const _AutoDownloadSlider();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final asyncVal = ref.watch(autoDownloadThresholdProvider);
+    final value = asyncVal.valueOrNull ?? 169;
+
+    final label = value >= 1024
+        ? '${(value / 1024).toStringAsFixed(1)} GB'
+        : '$value MB';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('Auto-Download', style: HollowTypography.bodySmall.copyWith(
+              color: hollow.textSecondary,
+            )),
+            Text(label, style: HollowTypography.caption.copyWith(
+              color: hollow.accent, fontWeight: FontWeight.w600,
+            )),
+          ],
+        ),
+        Slider(
+          value: value.toDouble().clamp(34, 2048),
+          min: 34,
+          max: 2048,
+          divisions: 50,
+          activeColor: hollow.accent,
+          inactiveColor: hollow.border,
+          onChanged: (v) =>
+              ref.read(autoDownloadThresholdProvider.notifier).setThreshold(v.round()),
+        ),
+        Text('Files up to this size auto-download',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary, fontSize: 11,
+            )),
+      ],
+    );
+  }
+}
+
+class _CacheCapSlider extends ConsumerWidget {
+  const _CacheCapSlider();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final asyncVal = ref.watch(vaultCacheCapProvider);
+    final value = asyncVal.valueOrNull ?? 1024;
+
+    final label = value >= 1024
+        ? '${(value / 1024).toStringAsFixed(1)} GB'
+        : '$value MB';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('Cache Size Limit', style: HollowTypography.bodySmall.copyWith(
+              color: hollow.textSecondary,
+            )),
+            Text(label, style: HollowTypography.caption.copyWith(
+              color: hollow.accent, fontWeight: FontWeight.w600,
+            )),
+          ],
+        ),
+        Slider(
+          value: value.toDouble().clamp(256, 10240),
+          min: 256,
+          max: 10240,
+          divisions: 40,
+          activeColor: hollow.accent,
+          inactiveColor: hollow.border,
+          onChanged: (v) =>
+              ref.read(vaultCacheCapProvider.notifier).setCap(v.round()),
+        ),
+        Text('LRU-evicted cache for vault files',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary, fontSize: 11,
+            )),
       ],
     );
   }
@@ -1211,16 +1967,21 @@ class _AboutTab extends ConsumerWidget {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        // App info
+        // Logo + name
         Center(
           child: Column(
             children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(24),
+                child: Image.asset(
+                  'assets/hollow_logo_rounded.png',
+                  width: 96,
+                  height: 96,
+                ),
+              ),
+              const SizedBox(height: HollowSpacing.md),
               Text('Hollow', style: HollowTypography.display.copyWith(
                 color: hollow.accent,
-              )),
-              const SizedBox(height: HollowSpacing.xs),
-              Text('v0.4.2', style: HollowTypography.body.copyWith(
-                color: hollow.textSecondary,
               )),
               const SizedBox(height: HollowSpacing.xs),
               Text('Encrypted, distributed messaging',

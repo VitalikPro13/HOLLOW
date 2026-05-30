@@ -315,11 +315,11 @@
 
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
-| 195 | Theme (dark/light) | `user_settings_dialog.dart` | Not impl | Toggle | **Mobile per plan:** under "Appearance" ASOT section in Settings tab |
-| 196 | Custom accent hue | `user_settings_dialog.dart` | Not impl | HSL slider 0-360° | **Mobile:** under "Appearance" section |
-| 197 | Accent color presets | `user_settings_dialog.dart` | Not impl | Add/remove saved hues | **Mobile:** under "Appearance" section |
-| 198 | Background image | `user_settings_dialog.dart` | Not impl | File picker + crop | **Mobile:** under "Appearance" section |
-| 199 | Animations toggle | `user_settings_dialog.dart` | Not impl | Toggle | **Mobile:** under "Appearance" section |
+| 195 | Theme (dark/light) | `user_settings_dialog.dart` | Done | Toggle | Immediate apply, persisted to SQLCipher |
+| 196 | Custom accent hue | `user_settings_dialog.dart` | Done | HSL slider 0-360° | Rainbow slider in Appearance section |
+| 197 | Accent color presets | `user_settings_dialog.dart` | Done | Add/remove saved hues | Swatches with long-press to remove |
+| 198 | Background image | `user_settings_dialog.dart` | Done | File picker + crop | Full-screen mobile crop route (pinch-to-zoom) |
+| 199 | Animations toggle | `user_settings_dialog.dart` | Done | Toggle | SharedTickers + HollowDurations |
 
 ## 21. Settings — Layout
 
@@ -327,28 +327,28 @@
 |---|---------|-----------------|--------|-------------|-------|
 | 200 | Layout mode (dock/classic) | `user_settings_dialog.dart` | N/A | Toggle | Desktop only |
 | 201 | Minimize to tray | `user_settings_dialog.dart` | N/A | Toggle | Desktop only |
-| 202 | Image quality selection | `settings_provider.dart` | Not impl | Radio buttons | Lossless/Balanced/Small |
-| 203 | Auto-download threshold | `settings_provider.dart` | Not impl | Number input (MB) | 34-2048 MB |
-| 204 | Vault cache cap | `settings_provider.dart` | Not impl | Number input (MB) | 256-10240 MB |
+| 202 | Image quality selection | `settings_provider.dart` | Done | Pill buttons | Lossless/Balanced/Small in Files section |
+| 203 | Auto-download threshold | `settings_provider.dart` | Done | Slider (MB) | 34-2048 MB in Files section |
+| 204 | Vault cache cap | `settings_provider.dart` | Done | Slider (MB) | 256-10240 MB in Files section |
 
 ## 22. Settings — Network
 
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
-| 205 | Relay domain selection | `user_settings_dialog.dart`, `relay_domain_provider.dart` | Not impl | Dropdown | **Mobile per plan:** under "Network" ASOT section in Settings tab |
-| 206 | Custom relay domain entry | `user_settings_dialog.dart` | Not impl | Text input + Add | **Mobile:** under "Network" section |
-| 207 | Remove relay from list | `user_settings_dialog.dart` | Not impl | Delete button | **Mobile:** swipe-to-delete in relay list |
-| 208 | License key entry | `license_key_dialog.dart` | Not impl | Modal dialog | Shows on startup if relay requires it |
+| 205 | Relay domain selection | `user_settings_dialog.dart`, `relay_domain_provider.dart` | Done | Radio list | Network section in System tab, official badge |
+| 206 | Custom relay domain entry | `user_settings_dialog.dart` | Done | Text input + Add | Inline add field with Add/Cancel |
+| 207 | Remove relay from list | `user_settings_dialog.dart` | Done | X button | Non-default relays only |
+| 208 | License key entry | `license_key_dialog.dart` | Done | Modal dialog | Button in Network section, reuses desktop dialog |
 
 ## 23. Settings — Dialogs
 
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
-| 209 | User settings dialog | `user_settings_dialog.dart` | Partial | 5-tab modal | **Mobile per plan:** Settings tab replaces dialog. ASOT-style sections: Profile, Appearance, Network, Data, About. Scrollable, full-width dividers |
-| 210 | Image crop dialog | `image_crop_dialog.dart` | Not impl | Modal with ratio | 1:1 (avatar) or 3:1 (banner) |
+| 209 | User settings dialog | `user_settings_dialog.dart` | Done | 4-tab Settings | Pill tabs: Profile, System, Security, About. All sections ported |
+| 210 | Image crop dialog | `image_crop_dialog.dart` | Done | Full-screen route | Fixed crop frame + pinch-zoom image. `mobile_image_crop_route.dart` |
 | 211 | Screen share picker dialog | `screen_share_dialog.dart` | N/A | Modal | Screens/windows, res, fps, audio |
-| 212 | Storage dashboard dialog | `storage_dashboard_dialog.dart` | Not impl | Modal | Cache, vault, DB usage |
-| 213 | Paste link dialog | `paste_link_dialog.dart` | Not impl | Modal | `hollow://` deep link navigation |
+| 212 | Storage dashboard dialog | `storage_dashboard_dialog.dart` | Done | Full-screen route | Drill-down from server settings. `mobile_storage_route.dart` |
+| 213 | Paste link dialog | `paste_link_dialog.dart` | N/A | Modal | Share system excluded from mobile |
 
 ---
 
