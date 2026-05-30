@@ -671,10 +671,14 @@ Uses `HollowPressable` wrapper. Shows check icon when selected.
 - `publicKeyFingerprint` -- base64-decoded key -> hex -> groups of 4 uppercase chars (first 32 hex chars = 16 bytes)
 - `toProofJson()` -- structured JSON with version, protocol, message, sender, context, signature, verification instructions
 
-### Widget: `_MessageProofDialogContent` (StatefulWidget)
+### Widget: `_MessageProofDialogContent` (StatefulWidget + SingleTickerProviderStateMixin)
 
 **State fields:**
 - `_verified` -- `bool?` (null = pending, true = valid, false = invalid)
+- `_staggerController` -- AnimationController (600ms forward / 200ms reverse)
+- `_fadeAnims` / `_slideAnims` -- per-item stagger animations (7 items, overlapping intervals)
+
+**Stagger animation:** 7 content sections fade+slide in sequentially on open (600ms). On close (Close button or barrier tap), `_closeDialog()` reverses the stagger (200ms) before popping. `PopScope` intercepts barrier dismiss to play the reverse animation.
 
 **`_verifySignature()` (called in initState):**
 - Calls `network_api.verifyMessageProof(senderPeerId:, signatureB64:, publicKeyB64:, canonicalPayload:)`
@@ -683,9 +687,9 @@ Uses `HollowPressable` wrapper. Shows check icon when selected.
 **Layout (520px max):**
 
 **Header row:**
-- Dynamic shield icon: `shieldCheck` (verified), `shieldAlert` (invalid), `shield` (pending), `shieldOff` (unsigned)
+- Dynamic shield icon: `shieldCheck` (verified), `shieldAlert` (invalid), `shield` (pending), `shieldOff` (unsigned). Uses `AnimatedSwitcher` + `ScaleTransition` to pop on state change.
 - "Message Proof" heading
-- Badge: `_buildBadge()` -- "UNSIGNED", "VERIFYING...", "VERIFIED", or "INVALID" with appropriate color
+- Badge: `_buildBadge()` -- hidden during verification (returns `SizedBox.shrink`), then fades in as "UNSIGNED", "VERIFIED", or "INVALID" via `AnimatedSwitcher`
 
 **Message preview (`_MessagePreview`):**
 - Chat-bubble style: `HollowAvatar` + sender name + timestamp + optional media thumbnail + text

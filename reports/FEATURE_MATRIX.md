@@ -356,17 +356,17 @@
 
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
-| 214 | Archive dashboard | `archive_dashboard.dart` | Partial | Tab switcher | **Mobile per plan:** Archive tab (3rd bottom tab). My Data + Imported as sub-tabs or sections |
-| 215 | My data view | `my_data_view.dart` | Not impl | Two-panel layout | **Mobile:** single-panel list → tap conversation → push viewer. Export per-DM/channel/server |
-| 216 | Conversation list | `archive_conversation_list.dart` | Not impl | Searchable panel | DMs + channels by server |
-| 217 | Message viewer | `archive_message_viewer.dart` | Not impl | Read-only display | Full history |
-| 218 | DM export | `export_archive_dialog.dart` | Not impl | Right-click → Export | `.hollow-archive` file |
-| 219 | Channel export | `export_archive_dialog.dart` | Not impl | Right-click → Export | Single or multi-channel |
-| 220 | Server export | `export_archive_dialog.dart` | Not impl | Header → Export | All channels |
-| 221 | Export mode (full/text) | `export_archive_dialog.dart` | Not impl | Radio buttons | With/without attachments |
-| 222 | Hidden DM management | `archive_conversation_list.dart` | Not impl | Eye toggle | Hide/unhide in archive |
-| 223 | Imported archives view | `imported_archives_view.dart` | Not impl | Right panel | Browse + search + verify |
-| 224 | Archive search | `archive_conversation_list.dart` | Not impl | Search field | Case-insensitive contains |
+| 214 | Archive dashboard | `archive_dashboard.dart` | Done | Tab switcher | Mobile: pill sub-tabs (My Data / Imported) in Archive tab |
+| 215 | My data view | `my_data_view.dart` | Done | Two-panel layout | Mobile: single-panel list → tap → push MobileArchiveViewerRoute |
+| 216 | Conversation list | `archive_conversation_list.dart` | Done | Searchable panel | DMs + channels by server, inner pill tabs |
+| 217 | Message viewer | `archive_message_viewer.dart` | Done | Read-only display | Full history, search, jump-to-date, sender filter, edit history |
+| 218 | DM export | `export_archive_dialog.dart` | Done | Long-press → Export | Reuses desktop showExportArchiveDialog |
+| 219 | Channel export | `export_archive_dialog.dart` | Done | Long-press → Export | Single channel or from viewer header |
+| 220 | Server export | `export_archive_dialog.dart` | Done | Long-press header → Export | All channels via server header |
+| 221 | Export mode (full/text) | `export_archive_dialog.dart` | Done | Radio buttons | Reuses desktop dialog (cross-platform) |
+| 222 | Hidden DM management | `archive_conversation_list.dart` | Done | Eye toggle | Hide/unhide inline + expandable Hidden section |
+| 223 | Imported archives view | `imported_archives_view.dart` | Done | Right panel | Mobile: load via file picker, verify status badges, push viewer |
+| 224 | Archive search | `archive_conversation_list.dart` | Done | Search field | Conversation list search + in-message search with prev/next |
 
 ## 25. Vault & Recovery
 
@@ -487,11 +487,11 @@
 
 | Category | Total | Done | Partial | Not Impl | N/A |
 |----------|-------|------|---------|----------|-----|
-| All features | 288 | 182 | 3 | 56 | 47 |
+| All features | 288 | 193 | 2 | 46 | 47 |
 
-**Actionable (excl. N/A): 241 total, 182 Done (75%), 3 Partial, 56 Not impl.**
+**Actionable (excl. N/A): 241 total, 193 Done (80%), 2 Partial, 46 Not impl.**
 
-*Updated 2026-05-29. Sections 12-19 complete.*
+*Updated 2026-05-30. Sections 12-24 complete.*
 
 ### Session 2026-05-29 Progress
 - **Sections 17-19 complete.** Voice channels: join/leave/mute/deafen/camera/video/speaking indicators, floating pill, cross-server status strip. Audio settings in System tab. E2EE/WebRTC transparent cross-platform.

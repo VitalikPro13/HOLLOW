@@ -116,15 +116,60 @@ class _MessageProofDialogContent extends StatefulWidget {
 
 /// Verification state: null = pending, true = valid, false = invalid.
 class _MessageProofDialogContentState
-    extends State<_MessageProofDialogContent> {
+    extends State<_MessageProofDialogContent>
+    with SingleTickerProviderStateMixin {
   bool? _verified;
+  late final AnimationController _staggerController;
+  late final List<Animation<double>> _fadeAnims;
+  late final List<Animation<Offset>> _slideAnims;
 
   MessageProofData get proof => widget.proof;
+
+  static const _itemCount = 7;
 
   @override
   void initState() {
     super.initState();
+    _staggerController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+      reverseDuration: const Duration(milliseconds: 200),
+    );
+
+    _fadeAnims = List.generate(_itemCount, (i) {
+      final start = (i * 0.1).clamp(0.0, 0.7);
+      final end = (start + 0.4).clamp(0.0, 1.0);
+      return CurvedAnimation(
+        parent: _staggerController,
+        curve: Interval(start, end, curve: Curves.easeOut),
+      );
+    });
+
+    _slideAnims = List.generate(_itemCount, (i) {
+      final start = (i * 0.1).clamp(0.0, 0.7);
+      final end = (start + 0.4).clamp(0.0, 1.0);
+      return Tween<Offset>(
+        begin: const Offset(0, 0.08),
+        end: Offset.zero,
+      ).animate(CurvedAnimation(
+        parent: _staggerController,
+        curve: Interval(start, end, curve: Curves.easeOutCubic),
+      ));
+    });
+
+    _staggerController.forward();
     _verifySignature();
+  }
+
+  @override
+  void dispose() {
+    _staggerController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _closeDialog() async {
+    await _staggerController.reverse();
+    if (mounted) Navigator.of(context).pop();
   }
 
   Future<void> _verifySignature() async {
@@ -180,6 +225,17 @@ class _MessageProofDialogContentState
     }
   }
 
+  Widget _stagger(int index, {required Widget child}) {
+    final i = index.clamp(0, _itemCount - 1);
+    return SlideTransition(
+      position: _slideAnims[i],
+      child: FadeTransition(
+        opacity: _fadeAnims[i],
+        child: child,
+      ),
+    );
+  }
+
   Widget _buildBadge(HollowTheme hollow, bool hasSig) {
     final String label;
     final Color color;
@@ -187,8 +243,7 @@ class _MessageProofDialogContentState
       label = 'UNSIGNED';
       color = hollow.textSecondary;
     } else if (_verified == null) {
-      label = 'VERIFYING...';
-      color = hollow.textSecondary;
+      return const SizedBox.shrink(key: ValueKey('pending'));
     } else if (_verified!) {
       label = 'VERIFIED';
       color = hollow.accent;
@@ -197,6 +252,7 @@ class _MessageProofDialogContentState
       color = hollow.error;
     }
     return Container(
+      key: ValueKey(label),
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm,
         vertical: 2,
@@ -223,7 +279,12 @@ class _MessageProofDialogContentState
     final timestamp = DateTime.fromMillisecondsSinceEpoch(proof.timestampMs);
     final fingerprint = proof.publicKeyFingerprint;
 
-    return Center(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _closeDialog();
+      },
+      child: Center(
       child: Padding(
         padding: const EdgeInsets.all(HollowSpacing.xl),
         child: ConstrainedBox(
@@ -250,24 +311,29 @@ class _MessageProofDialogContentState
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   // Header
-                  Row(
+                  _stagger(0, child: Row(
                     children: [
-                      Icon(
-                        hasSig
-                            ? (_verified == true
-                                ? LucideIcons.shieldCheck
-                                : _verified == false
-                                    ? LucideIcons.shieldAlert
-                                    : LucideIcons.shield)
-                            : LucideIcons.shieldOff,
-                        size: 18,
-                        color: !hasSig
-                            ? hollow.textSecondary
-                            : _verified == true
-                                ? hollow.accent
-                                : _verified == false
-                                    ? hollow.error
-                                    : hollow.textSecondary,
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 300),
+                        transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: child),
+                        child: Icon(
+                          hasSig
+                              ? (_verified == true
+                                  ? LucideIcons.shieldCheck
+                                  : _verified == false
+                                      ? LucideIcons.shieldAlert
+                                      : LucideIcons.shield)
+                              : LucideIcons.shieldOff,
+                          key: ValueKey(_verified),
+                          size: 18,
+                          color: !hasSig
+                              ? hollow.textSecondary
+                              : _verified == true
+                                  ? hollow.accent
+                                  : _verified == false
+                                      ? hollow.error
+                                      : hollow.textSecondary,
+                        ),
                       ),
                       const SizedBox(width: HollowSpacing.sm),
                       Text(
@@ -276,65 +342,69 @@ class _MessageProofDialogContentState
                             .copyWith(color: hollow.textPrimary),
                       ),
                       const Spacer(),
-                      _buildBadge(hollow, hasSig),
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 300),
+                        transitionBuilder: (child, anim) => FadeTransition(opacity: anim, child: child),
+                        child: _buildBadge(hollow, hasSig),
+                      ),
                     ],
-                  ),
+                  )),
                   const SizedBox(height: HollowSpacing.lg),
 
-                  // Message preview — mimics chat bubble style
-                  _MessagePreview(hollow: hollow, proof: proof),
+                  // Message preview
+                  _stagger(1, child: _MessagePreview(hollow: hollow, proof: proof)),
                   const SizedBox(height: HollowSpacing.lg),
 
                   // Info rows
-                  _InfoRow(
+                  _stagger(2, child: _InfoRow(
                     hollow: hollow,
                     label: 'Sender Peer ID',
                     value: proof.senderPeerId,
                     mono: true,
                     copyable: true,
-                  ),
+                  )),
                   const SizedBox(height: HollowSpacing.sm),
-                  _InfoRow(
+                  _stagger(3, child: _InfoRow(
                     hollow: hollow,
                     label: 'Timestamp',
                     value:
                         '${timestamp.toUtc().toIso8601String()} (${proof.timestampMs})',
-                  ),
+                  )),
                   if (proof.messageId != null) ...[
                     const SizedBox(height: HollowSpacing.sm),
-                    _InfoRow(
+                    _stagger(4, child: _InfoRow(
                       hollow: hollow,
                       label: 'Message ID',
                       value: proof.messageId!,
                       mono: true,
                       copyable: true,
-                    ),
+                    )),
                   ],
                   if (fingerprint != null) ...[
                     const SizedBox(height: HollowSpacing.sm),
-                    _InfoRow(
+                    _stagger(5, child: _InfoRow(
                       hollow: hollow,
                       label: 'Public Key Fingerprint',
                       value: fingerprint,
                       mono: true,
                       copyable: true,
-                    ),
+                    )),
                   ],
                   if (hasSig) ...[
                     const SizedBox(height: HollowSpacing.sm),
-                    _InfoRow(
+                    _stagger(5, child: _InfoRow(
                       hollow: hollow,
                       label: 'Ed25519 Signature',
                       value: proof.signature!,
                       mono: true,
                       copyable: true,
                       truncate: true,
-                    ),
+                    )),
                   ],
                   const SizedBox(height: HollowSpacing.xl),
 
                   // Actions
-                  Row(
+                  _stagger(6, child: Row(
                     children: [
                       if (hasSig)
                         HollowButton.ghost(
@@ -360,16 +430,17 @@ class _MessageProofDialogContentState
                         const SizedBox(width: HollowSpacing.sm),
                       ],
                       HollowButton.filled(
-                        onPressed: () => Navigator.of(context).pop(),
+                        onPressed: _closeDialog,
                         child: const Text('Close'),
                       ),
                     ],
-                  ),
+                  )),
                 ],
               ),
             ),
           ),
         ),
+      ),
       ),
     );
   }

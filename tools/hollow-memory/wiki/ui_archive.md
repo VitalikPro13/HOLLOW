@@ -1,6 +1,6 @@
 # Archive UI — Message History and Data Management
 
-The Archive system provides read-only access to the user's entire message history (DMs + channels), vault file management with erasure-coded shard status, imported archive verification/viewing, and recovery pool coordination. It is accessed via the Archive dashboard in the shell and consists of seven interconnected views spanning eight source files.
+The Archive system provides read-only access to the user's entire message history (DMs + channels), vault file management with erasure-coded shard status, imported archive verification/viewing, and recovery pool coordination. Desktop: accessed via the Archive dashboard in the shell. Mobile: bottom nav tab index 2 (`MobileArchiveTab`), with push navigation to `MobileArchiveViewerRoute` and `MobileImportedArchiveViewerRoute`. See `wiki/ui_mobile.md` for mobile-specific documentation.
 
 ---
 

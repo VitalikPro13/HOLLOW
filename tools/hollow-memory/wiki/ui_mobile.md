@@ -610,3 +610,121 @@ Manual `_scale`, `_offsetX`, `_offsetY` state (no `InteractiveViewer`). On every
 
 ### Navigation
 Added as `_NavRow(icon: LucideIcons.hardDrive, label: 'Storage')` in `MobileServerSettingsRoute` Management section, visible to all members.
+
+---
+
+## MobileArchiveTab
+
+**File:** `lib/src/ui/mobile/tabs/mobile_archive_tab.dart`
+**Class:** `MobileArchiveTab extends ConsumerWidget`
+**Purpose:** Full archive tab (bottom nav index 2). My Data + Imported Archives sub-tabs.
+
+### Deferred Loading
+Watches `mobileTabProvider` — returns `SizedBox.shrink()` when `activeTab != 2`. Prevents `archiveDmListProvider` from firing before the message store is open at startup.
+
+### Top-Level Structure
+- "Archive" heading + pill sub-tab row: "My Data" | "Imported" (uses `archiveSubTabProvider`)
+- `AnimatedSwitcher` (200ms) switches between `_MobileMyDataView` and `_MobileImportedArchivesView`
+
+### _MobileMyDataView (ConsumerStatefulWidget)
+- Inner pill tabs: DMs | Channels (uses `myDataInnerTabProvider`, no Vault Files — deferred to Section 25)
+- Search field (uses `archiveSearchProvider`)
+- **DM list:** Avatar + name + message count + eye icon (hide/unhide). Hidden section with expandable `AnimatedSize`. Tap → push `MobileArchiveViewerRoute(peerId:)`. Long-press → bottom sheet (Export, Hide/Unhide).
+- **Channel list:** Grouped by server headers (uppercase). Each channel: # + name + count. Server headers have export icon. Tap → push `MobileArchiveViewerRoute(serverId:, channelId:)`. Long-press → export bottom sheet.
+- Selection providers set before push, cleared in `.then()`.
+
+### _MobileImportedArchivesView (ConsumerStatefulWidget)
+- "Load Archive" button → `FilePicker` (no drag-drop on mobile)
+- List of `_MobileArchiveEntryCard` widgets showing: type icon, name, verification shield badge, detail text, message count, date
+- Tap → push `MobileImportedArchiveViewerRoute(path:)`. Long-press → remove bottom sheet.
+
+---
+
+## MobileArchiveViewerRoute
+
+**File:** `lib/src/ui/mobile/mobile_archive_viewer_route.dart`
+**Class:** `MobileArchiveViewerRoute extends ConsumerStatefulWidget`
+**Purpose:** Full-screen read-only message viewer for My Data (DMs and channels).
+
+### Constructor
+| Parameter | Type | Description |
+|---|---|---|
+| `peerId` | `String?` | DM peer (mutually exclusive with serverId/channelId) |
+| `serverId` | `String?` | Server ID for channel viewer |
+| `channelId` | `String?` | Channel ID for channel viewer |
+
+`isDm` getter: `peerId != null`.
+
+### Header (_MobileArchiveHeader)
+Back button, avatar (DM) or # icon (channel), title, subtitle "in serverName" (channel), icon buttons: filter (channels, >1 sender), calendar (jump-to-date), search toggle, export, "read-only" badge.
+
+### Message List
+- `ScrollablePositionedList.builder` with `ItemScrollController`
+- `DateSeparator` + `shouldGroup` / `shouldShowDateSeparator` (reused from `chat_pane.dart`)
+- `MessageBubble` (DM) or `ChannelMessageBubble` (channel)
+- `_DeletedOverlay` for `hiddenAt != null`
+- `EditHistoryIndicator` (reused from `archive_message_viewer.dart`)
+- `_LongPressMessage` wrapper → `showMobileArchiveMessageActions()`
+- Reply lookups from same message list (channels: from unfiltered `allMessages`)
+- `AnimatedSwitcher` crossfade from loading spinner to content
+
+### Search
+Reuses `ArchiveSearchBar` from `archive_message_viewer.dart`. Match indices computed inline, prev/next cycle with `_scrollToIndex()` + 1.5s highlight.
+
+### Sender Filter (Channel only)
+`_FilterSheet` bottom sheet with searchable participant list. Sets `archiveFilterSenderProvider`.
+
+### Jump-to-Date
+`showDatePicker()` → `archiveJumpToDateProvider` → binary search scroll.
+
+### File Save
+Same pattern as `mobile_chat_route.dart:_saveFile()` — WebP→PNG conversion, `FilePicker.platform.saveFile(bytes:)`.
+
+### Provider Cleanup
+Resets `archiveFilterSenderProvider`, search/jump providers in `dispose()` via `addPostFrameCallback`.
+
+---
+
+## MobileImportedArchiveViewerRoute
+
+**File:** `lib/src/ui/mobile/mobile_imported_archive_viewer_route.dart`
+**Class:** `MobileImportedArchiveViewerRoute extends ConsumerStatefulWidget`
+**Purpose:** Full-screen viewer for imported `.hollow-archive` files.
+
+### Constructor
+| Parameter | Type | Description |
+|---|---|---|
+| `path` | `String` | File path of the `.hollow-archive` |
+
+### Data Loading
+Uses `importedArchiveDataProvider(path)` with `AnimatedSwitcher` crossfade from spinner to content.
+
+### Verification Banner
+- Archive signature status: shield icon + text (signed by exporter or invalid)
+- Message signature counts: valid/invalid/unsigned
+- Color-coded: accent (valid), amber (warnings), error (invalid)
+
+### Channel Selector (Server Archives)
+Horizontal scrolling pill tabs for multi-channel server archives. Uses `importedArchiveSelectedChannelProvider`. Resets filter/search on channel switch.
+
+### Message List
+Same pattern as `MobileArchiveViewerRoute`: `ScrollablePositionedList`, date separators, grouping, reply lookups, edit history, deleted overlay, long-press actions, search bar.
+
+### Message Conversion
+Uses `convertArchiveDmMessages()` / `convertArchiveChannelMessages()` from `archive_provider.dart`.
+
+---
+
+## MobileArchiveMessageActions
+
+**File:** `lib/src/ui/mobile/mobile_archive_message_actions.dart`
+**Function:** `showMobileArchiveMessageActions(context, messageText, senderName, timestamp, {onCopy, onDownload, onInfo})`
+**Purpose:** Read-only long-press bottom sheet for archive messages.
+
+### Actions (subset of showMobileMessageActions)
+- Copy Text — when message has text
+- Save File — when file attachment with diskPath
+- Message Info — opens message proof dialog
+
+### Animation
+Staggered entrance (400ms): message preview fades+slides in first, then each action row with 0.15 offset. Exit handled by `showModalBottomSheet`'s built-in slide-down.
