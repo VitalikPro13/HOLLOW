@@ -314,6 +314,7 @@ class _MobileImportedArchiveViewerRouteState
         ? (data.peerId ?? '')
         : '${data.serverId ?? ''}:${activeChannelId ?? data.channelId ?? ''}';
     final proofMsgType = isDm ? 'dm' : 'ch';
+    final exporterPeerId = v.exporterPeerId;
 
     // Header title
     String headerTitle;
@@ -607,7 +608,7 @@ class _MobileImportedArchiveViewerRouteState
               : isDm
                   ? _buildDmMessageList(
                       dmMessages!, profiles, localPeerId, data, editsMap,
-                      proofContext, proofMsgType)
+                      proofContext, proofMsgType, exporterPeerId)
                   : _buildChannelMessageList(
                       channelMessages!,
                       unfilteredChannelMessages ?? channelMessages,
@@ -625,6 +626,7 @@ class _MobileImportedArchiveViewerRouteState
     Map<String, List<ArchiveEditEntry>> editsMap,
     String proofContext,
     String proofMsgType,
+    String exporterPeerId,
   ) {
     final searchQuery = ref.watch(archiveMessageSearchQueryProvider);
     final matchIdx = ref.watch(archiveSearchMatchIndexProvider);
@@ -701,6 +703,11 @@ class _MobileImportedArchiveViewerRouteState
 
         final msgEdits =
             msg.messageId != null ? editsMap[msg.messageId] : null;
+
+        final dmProofCtx = proofMsgType == 'dm'
+            ? (senderPeerId == exporterPeerId ? proofContext : exporterPeerId)
+            : proofContext;
+
         if (msgEdits != null && msgEdits.isNotEmpty) {
           bubble = Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -709,7 +716,7 @@ class _MobileImportedArchiveViewerRouteState
               EditHistoryIndicator(
                 edits: msgEdits,
                 senderPeerId: senderPeerId,
-                proofContext: proofContext,
+                proofContext: dmProofCtx,
                 proofMsgType: proofMsgType,
                 messageId: msg.messageId,
               ),
@@ -727,7 +734,7 @@ class _MobileImportedArchiveViewerRouteState
             msg.publicKey,
             msg.messageId,
             msg.editedAt,
-            proofContext,
+            dmProofCtx,
             proofMsgType,
             msg.fileAttachment,
             profiles,

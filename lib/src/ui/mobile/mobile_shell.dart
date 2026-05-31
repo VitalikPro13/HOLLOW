@@ -5,6 +5,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/mobile/mobile_active_call_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_nav_bar.dart';
+import 'package:hollow/src/ui/mobile/mobile_notification_banner.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_pill.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_archive_tab.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_chats_tab.dart'
@@ -82,6 +83,7 @@ class MobileShell extends ConsumerWidget {
     return Stack(
       children: [
         scaffold,
+        const MobileNotificationBanner(),
         const MobileActiveCallPill(),
         const MobileVoiceChannelPill(),
       ],

@@ -175,27 +175,30 @@ pub(crate) fn load_archive(zip_bytes: &[u8]) -> Result<LoadedArchive, String> {
 
     // ── 10. Per-message signature verification ──────────────────
     let msg_type = if manifest.archive_type == "dm" { "dm" } else { "ch" };
-    // For single-channel archives, context is fixed.
-    // For server (multi-channel) archives, context is per-message from channel_id.
-    let fixed_context = if manifest.archive_type == "dm" {
-        Some(manifest.peer_id.clone().unwrap_or_default())
-    } else if manifest.archive_type == "channel" {
-        Some(format!(
-            "{}:{}",
-            manifest.server_id.as_deref().unwrap_or(""),
-            manifest.channel_id.as_deref().unwrap_or("")
-        ))
-    } else {
-        None // Server archives use per-message context.
-    };
+    let is_dm = manifest.archive_type == "dm";
+    let dm_peer = manifest.peer_id.clone().unwrap_or_default();
+    let dm_exporter = manifest.exporter_peer_id.clone();
 
     let mut per_message_results: Vec<MessageVerification> = Vec::new();
     for msg in &messages {
         let has_signature = msg.signature.is_some() && msg.public_key.is_some();
 
         let signature_valid = if has_signature {
-            let context = if let Some(ref ctx) = fixed_context {
-                ctx.clone()
+            let context = if is_dm {
+                // DM signing context = the recipient's peer ID.
+                // If the exporter sent this message, recipient = dm_peer.
+                // If the exporter received it, recipient = exporter.
+                if msg.sender_id == dm_exporter {
+                    dm_peer.clone()
+                } else {
+                    dm_exporter.clone()
+                }
+            } else if manifest.archive_type == "channel" {
+                format!(
+                    "{}:{}",
+                    manifest.server_id.as_deref().unwrap_or(""),
+                    manifest.channel_id.as_deref().unwrap_or("")
+                )
             } else {
                 // Server archive: context = "server_id:channel_id" from the message.
                 format!(

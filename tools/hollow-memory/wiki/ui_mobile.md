@@ -38,7 +38,7 @@ Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Uses `LayoutBu
 - Same pattern must be applied in `MobileChatRoute` (and any other pushed full-screen route) since pushed routes fully cover the shell
 
 ### Floating Pill Layering
-`MobileShell` wraps its `Scaffold` in a `Stack` with `MobileActiveCallPill` and `MobileVoiceChannelPill` on top. These pills are also placed in `MobileChatRoute`'s Stack so they remain visible on pushed chat routes. Full-screen voice/call routes use `PageRouteBuilder` (slide-from-bottom) and cover the pills by being pushed on top in the navigator stack. **CRITICAL:** Pills must NOT go in `app.dart` builder — that layer is above the navigator and no route can cover it.
+`MobileShell` wraps its `Scaffold` in a `Stack` with `MobileNotificationBanner`, `MobileActiveCallPill`, and `MobileVoiceChannelPill` on top. These pills are also placed in `MobileChatRoute`'s Stack so they remain visible on pushed chat routes. Full-screen voice/call routes use `PageRouteBuilder` (slide-from-bottom) and cover the pills by being pushed on top in the navigator stack. **CRITICAL:** Pills must NOT go in `app.dart` builder — that layer is above the navigator and no route can cover it.
 
 ### MobileChatsTab — Ambient Background & Header
 **File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart`
@@ -728,3 +728,66 @@ Uses `convertArchiveDmMessages()` / `convertArchiveChannelMessages()` from `arch
 
 ### Animation
 Staggered entrance (400ms): message preview fades+slides in first, then each action row with 0.15 offset. Exit handled by `showModalBottomSheet`'s built-in slide-down.
+
+## MobileNotificationBanner
+
+**File:** `lib/src/ui/mobile/mobile_notification_banner.dart`
+**Class:** `MobileNotificationBanner extends ConsumerStatefulWidget`
+**Purpose:** Slide-down banner for incoming messages when viewing a different chat.
+
+### Behavior
+- Watches `systemNotificationProvider` and filters out cards for the currently viewed conversation (via `selectedPeerProvider`/`selectedServerProvider`/`selectedChannelProvider`)
+- Slides down from top (300ms easeOutCubic), fades in
+- Auto-dismiss after 4s, swipe-up to dismiss
+- Tap navigates to source conversation (pushes `MobileChatRoute`, sets selection providers, clears in `.then()`)
+- One banner at a time (not stacked like desktop `NotificationOverlay`)
+- Wired into `MobileShell` Stack (above scaffold, below call pills)
+
+### Layout
+Row: `HollowAvatar(32)` + Column(title, last message preview). Elevated container with accent border + shadow.
+
+## DM Long-Press Context Menu
+
+**File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_DmContextSheet`)
+**Trigger:** `onLongPress` on `_DmRow` in the Chats tab conversation list.
+
+### Actions
+- Mute/Unmute Notifications — toggles `notificationSettingsProvider.setDmEnabled`
+- Export Archive — opens `showExportArchiveDialog` (messageCount: 0, count hidden)
+- Hide/Show in Archive — toggles `hiddenArchiveDmsProvider`
+- Copy Peer ID — clipboard + toast
+
+### Pattern
+Reuses existing `_SheetAction` widget (same as server context sheet). Bottom sheet with drag handle + peer name header.
+
+## Notification Levels (Server Settings)
+
+**File:** `lib/src/ui/mobile/mobile_server_settings_route.dart` (`_NotificationSection`)
+**Purpose:** Server-wide + per-channel notification level control.
+
+### Server-Wide Level
+3 pills in a Row: All Messages (bell, accent) / Mentions Only (atSign, warning) / Nothing (bellOff, error). Uses `notificationSettingsProvider.setServerLevel()`.
+
+### Per-Channel Overrides
+List of channels with current level badge. Tap → bottom sheet with 4 options: Default / All / Mentions / Nothing. Uses `notificationSettingsProvider.setChannelOverride()`.
+
+## Vault Files Tab (Archive)
+
+**File:** `lib/src/ui/mobile/tabs/mobile_archive_tab.dart` (`_MobileVaultFilesView`)
+**Purpose:** Third inner pill tab in My Data (DMs | Channels | Vault).
+
+### Layout
+- "Join Recovery Pool" accent button (reuses `showJoinRecoveryPoolDialog`)
+- Server list: `_VaultServerSection` expandable per-server (auto-expands if files exist)
+- Per-server: `_VaultFileRow` with file icon, name, size, shard progress bar, "X/Y" badge
+- Badge colors: green (reconstructable), orange (partial), gray (no shards)
+
+## About Tab (Relay Stats + News)
+
+**File:** `lib/src/ui/mobile/tabs/mobile_settings_tab.dart` (`_AboutTab`)
+
+### Relay Stats Card
+Container with status dot (green if fetchCount > 0), relay domain, online users count, RAM usage bar (`_StatBar`), bandwidth bar. Watches `relayStatsProvider` (7s polling).
+
+### News Section
+Latest 3 posts from `newsProvider`. Cards with title + date + body (4 lines max). Tap opens `showHollowDialog` with full scrollable body, title, date, and X close button.

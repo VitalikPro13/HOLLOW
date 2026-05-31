@@ -27,6 +27,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/ui/animations/ambient_background.dart';
+import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_channel_actions.dart';
@@ -67,6 +68,24 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
         ref.read(selectedPeerProvider.notifier).state = null;
       }
     });
+  }
+
+  void _showDmSheet(BuildContext context, String peerId, String name) {
+    final hollow = HollowTheme.of(context);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: hollow.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
+      ),
+      builder: (_) => SafeArea(
+        child: _DmContextSheet(
+          peerId: peerId,
+          name: name,
+          onDismiss: () => Navigator.pop(context),
+        ),
+      ),
+    );
   }
 
   void _showServerSheet(BuildContext context, String serverId, String serverName) {
@@ -326,6 +345,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                 isOnline: item.isOnline,
                 formatTime: _formatTime,
                 onTap: () => _openDmChat(item.id),
+                onLongPress: () => _showDmSheet(context, item.id, item.name),
               );
             } else {
               return _ServerRow(
@@ -471,6 +491,7 @@ class _DmRow extends ConsumerWidget {
   final bool isOnline;
   final String Function(DateTime) formatTime;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
 
   const _DmRow({
     required this.peerId,
@@ -479,6 +500,7 @@ class _DmRow extends ConsumerWidget {
     required this.isOnline,
     required this.formatTime,
     required this.onTap,
+    this.onLongPress,
   });
 
   @override
@@ -491,7 +513,9 @@ class _DmRow extends ConsumerWidget {
         : ref.watch(unreadProvider.select((s) => s.dmUnreadCount(peerId)));
     final hasUnread = dmUnreadCount > 0;
 
-    return HollowPressable(
+    return GestureDetector(
+      onLongPress: onLongPress,
+      child: HollowPressable(
       onTap: onTap,
       subtle: true,
       padding: const EdgeInsets.symmetric(
@@ -592,6 +616,105 @@ class _DmRow extends ConsumerWidget {
           ),
         ],
       ),
+    ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────
+// DM context bottom sheet
+// ─────────────────────────────────────────────────
+
+class _DmContextSheet extends ConsumerWidget {
+  final String peerId;
+  final String name;
+  final VoidCallback onDismiss;
+
+  const _DmContextSheet({
+    required this.peerId,
+    required this.name,
+    required this.onDismiss,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final isDmMuted = !ref.watch(
+        notificationSettingsProvider.select((s) => s.isDmEnabled(peerId)));
+    final isHidden = ref.watch(
+        hiddenArchiveDmsProvider.select((s) => s.contains(peerId)));
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: HollowSpacing.sm),
+          child: Container(
+            width: 32, height: 4,
+            decoration: BoxDecoration(
+              color: hollow.border,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+          child: Text(name,
+              style: HollowTypography.body.copyWith(
+                color: hollow.textSecondary, fontSize: 12),
+              maxLines: 1, overflow: TextOverflow.ellipsis),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        // Mute / Unmute
+        _SheetAction(
+          icon: isDmMuted ? LucideIcons.bell : LucideIcons.bellOff,
+          label: isDmMuted ? 'Unmute Notifications' : 'Mute Notifications',
+          onTap: () {
+            ref.read(notificationSettingsProvider.notifier)
+                .setDmEnabled(peerId, isDmMuted);
+            onDismiss();
+            HollowToast.show(context,
+                isDmMuted ? 'Unmuted' : 'Muted',
+                type: HollowToastType.success);
+          },
+        ),
+        // Export Archive
+        _SheetAction(
+          icon: LucideIcons.fileOutput,
+          label: 'Export Archive',
+          onTap: () {
+            onDismiss();
+            showExportArchiveDialog(context,
+                isDm: true, peerId: peerId, name: name, messageCount: 0);
+          },
+        ),
+        // Hide / Unhide from Archive
+        _SheetAction(
+          icon: isHidden ? LucideIcons.eye : LucideIcons.eyeOff,
+          label: isHidden ? 'Show in Archive' : 'Hide from Archive',
+          onTap: () {
+            if (isHidden) {
+              ref.read(hiddenArchiveDmsProvider.notifier).unhide(peerId);
+            } else {
+              ref.read(hiddenArchiveDmsProvider.notifier).hide(peerId);
+            }
+            onDismiss();
+          },
+        ),
+        // Copy Peer ID
+        _SheetAction(
+          icon: LucideIcons.copy,
+          label: 'Copy Peer ID',
+          onTap: () {
+            Clipboard.setData(ClipboardData(text: peerId));
+            onDismiss();
+            HollowToast.show(context, 'Peer ID copied',
+                type: HollowToastType.success);
+          },
+        ),
+        const SizedBox(height: HollowSpacing.md),
+      ],
     );
   }
 }

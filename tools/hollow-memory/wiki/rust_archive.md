@@ -331,7 +331,7 @@ Uses `export_timestamp_slug()` for unique directory naming.
 #### Step 10: Per-message signature verification
 
 Determines verification context based on `archive_type`:
-- **DM**: `msg_type = "dm"`, context = `manifest.peer_id`
+- **DM**: `msg_type = "dm"`, context is **per-message** based on sender direction: if `sender == exporter_peer_id`, context = `manifest.peer_id` (other peer); if `sender != exporter_peer_id`, context = `manifest.exporter_peer_id`. This is because the DM signing payload context is always the **recipient's** peer ID.
 - **Channel**: `msg_type = "ch"`, context = `"{server_id}:{channel_id}"` from manifest
 - **Server**: `msg_type = "ch"`, context varies per message: `"{server_id}:{msg.channel_id}"`
 
@@ -421,7 +421,7 @@ archive.hollow-archive (Deflated ZIP)
 
 - **Legacy message IDs**: Messages without a UUID get `"legacy-{sender}-{timestamp}"` as a synthetic ID. This ensures all messages have unique keys in the BTreeMap.
 - **Edited message timestamp for signing**: The loader uses `msg.edited_at.unwrap_or(msg.timestamp)` when computing the signing payload. This matches the signing behavior at edit time, where the edit timestamp replaces the original.
-- **Server archive context routing**: In server (multi-channel) archives, the signing context varies per message (`"{server_id}:{channel_id}"` from `msg.channel_id`), while DM/channel archives use a fixed context from the manifest.
+- **Server archive context routing**: In server (multi-channel) archives, the signing context varies per message (`"{server_id}:{channel_id}"` from `msg.channel_id`). Channel archives use fixed context from manifest. DM archives compute context per-message based on sender direction (context = recipient peer ID).
 - **Graceful degradation**: Malformed individual entries (messages, edits, deletions, etc.) are logged and skipped, not fatal. The archive can still be partially loaded and verified.
 - **Hash duplication**: `compute_archive_hash()` is implemented identically in both `exporter.rs` and `loader.rs` rather than shared. Both use the exact same algorithm.
 - **In-memory ZIP**: The entire archive is built and returned as `Vec<u8>` in memory, not written to disk. The caller (FFI layer) handles writing to the filesystem.

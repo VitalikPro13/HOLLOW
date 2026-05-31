@@ -1,8 +1,10 @@
 ﻿import 'dart:convert';
+import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/rust/api/archive.dart' as archive_api;
+import 'package:path_provider/path_provider.dart' as path_provider;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -79,20 +81,27 @@ class _ExportArchiveDialogContentState
   bool _exporting = false;
 
   Future<void> _export() async {
-    // Open save dialog.
     final safeName = widget.name
         .replaceAll(RegExp(r'[^\w\s\-]'), '')
         .replaceAll(RegExp(r'\s+'), '_')
         .toLowerCase();
     final fileName = '$safeName.hollow-archive';
+    final isMobile = Platform.isAndroid || Platform.isIOS;
 
-    final savePath = await FilePicker.platform.saveFile(
-      dialogTitle: 'Save Archive',
-      fileName: fileName,
-      type: FileType.custom,
-      allowedExtensions: ['hollow-archive'],
-    );
-    if (savePath == null || !mounted) return;
+    String outputPath;
+    if (isMobile) {
+      final tmpDir = await path_provider.getTemporaryDirectory();
+      outputPath = '${tmpDir.path}/$fileName';
+    } else {
+      final savePath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save Archive',
+        fileName: fileName,
+        type: FileType.custom,
+        allowedExtensions: ['hollow-archive'],
+      );
+      if (savePath == null || !mounted) return;
+      outputPath = savePath;
+    }
 
     setState(() => _exporting = true);
 
@@ -103,13 +112,13 @@ class _ExportArchiveDialogContentState
           serverId: widget.serverId!,
           serverName: widget.serverName ?? widget.name,
           channelsJson: jsonEncode(widget.channels ?? []),
-          outputPath: savePath,
+          outputPath: outputPath,
           fileMode: _fileMode,
         );
       } else if (widget.isDm) {
         sizeBytes = await archive_api.exportDmArchive(
           peerId: widget.peerId!,
-          outputPath: savePath,
+          outputPath: outputPath,
           fileMode: _fileMode,
         );
       } else {
@@ -117,9 +126,25 @@ class _ExportArchiveDialogContentState
           serverId: widget.serverId!,
           channelId: widget.channelId!,
           channelName: widget.channelName,
-          outputPath: savePath,
+          outputPath: outputPath,
           fileMode: _fileMode,
         );
+      }
+
+      if (isMobile) {
+        final bytes = await File(outputPath).readAsBytes();
+        final savedPath = await FilePicker.platform.saveFile(
+          dialogTitle: 'Save Archive',
+          fileName: fileName,
+          bytes: bytes,
+        );
+        try { await File(outputPath).delete(); } catch (_) {}
+        if (savedPath == null) {
+          if (mounted) {
+            setState(() => _exporting = false);
+          }
+          return;
+        }
       }
 
       final sizeMb = (sizeBytes.toInt() / (1024 * 1024)).toStringAsFixed(1);
@@ -185,13 +210,14 @@ class _ExportArchiveDialogContentState
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                Text(
-                  '${widget.messageCount} messages',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 11,
+                if (widget.messageCount > 0)
+                  Text(
+                    '${widget.messageCount} messages',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                      fontSize: 11,
+                    ),
                   ),
-                ),
               ],
             ),
           ),

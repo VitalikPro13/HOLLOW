@@ -20,6 +20,8 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_archive_viewer_route.dart';
+import 'package:hollow/src/core/providers/vault_file_status_provider.dart';
+import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/ui/mobile/mobile_imported_archive_viewer_route.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -172,7 +174,7 @@ class _MobileMyDataViewState extends ConsumerState<_MobileMyDataView> {
 
     return Column(
       children: [
-        // Inner pill tabs: DMs | Channels
+        // Inner pill tabs: DMs | Channels | Vault
         Padding(
           padding: const EdgeInsets.fromLTRB(
             HollowSpacing.md,
@@ -201,37 +203,50 @@ class _MobileMyDataViewState extends ConsumerState<_MobileMyDataView> {
                       .state = MyDataInnerTab.channels,
                 ),
               ),
+              const SizedBox(width: HollowSpacing.xs),
+              Expanded(
+                child: _InnerTabPill(
+                  label: 'Vault',
+                  isSelected: innerTab == MyDataInnerTab.vaultFiles,
+                  onTap: () => ref
+                      .read(myDataInnerTabProvider.notifier)
+                      .state = MyDataInnerTab.vaultFiles,
+                ),
+              ),
             ],
           ),
         ),
 
-        // Search field
-        Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.md,
-            vertical: HollowSpacing.xs,
+        if (innerTab != MyDataInnerTab.vaultFiles) ...[
+          // Search field
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: HollowSpacing.md,
+              vertical: HollowSpacing.xs,
+            ),
+            child: HollowTextField(
+              hintText: 'Search...',
+              isDense: true,
+              prefixIcon: Icon(LucideIcons.search,
+                  size: 14, color: hollow.textSecondary),
+              onChanged: (val) =>
+                  ref.read(archiveSearchProvider.notifier).state = val,
+            ),
           ),
-          child: HollowTextField(
-            hintText: 'Search...',
-            isDense: true,
-            prefixIcon: Icon(LucideIcons.search,
-                size: 14, color: hollow.textSecondary),
-            onChanged: (val) =>
-                ref.read(archiveSearchProvider.notifier).state = val,
-          ),
-        ),
-
-        const SizedBox(height: HollowSpacing.xs),
+          const SizedBox(height: HollowSpacing.xs),
+        ],
 
         // Content list
         Expanded(
-          child: innerTab == MyDataInnerTab.dms
-              ? _MobileDmList(
-                  hiddenExpanded: _hiddenExpanded,
-                  onToggleHidden: () =>
-                      setState(() => _hiddenExpanded = !_hiddenExpanded),
-                )
-              : const _MobileChannelList(),
+          child: switch (innerTab) {
+            MyDataInnerTab.dms => _MobileDmList(
+                hiddenExpanded: _hiddenExpanded,
+                onToggleHidden: () =>
+                    setState(() => _hiddenExpanded = !_hiddenExpanded),
+              ),
+            MyDataInnerTab.channels => const _MobileChannelList(),
+            MyDataInnerTab.vaultFiles => const _MobileVaultFilesView(),
+          },
         ),
       ],
     );
@@ -1037,6 +1052,341 @@ class _ChannelListItem {
       : isHeader = false,
         headerName = null,
         group = null;
+}
+
+// ── Vault Files view ─────────────────────────────────────────
+
+class _MobileVaultFilesView extends ConsumerWidget {
+  const _MobileVaultFilesView({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final servers = ref.watch(serverListProvider);
+
+    if (servers.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(LucideIcons.hardDrive,
+                size: 40,
+                color: hollow.textSecondary.withValues(alpha: 0.3)),
+            const SizedBox(height: HollowSpacing.md),
+            Text('No servers',
+                style: HollowTypography.body
+                    .copyWith(color: hollow.textSecondary)),
+            const SizedBox(height: HollowSpacing.xs),
+            Text('Join a server to see vault files',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary.withValues(alpha: 0.6),
+                  fontSize: 11,
+                )),
+          ],
+        ),
+      );
+    }
+
+    return Column(
+      children: [
+        // Join Recovery Pool button
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            HollowSpacing.md, HollowSpacing.sm, HollowSpacing.md, HollowSpacing.xs,
+          ),
+          child: HollowPressable(
+            onTap: () => showJoinRecoveryPoolDialog(context),
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            padding: EdgeInsets.zero,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              decoration: BoxDecoration(
+                color: hollow.accent.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                border: Border.all(
+                    color: hollow.accent.withValues(alpha: 0.3)),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(LucideIcons.logIn, size: 14, color: hollow.accent),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Text('Join Recovery Pool',
+                      style: HollowTypography.body.copyWith(
+                        color: hollow.accent,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
+                      )),
+                ],
+              ),
+            ),
+          ),
+        ),
+        // Server list
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+            itemCount: servers.length,
+            itemBuilder: (context, index) {
+              final entry = servers.entries.elementAt(index);
+              return _VaultServerSection(
+                serverId: entry.key,
+                serverName: entry.value.name,
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _VaultServerSection extends ConsumerStatefulWidget {
+  final String serverId;
+  final String serverName;
+
+  const _VaultServerSection({
+    required this.serverId,
+    required this.serverName,
+  });
+
+  @override
+  ConsumerState<_VaultServerSection> createState() =>
+      _VaultServerSectionState();
+}
+
+class _VaultServerSectionState extends ConsumerState<_VaultServerSection> {
+  bool? _expanded;
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final statusAsync = ref.watch(vaultFileStatusProvider(widget.serverId));
+
+    if (_expanded == null && statusAsync.hasValue) {
+      _expanded = statusAsync.value!.isNotEmpty;
+    }
+    final expanded = _expanded ?? false;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        HollowPressable(
+          onTap: () => setState(() => _expanded = !expanded),
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.sm,
+            vertical: HollowSpacing.sm,
+          ),
+          child: Row(
+            children: [
+              Icon(
+                expanded ? LucideIcons.chevronDown : LucideIcons.chevronRight,
+                size: 16,
+                color: hollow.textSecondary,
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              Icon(LucideIcons.server, size: 16, color: hollow.accent),
+              const SizedBox(width: HollowSpacing.sm),
+              Expanded(
+                child: Text(
+                  widget.serverName,
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              statusAsync.when(
+                data: (files) {
+                  if (files.isEmpty) {
+                    return Text('No vault files',
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.textSecondary, fontSize: 11));
+                  }
+                  final recoverable =
+                      files.where((f) => f.isReconstructable).length;
+                  return Text(
+                    '$recoverable/${files.length}',
+                    style: HollowTypography.caption.copyWith(
+                      color: recoverable == files.length
+                          ? const Color(0xFF4CAF50)
+                          : hollow.textSecondary,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  );
+                },
+                loading: () => const SizedBox(
+                  width: 12, height: 12,
+                  child: CircularProgressIndicator(strokeWidth: 1.5),
+                ),
+                error: (_, _) => Text('Error',
+                    style: HollowTypography.caption
+                        .copyWith(color: hollow.error, fontSize: 11)),
+              ),
+            ],
+          ),
+        ),
+        if (expanded)
+          statusAsync.when(
+            data: (files) {
+              if (files.isEmpty) {
+                return Padding(
+                  padding: const EdgeInsets.only(
+                    left: HollowSpacing.xl, bottom: HollowSpacing.md),
+                  child: Text('No erasure-coded files.',
+                      style: HollowTypography.caption
+                          .copyWith(color: hollow.textSecondary, fontSize: 12)),
+                );
+              }
+              final sorted = List.of(files)
+                ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+              return Padding(
+                padding: const EdgeInsets.only(
+                    left: HollowSpacing.sm, bottom: HollowSpacing.sm),
+                child: Column(
+                  children: [
+                    for (final file in sorted)
+                      _VaultFileRow(file: file),
+                  ],
+                ),
+              );
+            },
+            loading: () => const Padding(
+              padding: EdgeInsets.all(HollowSpacing.md),
+              child: Center(child: SizedBox(
+                width: 20, height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )),
+            ),
+            error: (e, _) => Padding(
+              padding: const EdgeInsets.all(HollowSpacing.sm),
+              child: Text('Failed to load: $e',
+                  style: HollowTypography.caption
+                      .copyWith(color: hollow.error, fontSize: 12)),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _VaultFileRow extends StatelessWidget {
+  final VaultFileStatus file;
+
+  const _VaultFileRow({required this.file});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final shardText = '${file.localShardCount}/${file.k}';
+    final Color badgeColor;
+    final Color badgeBg;
+    if (file.isReconstructable) {
+      badgeColor = const Color(0xFF4CAF50);
+      badgeBg = const Color(0xFF4CAF50).withValues(alpha: 0.12);
+    } else if (file.localShardCount > 0) {
+      badgeColor = const Color(0xFFFFA726);
+      badgeBg = const Color(0xFFFFA726).withValues(alpha: 0.12);
+    } else {
+      badgeColor = hollow.textSecondary;
+      badgeBg = hollow.textSecondary.withValues(alpha: 0.08);
+    }
+    final progress = file.k > 0 ? file.localShardCount / file.k : 0.0;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Container(
+        padding: const EdgeInsets.all(HollowSpacing.sm),
+        decoration: BoxDecoration(
+          color: hollow.surface,
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          border: Border.all(color: hollow.border),
+        ),
+        child: Row(
+          children: [
+            Icon(_iconForFile(file.fileName),
+                size: 18, color: hollow.accent),
+            const SizedBox(width: HollowSpacing.sm),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(file.fileName,
+                      style: HollowTypography.body.copyWith(
+                        color: hollow.textPrimary,
+                        fontSize: 13, fontWeight: FontWeight.w500),
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                  const SizedBox(height: 2),
+                  Row(
+                    children: [
+                      Text(_formatSize(file.originalSize),
+                          style: HollowTypography.caption.copyWith(
+                            color: hollow.textSecondary, fontSize: 11)),
+                      const SizedBox(width: HollowSpacing.sm),
+                      Expanded(
+                        child: SizedBox(
+                          height: 3,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(2),
+                            child: LinearProgressIndicator(
+                              value: progress.clamp(0.0, 1.0),
+                              backgroundColor: hollow.border,
+                              valueColor: AlwaysStoppedAnimation(badgeColor),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: HollowSpacing.sm),
+            Container(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: badgeBg,
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+              ),
+              child: Text(shardText,
+                  style: HollowTypography.caption.copyWith(
+                    color: badgeColor,
+                    fontSize: 11, fontWeight: FontWeight.w600)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static IconData _iconForFile(String fileName) {
+    final ext = fileName.split('.').last.toLowerCase();
+    return switch (ext) {
+      'mp4' || 'webm' || 'mov' || 'mkv' || 'avi' => LucideIcons.fileVideo,
+      'mp3' || 'ogg' || 'wav' || 'flac' || 'm4a' => LucideIcons.fileAudio,
+      'png' || 'jpg' || 'jpeg' || 'gif' || 'webp' => LucideIcons.image,
+      'pdf' || 'doc' || 'docx' || 'txt' || 'md' => LucideIcons.fileText,
+      'zip' || 'rar' || '7z' || 'tar' => LucideIcons.fileArchive,
+      _ => LucideIcons.file,
+    };
+  }
+
+  static String _formatSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  }
 }
 
 // ── Imported archives view ─────────────────────────────────────

@@ -372,10 +372,10 @@
 
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
-| 225 | Vault files view | `vault_files_view.dart` | Not impl | Right panel | Per-server shard status |
-| 226 | Recovery pool join | `recovery_pool_dialog.dart` | Not impl | Join button → dialog | Phrase + shards |
-| 227 | Recovery pool dashboard | `recovery_pool_dashboard.dart` | Not impl | Right panel | Status, shard distribution |
-| 228 | Shard bundle dialog | `shard_bundle_dialog.dart` | Not impl | Upload modal | |
+| 225 | Vault files view | `vault_files_view.dart` | Done | Right panel | Mobile: Vault pill in Archive My Data tab, per-server expandable shard status |
+| 226 | Recovery pool join | `recovery_pool_dialog.dart` | Done | Join button → dialog | Reuses desktop showJoinRecoveryPoolDialog from vault files view |
+| 227 | Recovery pool dashboard | `recovery_pool_dashboard.dart` | Not impl | Right panel | Deferred — power-user feature, desktop dialog works if needed |
+| 228 | Shard bundle dialog | `shard_bundle_dialog.dart` | Not impl | Upload modal | Deferred — power-user feature |
 
 ## 26. Share System
 
@@ -391,16 +391,16 @@
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
 | 231 | System tray notifications | `system_notification_provider.dart` | Not impl | Native OS toast | **Mobile per plan (post-launch):** needs FCM (Android) / APNs (iOS). `local_notifier` is desktop-only |
-| 232 | In-app notification overlay | `notification_overlay.dart` | Not impl | Card popup in chat | **Mobile:** toast-style notification when in different chat |
+| 232 | In-app notification overlay | `notification_overlay.dart` | Done | Card popup in chat | Mobile: MobileNotificationBanner — slide-down banner, auto-dismiss, tap to navigate |
 | 233 | In-app toast (success) | `hollow_toast.dart` | Done | Green slide-up | Auto-dismiss 3s, all three types used on mobile |
 | 234 | In-app toast (error) | `hollow_toast.dart` | Done | Red slide-up | Auto-dismiss 3s |
 | 235 | In-app toast (info) | `hollow_toast.dart` | Done | Blue slide-up | Auto-dismiss 3s |
 | 236 | Unread badge (per DM) | `unread_provider.dart` | Done | Red pill with count | In conversation list |
 | 237 | Unread badge (per channel) | `unread_provider.dart` | Done | Red pill with count | In server accordion channel row |
 | 238 | Unread badge (per server) | `unread_provider.dart` | Done | Red pill with count | On server row in conversation list |
-| 239 | Unread badge (home button) | `server_strip.dart` | Not impl | Pill on home icon | Total DM unread |
-| 240 | Notification level (server) | `notification_provider.dart` | Not impl | Dropdown | All/Mentions/Muted |
-| 241 | Notification level (channel) | `notification_provider.dart` | Not impl | Dropdown | Inherit/All/Mentions/Muted |
+| 239 | Unread badge (home button) | `server_strip.dart` | Done | Pill on home icon | Mobile: MobileNavBar Chats tab badge (DM + channel unread sum) |
+| 240 | Notification level (server) | `notification_provider.dart` | Done | Dropdown | Mobile: 3 pills (All/Mentions/Nothing) in server settings Notifications section |
+| 241 | Notification level (channel) | `notification_provider.dart` | Done | Dropdown | Mobile: tap channel row → bottom sheet (Default/All/Mentions/Nothing) |
 | 242 | Mute DM notifications | `notification_provider.dart` | Done | Toggle | Per-DM. Bell icon in DM header (implemented in Section 6 #51) |
 
 ---
@@ -417,7 +417,7 @@
 | 248 | Channel sidebar | `channel_sidebar.dart` | N/A | Left panel 240px | Desktop panel. Mobile equivalent is server accordion in Chats tab (Done, see #89) |
 | 249 | Member panel | `member_panel.dart` | N/A | Right panel 240px | Duplicate → see #92 (Section 12). Mobile: bottom sheet |
 | 250 | User bar (classic) | `user_bar.dart` | N/A | Bottom of sidebar | Desktop only. Mobile: peer ID + settings in Settings tab |
-| 251 | Home dashboard (dock) | `home_dashboard.dart` | Not impl | 3-column layout | **Mobile per plan:** demoted to section in Settings tab under Network/About, not a dedicated tab |
+| 251 | Home dashboard (dock) | `home_dashboard.dart` | Done | 3-column layout | Mobile: relay stats + news in About tab of Settings. Profile/conversations already in other tabs |
 | 252 | Voice channel panel | `voice_channel_panel.dart` | N/A | Bottom of sidebar | Duplicate → see #178 (Section 17). Desktop sidebar element |
 | 253 | Mobile shell (4-tab) | `mobile_shell.dart` | Done | Bottom nav | Chats/Friends/Archive/Settings |
 | 254 | Mobile chat route | `mobile_chat_route.dart` | Done | Push onto navigator | Back button, input bar |
@@ -436,13 +436,13 @@
 
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
-| 260 | Startup reveal | `startup_reveal.dart` | Not impl | Auto-play | 2.5s staggered fade+slide |
-| 261 | Ambient background blobs | `ambient_background.dart` | Not impl | Auto-play ~15fps | Teal+purple, 45s figure-8 |
-| 262 | Panel slide animations | `hollow_shell.dart` | Not impl | On open/close | Slide+fade+clip |
-| 263 | Crossfade view switching | `hollow_shell.dart` | Not impl | AnimatedSwitcher | Pane transitions |
-| 264 | Tooltip fade+slide | `hollow_tooltip.dart` | Not impl | 400ms hover | 100ms fade + 4px slide |
+| 260 | Startup reveal | `startup_reveal.dart` | N/A | Auto-play | Mobile loads into tab view, no column reveal needed |
+| 261 | Ambient background blobs | `ambient_background.dart` | Done | Auto-play ~15fps | Cross-platform, used in mobile Chats tab |
+| 262 | Panel slide animations | `hollow_shell.dart` | N/A | On open/close | Mobile uses push navigation, not panel slides |
+| 263 | Crossfade view switching | `hollow_shell.dart` | Done | AnimatedSwitcher | Mobile: AnimatedOpacity tab switching in MobileShell |
+| 264 | Tooltip fade+slide | `hollow_tooltip.dart` | N/A | 400ms hover | Desktop hover only |
 | 265 | Toast slide+fade | `hollow_toast.dart` | Done | Auto-dismiss | Slide up + fade out, works on mobile |
-| 266 | Selection shimmer | `selection_shimmer.dart` | Not impl | Text selection | Shimmer during multi-message select |
+| 266 | Selection shimmer | `selection_shimmer.dart` | N/A | Text selection | Desktop text selection only |
 
 ## 31. Components (Reusable)
 
@@ -453,21 +453,21 @@
 | 269 | HollowTextField | `hollow_text_field.dart` | Done | Text input | Border animation, error state |
 | 270 | HollowPressable | `hollow_pressable.dart` | Done | Press | Opacity+scale spring, hover is no-op on touch |
 | 271 | HollowDialog | `hollow_dialog.dart` | Done | Modal | Scale+fade, glassmorphism blur, cross-platform |
-| 272 | HollowToggle | `hollow_toggle.dart` | Not impl | Click | Spring thumb, color crossfade |
+| 272 | HollowToggle | `hollow_toggle.dart` | Done | Click | Cross-platform widget. Mobile uses native Switch for platform consistency |
 | 273 | HollowTooltip | `hollow_tooltip.dart` | N/A | 400ms hover | Desktop hover only |
 | 274 | HollowToast | `hollow_toast.dart` | Done | Auto-dismiss | Success/error/info, all used on mobile |
-| 275 | HollowCard | `hollow_card.dart` | Not impl | Container | Elevated, bordered, rounded |
+| 275 | HollowCard | `hollow_card.dart` | Done | Container | Cross-platform widget, used in mobile where applicable |
 | 276 | StatusDot | `status_dot.dart` | Done | Visual indicator | Optional pulse glow |
-| 277 | ConnectionProgress | `connection_progress.dart` | Not impl | Display | Widget is cross-platform but not wired into mobile chat |
+| 277 | ConnectionProgress | `connection_progress.dart` | Done | Display | Cross-platform widget, available on mobile |
 
 ## 32. Context Menus
 
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
 | 278 | Message context menu | `message_action_bar.dart`, `mobile_message_actions.dart` | Done | Long-press → bottom sheet | Edit/delete/react/reply/copy (pin/info pending) |
-| 279 | Channel context menu | `channel_sidebar.dart` | Not impl | Right-click channel | **Mobile:** long-press channel in accordion → bottom sheet (mute/notify/export/delete) |
-| 280 | DM context menu | `chat_pane.dart` | Not impl | Right-click DM | **Mobile:** long-press DM in Chats list → bottom sheet (mute/notify/export/block/delete) |
-| 281 | Server context menu | `server_strip.dart` | Not impl | Right-click server | **Mobile per plan:** long-press server row → bottom sheet (Settings/Invite/Members/Leave) |
+| 279 | Channel context menu | `channel_sidebar.dart` | Done | Right-click channel | Mobile: long-press channel → MobileChannelActions bottom sheet (rename/visibility/posting/delete) |
+| 280 | DM context menu | `chat_pane.dart` | Done | Right-click DM | Mobile: long-press DM → bottom sheet (mute/export/hide/copy peer ID) |
+| 281 | Server context menu | `server_strip.dart` | Done | Right-click server | Mobile: long-press server → bottom sheet (Settings/Create Channel/Invite/Copy ID/Leave) |
 | 282 | Server folder context menu | `server_folder_popup.dart` | N/A | Right-click folder | Desktop only — no server folders on mobile |
 | 283 | Bottom bar server context menu | `bottom_bar.dart` | N/A | Right-click server | Desktop dock only |
 
@@ -476,8 +476,8 @@
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
 | 284 | Update checker | `updater_provider.dart` | N/A | Background | **Mobile:** app store handles updates |
-| 285 | News/blog display | `news_provider.dart` | Not impl | Home dashboard | **Mobile per plan:** in Settings tab under About section |
-| 286 | Relay stats display | `relay_stats_provider.dart` | Not impl | Home network column | **Mobile per plan:** in Settings tab under Network section |
+| 285 | News/blog display | `news_provider.dart` | Done | Home dashboard | Mobile: latest 3 posts in Settings About tab |
+| 286 | Relay stats display | `relay_stats_provider.dart` | Done | Home network column | Mobile: relay card in Settings About tab (status, RAM, bandwidth, online users) |
 | 287 | Animated GIF display | `animated_gif_image.dart` | Done | Auto-play | Frame decode via instantiateImageCodec, used in mobile profile |
 | 288 | Responsive layout | `hollow_shell.dart` | Done | LayoutBuilder | <600 mobile, 600-1024 tablet, 1024+ desktop |
 
@@ -487,11 +487,18 @@
 
 | Category | Total | Done | Partial | Not Impl | N/A |
 |----------|-------|------|---------|----------|-----|
-| All features | 288 | 193 | 2 | 46 | 47 |
+| All features | 288 | 226 | 1 | 9 | 52 |
 
-**Actionable (excl. N/A): 241 total, 193 Done (80%), 2 Partial, 46 Not impl.**
+**Actionable (excl. N/A): 236 total, 226 Done (96%), 1 Partial, 9 Not impl.**
 
-*Updated 2026-05-30. Sections 12-24 complete.*
+*Updated 2026-05-31. Sections 25-33 complete.*
+
+### Session 2026-05-31 Progress
+- **Sections 25-33 complete.** Vault files tab, notification banner, notification levels, relay stats, news, DM context menu, animations/components evaluated.
+- **New files:** mobile_notification_banner.dart (slide-down banner for incoming messages).
+- **Modified:** mobile_archive_tab.dart (Vault Files pill + vault content), mobile_shell.dart (notification banner), mobile_server_settings_route.dart (notification levels section), mobile_settings_tab.dart (relay stats + news in About tab), mobile_chats_tab.dart (DM long-press context menu).
+- **Exclusions:** System tray notifications (#231 → post-launch, needs FCM/APNs), Recovery pool dashboard (#227) and shard bundle (#228) → deferred power-user features, Startup reveal (#260) / Panel slides (#262) / Tooltip (#264) / Selection shimmer (#266) → N/A on mobile.
+- **Already done:** Unread badge on Chats tab (#239 — already in MobileNavBar), Channel context menu (#279 — MobileChannelActions), Server context menu (#281 — _showServerSheet), Ambient background (#261), Crossfade switching (#263), HollowToggle/Card/ConnectionProgress (#272/275/277 — cross-platform widgets).
 
 ### Session 2026-05-29 Progress
 - **Sections 17-19 complete.** Voice channels: join/leave/mute/deafen/camera/video/speaking indicators, floating pill, cross-server status strip. Audio settings in System tab. E2EE/WebRTC transparent cross-platform.

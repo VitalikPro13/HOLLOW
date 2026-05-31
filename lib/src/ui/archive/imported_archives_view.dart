@@ -870,6 +870,7 @@ class _ArchivePovViewerState extends ConsumerState<_ArchivePovViewer> {
                   editsMap: editsMap,
                   proofContext: proofContext,
                   proofMsgType: proofMsgType,
+                  exporterPeerId: data.exporterPeerId,
                 )
               : _ImportedChannelMessageList(
                   messages: channelMessages!,
@@ -1136,6 +1137,7 @@ class _ImportedDmMessageList extends ConsumerStatefulWidget {
   final Map<String, List<ArchiveEditEntry>> editsMap;
   final String proofContext;
   final String proofMsgType;
+  final String? exporterPeerId;
 
   const _ImportedDmMessageList({
     required this.messages,
@@ -1143,6 +1145,7 @@ class _ImportedDmMessageList extends ConsumerStatefulWidget {
     this.editsMap = const {},
     required this.proofContext,
     required this.proofMsgType,
+    this.exporterPeerId,
   });
 
   @override
@@ -1385,7 +1388,9 @@ class _ImportedDmMessageListState
                         signature: msg.signature,
                         publicKey: msg.publicKey,
                         messageId: msg.messageId,
-                        context: widget.proofContext,
+                        context: widget.proofMsgType == 'dm' && widget.exporterPeerId != null
+                            ? (senderPeerId == widget.exporterPeerId ? widget.proofContext : widget.exporterPeerId!)
+                            : widget.proofContext,
                         msgType: widget.proofMsgType,
                         fileAttachment: msg.fileAttachment,
                       ),

@@ -9,8 +9,10 @@ import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/news_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
@@ -1963,6 +1965,9 @@ class _AboutTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
+    final relayStats = ref.watch(relayStatsProvider);
+    final newsState = ref.watch(newsProvider);
+    final relayDomain = ref.watch(relayDomainProvider);
 
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
@@ -2002,6 +2007,125 @@ class _AboutTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
+        // Relay stats
+        _SectionLabel(label: 'Relay'),
+        const SizedBox(height: HollowSpacing.sm),
+        Container(
+          padding: const EdgeInsets.all(HollowSpacing.md),
+          decoration: BoxDecoration(
+            color: hollow.surface,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            border: Border.all(color: hollow.border),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 8, height: 8,
+                    decoration: BoxDecoration(
+                      color: relayStats.fetchCount > 0
+                          ? const Color(0xFF4CAF50)
+                          : hollow.textSecondary,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Expanded(
+                    child: Text(relayDomain,
+                        style: HollowTypography.body.copyWith(
+                          color: hollow.textPrimary, fontSize: 13,
+                          fontWeight: FontWeight.w500)),
+                  ),
+                  Text('${relayStats.onlineUsers} online',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.accent, fontSize: 11,
+                        fontWeight: FontWeight.w600)),
+                ],
+              ),
+              const SizedBox(height: HollowSpacing.md),
+              // Memory bar
+              _StatBar(
+                label: 'RAM',
+                value: relayStats.memLabel,
+                progress: relayStats.memUsagePercent,
+                color: hollow.accent,
+                hollow: hollow,
+              ),
+              const SizedBox(height: HollowSpacing.sm),
+              // Bandwidth bar
+              _StatBar(
+                label: 'Bandwidth',
+                value: relayStats.bandwidthLabel,
+                progress: relayStats.bandwidthUsagePercent,
+                color: hollow.accent,
+                hollow: hollow,
+              ),
+            ],
+          ),
+        ),
+
+        const SizedBox(height: HollowSpacing.xl),
+
+        // News
+        _SectionLabel(label: 'News'),
+        const SizedBox(height: HollowSpacing.sm),
+        if (!newsState.hasFetched)
+          Padding(
+            padding: const EdgeInsets.all(HollowSpacing.lg),
+            child: Center(child: SizedBox(
+              width: 20, height: 20,
+              child: CircularProgressIndicator(
+                strokeWidth: 2, color: hollow.accent),
+            )),
+          )
+        else if (newsState.posts.isEmpty)
+          Text('No news yet',
+              style: HollowTypography.body.copyWith(
+                color: hollow.textSecondary))
+        else
+          ...newsState.posts.take(3).map((post) => Padding(
+            padding: const EdgeInsets.only(bottom: HollowSpacing.md),
+            child: GestureDetector(
+              onTap: () => _showNewsDialog(context, post, hollow),
+              child: Container(
+                padding: const EdgeInsets.all(HollowSpacing.md),
+                decoration: BoxDecoration(
+                  color: hollow.surface,
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
+                  border: Border.all(color: hollow.border),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(post.title,
+                              style: HollowTypography.body.copyWith(
+                                color: hollow.textPrimary,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 13)),
+                        ),
+                        Text(post.date,
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.textSecondary, fontSize: 11)),
+                      ],
+                    ),
+                    const SizedBox(height: HollowSpacing.xs),
+                    Text(post.body,
+                        style: HollowTypography.body.copyWith(
+                          color: hollow.textSecondary, fontSize: 12),
+                        maxLines: 4, overflow: TextOverflow.ellipsis),
+                  ],
+                ),
+              ),
+            ),
+          )),
+
+        const SizedBox(height: HollowSpacing.xl),
+
         _SectionLabel(label: 'Links'),
         const SizedBox(height: HollowSpacing.sm),
         Text('anonlisten.com',
@@ -2009,6 +2133,111 @@ class _AboutTab extends ConsumerWidget {
         const SizedBox(height: HollowSpacing.sm),
         Text('github.com/AnonListen/Hollow',
             style: HollowTypography.body.copyWith(color: hollow.accent)),
+      ],
+    );
+  }
+
+  void _showNewsDialog(BuildContext context, NewsPost post, HollowTheme hollow) {
+    showHollowDialog(
+      context: context,
+      builder: (_) => Center(
+        child: Padding(
+          padding: const EdgeInsets.all(HollowSpacing.xl),
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 400, maxHeight: 500),
+              padding: const EdgeInsets.all(HollowSpacing.lg),
+              decoration: BoxDecoration(
+                color: hollow.elevated,
+                borderRadius: BorderRadius.circular(hollow.radiusLg),
+                border: Border.all(color: hollow.border),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(post.title,
+                            style: HollowTypography.heading.copyWith(
+                              color: hollow.textPrimary, fontSize: 16)),
+                      ),
+                      HollowPressable(
+                        onTap: () => Navigator.pop(context),
+                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        padding: const EdgeInsets.all(HollowSpacing.xs),
+                        child: Icon(LucideIcons.x, size: 18,
+                            color: hollow.textSecondary),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: HollowSpacing.xs),
+                  Text(post.date,
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary, fontSize: 11)),
+                  const SizedBox(height: HollowSpacing.md),
+                  Flexible(
+                    child: SingleChildScrollView(
+                      child: Text(post.body,
+                          style: HollowTypography.body.copyWith(
+                            color: hollow.textSecondary,
+                            fontSize: 13, height: 1.5)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StatBar extends StatelessWidget {
+  final String label;
+  final String value;
+  final double progress;
+  final Color color;
+  final HollowTheme hollow;
+
+  const _StatBar({
+    required this.label,
+    required this.value,
+    required this.progress,
+    required this.color,
+    required this.hollow,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(label, style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary, fontSize: 11)),
+            Text(value, style: HollowTypography.caption.copyWith(
+              color: hollow.textPrimary, fontSize: 11,
+              fontWeight: FontWeight.w500)),
+          ],
+        ),
+        const SizedBox(height: 4),
+        SizedBox(
+          height: 4,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(2),
+            child: LinearProgressIndicator(
+              value: progress.clamp(0.0, 1.0),
+              backgroundColor: hollow.border,
+              valueColor: AlwaysStoppedAnimation(color),
+            ),
+          ),
+        ),
       ],
     );
   }

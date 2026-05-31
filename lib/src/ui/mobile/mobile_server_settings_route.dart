@@ -8,6 +8,7 @@ import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -606,6 +607,12 @@ class _MobileServerSettingsRouteState
                   ),
                   const SizedBox(height: HollowSpacing.xl),
 
+                  // Notifications
+                  _SectionDivider(label: 'Notifications'),
+                  const SizedBox(height: HollowSpacing.sm),
+                  _NotificationSection(serverId: widget.serverId),
+                  const SizedBox(height: HollowSpacing.xl),
+
                   // Server ID
                   _SectionDivider(label: 'Server ID'),
                   const SizedBox(height: HollowSpacing.sm),
@@ -752,6 +759,283 @@ class _SectionDivider extends StatelessWidget {
         ),
         Expanded(child: Divider(color: color.withValues(alpha: 0.3))),
       ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────
+// Notification level settings
+// ─────────────────────────────────────────────────
+
+class _NotificationSection extends ConsumerWidget {
+  final String serverId;
+
+  const _NotificationSection({required this.serverId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final notifState = ref.watch(notificationSettingsProvider);
+    final notifNotifier = ref.read(notificationSettingsProvider.notifier);
+    final channels = ref.watch(channelListProvider);
+    final serverLevel = notifState.serverLevels[serverId] ?? NotificationLevel.all;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Default for all channels',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary, fontSize: 11)),
+        const SizedBox(height: HollowSpacing.sm),
+        // Server-wide level pills
+        Row(
+          children: [
+            Expanded(
+              child: _NotifLevelPill(
+                icon: LucideIcons.bell,
+                label: 'All',
+                isSelected: serverLevel == NotificationLevel.all,
+                onTap: () => notifNotifier.setServerLevel(serverId, NotificationLevel.all),
+              ),
+            ),
+            const SizedBox(width: HollowSpacing.xs),
+            Expanded(
+              child: _NotifLevelPill(
+                icon: LucideIcons.atSign,
+                label: 'Mentions',
+                isSelected: serverLevel == NotificationLevel.mentions,
+                onTap: () => notifNotifier.setServerLevel(serverId, NotificationLevel.mentions),
+                activeColor: hollow.warning,
+              ),
+            ),
+            const SizedBox(width: HollowSpacing.xs),
+            Expanded(
+              child: _NotifLevelPill(
+                icon: LucideIcons.bellOff,
+                label: 'Nothing',
+                isSelected: serverLevel == NotificationLevel.nothing,
+                onTap: () => notifNotifier.setServerLevel(serverId, NotificationLevel.nothing),
+                activeColor: hollow.error,
+              ),
+            ),
+          ],
+        ),
+
+        if (channels.isNotEmpty) ...[
+          const SizedBox(height: HollowSpacing.lg),
+          Text('Channel overrides',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary, fontSize: 11)),
+          const SizedBox(height: HollowSpacing.sm),
+          ...channels.values.map((channel) {
+            final override = notifNotifier.channelOverride(
+                serverId, channel.channelId);
+            return _ChannelNotifRow(
+              channelName: channel.name,
+              level: override,
+              onTap: () => _showChannelOverrideSheet(
+                context, ref, serverId, channel.channelId, channel.name, override,
+              ),
+            );
+          }),
+        ],
+      ],
+    );
+  }
+
+  void _showChannelOverrideSheet(
+    BuildContext context,
+    WidgetRef ref,
+    String serverId,
+    String channelId,
+    String channelName,
+    ChannelNotificationLevel current,
+  ) {
+    final hollow = HollowTheme.of(context);
+    final options = [
+      (ChannelNotificationLevel.inherit, 'Default', LucideIcons.settings),
+      (ChannelNotificationLevel.all, 'All Messages', LucideIcons.bell),
+      (ChannelNotificationLevel.mentions, 'Mentions Only', LucideIcons.atSign),
+      (ChannelNotificationLevel.nothing, 'Nothing', LucideIcons.bellOff),
+    ];
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: hollow.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: HollowSpacing.sm),
+              child: Container(
+                width: 32, height: 4,
+                decoration: BoxDecoration(
+                  color: hollow.border, borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
+            const SizedBox(height: HollowSpacing.sm),
+            Text('#$channelName',
+                style: HollowTypography.body.copyWith(
+                  color: hollow.textSecondary, fontSize: 12)),
+            const SizedBox(height: HollowSpacing.sm),
+            for (final option in options)
+              HollowPressable(
+                onTap: () {
+                  ref.read(notificationSettingsProvider.notifier)
+                      .setChannelOverride(serverId, channelId, option.$1);
+                  Navigator.pop(ctx);
+                },
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: HollowSpacing.lg,
+                    vertical: HollowSpacing.sm + 2,
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(option.$3, size: 16,
+                          color: option.$1 == current
+                              ? hollow.accent : hollow.textSecondary),
+                      const SizedBox(width: HollowSpacing.md),
+                      Expanded(
+                        child: Text(option.$2,
+                            style: HollowTypography.body.copyWith(
+                              color: option.$1 == current
+                                  ? hollow.accent : hollow.textPrimary,
+                              fontWeight: option.$1 == current
+                                  ? FontWeight.w600 : FontWeight.w400,
+                            )),
+                      ),
+                      if (option.$1 == current)
+                        Icon(LucideIcons.check, size: 16, color: hollow.accent),
+                    ],
+                  ),
+                ),
+              ),
+            const SizedBox(height: HollowSpacing.md),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _NotifLevelPill extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool isSelected;
+  final VoidCallback onTap;
+  final Color? activeColor;
+
+  const _NotifLevelPill({
+    required this.icon,
+    required this.label,
+    required this.isSelected,
+    required this.onTap,
+    this.activeColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final color = activeColor ?? hollow.accent;
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm, vertical: HollowSpacing.sm),
+        decoration: BoxDecoration(
+          color: isSelected ? color.withValues(alpha: 0.15) : hollow.surface,
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
+          border: Border.all(color: isSelected ? color : hollow.border),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14,
+                color: isSelected ? color : hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.xs),
+            Flexible(
+              child: Text(label,
+                  style: HollowTypography.body.copyWith(
+                    color: isSelected ? color : hollow.textSecondary,
+                    fontSize: 12,
+                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400),
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ChannelNotifRow extends StatelessWidget {
+  final String channelName;
+  final ChannelNotificationLevel level;
+  final VoidCallback onTap;
+
+  const _ChannelNotifRow({
+    required this.channelName,
+    required this.level,
+    required this.onTap,
+  });
+
+  static const _labels = {
+    ChannelNotificationLevel.inherit: 'Default',
+    ChannelNotificationLevel.all: 'All',
+    ChannelNotificationLevel.mentions: 'Mentions',
+    ChannelNotificationLevel.nothing: 'Nothing',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: HollowPressable(
+        onTap: onTap,
+        subtle: true,
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm, vertical: HollowSpacing.sm),
+        child: Row(
+          children: [
+            Icon(LucideIcons.hash, size: 16, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.sm),
+            Expanded(
+              child: Text(channelName,
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary, fontSize: 13),
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: hollow.surface,
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                border: Border.all(color: hollow.border),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(_labels[level] ?? 'Default',
+                      style: HollowTypography.body.copyWith(
+                        color: hollow.textPrimary, fontSize: 12)),
+                  const SizedBox(width: HollowSpacing.xs),
+                  Icon(LucideIcons.chevronDown, size: 12,
+                      color: hollow.textSecondary),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
