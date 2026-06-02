@@ -9,6 +9,7 @@ abstract final class BrandIcons {
   static const IconData kick = IconData(0xefe3, fontFamily: _kFontFamily);
   static const IconData patreon = IconData(0xf223, fontFamily: _kFontFamily);
   static const IconData kofi = IconData(0xeff6, fontFamily: _kFontFamily);
+  static const IconData github = IconData(0xee42, fontFamily: _kFontFamily);
 }
 
 abstract final class BrandIconColors {

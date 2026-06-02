@@ -297,9 +297,12 @@ Clear (X button): Sets ringtone path to null.
 
 ---
 
-## _RingtoneClipEditorDialog
+## RingtoneClipEditorDialog (Shared)
 
-`ConsumerStatefulWidget`. A `HollowDialog` with title "Trim Ringtone" for selecting a clip range within an audio file.
+**File:** `lib/src/ui/dialogs/ringtone_clip_editor_dialog.dart` (extracted from `user_settings_dialog.dart`)
+**Entry point:** `showRingtoneClipEditor(BuildContext context, String filePath)` — opens via `showHollowDialog`.
+
+`ConsumerStatefulWidget`. A `HollowDialog` with title "Trim Ringtone" for selecting a clip range within an audio file. Used by both desktop (System tab) and mobile (Settings > System > Ringtone > Trim button).
 
 ### State:
 - `_player` (AudioPlayer?), `_totalDuration` (double, seconds, default 60), `_start` / `_end` (double, seconds), `_currentPos` (double), `_isPlaying` (bool), `_loaded` (bool), `_posSub` (StreamSubscription?)
@@ -547,17 +550,19 @@ Reusable `StatelessWidget` for System tab toggle settings. Props: `icon`, `label
 
 ---
 
-## Twitch Device Code Dialog
+## TwitchDeviceCodeDialog (Shared)
 
-`showTwitchDeviceCodeDialog(BuildContext context, {VoidCallback? onSuccess})` — top-level function opening `_TwitchDeviceCodeDialog`.
+**File:** `lib/src/ui/dialogs/twitch_device_code_dialog.dart` (extracted from `user_settings_dialog.dart`)
+**Entry point:** `showTwitchDeviceCodeDialog(BuildContext context, {VoidCallback? onSuccess})` — opens via `showHollowDialog`.
 
-`_TwitchDeviceCodeDialog` — `StatefulWidget`. State: `_userCode`, `_verificationUri`, `_error`, `_polling`, `_done`.
+`TwitchDeviceCodeDialog` — `StatefulWidget`. State: `_userCode`, `_verificationUri`, `_error`, `_polling`, `_done`. Used by both desktop (Settings > Profile > Twitch > Connect) and mobile (Settings > Profile > Twitch > Connect).
 
 ### Flow:
 1. `initState()` calls `_startFlow()`.
 2. `_startFlow()`: Calls `twitch_api.twitchStartDeviceFlow()`, gets user code + verification URI + device code + interval.
 3. Starts `_pollForToken(deviceCode, intervalSecs)`: Calls `twitch_api.twitchPollForToken()` which blocks until authorized or error.
-4. On success: sets `_done = true`, calls `onSuccess` callback, auto-closes after 800ms.
+4. On success: sets `_done = true`, calls `onSuccess` callback, auto-closes after 1200ms via `Navigator.of(context, rootNavigator: true).pop()`.
+5. "Open Twitch" button uses `LaunchMode.externalApplication` to open system browser (not in-app webview).
 
 ### UI States:
 - **Loading** (no code yet): 20x20 spinner.

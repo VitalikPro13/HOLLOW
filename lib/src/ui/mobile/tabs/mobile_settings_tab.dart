@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -34,7 +35,11 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/rainbow_slider_track.dart';
 import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
+import 'package:hollow/src/ui/dialogs/ringtone_clip_editor_dialog.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:hollow/src/ui/dialogs/twitch_device_code_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -594,9 +599,9 @@ class _TwitchRowState extends ConsumerState<_TwitchRow> {
           else
             HollowButton.outline(
               onPressed: () {
-                // TODO: showTwitchDeviceCodeDialog — needs device code flow on mobile
-                HollowToast.show(context, 'Connect via desktop for now',
-                    type: HollowToastType.info);
+                showTwitchDeviceCodeDialog(context, onSuccess: () {
+                  _check();
+                });
               },
               compact: true,
               child: const Text('Connect'),
@@ -708,8 +713,6 @@ class _SystemTabState extends ConsumerState<_SystemTab> {
         const SizedBox(height: HollowSpacing.sm),
         _AudioQualityPicker(),
         const SizedBox(height: HollowSpacing.md),
-        _MicGainSlider(),
-        const SizedBox(height: HollowSpacing.md),
         _AudioProcessingInfo(),
 
         const SizedBox(height: HollowSpacing.xl),
@@ -718,8 +721,6 @@ class _SystemTabState extends ConsumerState<_SystemTab> {
         _SectionLabel(label: 'Files'),
         const SizedBox(height: HollowSpacing.sm),
         const _ImageQualityPicker(),
-        const SizedBox(height: HollowSpacing.md),
-        const _AutoDownloadSlider(),
         const SizedBox(height: HollowSpacing.md),
         const _CacheCapSlider(),
 
@@ -1619,7 +1620,7 @@ class _RingtonePicker extends ConsumerWidget {
             ],
           ),
         ),
-        if (path != null && path.isNotEmpty)
+        if (path != null && path.isNotEmpty) ...[
           HollowPressable(
             onTap: () =>
                 ref.read(ringtonePathProvider.notifier).setPath(null),
@@ -1628,16 +1629,40 @@ class _RingtonePicker extends ConsumerWidget {
             child:
                 Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
           ),
+          const SizedBox(width: HollowSpacing.xs),
+          HollowButton.ghost(
+            compact: true,
+            onPressed: () => showRingtoneClipEditor(context, path),
+            child: const Text('Trim'),
+          ),
+        ],
         const SizedBox(width: HollowSpacing.sm),
         HollowButton.ghost(
           compact: true,
           onPressed: () async {
-            final result = await FilePicker.platform
-                .pickFiles(type: FileType.audio);
+            final result = await FilePicker.platform.pickFiles(
+              type: FileType.custom,
+              allowedExtensions: ['mp3', 'wav', 'ogg', 'flac', 'm4a'],
+            );
             if (result != null && result.files.single.path != null) {
-              ref
-                  .read(ringtonePathProvider.notifier)
-                  .setPath(result.files.single.path!);
+              final picked = result.files.single.path!;
+              ref.read(ringtonePathProvider.notifier).setPath(picked);
+              ref.read(ringtoneStartProvider.notifier).setStart(0.0);
+              ref.read(ringtoneEndProvider.notifier).setEnd(30.0);
+              final probe = AudioPlayer();
+              probe.setSource(DeviceFileSource(picked)).then((_) async {
+                final dur = await probe.getDuration();
+                await probe.dispose();
+                if (dur != null && dur.inMilliseconds > 0) {
+                  final secs = dur.inMilliseconds / 1000.0;
+                  ref
+                      .read(ringtoneDurationProvider.notifier)
+                      .setDuration(secs);
+                  ref
+                      .read(ringtoneEndProvider.notifier)
+                      .setEnd(secs.clamp(0, 30));
+                }
+              });
             }
           },
           child: const Text('Choose'),
@@ -2126,14 +2151,263 @@ class _AboutTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        _SectionLabel(label: 'Links'),
+        // Contact
+        _SectionLabel(label: 'Contact'),
         const SizedBox(height: HollowSpacing.sm),
-        Text('anonlisten.com',
-            style: HollowTypography.body.copyWith(color: hollow.accent)),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: HollowButton.ghost(
+            onPressed: () {
+              Clipboard.setData(
+                  const ClipboardData(text: 'feedback@anonlisten.com'));
+              HollowToast.show(context, 'Email copied to clipboard',
+                  type: HollowToastType.success);
+            },
+            icon: Icon(LucideIcons.mail, size: 16),
+            child: const Text('feedback@anonlisten.com'),
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: HollowButton.ghost(
+            onPressed: () => launchUrl(
+              Uri.parse('https://anonlisten.com'),
+              mode: LaunchMode.externalApplication,
+            ),
+            icon: Icon(LucideIcons.globe, size: 16),
+            child: const Text('anonlisten.com'),
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: HollowButton.ghost(
+            onPressed: () => launchUrl(
+              Uri.parse('https://github.com/VitalikPro13/HOLLOW'),
+              mode: LaunchMode.externalApplication,
+            ),
+            icon: Icon(BrandIcons.github, size: 16),
+            child: const Text('GitHub'),
+          ),
+        ),
+
+        const SizedBox(height: HollowSpacing.xl),
+
+        // Follow & Support
+        Row(
+          children: [
+            Text('Follow', style: HollowTypography.label.copyWith(
+              color: hollow.textSecondary,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.5,
+            )),
+            const SizedBox(width: HollowSpacing.sm),
+            Expanded(child: _MobileShimmerLine(hollow: hollow)),
+            const SizedBox(width: HollowSpacing.sm),
+            Text('Support', style: HollowTypography.label.copyWith(
+              color: hollow.textSecondary,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.5,
+            )),
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.md),
+        Row(
+          children: [
+            _MobileBrandIcon(
+              icon: BrandIcons.youtube,
+              color: BrandIconColors.youtube,
+              url: 'https://youtube.com/@Anon_Listen',
+            ),
+            const SizedBox(width: HollowSpacing.sm),
+            _MobileBrandIcon(
+              icon: BrandIcons.x,
+              color: hollow.textPrimary,
+              url: 'https://x.com/Anon_Listen',
+            ),
+            const SizedBox(width: HollowSpacing.sm),
+            _MobileBrandIcon(
+              icon: BrandIcons.twitch,
+              color: BrandIconColors.twitch,
+              url: 'https://twitch.tv/AnonListen',
+            ),
+            const SizedBox(width: HollowSpacing.sm),
+            _MobileBrandIcon(
+              icon: BrandIcons.kick,
+              color: BrandIconColors.kick,
+              url: 'https://kick.com/AnonListen',
+            ),
+            const SizedBox(width: HollowSpacing.sm),
+            Expanded(child: _MobileShimmerLine(hollow: hollow)),
+            const SizedBox(width: HollowSpacing.sm),
+            _MobileBrandIcon(
+              icon: BrandIcons.patreon,
+              color: hollow.textPrimary,
+              url: 'https://patreon.com/AnonListen',
+            ),
+            const SizedBox(width: HollowSpacing.sm),
+            _MobileBrandIcon(
+              icon: BrandIcons.kofi,
+              color: BrandIconColors.kofi,
+              url: 'https://ko-fi.com/AnonListen',
+            ),
+          ],
+        ),
+
+        const SizedBox(height: HollowSpacing.xl),
+
+        // Legal
+        _SectionLabel(label: 'Legal'),
         const SizedBox(height: HollowSpacing.sm),
-        Text('github.com/AnonListen/Hollow',
-            style: HollowTypography.body.copyWith(color: hollow.accent)),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: HollowButton.ghost(
+            onPressed: () => _showLegalSheet(context, 'Privacy Policy', 'legal/PRIVACY_POLICY.md'),
+            icon: Icon(LucideIcons.shield, size: 16),
+            child: const Text('Privacy Policy'),
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: HollowButton.ghost(
+            onPressed: () => _showLegalSheet(context, 'Terms of Use', 'legal/TERMS_OF_USE.md'),
+            icon: Icon(LucideIcons.scroll, size: 16),
+            child: const Text('Terms of Use'),
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: HollowButton.ghost(
+            onPressed: () {
+              showLicensePage(
+                context: context,
+                applicationName: 'Hollow',
+                applicationVersion: 'Alpha',
+                applicationIcon: Padding(
+                  padding: const EdgeInsets.all(HollowSpacing.md),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.asset(
+                      'assets/hollow_logo_rounded.png',
+                      width: 48,
+                      height: 48,
+                    ),
+                  ),
+                ),
+              );
+            },
+            icon: Icon(LucideIcons.fileText, size: 16),
+            child: const Text('Open-Source Licenses'),
+          ),
+        ),
+
+        const SizedBox(height: HollowSpacing.xl),
       ],
+    );
+  }
+
+  static void _showLegalSheet(
+      BuildContext context, String title, String assetPath) async {
+    final hollow = HollowTheme.of(context);
+    final text = await rootBundle.loadString(assetPath);
+    final lines = text.split('\n');
+    final body = lines
+        .skipWhile((l) => l.startsWith('# ') || l.trim().isEmpty)
+        .join('\n')
+        .trim();
+
+    if (!context.mounted) return;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: hollow.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius:
+            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
+      ),
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: 0.85,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (context, scrollController) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: HollowSpacing.sm),
+              child: Container(
+                width: 32,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: hollow.border,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(HollowSpacing.md),
+              child: Text(
+                title,
+                style: HollowTypography.subheading.copyWith(
+                  color: hollow.textPrimary,
+                ),
+              ),
+            ),
+            Divider(color: hollow.border, height: 1),
+            Expanded(
+              child: Markdown(
+                data: body,
+                controller: scrollController,
+                selectable: true,
+                padding: const EdgeInsets.all(HollowSpacing.lg),
+                onTapLink: (text, href, title) {
+                  if (href != null) {
+                    launchUrl(Uri.parse(href),
+                        mode: LaunchMode.externalApplication);
+                  }
+                },
+                styleSheet: MarkdownStyleSheet(
+                  h2: HollowTypography.heading.copyWith(
+                    color: hollow.textPrimary,
+                    fontSize: 16,
+                  ),
+                  h3: HollowTypography.heading.copyWith(
+                    color: hollow.textPrimary,
+                    fontSize: 14,
+                  ),
+                  p: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary,
+                    height: 1.6,
+                  ),
+                  listBullet: HollowTypography.body.copyWith(
+                    color: hollow.textSecondary,
+                  ),
+                  strong: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary,
+                    fontWeight: FontWeight.w700,
+                  ),
+                  a: HollowTypography.body.copyWith(
+                    color: hollow.accent,
+                    decoration: TextDecoration.underline,
+                    decorationColor: hollow.accent,
+                  ),
+                  blockSpacing: 12,
+                  horizontalRuleDecoration: BoxDecoration(
+                    border: Border(
+                      top: BorderSide(
+                        color: hollow.border.withValues(alpha: 0.5),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -2292,6 +2566,67 @@ class _InfoRow extends StatelessWidget {
             color: valueColor ?? hollow.textPrimary,
           )),
         ],
+      ),
+    );
+  }
+}
+
+class _MobileShimmerLine extends StatelessWidget {
+  final HollowTheme hollow;
+  const _MobileShimmerLine({required this.hollow});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<double>(
+      valueListenable: SharedTickers.instance.shimmer,
+      builder: (context, value, _) {
+        final pos = value * 4.0 - 1.5;
+        return Container(
+          height: 1,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment(pos - 0.5, 0),
+              end: Alignment(pos + 0.5, 0),
+              colors: [
+                hollow.border,
+                hollow.accent.withValues(alpha: 0.6),
+                hollow.border,
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _MobileBrandIcon extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String url;
+
+  const _MobileBrandIcon({
+    required this.icon,
+    required this.color,
+    required this.url,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return GestureDetector(
+      onTap: () => launchUrl(
+        Uri.parse(url),
+        mode: LaunchMode.externalApplication,
+      ),
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: hollow.elevated,
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          border: Border.all(color: hollow.border),
+        ),
+        child: Icon(icon, size: 20, color: color),
       ),
     );
   }

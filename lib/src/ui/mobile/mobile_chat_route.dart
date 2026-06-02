@@ -42,9 +42,11 @@ import 'package:hollow/src/ui/mobile/mobile_message_actions.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
+import 'package:hollow/src/core/providers/pinned_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
+import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -120,6 +122,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             widget.channelId!,
           ).then((_) {
         if (mounted) {
+          ref.read(pinnedProvider.notifier).loadPins(widget.serverId!, widget.channelId!);
           setState(() {});
           _jumpToBottom();
           _markSeen();
@@ -551,6 +554,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                 _MobileChatHeader(
               peerId: widget.peerId,
               serverId: widget.serverId,
+              channelId: widget.channelId,
               channelName: widget.channelName,
               searchOpen: _searchOpen,
               onSearchToggle: widget.isDm ? null : () {
@@ -1262,6 +1266,35 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               );
             }
           : null,
+      onPin: msg.messageId != null &&
+              (ref.read(myPermissionsProvider(widget.serverId!)).whenOrNull(
+                      data: (perms) =>
+                          (perms & Permission.manageChannels) != 0) ??
+                  false)
+          ? () {
+              final pins = ref.read(pinnedProvider)[
+                      '${widget.serverId}:${widget.channelId}'] ??
+                  [];
+              if (pins.contains(msg.messageId)) {
+                crdt_api.unpinMessage(
+                  serverId: widget.serverId!,
+                  channelId: widget.channelId!,
+                  messageId: msg.messageId!,
+                );
+              } else {
+                crdt_api.pinMessage(
+                  serverId: widget.serverId!,
+                  channelId: widget.channelId!,
+                  messageId: msg.messageId!,
+                );
+              }
+            }
+          : null,
+      isPinned: msg.messageId != null &&
+          (ref.read(pinnedProvider)[
+                      '${widget.serverId}:${widget.channelId}'] ??
+                  [])
+              .contains(msg.messageId),
     );
   }
 
@@ -1505,6 +1538,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 class _MobileChatHeader extends ConsumerWidget {
   final String? peerId;
   final String? serverId;
+  final String? channelId;
   final String? channelName;
   final VoidCallback? onSearchToggle;
   final bool searchOpen;
@@ -1512,6 +1546,7 @@ class _MobileChatHeader extends ConsumerWidget {
   const _MobileChatHeader({
     this.peerId,
     this.serverId,
+    this.channelId,
     this.channelName,
     this.onSearchToggle,
     this.searchOpen = false,
@@ -1612,6 +1647,32 @@ class _MobileChatHeader extends ConsumerWidget {
               padding: const EdgeInsets.all(HollowSpacing.sm),
               child: Icon(LucideIcons.users, size: 20, color: hollow.textSecondary),
             ),
+          if (!isDm && serverId != null && channelId != null)
+            Builder(builder: (context) {
+              final pinKey = '$serverId:$channelId';
+              final pinnedIds = ref.watch(pinnedProvider)[pinKey] ?? [];
+              if (pinnedIds.isEmpty) return const SizedBox.shrink();
+              return HollowPressable(
+                onTap: () => _showPinnedMessagesSheet(
+                    context, ref, serverId!, channelId!, pinnedIds),
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                padding: const EdgeInsets.all(HollowSpacing.sm),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(LucideIcons.pin, size: 16, color: hollow.accent),
+                    const SizedBox(width: 2),
+                    Text(
+                      '${pinnedIds.length}',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.accent,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
           if (!isDm && onSearchToggle != null)
             HollowPressable(
               onTap: onSearchToggle,
@@ -1630,6 +1691,138 @@ class _MobileChatHeader extends ConsumerWidget {
 
   void _showProfileSheet(BuildContext context, WidgetRef ref, String peerId) {
     showMobileProfileSheet(context, peerId: peerId);
+  }
+
+  void _showPinnedMessagesSheet(
+    BuildContext context,
+    WidgetRef ref,
+    String serverId,
+    String channelId,
+    List<String> pinnedIds,
+  ) {
+    final hollow = HollowTheme.of(context);
+    final messages =
+        ref.read(channelChatProvider)['$serverId:$channelId'] ?? [];
+    final profiles = ref.read(profileProvider);
+    final nicknames = ref.read(serverNicknamesProvider(serverId));
+
+    final pinnedMessages = pinnedIds
+        .map((id) => messages.where((m) => m.messageId == id).firstOrNull)
+        .where((m) => m != null)
+        .toList()
+      ..sort((a, b) => b!.timestamp.compareTo(a!.timestamp));
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: hollow.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius:
+            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
+      ),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: HollowSpacing.sm),
+              child: Container(
+                width: 32,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: hollow.border,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(HollowSpacing.md),
+              child: Row(
+                children: [
+                  Icon(LucideIcons.pin, size: 18, color: hollow.accent),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Text(
+                    'Pinned Messages',
+                    style: HollowTypography.subheading.copyWith(
+                      color: hollow.textPrimary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (pinnedMessages.isEmpty)
+              Padding(
+                padding: const EdgeInsets.all(HollowSpacing.xl),
+                child: Text(
+                  'Pinned messages not loaded in current view.',
+                  style: HollowTypography.body
+                      .copyWith(color: hollow.textSecondary),
+                ),
+              )
+            else
+              Flexible(
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: pinnedMessages.length,
+                  separatorBuilder: (_, __) =>
+                      Divider(color: hollow.border, height: 1),
+                  itemBuilder: (_, index) {
+                    final msg = pinnedMessages[index]!;
+                    final name = serverDisplayNameFor(
+                      profiles,
+                      msg.senderId,
+                      nickname: nicknames[msg.senderId] ?? '',
+                    );
+                    final time =
+                        '${msg.timestamp.hour.toString().padLeft(2, '0')}:${msg.timestamp.minute.toString().padLeft(2, '0')}';
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: HollowSpacing.md,
+                        vertical: HollowSpacing.sm,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Text(
+                                name,
+                                style: HollowTypography.body.copyWith(
+                                  color: hollow.accent,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              const SizedBox(width: HollowSpacing.sm),
+                              Text(
+                                time,
+                                style: HollowTypography.caption.copyWith(
+                                  color: hollow.textSecondary,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            msg.text.startsWith('[file:')
+                                ? '📎 File'
+                                : msg.text,
+                            style: HollowTypography.body
+                                .copyWith(color: hollow.textPrimary),
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            const SizedBox(height: HollowSpacing.sm),
+          ],
+        ),
+      ),
+    );
   }
 }
 

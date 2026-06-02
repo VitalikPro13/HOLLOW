@@ -1,5 +1,6 @@
 ﻿import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -218,15 +219,22 @@ Future<void> exportServerTemplate(
         .toLowerCase();
     final defaultName = '$safeName-template.json';
 
+    final jsonBytes = utf8.encode(json);
+
     final savePath = await FilePicker.platform.saveFile(
       dialogTitle: 'Export Server Template',
       fileName: defaultName,
       type: FileType.custom,
       allowedExtensions: ['json'],
+      bytes: (Platform.isAndroid || Platform.isIOS)
+          ? Uint8List.fromList(jsonBytes)
+          : null,
     );
     if (savePath == null) return;
-    final path = savePath.endsWith('.json') ? savePath : '$savePath.json';
-    await File(path).writeAsString(json);
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      final path = savePath.endsWith('.json') ? savePath : '$savePath.json';
+      await File(path).writeAsString(json);
+    }
 
     if (context.mounted) {
       HollowToast.show(context, 'Template exported',

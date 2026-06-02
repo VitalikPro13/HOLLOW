@@ -1921,6 +1921,7 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] First message is failing: peer A adds peer B as a friend, peer A writes a message and peer B doesn't see it; peer B writes a message but peer A sees it, the next message from peer A properly arrives to peer B - something is wrong with the initial first message or session establishment
 - [ ] Fetch profile data on the server for the offline peer from the online peer rather than trying to fetch from offline ones.
 - [ ] Add VAD for DM calls on desktop.
+- [ ] Input mic gain control for desktop/mobiles.
 
 **Deliverable:** A polished, feature-complete communication platform ready for public release — with private, encrypted P2P file sharing that rivals torrent performance without any of the privacy/legal exposure.
 

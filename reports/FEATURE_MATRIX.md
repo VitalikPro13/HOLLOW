@@ -1,8 +1,5 @@
 # HOLLOW — Complete Feature Matrix
 
-> Generated 2026-05-12, updated 2026-05-12. Covers every user-facing feature on desktop, with mobile porting status.
-> Used for: mobile port punch list, integration test coverage planning, QA tracking.
-
 ## Legend
 
 | Status | Meaning |
@@ -27,8 +24,8 @@
 | 7 | Emoji reactions (view) | `reaction_bar.dart` | Done | Reaction pills below message | Count + accent highlight for own reactions |
 | 8 | Reply to message | `message_action_bar.dart`, `chat_pane.dart` | Done | Long-press → Reply | Reply preview above input bar |
 | 9 | Reply preview in bubble | `message_bubble.dart` | Done | Inline display | Shows quoted sender + text above message |
-| 10 | Pin message (channel) | `channel_chat_pane.dart`, `message_action_bar.dart` | Not impl | Hover → pin | Permission-gated, channel only |
-| 11 | Pinned messages list | `channel_chat_pane.dart` | Not impl | Click pin icon in header | Modal with pinned count |
+| 10 | Pin message (channel) | `channel_chat_pane.dart`, `message_action_bar.dart` | Done | Long-press → Pin/Unpin | Permission-gated (manageChannels), channel only |
+| 11 | Pinned messages list | `channel_chat_pane.dart` | Done | Pin icon in header → bottom sheet | Shows pinned count badge, tap opens list |
 | 12 | Message proof / info | `message_action_bar.dart`, `message_proof_dialog.dart` | Done | Long-press → Message Info | Shows sender, timestamp, signature verification |
 | 13 | Message action bar (hover) / long-press sheet | `message_action_bar.dart`, `mobile_message_actions.dart` | Done | Long-press → bottom sheet | Mobile: bottom sheet with actions. Desktop: hover overlay |
 
@@ -145,7 +142,7 @@
 | 78 | Server description | `overview_tab.dart` | Done | Text field, max 256 chars | MobileServerSettingsRoute, multi-line, permission-gated |
 | 79 | Server ID display + copy | `overview_tab.dart` | Done | Selectable text | MobileServerSettingsRoute + long-press context sheet. Copy button |
 | 80 | Server settings access | `channel_sidebar.dart`, `server_settings_panel.dart` | Done | Gear icon in header | Long-press server row → Settings → full-screen MobileServerSettingsRoute |
-| 81 | Server export/import template | `overview_tab.dart`, `server_template.dart` | Not impl | Export/Import buttons | Low priority — template system rarely used |
+| 81 | Server export/import template | `overview_tab.dart`, `server_template.dart` | Done | Export/Import buttons in server settings | Reuses cross-platform `server_template.dart` |
 
 ## 11. Channel Management
 
@@ -189,7 +186,7 @@
 | 107 | Twitch min follow days | `overview_tab.dart` | Done | Number input | 0 = just follow |
 | 108 | Twitch subscription req | `overview_tab.dart` | Done | Toggle | Require sub not just follow |
 | 109 | Twitch owner-online | `overview_tab.dart` | Done | Toggle | Only owner accepts joins |
-| 110 | Twitch join dialog | `twitch_join_dialog.dart` | Not impl | Multi-step modal | Desktop dialog works cross-platform, needs wiring from server join flow |
+| 110 | Twitch join dialog | `twitch_join_dialog.dart` | Done | Cross-platform dialog | Already works on mobile via event_provider + showHollowDialog |
 | 111 | Twitch badge on member | `member_panel.dart` | Done | Purple icon + username | In MemberTile and MobileProfileSheet |
 
 ---
@@ -208,7 +205,7 @@
 | 119 | Banner upload/change | `user_settings_dialog.dart` | Done | File picker → crop (3:1) | Tap banner in Profile tab. processBanner FFI |
 | 120 | Banner clear | `user_settings_dialog.dart` | Done | Long-press banner | Clears pending banner |
 | 121 | Banner GIF support | `user_settings_dialog.dart` | Done | File picker accepts .gif | Skip crop, raw bytes, max 2MB |
-| 122 | Twitch connect/disconnect | `user_settings_dialog.dart` | Partial | Device code auth button | Disconnect works. Connect shows info toast (device code needs desktop for now) |
+| 122 | Twitch connect/disconnect | `user_settings_dialog.dart` | Done | Device code auth button | Uses shared `twitch_device_code_dialog.dart` |
 | 123 | Peer ID display + copy | `profile_card_popup.dart`, `user_bar.dart` | Done | Tap to copy | Settings → System tab |
 | 124 | Recovery phrase display | `mnemonic_dialog.dart` | Done | Modal dialog | Settings → Security tab → Recovery Phrase |
 | 125 | Identity creation flow | `welcome_dialog.dart` | Done | First launch dialog | Create / restore mnemonic / restore backup, cross-platform |
@@ -296,7 +293,7 @@
 | 185 | Noise suppression | `voice_channel_service.dart`, `voice_service.dart` | Done | Audio constraint | Mobile: shown as "Auto" in Settings (always on) |
 | 186 | Auto gain control | `voice_channel_service.dart`, `voice_service.dart` | Done | Audio constraint | Mobile: shown as "Auto" in Settings (always on) |
 | 187 | Ringtone file picker | `settings_provider.dart` | Done | File picker | Mobile: in Settings > System > Ringtone section |
-| 188 | Ringtone trim (start/end) | `settings_provider.dart` | Not impl | Slider | Low priority — desktop sliders work cross-platform |
+| 188 | Ringtone trim (start/end) | `settings_provider.dart` | Done | Trim button → clip editor dialog | Uses shared `ringtone_clip_editor_dialog.dart` |
 | 189 | Ringtone volume | `settings_provider.dart` | Done | Slider 0.0-1.0 | Mobile: slider in Settings > System > Ringtone section |
 
 ## 19. Voice — Encryption & WebRTC
@@ -487,9 +484,11 @@
 
 | Category | Total | Done | Partial | Not Impl | N/A |
 |----------|-------|------|---------|----------|-----|
-| All features | 288 | 226 | 1 | 9 | 52 |
+| All features | 288 | 232 | 0 | 4 | 52 |
 
-**Actionable (excl. N/A): 236 total, 226 Done (96%), 1 Partial, 9 Not impl.**
+**Actionable (excl. N/A): 236 total, 232 Done (98%), 0 Partial, 4 Not impl.**
+
+Refer to Exclusions of Session 2026-05-31 progress below.
 
 *Updated 2026-05-31. Sections 25-33 complete.*
 
@@ -497,14 +496,14 @@
 - **Sections 25-33 complete.** Vault files tab, notification banner, notification levels, relay stats, news, DM context menu, animations/components evaluated.
 - **New files:** mobile_notification_banner.dart (slide-down banner for incoming messages).
 - **Modified:** mobile_archive_tab.dart (Vault Files pill + vault content), mobile_shell.dart (notification banner), mobile_server_settings_route.dart (notification levels section), mobile_settings_tab.dart (relay stats + news in About tab), mobile_chats_tab.dart (DM long-press context menu).
-- **Exclusions:** System tray notifications (#231 → post-launch, needs FCM/APNs), Recovery pool dashboard (#227) and shard bundle (#228) → deferred power-user features, Startup reveal (#260) / Panel slides (#262) / Tooltip (#264) / Selection shimmer (#266) → N/A on mobile.
+- **Exclusions:** System tray notifications (#231 → post-launch, needs FCM/APNs), Recovery pool dashboard (#227) and shard bundle (#228) → deferred power-user features. Startup reveal (#260) / Panel slides (#262) / Tooltip (#264) / Selection shimmer (#266) → N/A on mobile.
 - **Already done:** Unread badge on Chats tab (#239 — already in MobileNavBar), Channel context menu (#279 — MobileChannelActions), Server context menu (#281 — _showServerSheet), Ambient background (#261), Crossfade switching (#263), HollowToggle/Card/ConnectionProgress (#272/275/277 — cross-platform widgets).
 
 ### Session 2026-05-29 Progress
 - **Sections 17-19 complete.** Voice channels: join/leave/mute/deafen/camera/video/speaking indicators, floating pill, cross-server status strip. Audio settings in System tab. E2EE/WebRTC transparent cross-platform.
 - **New files:** mobile_voice_channel_route.dart, mobile_voice_channel_pill.dart, mobile_voice_avatars.dart (shared widgets extracted from DM call).
 - **Modified:** mobile_chats_tab.dart (voice channel tap → join), mobile_shell.dart (VC pill), mobile_chat_route.dart (VC status strip), mobile_settings_tab.dart (audio settings), mobile_call_video_view.dart (refactored to shared widgets), voice_channel_service.dart (switchCamera), voice_channel_provider.dart (switchCamera).
-- **Exclusions:** Screen share sending (#169-171, 173 → N/A), Chat overlay (#174 → N/A, voice-only view), Voice channel panel (#178 → N/A, replaced by pill), Ringtone trim (#188 → low priority).
+- **Exclusions:** Screen share sending (#169-171, 173 → N/A), Chat overlay (#174 → N/A, voice-only view), Voice channel panel (#178 → N/A, replaced by pill).
 
 ### Session 2026-05-28 Progress (continued)
 - **Section 16 complete.** 1:1 DM calls: phone/video icons in header, full-screen incoming call overlay, floating active call pill, PiP video view.

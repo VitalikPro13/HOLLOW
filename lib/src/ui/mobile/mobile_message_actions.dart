@@ -22,6 +22,8 @@ void showMobileMessageActions({
   VoidCallback? onDownload,
   void Function(String emoji)? onReaction,
   VoidCallback? onInfo,
+  VoidCallback? onPin,
+  bool isPinned = false,
 }) {
   final hollow = HollowTheme.of(context);
   showModalBottomSheet(
@@ -42,6 +44,8 @@ void showMobileMessageActions({
       onDownload: onDownload,
       onReaction: onReaction,
       onInfo: onInfo,
+      onPin: onPin,
+      isPinned: isPinned,
     ),
   );
 }
@@ -60,6 +64,8 @@ class _MessageActionsSheet extends StatefulWidget {
   final VoidCallback? onDownload;
   final void Function(String emoji)? onReaction;
   final VoidCallback? onInfo;
+  final VoidCallback? onPin;
+  final bool isPinned;
 
   const _MessageActionsSheet({
     required this.messageText,
@@ -73,6 +79,8 @@ class _MessageActionsSheet extends StatefulWidget {
     this.onDownload,
     this.onReaction,
     this.onInfo,
+    this.onPin,
+    this.isPinned = false,
   });
 
   @override
@@ -188,6 +196,15 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
             onTap: () {
               Navigator.pop(context);
               widget.onInfo!();
+            },
+          ),
+        if (widget.onPin != null)
+          _ActionRow(
+            icon: LucideIcons.pin,
+            label: widget.isPinned ? 'Unpin Message' : 'Pin Message',
+            onTap: () {
+              Navigator.pop(context);
+              widget.onPin!();
             },
           ),
         if (widget.onDelete != null)

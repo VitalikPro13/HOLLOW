@@ -29,6 +29,7 @@ import 'package:hollow/src/ui/mobile/mobile_members_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_roles_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_labels_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_twitch_settings_route.dart';
+import 'package:hollow/src/ui/settings/server_template.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -672,6 +673,39 @@ class _MobileServerSettingsRouteState
                       ),
                     ],
                   ),
+                  if (canManage) ...[
+                    const SizedBox(height: HollowSpacing.xl),
+                    _SectionDivider(label: 'Server Template'),
+                    const SizedBox(height: HollowSpacing.sm),
+                    Text(
+                      'Export your server structure as a template, or import one to reconfigure this server.',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                      ),
+                    ),
+                    const SizedBox(height: HollowSpacing.md),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: HollowButton.outline(
+                            onPressed: () =>
+                                exportServerTemplate(context, server),
+                            icon: const Icon(LucideIcons.upload, size: 14),
+                            child: const Text('Export'),
+                          ),
+                        ),
+                        const SizedBox(width: HollowSpacing.sm),
+                        Expanded(
+                          child: HollowButton.outline(
+                            onPressed: () =>
+                                importServerTemplate(context, ref, server),
+                            icon: const Icon(LucideIcons.download, size: 14),
+                            child: const Text('Import'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: HollowSpacing.xl + HollowSpacing.lg),
 
                   // Danger zone

@@ -165,6 +165,13 @@ Wraps each message bubble. Provides:
 - `_requestFileFromPeer(FileAttachment, senderId)` — requests file via P2P when not on disk.
 - `_handleSend()` — if `_stagedFilePath` is set, sends as file attachment via `network_api.sendFile()`, otherwise sends text.
 
+### Pin Messages (Channel Only)
+- `pinnedProvider` loaded after channel history loads in `initState` `.then()` callback
+- `_MobileChatHeader` shows pin icon with count badge when `pinnedProvider[key]` is non-empty (between members icon and search icon)
+- Tapping pin icon opens `_showPinnedMessagesSheet()` — bottom sheet with sender name, time, text preview for each pinned message
+- `_showChannelActions()` wires `onPin` callback — permission-gated (`Permission.manageChannels`), toggles `crdt_api.pinMessage()`/`unpinMessage()`
+- `isPinned` param passed to bottom sheet for "Pin Message"/"Unpin Message" label toggle
+
 ### Action Callbacks Wired
 Both DM and channel builders wire:
 - `onToggleReaction` on bubbles → reaction pills are tappable
@@ -198,6 +205,7 @@ Smiley icon (`LucideIcons.smile`) between mic and send buttons. Opens `showModal
 - **Description** — multi-line `HollowTextField` (maxLines:3, maxLength:256) + Save. `crdt_api.updateServerSetting(key: 'description')`. Permission-gated.
 - **Server ID** — `SelectableText` (mono font) + copy button. Always visible.
 - **Your Nickname** — `HollowTextField` + Save. `crdt_api.setNickname()`. Always visible.
+- **Server Template** — Export/Import buttons in a `Row`. Gated by `canManage`. Calls `exportServerTemplate(context, server)` and `importServerTemplate(context, ref, server)` from `server_template.dart`. Export passes `bytes:` on Android/iOS.
 - **Danger Zone** — `_SectionDivider(danger: true)` + `HollowButton.danger()`. Owner: Delete Server (`crdt_api.deleteServer`). Member: Leave Server (`crdt_api.leaveServer`). Both show confirmation dialog and clear server/channel providers on success.
 
 ### ASOT-Style Section Dividers
@@ -418,6 +426,7 @@ Column (mainAxisSize: min)
     ├── Copy Text (LucideIcons.copy) — text messages only
     ├── Save File (LucideIcons.download) — file messages only
     ├── Message Info (LucideIcons.shieldCheck) — shows proof dialog
+    ├── Pin/Unpin Message (LucideIcons.pin) — manageChannels permission, channel only
     └── Delete Message (LucideIcons.trash2, error color) — own messages only
 ```
 
@@ -428,9 +437,10 @@ Column (mainAxisSize: min)
 
 ### Parameters
 All action callbacks are nullable — only shown when non-null:
-- `onReply`, `onEdit`, `onDelete`, `onCopy`, `onDownload` — `VoidCallback?`
+- `onReply`, `onEdit`, `onDelete`, `onCopy`, `onDownload`, `onPin` — `VoidCallback?`
 - `onReaction` — `void Function(String emoji)?`
 - `onInfo` — `VoidCallback?`
+- `isPinned` — `bool` (toggles "Pin Message"/"Unpin Message" label)
 
 Note: `onCopyImage` was removed — `super_clipboard` image operations don't work on Android. "Save File" covers the use case.
 
@@ -782,12 +792,30 @@ List of channels with current level badge. Tap → bottom sheet with 4 options: 
 - Per-server: `_VaultFileRow` with file icon, name, size, shard progress bar, "X/Y" badge
 - Badge colors: green (reconstructable), orange (partial), gray (no shards)
 
-## About Tab (Relay Stats + News)
+## About Tab (Relay Stats + News + Links + Legal)
 
 **File:** `lib/src/ui/mobile/tabs/mobile_settings_tab.dart` (`_AboutTab`)
+
+### Info Section
+`_InfoRow` widgets: Version (0.4.2), Platform (`Platform.operatingSystem` — dynamic), License (AGPL-3.0).
 
 ### Relay Stats Card
 Container with status dot (green if fetchCount > 0), relay domain, online users count, RAM usage bar (`_StatBar`), bandwidth bar. Watches `relayStatsProvider` (7s polling).
 
 ### News Section
 Latest 3 posts from `newsProvider`. Cards with title + date + body (4 lines max). Tap opens `showHollowDialog` with full scrollable body, title, date, and X close button.
+
+### Contact Section
+`HollowButton.ghost` with icons: email (copies to clipboard), website (opens external browser), GitHub (opens `github.com/VitalikPro13/HOLLOW` externally). Uses `BrandIcons.github` for GitHub icon.
+
+### Follow & Support Section
+Row header: "Follow ---shimmer--- Support" using `_MobileShimmerLine` (same shimmer as desktop `_AboutShimmerLine`).
+Brand icon row: YouTube, X, Twitch, Kick | shimmer divider | Patreon, Ko-Fi. `_MobileBrandIcon` widgets in bordered containers, tap opens external browser.
+
+### Legal Section
+`HollowButton.ghost` with icons: Privacy Policy, Terms of Use (open `_showLegalSheet` — `DraggableScrollableSheet` with `Markdown` widget from `flutter_markdown_plus`, styled `MarkdownStyleSheet` matching desktop), Open-Source Licenses (Flutter's built-in `showLicensePage`).
+
+### System Tab Notes
+- Mic Gain slider removed (provider exists but nothing reads the value — no audio pipeline consumer)
+- Auto-Download slider removed (Share system is N/A on mobile, setting has no effect)
+- Ringtone picker: resets `ringtoneStart`/`ringtoneEnd` and probes duration via `AudioPlayer` when new file selected (matches desktop pattern). "Trim" button opens shared `showRingtoneClipEditor()` dialog.
