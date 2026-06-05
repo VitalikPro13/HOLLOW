@@ -253,7 +253,7 @@
 | 155 | Call duration display | `active_call_bar.dart` | Done | MM:SS in call bar | Duration timer in MobileActiveCallPill |
 | 156 | Active call bar (floating) | `active_call_bar.dart` | Done | Draggable pill | MobileActiveCallPill: mute, camera, hangup, timer. Draggable |
 | 157 | PiP video view | `call_video_view.dart` | Done | Floating draggable panel | MobileCallVideoView: remote large, local PiP corner, portrait-first |
-| 158 | Remote volume control | `call_provider.dart` | Not impl | Slider 0-200% | Low priority — mobile uses system volume |
+| 158 | Remote volume control | `call_provider.dart` | Done | Slider 0-200% | Volume button in call controls → bottom sheet slider |
 | 159 | Call stats logging | `call_provider.dart` | Done | Diagnostic | Already fires from callProvider (5s after connect) — no mobile-specific code needed |
 
 ## 17. Voice — Server Voice Channels
@@ -371,8 +371,8 @@
 |---|---------|-----------------|--------|-------------|-------|
 | 225 | Vault files view | `vault_files_view.dart` | Done | Right panel | Mobile: Vault pill in Archive My Data tab, per-server expandable shard status |
 | 226 | Recovery pool join | `recovery_pool_dialog.dart` | Done | Join button → dialog | Reuses desktop showJoinRecoveryPoolDialog from vault files view |
-| 227 | Recovery pool dashboard | `recovery_pool_dashboard.dart` | Not impl | Right panel | Deferred — power-user feature, desktop dialog works if needed |
-| 228 | Shard bundle dialog | `shard_bundle_dialog.dart` | Not impl | Upload modal | Deferred — power-user feature |
+| 227 | Recovery pool dashboard | `recovery_pool_dashboard.dart` | Done | Right panel | Reuses desktop widget directly in mobile vault view |
+| 228 | Shard bundle dialog | `shard_bundle_dialog.dart` | Done | Upload modal | Long-press vault server header → bottom sheet (Export/Import/Start Pool) |
 
 ## 26. Share System
 
@@ -484,9 +484,9 @@
 
 | Category | Total | Done | Partial | Not Impl | N/A |
 |----------|-------|------|---------|----------|-----|
-| All features | 288 | 232 | 0 | 4 | 52 |
+| All features | 288 | 235 | 0 | 1 | 52 |
 
-**Actionable (excl. N/A): 236 total, 232 Done (98%), 0 Partial, 4 Not impl.**
+**Actionable (excl. N/A): 236 total, 235 Done (99%), 0 Partial, 1 Not impl.**
 
 Refer to Exclusions of Session 2026-05-31 progress below.
 

@@ -26,7 +26,7 @@ Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Uses `LayoutBu
 - **Animated glow:** `AnimatedPositioned` radial gradient circle (accent 0.3→0.1→0.0, `RadialGradient`, 84×76) follows active tab with 300ms `easeOutCubic`. Wrapped in `ClipRect` to prevent bleed outside bar. Maps tab indices 0,1 to slots 0,1 and 2,3 to slots 3,4 (skipping center button slot).
 - Chats tab: total unread count (DM + channel)
 - Friends tab: pending incoming friend request count
-- **Center "+" button** (`_AddButton`): 40×40 accent-colored rounded container with plus icon. Opens `NewConversationDialog` (Create/Join Server, Add Friend). Passed via `onAdd` callback from `MobileShell`.
+- **Center "+" button** (`_AddButton`): 40×40 accent-colored rounded container with plus icon. Opens `NewConversationDialog` (Join Server, Create Server — no Add Friend, that's in Friends tab). Passed via `onAdd` callback from `MobileShell`.
 - Archive tab
 - Settings tab
 
@@ -393,6 +393,9 @@ Sections in order:
 3. **Online** — sorted alphabetically by resolved name
 4. **Offline** — sorted alphabetically
 
+### Add Friend Dialog (`_AddFriendDialog`)
+Unified input: auto-detects peer ID (`12D3KooW` prefix) vs temporary nickname. Below the input, a "Your temporary nickname" section lets users claim/release an ephemeral relay-scoped nickname (watches `temporaryNicknameProvider`). Shows claim input (3-20 chars), claimed badge with Release button, or error state (taken/invalid).
+
 ### Long-Press Actions (bottom sheet with `SafeArea`)
 - Message → navigate to DM
 - View Profile → `showMobileProfileSheet`
@@ -558,7 +561,7 @@ Added to `_SystemTab` in `mobile_settings_tab.dart`:
 
 ### Voice & Audio Section
 - **Audio quality picker**: 3 pills (Voice/Music/Hi-Fi) with description label underneath. Reads/writes `audioQualityProvider`
-- **Mic gain slider**: 0.0–2.0, reads/writes `micGainProvider`
+- **Mic gain slider**: 0–200%, 40 divisions, default 130%. Reads/writes `micGainProvider`. Display label as percentage
 - **Audio processing info**: Echo cancellation, noise suppression, AGC shown as "Auto" (always on)
 
 ### Ringtone Section
@@ -787,10 +790,13 @@ List of channels with current level badge. Tap → bottom sheet with 4 options: 
 **Purpose:** Third inner pill tab in My Data (DMs | Channels | Vault).
 
 ### Layout
-- "Join Recovery Pool" accent button (reuses `showJoinRecoveryPoolDialog`)
+- When `recoveryPoolProvider` is active and not pending, shows the desktop `RecoveryPoolDashboard` widget directly (zero desktop-specific deps)
+- Otherwise: "Join Recovery Pool" accent button (reuses `showJoinRecoveryPoolDialog`) + server list
 - Server list: `_VaultServerSection` expandable per-server (auto-expands if files exist)
 - Per-server: `_VaultFileRow` with file icon, name, size, shard progress bar, "X/Y" badge
 - Badge colors: green (reconstructable), orange (partial), gray (no shards)
+- Long-press on server header (or tap ellipsis icon): bottom sheet with Export Shards, Import Shards, Start Recovery Pool actions
+- Shard export uses mobile file save pattern (temp dir → FFI → bytes → `FilePicker.saveFile(bytes:)`) on Android/iOS
 
 ## About Tab (Relay Stats + News + Links + Legal)
 
@@ -816,6 +822,5 @@ Brand icon row: YouTube, X, Twitch, Kick | shimmer divider | Patreon, Ko-Fi. `_M
 `HollowButton.ghost` with icons: Privacy Policy, Terms of Use (open `_showLegalSheet` — `DraggableScrollableSheet` with `Markdown` widget from `flutter_markdown_plus`, styled `MarkdownStyleSheet` matching desktop), Open-Source Licenses (Flutter's built-in `showLicensePage`).
 
 ### System Tab Notes
-- Mic Gain slider removed (provider exists but nothing reads the value — no audio pipeline consumer)
 - Auto-Download slider removed (Share system is N/A on mobile, setting has no effect)
 - Ringtone picker: resets `ringtoneStart`/`ringtoneEnd` and probes duration via `AudioPlayer` when new file selected (matches desktop pattern). "Trim" button opens shared `showRingtoneClipEditor()` dialog.

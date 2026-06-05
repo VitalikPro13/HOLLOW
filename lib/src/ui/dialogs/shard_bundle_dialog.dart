@@ -1,6 +1,9 @@
-﻿import 'package:file_picker/file_picker.dart';
+﻿import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/rust/api/archive.dart' as archive_api;
+import 'package:path_provider/path_provider.dart' as path_provider;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -52,22 +55,44 @@ class _ExportShardsDialogState extends State<_ExportShardsDialog> {
         .replaceAll(RegExp(r'\s+'), '_')
         .toLowerCase();
     final fileName = '$safeName.hollow-shards';
+    final isMobile = Platform.isAndroid || Platform.isIOS;
 
-    final savePath = await FilePicker.platform.saveFile(
-      dialogTitle: 'Save Shard Bundle',
-      fileName: fileName,
-      type: FileType.custom,
-      allowedExtensions: ['hollow-shards'],
-    );
-    if (savePath == null || !mounted) return;
+    String outputPath;
+    if (isMobile) {
+      final tmpDir = await path_provider.getTemporaryDirectory();
+      outputPath = '${tmpDir.path}/$fileName';
+    } else {
+      final savePath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save Shard Bundle',
+        fileName: fileName,
+        type: FileType.custom,
+        allowedExtensions: ['hollow-shards'],
+      );
+      if (savePath == null || !mounted) return;
+      outputPath = savePath;
+    }
 
     setState(() => _exporting = true);
 
     try {
       final sizeBytes = await archive_api.exportServerShards(
         serverId: widget.serverId,
-        outputPath: savePath,
+        outputPath: outputPath,
       );
+
+      if (isMobile) {
+        final bytes = await File(outputPath).readAsBytes();
+        final savedPath = await FilePicker.platform.saveFile(
+          dialogTitle: 'Save Shard Bundle',
+          fileName: fileName,
+          bytes: bytes,
+        );
+        try { await File(outputPath).delete(); } catch (_) {}
+        if (savedPath == null) {
+          if (mounted) setState(() => _exporting = false);
+          return;
+        }
+      }
 
       final sizeMb = (sizeBytes.toInt() / (1024 * 1024)).toStringAsFixed(1);
       final sizeKb = (sizeBytes.toInt() / 1024).toStringAsFixed(0);

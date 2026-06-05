@@ -1415,13 +1415,11 @@ class _NewConversationDialogState
     extends ConsumerState<NewConversationDialog> {
   final _joinController = TextEditingController();
   final _createController = TextEditingController();
-  final _friendController = TextEditingController();
 
   @override
   void dispose() {
     _joinController.dispose();
     _createController.dispose();
-    _friendController.dispose();
     super.dispose();
   }
 
@@ -1453,24 +1451,6 @@ class _NewConversationDialogState
     if (mounted) {
       HollowToast.show(context, 'Server created',
           type: HollowToastType.success);
-    }
-  }
-
-  Future<void> _handleAddFriend() async {
-    final peerId = _friendController.text.trim();
-    if (peerId.isEmpty) return;
-    Navigator.of(context).pop();
-    try {
-      await ref.read(friendsProvider.notifier).sendRequest(peerId);
-      if (mounted) {
-        HollowToast.show(context, 'Friend request sent',
-            type: HollowToastType.success);
-      }
-    } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, 'Failed to send request',
-            type: HollowToastType.error);
-      }
     }
   }
 
@@ -1555,21 +1535,6 @@ class _NewConversationDialogState
                     onSubmit: _handleCreate,
                   ),
 
-                  const SizedBox(height: HollowSpacing.xl),
-
-                  // Add Friend
-                  _SectionLabel(
-                    icon: LucideIcons.userPlus,
-                    label: 'Add a Friend',
-                  ),
-                  const SizedBox(height: HollowSpacing.sm),
-                  _InputRow(
-                    controller: _friendController,
-                    hint: 'Paste peer ID',
-                    mono: true,
-                    buttonLabel: 'Send',
-                    onSubmit: _handleAddFriend,
-                  ),
                 ],
               ),
             ),

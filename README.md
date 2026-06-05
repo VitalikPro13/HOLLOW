@@ -61,13 +61,13 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 | Platform | Link |
 |----------|------|
 | Windows | [Download latest release](https://hollow.anonlisten.com) |
-| macOS | Testing |
+| macOS | Waiting |
 | Linux | [Experimental Flatpak](https://github.com/VitalikPro13/HOLLOW/releases) |
 | Android | [Experimental APK](https://github.com/VitalikPro13/HOLLOW/releases) |
 | iOS | Waiting |
 | Web | Not planned |
 
-Current Progress: I really need to get the mac mini, to be honest... but we got Linux running! Most features should work as expected, but it needs extensive testing (voice calls might be broken etc.) As for mobiles, it's basically done (98%). Some advanced features like recovery pool dashboard is postponed for later, but everything else looks solid overall. Proper notifications will be later too. Since the code is the same, it should work on iOS without any troubles, so I'll handle it later with both app stores. Supported Android versions: from 7.0 to 16.
+Current Progress: Mac is coming! Linux is experimental and not properly tested but core features work. Mobile port to Android/iOS is done at 99% (push notifications is the final boss!)
 
 ## Tech Stack
 

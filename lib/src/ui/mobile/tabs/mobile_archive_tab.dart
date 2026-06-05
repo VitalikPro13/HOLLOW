@@ -20,8 +20,11 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_archive_viewer_route.dart';
+import 'package:hollow/src/core/providers/recovery_pool_provider.dart';
 import 'package:hollow/src/core/providers/vault_file_status_provider.dart';
+import 'package:hollow/src/ui/archive/recovery_pool_dashboard.dart';
 import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
+import 'package:hollow/src/ui/dialogs/shard_bundle_dialog.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/ui/mobile/mobile_imported_archive_viewer_route.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -1063,6 +1066,7 @@ class _MobileVaultFilesView extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final servers = ref.watch(serverListProvider);
+    final pool = ref.watch(recoveryPoolProvider);
 
     if (servers.isEmpty) {
       return Center(
@@ -1085,6 +1089,10 @@ class _MobileVaultFilesView extends ConsumerWidget {
           ],
         ),
       );
+    }
+
+    if (pool != null && pool.isActive && !pool.isPending) {
+      return const RecoveryPoolDashboard();
     }
 
     return Column(
@@ -1174,6 +1182,9 @@ class _VaultServerSectionState extends ConsumerState<_VaultServerSection> {
       children: [
         HollowPressable(
           onTap: () => setState(() => _expanded = !expanded),
+          onLongPress: statusAsync.hasValue && statusAsync.value!.isNotEmpty
+              ? () => _showVaultActionsSheet(context, statusAsync.value!)
+              : null,
           borderRadius: BorderRadius.circular(hollow.radiusSm),
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.sm,
@@ -1210,15 +1221,23 @@ class _VaultServerSectionState extends ConsumerState<_VaultServerSection> {
                   }
                   final recoverable =
                       files.where((f) => f.isReconstructable).length;
-                  return Text(
-                    '$recoverable/${files.length}',
-                    style: HollowTypography.caption.copyWith(
-                      color: recoverable == files.length
-                          ? const Color(0xFF4CAF50)
-                          : hollow.textSecondary,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
+                  return Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '$recoverable/${files.length}',
+                        style: HollowTypography.caption.copyWith(
+                          color: recoverable == files.length
+                              ? const Color(0xFF4CAF50)
+                              : hollow.textSecondary,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(width: HollowSpacing.xs),
+                      Icon(LucideIcons.ellipsisVertical,
+                          size: 14, color: hollow.textSecondary),
+                    ],
                   );
                 },
                 loading: () => const SizedBox(
@@ -1272,6 +1291,122 @@ class _VaultServerSectionState extends ConsumerState<_VaultServerSection> {
             ),
           ),
       ],
+    );
+  }
+
+  void _showVaultActionsSheet(BuildContext context, List<VaultFileStatus> files) {
+    final hollow = HollowTheme.of(context);
+    final totalShards = files.fold<int>(0, (sum, f) => sum + f.localShardCount);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: hollow.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius:
+            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
+      ),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: HollowSpacing.sm),
+              child: Container(
+                width: 32,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: hollow.border,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: HollowSpacing.md),
+            HollowPressable(
+              onTap: () {
+                Navigator.pop(context);
+                showExportShardsDialog(
+                  context,
+                  serverId: widget.serverId,
+                  serverName: widget.serverName,
+                  shardCount: totalShards,
+                );
+              },
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.lg,
+                  vertical: HollowSpacing.sm + 2,
+                ),
+                child: Row(
+                  children: [
+                    Icon(LucideIcons.download,
+                        size: 18, color: hollow.textPrimary),
+                    const SizedBox(width: HollowSpacing.md),
+                    Text('Export Shards',
+                        style: HollowTypography.body
+                            .copyWith(color: hollow.textPrimary)),
+                  ],
+                ),
+              ),
+            ),
+            HollowPressable(
+              onTap: () {
+                Navigator.pop(context);
+                showImportShardsDialog(
+                  context,
+                  onImported: () => ref.invalidate(
+                      vaultFileStatusProvider(widget.serverId)),
+                );
+              },
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.lg,
+                  vertical: HollowSpacing.sm + 2,
+                ),
+                child: Row(
+                  children: [
+                    Icon(LucideIcons.upload,
+                        size: 18, color: hollow.textPrimary),
+                    const SizedBox(width: HollowSpacing.md),
+                    Text('Import Shards',
+                        style: HollowTypography.body
+                            .copyWith(color: hollow.textPrimary)),
+                  ],
+                ),
+              ),
+            ),
+            HollowPressable(
+              onTap: () {
+                Navigator.pop(context);
+                showInitiateRecoveryPoolDialog(
+                  context,
+                  serverId: widget.serverId,
+                  serverName: widget.serverName,
+                );
+              },
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.lg,
+                  vertical: HollowSpacing.sm + 2,
+                ),
+                child: Row(
+                  children: [
+                    Icon(LucideIcons.shield,
+                        size: 18, color: hollow.textPrimary),
+                    const SizedBox(width: HollowSpacing.md),
+                    Text('Start Recovery Pool',
+                        style: HollowTypography.body
+                            .copyWith(color: hollow.textPrimary)),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: HollowSpacing.md),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -513,7 +513,7 @@ Full-screen call overlay pushed as a route with slide-up transition from `Mobile
 - **Audio mode:** Clustered avatar layout (`_ClusteredAvatars`) — 2: side-by-side, 3: triangle, 4: 2x2, 5: 2-1-2. Each avatar has animated teal rounded-square glow (`_SpeakingAvatar`) driven by `CallState.isLocalSpeaking`/`isRemoteSpeaking` (300ms ease-out animation). Mute badge overlay on muted avatars.
 - **Video mode:** Remote camera full-screen, local PiP corner (90x120 portrait, draggable). If remote camera off, shows local camera full-screen. Uses `_hasRealVideo()` which checks `renderer.srcObject != null` in addition to `remoteVideoEnabled` to prevent black rectangles from stale transceivers.
 - **Top bar:** Chevron-down to dismiss, peer name + status text ("Calling...", "Connecting...", "MM:SS", "Ended").
-- **Controls bar:** Three circular buttons — mute (red highlight), camera (accent highlight), hangup (red circle). Disabled gracefully during ringing via `AnimatedOpacity`.
+- **Controls bar:** Four circular buttons — volume (opens bottom sheet with 0-200% slider, icon changes with level), mute (red highlight), camera (accent highlight), hangup (red circle). Volume slider wired to `callProvider.notifier.setRemoteVolume()`. Disabled gracefully during ringing via `AnimatedOpacity`.
 - **Status text:** Uses accent color for non-active states, secondary for duration.
 
 ### MobileCallStatusStrip

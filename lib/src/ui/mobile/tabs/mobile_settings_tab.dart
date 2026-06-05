@@ -713,6 +713,8 @@ class _SystemTabState extends ConsumerState<_SystemTab> {
         const SizedBox(height: HollowSpacing.sm),
         _AudioQualityPicker(),
         const SizedBox(height: HollowSpacing.md),
+        _MicGainSlider(),
+        const SizedBox(height: HollowSpacing.md),
         _AudioProcessingInfo(),
 
         const SizedBox(height: HollowSpacing.xl),
@@ -1503,7 +1505,7 @@ class _MicGainSlider extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final asyncGain = ref.watch(micGainProvider);
-    final gain = asyncGain.valueOrNull ?? 1.0;
+    final gain = asyncGain.valueOrNull ?? 1.3;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1514,7 +1516,7 @@ class _MicGainSlider extends ConsumerWidget {
             Text('Microphone Gain',
                 style: HollowTypography.bodySmall
                     .copyWith(color: hollow.textSecondary)),
-            Text('${gain.toStringAsFixed(1)}x',
+            Text('${(gain * 100).round()}%',
                 style: HollowTypography.caption.copyWith(
                   color: hollow.accent,
                   fontWeight: FontWeight.w600,

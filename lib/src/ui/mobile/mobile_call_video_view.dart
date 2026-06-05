@@ -29,6 +29,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
   Timer? _durationTimer;
   Duration _duration = Duration.zero;
   Offset _pipOffset = const Offset(12, 12);
+  double _remoteVolume = 1.0;
 
   @override
   void dispose() {
@@ -296,11 +297,29 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     final canControl = call.status == CallStatus.active ||
         call.status == CallStatus.connecting;
 
+    final volumeIcon = _remoteVolume == 0
+        ? LucideIcons.volumeX
+        : _remoteVolume < 0.5
+            ? LucideIcons.volume
+            : _remoteVolume < 1.5
+                ? LucideIcons.volume1
+                : LucideIcons.volume2;
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
+          MobileControlButton(
+            icon: volumeIcon,
+            iconSize: iconSize,
+            size: buttonSize,
+            color: hollow.textPrimary,
+            backgroundColor: hollow.elevated,
+            onTap: canControl
+                ? () => _showVolumeSheet(context, hollow)
+                : null,
+          ),
           MobileControlButton(
             icon: call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
             iconSize: iconSize,
@@ -337,6 +356,79 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
             onTap: () => ref.read(callProvider.notifier).endCall(),
           ),
         ],
+      ),
+    );
+  }
+
+  void _showVolumeSheet(BuildContext context, HollowTheme hollow) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: hollow.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius:
+            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
+      ),
+      builder: (_) => StatefulBuilder(
+        builder: (context, setSheetState) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(HollowSpacing.lg),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 32,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: hollow.border,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(height: HollowSpacing.lg),
+                Text('Remote Volume',
+                    style: HollowTypography.body.copyWith(
+                      color: hollow.textPrimary,
+                      fontWeight: FontWeight.w600,
+                    )),
+                const SizedBox(height: HollowSpacing.md),
+                Row(
+                  children: [
+                    Icon(LucideIcons.volume2,
+                        size: 18, color: hollow.textSecondary),
+                    Expanded(
+                      child: Slider(
+                        value: _remoteVolume,
+                        min: 0.0,
+                        max: 2.0,
+                        divisions: 40,
+                        activeColor: hollow.accent,
+                        inactiveColor: hollow.border,
+                        onChanged: (v) {
+                          setSheetState(() {});
+                          setState(() => _remoteVolume = v);
+                          ref
+                              .read(callProvider.notifier)
+                              .setRemoteVolume(v);
+                        },
+                      ),
+                    ),
+                    SizedBox(
+                      width: 40,
+                      child: Text(
+                        '${(_remoteVolume * 100).round()}%',
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.textSecondary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        textAlign: TextAlign.right,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: HollowSpacing.sm),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
