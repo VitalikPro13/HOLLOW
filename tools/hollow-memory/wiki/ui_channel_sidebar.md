@@ -259,10 +259,11 @@ Watches `friendsProvider` and splits friends into three lists:
 
 ## Add Friend Dialog
 
-`file:_HomeContent._showAddFriendDialog()` opens a `showHollowDialog` with:
-- Title: "Add Friend"
-- Content: `HollowTextField` with hint "Paste peer ID...", autofocus, monospace font (12px). `onSubmitted` and the "Send Request" button both trim the input, call `friendsProvider.notifier.sendRequest(peerId)`, close the dialog, and show a success toast "Friend request sent".
-- Actions: "Cancel" ghost button, "Send Request" filled button.
+`file:_HomeContent._showAddFriendDialog()` opens `_SidebarAddFriendDialog` via `showHollowDialog`.
+
+`_SidebarAddFriendDialog` is a `ConsumerStatefulWidget` with a unified input field (hint: "Peer ID or nickname..."). Auto-detects input type: if it starts with `12D3KooW`, sends as peer ID via `friendsProvider.notifier.sendRequest()`; otherwise resolves as a temporary nickname via `network_api.sendFriendRequestByNickname()`. Toast shows "Friend request sent" or "Looking up nickname..." accordingly.
+
+Actions: "Cancel" ghost button, "Send Request" filled button.
 
 ## _PendingRequestTile -- Friend Request Display
 

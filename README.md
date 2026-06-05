@@ -49,6 +49,7 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 - **File sharing** -- encrypted peer-to-peer transfers. Files up to 34 MB transfer directly. Larger files automatically use Hollow Share (BitTorrent-like swarmed distribution)
 - **Distributed storage (Vault)** -- erasure-coded encrypted shards distributed across server members. Files survive even when individual peers go offline
 - **Servers and channels** -- create communities with text channels, voice channels, roles, and permissions. All state synchronized via CRDTs with no authoritative server. Optional: secure Twitch verification to limit members only to your followers/subs
+- **Public channels** -- you can make your server channel public, so users can easily read it just from knowing the server ID/join link and without the need to even join it. You can use a viewer inside the app or on the [website](https://hollow.anonlisten.com/)
 - **Custom relay support** -- self-host your own relay for a fully isolated network. One `docker compose up` and you're running
 - **Cryptographic identity** -- Ed25519 keypair from a BIP-39 mnemonic. No accounts, no passwords, no email or phone verification
 - **Full local data retention** -- using the Archive tab, you can see all the messages saved in your local database that you can easily export
@@ -63,7 +64,7 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 | macOS | Testing |
 | Linux | [Experimental Flatpak](https://github.com/VitalikPro13/HOLLOW/releases) |
 | Android | [Experimental APK](https://github.com/VitalikPro13/HOLLOW/releases) |
-| iOS | Awaiting Release |
+| iOS | Waiting |
 | Web | Not planned |
 
 Current Progress: I really need to get the mac mini, to be honest... but we got Linux running! Most features should work as expected, but it needs extensive testing (voice calls might be broken etc.) As for mobiles, it's basically done (98%). Some advanced features like recovery pool dashboard is postponed for later, but everything else looks solid overall. Proper notifications will be later too. Since the code is the same, it should work on iOS without any troubles, so I'll handle it later with both app stores. Supported Android versions: from 7.0 to 16.

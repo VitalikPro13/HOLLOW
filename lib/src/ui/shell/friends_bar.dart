@@ -14,6 +14,8 @@ import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/temporary_nickname_provider.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -988,14 +990,30 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
   }
 }
 
-/// Add Friend tab — peer ID input.
-class _AddFriendTab extends ConsumerWidget {
+/// Add Friend tab — unified input: auto-detects peer ID vs nickname.
+class _AddFriendTab extends ConsumerStatefulWidget {
   final TextEditingController controller;
   const _AddFriendTab({super.key, required this.controller});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_AddFriendTab> createState() => _AddFriendTabState();
+}
+
+class _AddFriendTabState extends ConsumerState<_AddFriendTab> {
+  final _nicknameClaimController = TextEditingController();
+
+  static bool _isPeerId(String input) => input.startsWith('12D3KooW');
+
+  @override
+  void dispose() {
+    _nicknameClaimController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final nicknameState = ref.watch(temporaryNicknameProvider);
 
     return Padding(
       padding: const EdgeInsets.all(HollowSpacing.lg),
@@ -1003,47 +1021,147 @@ class _AddFriendTab extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Add a friend by their peer ID',
-            style: HollowTypography.body
-                .copyWith(color: hollow.textSecondary),
+            'Enter a peer ID or temporary nickname',
+            style:
+                HollowTypography.body.copyWith(color: hollow.textSecondary),
           ),
           const SizedBox(height: HollowSpacing.md),
           Row(
             children: [
               Expanded(
                 child: HollowTextField(
-                  controller: controller,
-                  hintText: 'Paste peer ID...',
+                  controller: widget.controller,
+                  hintText: 'Peer ID or nickname...',
                   autofocus: true,
                   style: HollowTypography.mono.copyWith(
                     color: hollow.textPrimary,
                     fontSize: 12,
                   ),
-                  onSubmitted: (_) => _send(context, ref),
+                  onSubmitted: (_) => _send(),
                 ),
               ),
               const SizedBox(width: HollowSpacing.sm),
               HollowButton.filled(
-                onPressed: () => _send(context, ref),
+                onPressed: _send,
                 child: const Text('Send Request'),
               ),
             ],
           ),
+          const SizedBox(height: HollowSpacing.xl),
+          // -- Your temporary nickname section --
+          Divider(color: hollow.border, height: 1),
+          const SizedBox(height: HollowSpacing.lg),
+          Text(
+            'Your temporary nickname',
+            style: HollowTypography.bodySmall
+                .copyWith(color: hollow.textSecondary),
+          ),
+          const SizedBox(height: HollowSpacing.xs),
+          Text(
+            'Lets others add you without your full peer ID. '
+            'Resets when you go offline.',
+            style: HollowTypography.caption
+                .copyWith(color: hollow.textSecondary),
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          if (nicknameState.status == NicknameStatus.claimed)
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: HollowSpacing.md,
+                    vertical: HollowSpacing.sm,
+                  ),
+                  decoration: BoxDecoration(
+                    color: hollow.accent.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
+                    border: Border.all(
+                        color: hollow.accent.withValues(alpha: 0.3)),
+                  ),
+                  child: Text(
+                    nicknameState.nickname ?? '',
+                    style: HollowTypography.mono.copyWith(
+                      color: hollow.accent,
+                      fontSize: 14,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                HollowButton.ghost(
+                  compact: true,
+                  onPressed: () =>
+                      ref.read(temporaryNicknameProvider.notifier).release(),
+                  child: const Text('Release'),
+                ),
+              ],
+            )
+          else
+            Row(
+              children: [
+                Expanded(
+                  child: HollowTextField(
+                    controller: _nicknameClaimController,
+                    hintText: 'Choose a nickname (3-20 chars)...',
+                    style: HollowTypography.mono.copyWith(
+                      color: hollow.textPrimary,
+                      fontSize: 12,
+                    ),
+                    onSubmitted: (_) => _claimNickname(),
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                HollowButton.filled(
+                  onPressed:
+                      nicknameState.status == NicknameStatus.claiming
+                          ? null
+                          : _claimNickname,
+                  child: Text(
+                    nicknameState.status == NicknameStatus.claiming
+                        ? 'Claiming...'
+                        : 'Claim',
+                  ),
+                ),
+              ],
+            ),
+          if (nicknameState.status == NicknameStatus.failed &&
+              nicknameState.error != null) ...[
+            const SizedBox(height: HollowSpacing.sm),
+            Text(
+              nicknameState.error == 'taken'
+                  ? 'That nickname is already taken'
+                  : nicknameState.error == 'invalid'
+                      ? 'Nickname must be 3-20 chars: lowercase letters, numbers, underscores'
+                      : 'Failed to claim nickname',
+              style: HollowTypography.caption
+                  .copyWith(color: hollow.error),
+            ),
+          ],
         ],
       ),
     );
   }
 
-  void _send(BuildContext context, WidgetRef ref) {
-    final peerId = controller.text.trim();
-    if (peerId.isEmpty) return;
-    ref.read(friendsProvider.notifier).sendRequest(peerId);
-    controller.clear();
+  void _send() {
+    final input = widget.controller.text.trim();
+    if (input.isEmpty) return;
+    if (_isPeerId(input)) {
+      ref.read(friendsProvider.notifier).sendRequest(input);
+    } else {
+      network_api.sendFriendRequestByNickname(nickname: input);
+    }
+    widget.controller.clear();
     HollowToast.show(
       context,
-      'Friend request sent',
+      _isPeerId(input) ? 'Friend request sent' : 'Looking up nickname...',
       type: HollowToastType.success,
     );
+  }
+
+  void _claimNickname() {
+    final nickname = _nicknameClaimController.text.trim().toLowerCase();
+    if (nickname.isEmpty) return;
+    ref.read(temporaryNicknameProvider.notifier).claim(nickname);
+    _nicknameClaimController.clear();
   }
 }
 

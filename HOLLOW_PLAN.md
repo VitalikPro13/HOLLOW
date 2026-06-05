@@ -1922,7 +1922,7 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] Fetch profile data on the server for the offline peer from the online peer rather than trying to fetch from offline ones.
 - [X] Add VAD for DM calls on desktop.
 - [X] Input mic gain control for desktop/mobiles.
-- [ ] Temporary nickname taking for accepting the friends
+- [X] Temporary nickname taking for accepting the friends
 
 **Deliverable:** A polished, feature-complete communication platform ready for public release — with private, encrypted P2P file sharing that rivals torrent performance without any of the privacy/legal exposure.
 

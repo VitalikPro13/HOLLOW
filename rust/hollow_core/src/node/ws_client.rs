@@ -36,6 +36,12 @@ pub enum WsCommand {
     SendToRoomTopic { room_code: String, topic: String, data: Vec<u8> },
     /// Ask the relay which peers/rooms are actually alive.
     CheckPeers { peers: Vec<String>, rooms: Vec<String> },
+    /// Claim a temporary nickname on the relay (RAM only).
+    ClaimNickname { nickname: String },
+    /// Release the currently claimed nickname.
+    ReleaseNickname,
+    /// Resolve a nickname to a peer_id via the relay.
+    ResolveNickname { nickname: String },
 }
 
 /// Events received from the WebSocket relay, forwarded to the swarm.
@@ -60,6 +66,14 @@ pub enum WsEvent {
     RoomCapHit { room: String },
     /// Response to CheckPeers — which peers/rooms are actually alive.
     PeerStatus { online: Vec<String>, active_rooms: Vec<String> },
+    /// Temporary nickname successfully claimed.
+    NicknameClaimed { nickname: String },
+    /// Temporary nickname released.
+    NicknameReleased,
+    /// Nickname operation error (claim failed or resolve failed).
+    NicknameError { error: String, nickname: String },
+    /// Nickname resolved to a peer_id.
+    NicknameResolved { nickname: String, peer_id: String },
 }
 
 // -- Wire protocol (matches relay/src/ws_router.rs) --
@@ -91,6 +105,10 @@ enum ServerMsg {
     Members { room: String, peers: Vec<String> },
     PeerStatus { online: Vec<String>, active_rooms: Vec<String> },
     Error { error: String },
+    NicknameClaimed { nickname: String },
+    NicknameReleased,
+    NicknameError { error: String, #[serde(default)] nickname: String },
+    NicknameResolved { nickname: String, peer_id: String },
 }
 
 // -- State --
@@ -409,6 +427,30 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
+        WsCommand::ClaimNickname { nickname } => {
+            let msg = serde_json::json!({ "type": "claim_nickname", "nickname": nickname });
+            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] ClaimNickname send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::ReleaseNickname => {
+            let msg = serde_json::json!({ "type": "release_nickname" });
+            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] ReleaseNickname send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::ResolveNickname { nickname } => {
+            let msg = serde_json::json!({ "type": "resolve_nickname", "nickname": nickname });
+            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] ResolveNickname send failed: {e}");
+                return false;
+            }
+            return true;
+        }
         WsCommand::SendToRoomTopic { room_code, topic, data } => {
             let mut frame = Vec::with_capacity(1 + room_code.len() + 1 + topic.len() + 1 + data.len());
             frame.push(0x07);
@@ -540,6 +582,22 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
                 }
             }
             return;
+        }
+        ServerMsg::NicknameClaimed { nickname } => {
+            hollow_log!("[HOLLOW-WS] Nickname claimed: {nickname}");
+            WsEvent::NicknameClaimed { nickname }
+        }
+        ServerMsg::NicknameReleased => {
+            hollow_log!("[HOLLOW-WS] Nickname released");
+            WsEvent::NicknameReleased
+        }
+        ServerMsg::NicknameError { error, nickname } => {
+            hollow_log!("[HOLLOW-WS] Nickname error: {error} (nickname={nickname})");
+            WsEvent::NicknameError { error, nickname }
+        }
+        ServerMsg::NicknameResolved { nickname, peer_id } => {
+            hollow_log!("[HOLLOW-WS] Nickname resolved: {nickname} -> {peer_id}");
+            WsEvent::NicknameResolved { nickname, peer_id }
         }
         ServerMsg::AuthOk | ServerMsg::AuthFailed { .. } => return,
     };

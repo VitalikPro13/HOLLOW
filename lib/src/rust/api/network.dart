@@ -224,6 +224,20 @@ Future<void> rejectFriendRequest({required String peerId}) =>
 Future<void> removeFriend({required String peerId}) =>
     RustLib.instance.api.crateApiNetworkRemoveFriend(peerId: peerId);
 
+/// Send a friend request to a peer, resolving their temporary nickname first.
+Future<void> sendFriendRequestByNickname({required String nickname}) => RustLib
+    .instance
+    .api
+    .crateApiNetworkSendFriendRequestByNickname(nickname: nickname);
+
+/// Claim a temporary nickname on the relay (RAM only, released on disconnect).
+Future<void> claimNickname({required String nickname}) =>
+    RustLib.instance.api.crateApiNetworkClaimNickname(nickname: nickname);
+
+/// Release the currently claimed temporary nickname.
+Future<void> releaseNickname() =>
+    RustLib.instance.api.crateApiNetworkReleaseNickname();
+
 /// Send a typing indicator to peers. Ephemeral, not stored.
 /// For DMs: server_id = "", channel_id = peer ID.
 /// For channels: server_id and channel_id as normal.
@@ -878,6 +892,17 @@ sealed class NetworkEvent with _$NetworkEvent {
       NetworkEvent_FriendRequestRejected;
   const factory NetworkEvent.friendRemoved({required String peerId}) =
       NetworkEvent_FriendRemoved;
+  const factory NetworkEvent.nicknameClaimed({required String nickname}) =
+      NetworkEvent_NicknameClaimed;
+  const factory NetworkEvent.nicknameReleased() = NetworkEvent_NicknameReleased;
+  const factory NetworkEvent.nicknameClaimFailed({required String error}) =
+      NetworkEvent_NicknameClaimFailed;
+  const factory NetworkEvent.nicknameResolveFailed({
+    required String nickname,
+    required String error,
+  }) = NetworkEvent_NicknameResolveFailed;
+  const factory NetworkEvent.relayDisconnected() =
+      NetworkEvent_RelayDisconnected;
   const factory NetworkEvent.channelNotificationHint({
     required String serverId,
     required String channelId,

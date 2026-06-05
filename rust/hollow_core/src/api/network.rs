@@ -169,6 +169,13 @@ pub enum NetworkEvent {
     FriendRequestAccepted { peer_id: String },
     FriendRequestRejected { peer_id: String },
     FriendRemoved { peer_id: String },
+    // -- Temporary nickname events --
+    NicknameClaimed { nickname: String },
+    NicknameReleased,
+    NicknameClaimFailed { error: String },
+    NicknameResolveFailed { nickname: String, error: String },
+    // -- Relay connection events --
+    RelayDisconnected,
     ChannelNotificationHint {
         server_id: String, channel_id: String, from_peer: String,
         message_id: String,
@@ -529,6 +536,21 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::FriendRemoved { peer_id } => {
             hollow_log!("[HOLLOW] Friend removed: {peer_id}");
         }
+        node::NetworkEvent::NicknameClaimed { nickname } => {
+            hollow_log!("[HOLLOW] Temporary nickname claimed: {nickname}");
+        }
+        node::NetworkEvent::NicknameReleased => {
+            hollow_log!("[HOLLOW] Temporary nickname released");
+        }
+        node::NetworkEvent::NicknameClaimFailed { error } => {
+            hollow_log!("[HOLLOW] Nickname claim failed: {error}");
+        }
+        node::NetworkEvent::NicknameResolveFailed { nickname, error } => {
+            hollow_log!("[HOLLOW] Nickname resolve failed: {nickname} — {error}");
+        }
+        node::NetworkEvent::RelayDisconnected => {
+            hollow_log!("[HOLLOW] Relay disconnected event emitted");
+        }
         node::NetworkEvent::ChannelNotificationHint { server_id, channel_id, from_peer, .. } => {
             hollow_log!("[HOLLOW] Notification hint for {channel_id} in {server_id} from {from_peer}");
         }
@@ -691,6 +713,21 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::FriendRemoved { peer_id } => {
             NetworkEvent::FriendRemoved { peer_id }
+        }
+        node::NetworkEvent::NicknameClaimed { nickname } => {
+            NetworkEvent::NicknameClaimed { nickname }
+        }
+        node::NetworkEvent::NicknameReleased => {
+            NetworkEvent::NicknameReleased
+        }
+        node::NetworkEvent::NicknameClaimFailed { error } => {
+            NetworkEvent::NicknameClaimFailed { error }
+        }
+        node::NetworkEvent::NicknameResolveFailed { nickname, error } => {
+            NetworkEvent::NicknameResolveFailed { nickname, error }
+        }
+        node::NetworkEvent::RelayDisconnected => {
+            NetworkEvent::RelayDisconnected
         }
         node::NetworkEvent::ChannelNotificationHint {
             server_id, channel_id, from_peer, message_id, has_everyone, mentioned_names, is_reply,
@@ -1520,6 +1557,45 @@ pub fn remove_friend(peer_id: String) -> Result<(), String> {
 
     let rt = get_runtime();
     rt.block_on(state.cmd_tx.send(node::NodeCommand::RemoveFriend { peer_id: peer }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Send a friend request to a peer, resolving their temporary nickname first.
+#[frb]
+pub fn send_friend_request_by_nickname(nickname: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::SendFriendRequestByNickname { nickname }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Claim a temporary nickname on the relay (RAM only, released on disconnect).
+#[frb]
+pub fn claim_nickname(nickname: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::ClaimNickname { nickname }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Release the currently claimed temporary nickname.
+#[frb]
+pub fn release_nickname() -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::ReleaseNickname))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }

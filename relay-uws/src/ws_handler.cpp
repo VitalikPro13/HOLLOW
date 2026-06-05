@@ -15,6 +15,23 @@ static bool is_guest_peer(const RelayState& state, const std::string& peer_id) {
     return it->second->getUserData()->is_guest;
 }
 
+static bool is_valid_nickname(std::string_view nick) {
+    if (nick.size() < 3 || nick.size() > 20) return false;
+    for (char c : nick) {
+        if (!std::islower(static_cast<unsigned char>(c)) &&
+            !std::isdigit(static_cast<unsigned char>(c)) && c != '_') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static std::string to_lowercase(std::string_view s) {
+    std::string result(s);
+    for (char& c : result) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return result;
+}
+
 static bool is_valid_room_code(std::string_view room) {
     if (room.empty() || room.size() > 128) return false;
     for (char c : room) {
@@ -482,6 +499,55 @@ static void handle_binary_topic_msg(PerSocketData* data,
     }
 }
 
+static void handle_claim_nickname(SSLWebSocket* ws, PerSocketData* data,
+                                   const std::string& raw_nick, RelayState& state) {
+    if (data->is_guest) return;
+
+    std::string nickname = to_lowercase(raw_nick);
+    if (!is_valid_nickname(nickname)) {
+        send_json(ws, {{"type", "nickname_error"}, {"error", "invalid"}});
+        return;
+    }
+
+    // Auto-release old nickname if peer already has one
+    auto old = state.peer_to_nickname.find(data->peer_id);
+    if (old != state.peer_to_nickname.end()) {
+        state.nickname_to_peer.erase(old->second);
+        state.peer_to_nickname.erase(old);
+    }
+
+    // Check availability
+    if (state.nickname_to_peer.count(nickname)) {
+        send_json(ws, {{"type", "nickname_error"}, {"error", "taken"}});
+        return;
+    }
+
+    state.nickname_to_peer[nickname] = data->peer_id;
+    state.peer_to_nickname[data->peer_id] = nickname;
+    send_json(ws, {{"type", "nickname_claimed"}, {"nickname", nickname}});
+}
+
+static void handle_release_nickname(SSLWebSocket* ws, PerSocketData* data,
+                                     RelayState& state) {
+    auto it = state.peer_to_nickname.find(data->peer_id);
+    if (it != state.peer_to_nickname.end()) {
+        state.nickname_to_peer.erase(it->second);
+        state.peer_to_nickname.erase(it);
+    }
+    send_json(ws, {{"type", "nickname_released"}});
+}
+
+static void handle_resolve_nickname(SSLWebSocket* ws, PerSocketData* /*data*/,
+                                     const std::string& raw_nick, RelayState& state) {
+    std::string nickname = to_lowercase(raw_nick);
+    auto it = state.nickname_to_peer.find(nickname);
+    if (it != state.nickname_to_peer.end()) {
+        send_json(ws, {{"type", "nickname_resolved"}, {"nickname", nickname}, {"peer_id", it->second}});
+    } else {
+        send_json(ws, {{"type", "nickname_error"}, {"error", "not_found"}, {"nickname", nickname}});
+    }
+}
+
 static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                                  std::string_view message, RelayState& state) {
     json j;
@@ -532,6 +598,12 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
     } else if (type == "subscribe") {
         handle_subscribe(data, j.value("room", ""),
                          j.contains("topics") ? j["topics"] : json::array());
+    } else if (type == "claim_nickname") {
+        handle_claim_nickname(ws, data, j.value("nickname", ""), state);
+    } else if (type == "release_nickname") {
+        handle_release_nickname(ws, data, state);
+    } else if (type == "resolve_nickname") {
+        handle_resolve_nickname(ws, data, j.value("nickname", ""), state);
     }
 }
 
@@ -540,6 +612,13 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
 
 
 static void cleanup_peer(RelayState& state, const std::string& peer_id) {
+    // Release temporary nickname
+    auto nit = state.peer_to_nickname.find(peer_id);
+    if (nit != state.peer_to_nickname.end()) {
+        state.nickname_to_peer.erase(nit->second);
+        state.peer_to_nickname.erase(nit);
+    }
+
     state.license.release_key(peer_id);
     state.peer_sockets.erase(peer_id);
 

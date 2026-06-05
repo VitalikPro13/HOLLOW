@@ -23,6 +23,14 @@ pub(crate) async fn handle_send_friend_request(
     db_path: &str,
     db_passphrase: &str,
 ) {
+    if peer_id_str == local_peer_str {
+        hollow_log!("[HOLLOW-FRIENDS] Rejected self-friend request");
+        let _ = event_tx.send(NetworkEvent::Error {
+            message: "Cannot send a friend request to yourself".into(),
+        }).await;
+        return;
+    }
+
     hollow_log!("[HOLLOW-FRIENDS] Sending friend request to {peer_id_str}");
 
     let now = std::time::SystemTime::now()

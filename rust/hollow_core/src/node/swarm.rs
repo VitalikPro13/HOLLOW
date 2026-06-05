@@ -292,6 +292,7 @@ async fn run_event_loop(
     // Pending friend requests: peer_id → requested_at timestamp.
     // Queued when peer isn't reachable (no shared rooms), sent when they appear.
     let mut pending_friend_requests: HashMap<String, i64> = HashMap::new();
+    let mut pending_nickname_resolve: Option<String> = None;
     // Pending friend removals: peer_ids whose FriendRemove wasn't delivered (peer offline).
     let mut pending_friend_removals: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
@@ -910,6 +911,19 @@ async fn run_event_loop(
                         ).await;
                     }
 
+                    NodeCommand::SendFriendRequestByNickname { nickname } => {
+                        pending_nickname_resolve = Some(nickname.clone());
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ResolveNickname { nickname });
+                    }
+
+                    NodeCommand::ClaimNickname { nickname } => {
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ClaimNickname { nickname });
+                    }
+
+                    NodeCommand::ReleaseNickname => {
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ReleaseNickname);
+                    }
+
                     NodeCommand::AcceptFriendRequest { peer_id: peer_id_str } => {
                         social::handle_accept_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers, &sig_cmd_tx,
@@ -1389,6 +1403,8 @@ async fn run_event_loop(
 
                     WsEvent::Disconnected => {
                         hollow_log!("[HOLLOW-WS] Relay disconnected — will auto-reconnect");
+                        pending_nickname_resolve = None;
+                        let _ = event_tx.send(NetworkEvent::RelayDisconnected).await;
                         ws_room_peers.clear();
                         synced_peers.clear();
                         key_request_in_flight.clear();
@@ -2074,6 +2090,31 @@ async fn run_event_loop(
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                                 room_code: format!("inbox:{}", local_peer),
                             });
+                        }
+                    }
+                    WsEvent::NicknameClaimed { nickname } => {
+                        let _ = event_tx.send(NetworkEvent::NicknameClaimed { nickname }).await;
+                    }
+                    WsEvent::NicknameReleased => {
+                        let _ = event_tx.send(NetworkEvent::NicknameReleased).await;
+                    }
+                    WsEvent::NicknameError { error, nickname } => {
+                        if pending_nickname_resolve.as_deref() == Some(&nickname) {
+                            pending_nickname_resolve = None;
+                            let _ = event_tx.send(NetworkEvent::NicknameResolveFailed { nickname, error }).await;
+                        } else {
+                            let _ = event_tx.send(NetworkEvent::NicknameClaimFailed { error }).await;
+                        }
+                    }
+                    WsEvent::NicknameResolved { nickname, peer_id } => {
+                        if pending_nickname_resolve.as_deref() == Some(&nickname) {
+                            pending_nickname_resolve = None;
+                            social::handle_send_friend_request(
+                                &event_tx, &ws_cmd_tx, &ws_room_peers, &sig_cmd_tx,
+                                &mut pending_friend_requests,
+                                &local_peer_str, peer_id,
+                                &db_path, &db_passphrase,
+                            ).await;
                         }
                     }
                     WsEvent::Message { room, from, data } | WsEvent::DirectMessage { room, from, data } => {

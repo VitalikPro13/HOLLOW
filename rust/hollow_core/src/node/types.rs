@@ -90,6 +90,13 @@ pub(crate) enum NetworkEvent {
     FriendRequestAccepted { peer_id: String },
     FriendRequestRejected { peer_id: String },
     FriendRemoved { peer_id: String },
+    // -- Temporary nickname events --
+    NicknameClaimed { nickname: String },
+    NicknameReleased,
+    NicknameClaimFailed { error: String },
+    NicknameResolveFailed { nickname: String, error: String },
+    // -- Relay connection events --
+    RelayDisconnected,
     ChannelNotificationHint {
         server_id: String, channel_id: String, from_peer: String,
         message_id: String,
@@ -389,9 +396,13 @@ pub(crate) enum NodeCommand {
     RemoveDmReaction { peer_id: String, message_id: String, emoji: String },
     // -- Friends (Phase 3.5) --
     SendFriendRequest { peer_id: String },
+    SendFriendRequestByNickname { nickname: String },
     AcceptFriendRequest { peer_id: String },
     RejectFriendRequest { peer_id: String },
     RemoveFriend { peer_id: String },
+    // -- Temporary nicknames --
+    ClaimNickname { nickname: String },
+    ReleaseNickname,
     // -- Typing indicators (Phase 3.5) --
     SendTypingIndicator { server_id: String, channel_id: String },
     // -- Presence (Phase 6.75) --

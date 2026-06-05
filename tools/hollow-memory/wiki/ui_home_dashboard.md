@@ -464,19 +464,22 @@ Used for "Encrypted" (success green, `LucideIcons.shieldCheck`) and "Offline" (t
 
 ---
 
-## _AddFriendTab — Add Friend by Peer ID
+## _AddFriendTab — Unified Add Friend Input
 
-`friends_bar.dart:_AddFriendTab` is a `ConsumerWidget`. Input form for sending a friend request by peer ID.
+`friends_bar.dart:_AddFriendTab` is a `ConsumerStatefulWidget`. Unified input form for sending a friend request by peer ID or temporary nickname, plus a nickname claim section.
 
 **Props:** `controller` (TextEditingController, managed by parent `_FriendsManagerState`).
 
-**Layout:** Padded with `HollowSpacing.lg`. Column containing:
-1. Instruction text: "Add a friend by their peer ID" (body, textSecondary)
-2. Row with:
-   - `HollowTextField` (Expanded): placeholder "Paste peer ID...", `autofocus: true`, mono style (12px), `onSubmitted` triggers `_send()`
-   - `HollowButton.filled`: "Send Request", triggers `_send()`
+**Auto-detection:** `_isPeerId(input)` checks if input starts with `12D3KooW`. If yes, sends via `friendsProvider.notifier.sendRequest()`; otherwise resolves as nickname via `network_api.sendFriendRequestByNickname()`.
 
-**`_send()` method:** Trims controller text. If empty, returns. Calls `friendsProvider.notifier.sendRequest(peerId)`, clears controller, shows `HollowToast` "Friend request sent" (success type).
+**Layout:** Padded with `HollowSpacing.lg`. Column containing:
+1. Instruction text: "Enter a peer ID or temporary nickname" (body, textSecondary)
+2. Row: `HollowTextField` (hint "Peer ID or nickname...", mono 12px, autofocus) + "Send Request" filled button
+3. Divider
+4. "Your temporary nickname" section — watches `temporaryNicknameProvider`:
+   - **Claimed state:** Shows nickname in accent-colored chip + "Release" ghost button
+   - **Off/failed state:** `HollowTextField` (hint "Choose a nickname (3-20 chars)...") + "Claim" filled button (disabled while claiming)
+   - **Error display:** Shows human-readable error for "taken" / "invalid" / generic failure
 
 ---
 

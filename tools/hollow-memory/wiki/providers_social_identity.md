@@ -49,6 +49,42 @@ Four `NetworkEvent` variants trigger friend state updates. All four call `friend
 
 On `FriendRemoved`, the event handler also clears the `selectedPeerProvider` if the removed friend was the active chat, and closes the split pane if it was showing the removed friend.
 
+---
+
+## TemporaryNicknameProvider
+
+**File:** `lib/src/core/providers/temporary_nickname_provider.dart`
+**Provider:** `temporaryNicknameProvider` — `NotifierProvider<TemporaryNicknameNotifier, TemporaryNicknameState>`
+
+### State Shape
+
+`TemporaryNicknameState` with three fields:
+- `status` — `NicknameStatus` enum: `off`, `claiming`, `claimed`, `failed`
+- `nickname` — the claimed nickname string (null when off)
+- `error` — error string from relay (null on success). Values: `'taken'`, `'invalid'`, `'not_found'`
+
+Initial state: `off`, no nickname, no error. **No persistence** — resets every session.
+
+### Methods
+
+- **`claim(nickname)`** — sets status to `claiming`, calls `network_api.claimNickname()`. Actual state transition happens when `NicknameClaimed`/`NicknameClaimFailed` event arrives.
+- **`release()`** — sets status to `off` immediately, calls `network_api.releaseNickname()`.
+- **`onClaimed(nickname)`** — event handler, sets `claimed` with nickname.
+- **`onReleased()`** — event handler, resets to `off`.
+- **`onClaimFailed(error)`** — event handler, sets `failed` with error string.
+- **`onDisconnected()`** — called on `NetworkEvent_RelayDisconnected`, resets to `off` (relay lost the nickname).
+
+### Event Wiring (event_provider.dart)
+
+Five new events handled:
+- `NetworkEvent_NicknameClaimed` → `onClaimed()`
+- `NetworkEvent_NicknameReleased` → `onReleased()`
+- `NetworkEvent_NicknameClaimFailed` → `onClaimFailed()`
+- `NetworkEvent_NicknameResolveFailed` → debug log only (toast handled by caller)
+- `NetworkEvent_RelayDisconnected` → `onDisconnected()` + `connectionStatusProvider.onRelayStatusChanged('disconnected')`
+
+---
+
 ### Favourite Friends Ordering
 
 **File:** `lib/src/core/providers/favourite_friends_provider.dart`

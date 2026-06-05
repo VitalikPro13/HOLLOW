@@ -18,6 +18,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileFriendsTab extends ConsumerStatefulWidget {
@@ -636,16 +637,25 @@ class _AddFriendDialog extends ConsumerStatefulWidget {
 class _AddFriendDialogState extends ConsumerState<_AddFriendDialog> {
   bool _sending = false;
 
+  static bool _isPeerId(String input) => input.startsWith('12D3KooW');
+
   Future<void> _send() async {
-    final peerId = widget.controller.text.trim();
-    if (peerId.isEmpty || _sending) return;
+    final input = widget.controller.text.trim();
+    if (input.isEmpty || _sending) return;
     setState(() => _sending = true);
     try {
-      await ref.read(friendsProvider.notifier).sendRequest(peerId);
+      if (_isPeerId(input)) {
+        await ref.read(friendsProvider.notifier).sendRequest(input);
+      } else {
+        await network_api.sendFriendRequestByNickname(nickname: input);
+      }
       if (mounted) {
         Navigator.of(context).pop();
-        HollowToast.show(context, 'Friend request sent',
-            type: HollowToastType.success);
+        HollowToast.show(
+          context,
+          _isPeerId(input) ? 'Friend request sent' : 'Looking up nickname...',
+          type: HollowToastType.success,
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -665,24 +675,27 @@ class _AddFriendDialogState extends ConsumerState<_AddFriendDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Paste their peer ID to send a friend request.',
+          Text('Enter a peer ID or temporary nickname.',
               style: HollowTypography.bodySmall),
           const SizedBox(height: HollowSpacing.lg),
           TextField(
             controller: widget.controller,
             autofocus: true,
             style: HollowTypography.mono.copyWith(
-              color: hollow.textPrimary, fontSize: 12,
+              color: hollow.textPrimary,
+              fontSize: 12,
             ),
             decoration: InputDecoration(
-              hintText: 'Paste peer ID...',
+              hintText: 'Peer ID or nickname...',
               hintStyle: HollowTypography.mono.copyWith(
-                color: hollow.textSecondary, fontSize: 12,
+                color: hollow.textSecondary,
+                fontSize: 12,
               ),
               filled: true,
               fillColor: hollow.surface,
               contentPadding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.md, vertical: HollowSpacing.md,
+                horizontal: HollowSpacing.md,
+                vertical: HollowSpacing.md,
               ),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(hollow.radiusMd),

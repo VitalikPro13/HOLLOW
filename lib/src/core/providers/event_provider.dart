@@ -41,6 +41,7 @@ import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/license_key_provider.dart';
 import 'package:hollow/src/core/providers/room_budget_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
+import 'package:hollow/src/core/providers/temporary_nickname_provider.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
@@ -604,6 +605,26 @@ class EventStreamNotifier extends Notifier<bool> {
         if (splitState.isSplit && splitState.rightPane?.peerId == peerId) {
           ref.read(splitViewProvider.notifier).closeSplit();
         }
+
+      // -- Temporary nickname events --
+      case NetworkEvent_NicknameClaimed(:final nickname):
+        ref.read(temporaryNicknameProvider.notifier).onClaimed(nickname);
+
+      case NetworkEvent_NicknameReleased():
+        ref.read(temporaryNicknameProvider.notifier).onReleased();
+
+      case NetworkEvent_NicknameClaimFailed(:final error):
+        ref.read(temporaryNicknameProvider.notifier).onClaimFailed(error);
+
+      case NetworkEvent_NicknameResolveFailed(:final nickname, :final error):
+        debugPrint('[HOLLOW] Nickname resolve failed: $nickname — $error');
+
+      // -- Relay connection events --
+      case NetworkEvent_RelayDisconnected():
+        ref.read(temporaryNicknameProvider.notifier).onDisconnected();
+        ref
+            .read(connectionStatusProvider.notifier)
+            .onRelayStatusChanged('disconnected');
 
       // -- Channel notification hints (unsubscribed channel awareness) --
       case NetworkEvent_ChannelNotificationHint(

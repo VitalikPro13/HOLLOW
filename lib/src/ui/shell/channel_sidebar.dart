@@ -35,6 +35,7 @@ import 'package:hollow/src/ui/shell/user_bar.dart';
 import 'package:hollow/src/ui/shell/voice_channel_panel.dart';
 import 'package:hollow/src/ui/sidebar/peer_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 
 /// Channel / DM sidebar (240px). Supports two modes:
 ///
@@ -717,54 +718,9 @@ class _HomeContent extends ConsumerWidget {
   }
 
   void _showAddFriendDialog(BuildContext context, WidgetRef ref) {
-    final controller = TextEditingController();
     showHollowDialog(
       context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'Add Friend',
-        content: HollowTextField(
-          controller: controller,
-          hintText: 'Paste peer ID...',
-          autofocus: true,
-          style: HollowTypography.mono.copyWith(
-            color: hollow.textPrimary,
-            fontSize: 12,
-          ),
-          onSubmitted: (_) {
-            final peerId = controller.text.trim();
-            if (peerId.isNotEmpty) {
-              ref.read(friendsProvider.notifier).sendRequest(peerId);
-              Navigator.pop(ctx);
-              HollowToast.show(
-                context,
-                'Friend request sent',
-                type: HollowToastType.success,
-              );
-            }
-          },
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: () {
-              final peerId = controller.text.trim();
-              if (peerId.isNotEmpty) {
-                ref.read(friendsProvider.notifier).sendRequest(peerId);
-                Navigator.pop(ctx);
-                HollowToast.show(
-                  context,
-                  'Friend request sent',
-                  type: HollowToastType.success,
-                );
-              }
-            },
-            child: const Text('Send Request'),
-          ),
-        ],
-      ),
+      builder: (ctx) => _SidebarAddFriendDialog(parentContext: context),
     );
   }
 }
@@ -851,6 +807,73 @@ class _PendingRequestTile extends ConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Sidebar add-friend dialog — unified peer ID / nickname input.
+class _SidebarAddFriendDialog extends ConsumerStatefulWidget {
+  final BuildContext parentContext;
+  const _SidebarAddFriendDialog({required this.parentContext});
+
+  @override
+  ConsumerState<_SidebarAddFriendDialog> createState() =>
+      _SidebarAddFriendDialogState();
+}
+
+class _SidebarAddFriendDialogState
+    extends ConsumerState<_SidebarAddFriendDialog> {
+  final _controller = TextEditingController();
+
+  static bool _isPeerId(String input) => input.startsWith('12D3KooW');
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _send() {
+    final input = _controller.text.trim();
+    if (input.isEmpty) return;
+    if (_isPeerId(input)) {
+      ref.read(friendsProvider.notifier).sendRequest(input);
+    } else {
+      network_api.sendFriendRequestByNickname(nickname: input);
+    }
+    Navigator.pop(context);
+    HollowToast.show(
+      widget.parentContext,
+      _isPeerId(input) ? 'Friend request sent' : 'Looking up nickname...',
+      type: HollowToastType.success,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return HollowDialog(
+      title: 'Add Friend',
+      content: HollowTextField(
+        controller: _controller,
+        hintText: 'Peer ID or nickname...',
+        autofocus: true,
+        style: HollowTypography.mono.copyWith(
+          color: hollow.textPrimary,
+          fontSize: 12,
+        ),
+        onSubmitted: (_) => _send(),
+      ),
+      actions: [
+        HollowButton.ghost(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        HollowButton.filled(
+          onPressed: _send,
+          child: const Text('Send Request'),
+        ),
+      ],
     );
   }
 }

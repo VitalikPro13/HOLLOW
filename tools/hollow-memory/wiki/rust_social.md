@@ -10,16 +10,22 @@ Imports from: `crypto_handler::{peer_is_reachable, send_mls_broadcast, send_mess
 
 ## handle_send_friend_request()
 
-`social.rs:handle_send_friend_request(event_tx, ws_cmd_tx, ws_room_peers, sig_cmd_tx, pending_friend_requests, bundle_keypair, local_peer_str, peer_id_str)`
+`social.rs:handle_send_friend_request(event_tx, ws_cmd_tx, ws_room_peers, sig_cmd_tx, pending_friend_requests, local_peer_str, peer_id_str, db_path, db_passphrase)`
 
-Called when the local user sends a friend request (`NodeCommand::SendFriendRequest`).
+Called when the local user sends a friend request (`NodeCommand::SendFriendRequest`) or after a nickname is resolved (`NodeCommand::SendFriendRequestByNickname` → relay resolve → this function).
+
+**Self-request guard:** If `peer_id_str == local_peer_str`, emits `NetworkEvent::Error` with "Cannot send a friend request to yourself" and returns early.
 
 Steps:
-1. **Persist as pending outgoing:** Opens `MessageStore` from `~/.hollow/messages.db` (passphrase derived from first 32 bytes of keypair protobuf encoding, hex-encoded), calls `store.save_friend(peer_id, "pending", "outgoing", now)`.
+1. **Persist as pending outgoing:** Opens `MessageStore`, calls `store.save_friend(peer_id, "pending", "outgoing", now)`.
 2. **Register DM room:** Computes the deterministic DM room code via `dm_room_code(local_peer, peer_id)` (SHA-256 hash of sorted peer IDs with "dm-" prefix). Registers the room with signaling (`SignalingCmd::SetRoom` + `SignalingCmd::Bootstrap`) and joins the WS relay room (`WsCommand::JoinRoom`). This enables peer discovery even before the request is accepted.
 3. **Join target's inbox room:** Joins `"inbox:{peer_id}"` on the WS relay. Every peer auto-joins their own inbox room on startup, so this is the reliable way to reach any peer regardless of shared servers.
 4. **Send or queue:** If the target peer is already reachable (in any shared WS room), sends `HavenMessage::FriendRequest { requested_at: now }` immediately via `send_message_to_peer()`. If not reachable, inserts into `pending_friend_requests: HashMap<String, i64>` (peer_id -> requested_at timestamp). Pending requests are drained when the peer appears via `PeerJoined` or `RoomMembers` events in swarm.rs.
 5. **Emit event:** Sends `NetworkEvent::FriendRequestReceived { peer_id }` to Dart so the UI shows the outgoing request immediately.
+
+### Friend Request by Nickname (two-step)
+
+`NodeCommand::SendFriendRequestByNickname { nickname }` in swarm.rs stores `pending_nickname_resolve = Some(nickname)` and sends `WsCommand::ResolveNickname` to the relay. When the relay responds with `WsEvent::NicknameResolved { peer_id }`, swarm.rs calls `handle_send_friend_request()` with the resolved peer_id. If resolution fails (`WsEvent::NicknameError`), emits `NetworkEvent::NicknameResolveFailed`.
 
 ### DM Room Code
 
@@ -254,6 +260,11 @@ The passphrase is derived from the first 32 bytes of the Ed25519 keypair's proto
 - `NetworkEvent::FriendRequestAccepted { peer_id }` — friend request accepted (by us or by them)
 - `NetworkEvent::FriendRequestRejected { peer_id }` — friend request rejected
 - `NetworkEvent::FriendRemoved { peer_id }` — friend removed
+- `NetworkEvent::NicknameClaimed { nickname }` — temporary nickname successfully claimed on relay
+- `NetworkEvent::NicknameReleased` — temporary nickname released
+- `NetworkEvent::NicknameClaimFailed { error }` — nickname claim failed (taken/invalid)
+- `NetworkEvent::NicknameResolveFailed { nickname, error }` — nickname lookup failed (not_found)
+- `NetworkEvent::RelayDisconnected` — WS relay connection lost (resets nickname state)
 - `NetworkEvent::TypingStarted { peer_id, server_id, channel_id }` — typing indicator (server_id empty for DMs)
 - `NetworkEvent::ProfileUpdated { peer_id }` — profile changed (ours or theirs)
 - `NetworkEvent::PeerStatusChanged { peer_id, status }` — invisible/online status change

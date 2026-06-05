@@ -88,5 +88,9 @@ struct RelayState {
     LicenseState license;
     ServerStatsCache stats_cache;
 
+    // Temporary nickname registry (RAM only, released on disconnect)
+    std::unordered_map<std::string, std::string> nickname_to_peer;  // nickname -> peer_id
+    std::unordered_map<std::string, std::string> peer_to_nickname;  // peer_id -> nickname
+
     size_t online_users() const { return peer_sockets.size() - guest_count; }
 };
