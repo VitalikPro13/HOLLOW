@@ -58,6 +58,9 @@ class VoiceService {
   String? preferredAudioOutputDeviceId;
   String? preferredCameraDeviceId;
 
+  /// Microphone input gain (0.0-2.0). Applied via SetVolume on local audio track.
+  double micGain = 1.3;
+
   /// SFrame encryption service for DM call E2EE.
   FrameCryptorService? _frameCryptor;
   FrameCryptorService? get frameCryptor => _frameCryptor;
@@ -847,6 +850,16 @@ class VoiceService {
           'tracks: ${audioTracks.length}'
           '${audioTracks.isNotEmpty ? ", label=${audioTracks.first.label}" : ""}');
 
+      // Apply mic gain boost.
+      if (micGain != 1.0 && audioTracks.isNotEmpty) {
+        try {
+          await Helper.setVolume(micGain, audioTracks.first);
+          _log('[HOLLOW-VOICE] Applied mic gain: ${micGain.toStringAsFixed(2)}');
+        } catch (e) {
+          _log('[HOLLOW-VOICE] Failed to apply mic gain: $e');
+        }
+      }
+
       // Apply preferred output device if set.
       if (preferredAudioOutputDeviceId != null) {
         try {
@@ -859,6 +872,16 @@ class VoiceService {
     } catch (e) {
       _log('[HOLLOW-VOICE] Failed to get microphone: $e');
       rethrow;
+    }
+  }
+
+  Future<void> updateMicGain(double gain) async {
+    micGain = gain;
+    if (_localStream == null) return;
+    final audioTracks = _localStream!.getAudioTracks();
+    if (audioTracks.isNotEmpty) {
+      await Helper.setVolume(gain, audioTracks.first);
+      _log('[HOLLOW-VOICE] Updated mic gain: ${gain.toStringAsFixed(2)}');
     }
   }
 

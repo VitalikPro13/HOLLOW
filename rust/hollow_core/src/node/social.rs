@@ -478,3 +478,99 @@ pub(crate) async fn handle_envelope_profile_update(
         peer_id: sender_peer_id,
     }).await;
 }
+
+/// Handle `ProfileRequestFor` — look up the target peer's profile in our DB
+/// and send it back as `ProfileRelay` (avatar included, no banner).
+pub(crate) fn handle_profile_request_for(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    requester_peer: &str,
+    target_peer_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if target_peer_id.is_empty() { return; }
+
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(Some(profile)) = store.load_profile(target_peer_id) {
+            let avatar_b64 = profile.avatar_bytes
+                .as_ref()
+                .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+                .unwrap_or_default();
+            let msg = HavenMessage::ProfileRelay {
+                source_peer_id: target_peer_id.to_string(),
+                display_name: profile.display_name,
+                status: profile.status,
+                about_me: profile.about_me,
+                updated_at: profile.updated_at,
+                avatar_b64,
+                twitch_username: profile.twitch_username,
+            };
+            send_message_to_peer(ws_cmd_tx, ws_room_peers, requester_peer, msg);
+            hollow_log!("[HOLLOW-PROFILE] Relayed profile for {target_peer_id} to {requester_peer}");
+        } else {
+            hollow_log!("[HOLLOW-PROFILE] No cached profile for {target_peer_id}, cannot relay");
+        }
+    }
+}
+
+/// Handle incoming `ProfileRelay` — save the relayed profile + avatar, update
+/// member display names, emit `ProfileUpdated`.
+pub(crate) async fn handle_profile_relay(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    server_states: &mut HashMap<String, ServerState>,
+    source_peer_id: String,
+    display_name: String,
+    status: String,
+    about_me: String,
+    updated_at: i64,
+    avatar_b64: String,
+    twitch_username: String,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    // Truncate fields (same limits as ProfileUpdate handler).
+    let display_name = if display_name.len() > 64 { display_name[..64].to_string() } else { display_name };
+    let status = if status.len() > 96 { status[..96].to_string() } else { status };
+    let about_me = if about_me.len() > 256 { about_me[..256].to_string() } else { about_me };
+    let twitch_username = if twitch_username.len() > 64 { twitch_username[..64].to_string() } else { twitch_username };
+
+    let avatar_bytes: Option<Vec<u8>> = if avatar_b64.is_empty() {
+        None
+    } else {
+        base64::engine::general_purpose::STANDARD.decode(&avatar_b64).ok()
+            .filter(|b| b.len() <= 1_000_000)
+    };
+
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        // Only save if we don't already have a newer profile.
+        let should_save = match store.load_profile_light(&source_peer_id) {
+            Ok(Some(existing)) => existing.updated_at < updated_at,
+            Ok(None) => true,
+            Err(_) => true,
+        };
+        if should_save {
+            let _ = store.save_profile(
+                &source_peer_id, &display_name, &status, &about_me, updated_at,
+                avatar_bytes.as_deref(), None, &twitch_username,
+            );
+            hollow_log!("[HOLLOW-PROFILE] Saved relayed profile for {source_peer_id}");
+        } else {
+            hollow_log!("[HOLLOW-PROFILE] Skipped relayed profile for {source_peer_id} (already have newer)");
+            return;
+        }
+    }
+
+    // Update display_name in server member lists.
+    for (_, state) in server_states.iter_mut() {
+        if let Some(member) = state.members.get_mut(&source_peer_id) {
+            if !display_name.is_empty() {
+                member.display_name = display_name.clone();
+            }
+        }
+    }
+
+    let _ = event_tx.send(NetworkEvent::ProfileUpdated {
+        peer_id: source_peer_id,
+    }).await;
+}

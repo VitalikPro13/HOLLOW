@@ -979,6 +979,32 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "profile_request")]
     ProfileRequest,
 
+    /// Ask an online peer to relay a third (offline) peer's profile.
+    #[serde(rename = "profile_request_for")]
+    ProfileRequestFor {
+        #[serde(default)]
+        target_peer_id: String,
+    },
+
+    /// Relayed profile for an offline peer (avatar included, no banner).
+    #[serde(rename = "profile_relay")]
+    ProfileRelay {
+        #[serde(default)]
+        source_peer_id: String,
+        #[serde(default)]
+        display_name: String,
+        #[serde(default)]
+        status: String,
+        #[serde(default)]
+        about_me: String,
+        #[serde(default)]
+        updated_at: i64,
+        #[serde(default)]
+        avatar_b64: String,
+        #[serde(default)]
+        twitch_username: String,
+    },
+
     // -- Voice channel coordination (plaintext for MLS epoch resilience) --
     // These use plaintext HavenMessage instead of MLS MessageEnvelope so they
     // survive epoch staleness after reconnection. SDP/ICE (which contain IPs)

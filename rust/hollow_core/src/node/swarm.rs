@@ -1856,6 +1856,38 @@ async fn run_event_loop(
                                         }
                                     }
 
+                                    // Ask this peer for profiles of offline server members we don't have.
+                                    {
+                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                            let mut proxy_count = 0u32;
+                                            for (_sid, state) in server_states.iter() {
+                                                if !state.members.contains_key(pid_str) { continue; }
+                                                for (member_id, _) in state.members.iter() {
+                                                    if proxy_count >= 10 { break; }
+                                                    if member_id == pid_str { continue; }
+                                                    if member_id == &local_peer_str { continue; }
+                                                    // Skip online peers (direct ProfileRequest works).
+                                                    let is_online = ws_room_peers.values()
+                                                        .any(|peers| peers.contains(member_id.as_str()));
+                                                    if is_online { continue; }
+                                                    // Skip if we already have their profile.
+                                                    if let Ok(Some(_)) = store.load_profile_light(member_id) {
+                                                        continue;
+                                                    }
+                                                    hollow_log!("[HOLLOW-PROFILE] Requesting proxy profile for {member_id} from {pid_str}");
+                                                    send_message_to_peer(
+                                                        &ws_cmd_tx, &ws_room_peers,
+                                                        pid_str, HavenMessage::ProfileRequestFor {
+                                                            target_peer_id: member_id.clone(),
+                                                        },
+                                                    );
+                                                    proxy_count += 1;
+                                                }
+                                                if proxy_count >= 10 { break; }
+                                            }
+                                        }
+                                    }
+
                                     // Send CRDT SyncReq + channel message sync for servers shared with this peer.
                                     for (sid, state) in server_states.iter() {
                                         if state.members.contains_key(pid_str) {
@@ -7364,6 +7396,25 @@ async fn handle_incoming_request(
                 is_invisible,
                 db_path, db_passphrase,
             );
+        }
+
+        HavenMessage::ProfileRequestFor { target_peer_id } => {
+            hollow_log!("[HOLLOW-PROFILE] ProfileRequestFor {target_peer_id} from {peer_str}");
+            social::handle_profile_request_for(
+                ws_cmd_tx, ws_room_peers,
+                peer_str, &target_peer_id,
+                db_path, db_passphrase,
+            );
+        }
+
+        HavenMessage::ProfileRelay { source_peer_id, display_name, status, about_me, updated_at, avatar_b64, twitch_username } => {
+            hollow_log!("[HOLLOW-PROFILE] ProfileRelay for {source_peer_id} from {peer_str}");
+            social::handle_profile_relay(
+                event_tx, server_states,
+                source_peer_id, display_name, status, about_me, updated_at,
+                avatar_b64, twitch_username,
+                db_path, db_passphrase,
+            ).await;
         }
 
         // -- Plaintext voice channel handlers (MLS epoch-resilient) --

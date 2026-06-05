@@ -173,6 +173,20 @@ This ensures every peer receives the local user's profile data as soon as connec
 
 ---
 
+## handle_profile_request_for()
+
+`social.rs:handle_profile_request_for(ws_cmd_tx, ws_room_peers, requester_peer, target_peer_id, db_path, db_passphrase)`
+
+Handles `ProfileRequestFor` — looks up an offline peer's cached profile in local DB and sends it back as `ProfileRelay` (avatar included, no banner). Called when an online peer asks us for a third peer's profile.
+
+## handle_profile_relay()
+
+`social.rs:handle_profile_relay(event_tx, server_states, source_peer_id, display_name, status, about_me, updated_at, avatar_b64, twitch_username, db_path, db_passphrase)`
+
+Handles incoming `ProfileRelay`. Truncates fields (64/96/256 char limits), decodes avatar (max 1 MB, no banner), saves profile only if `updated_at` is newer than existing. Updates member display names in `server_states`, emits `ProfileUpdated`.
+
+---
+
 ## Incoming Typing Handlers
 
 ### handle_envelope_typing() (MLS path)

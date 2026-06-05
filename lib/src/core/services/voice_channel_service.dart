@@ -49,6 +49,9 @@ class VoiceChannelService {
   String? preferredAudioOutputDeviceId;
   String? preferredCameraDeviceId;
 
+  /// Microphone input gain (0.0-2.0). Applied via SetVolume on local audio track.
+  double micGain = 1.3;
+
   /// VAD: set of currently speaking peer IDs (updated every 200ms).
   final Set<String> _speakingPeers = {};
   Timer? _vadTimer;
@@ -158,6 +161,16 @@ class VoiceChannelService {
       });
       final tracks = _localAudioStream!.getAudioTracks();
       _vcLog('[HOLLOW-VC] Got local audio, tracks=${tracks.length}');
+
+      // Apply mic gain boost.
+      if (micGain != 1.0 && tracks.isNotEmpty) {
+        try {
+          await Helper.setVolume(micGain, tracks.first);
+          _vcLog('[HOLLOW-VC] Applied mic gain: ${micGain.toStringAsFixed(2)}');
+        } catch (e) {
+          _vcLog('[HOLLOW-VC] Failed to apply mic gain: $e');
+        }
+      }
     } catch (e) {
       _vcLog('[HOLLOW-VC] Failed to capture audio: $e');
       // Proceed without audio — user can still hear others.
@@ -620,6 +633,16 @@ class VoiceChannelService {
           await Helper.setVolume(volume, r.track!);
         }
       }
+    }
+  }
+
+  Future<void> updateMicGain(double gain) async {
+    micGain = gain;
+    if (_localAudioStream == null) return;
+    final tracks = _localAudioStream!.getAudioTracks();
+    if (tracks.isNotEmpty) {
+      await Helper.setVolume(gain, tracks.first);
+      _vcLog('[HOLLOW-VC] Updated mic gain: ${gain.toStringAsFixed(2)}');
     }
   }
 

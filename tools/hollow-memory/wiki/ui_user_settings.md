@@ -262,6 +262,8 @@ All use `_buildDeviceRow()` — a Row with icon (14px), label (80px fixed width)
 
 **Microphone** — `LucideIcons.mic`, items from `_audioInputs`. Value stored via `audioInputDeviceProvider.notifier.setDevice()`.
 
+**Mic Gain** — Slider (0%-200%, 40 divisions) indented below the Microphone row. Default 130%. Reads/writes `micGainProvider`. Applied to local audio track via `Helper.setVolume()` post-APM.
+
 **Speaker** — `LucideIcons.volume2`, items from `_audioOutputs`. On change, also calls `webrtc.Helper.selectAudioOutput(deviceId)` to apply immediately to WebRTC.
 
 **Camera** — `LucideIcons.camera`, only shown if cameras detected. Items from `_cameras`. Stored via `cameraDeviceProvider.notifier.setDevice()`.

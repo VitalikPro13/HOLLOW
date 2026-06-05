@@ -162,6 +162,8 @@ class CallNotifier extends Notifier<CallState> {
         ref.read(audioOutputDeviceProvider).valueOrNull;
     _voiceService!.preferredCameraDeviceId =
         ref.read(cameraDeviceProvider).valueOrNull;
+    _voiceService!.micGain =
+        ref.read(micGainProvider).valueOrNull ?? 1.3;
     return _voiceService!;
   }
 
@@ -254,6 +256,12 @@ class CallNotifier extends Notifier<CallState> {
       // explicit video_state signal in _handleVideoState is the only
       // source of truth for remote camera state.
     };
+
+    // Update mic gain mid-call when user adjusts the slider.
+    ref.listen(micGainProvider, (_, next) {
+      final gain = next.valueOrNull ?? 1.3;
+      _voiceService?.updateMicGain(gain);
+    });
   }
 
   /// Ensure audio device preferences are loaded from SQLCipher before starting

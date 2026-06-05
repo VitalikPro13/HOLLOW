@@ -3305,6 +3305,59 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
             }
           },
         ),
+        const SizedBox(height: HollowSpacing.sm),
+
+        // Mic gain slider
+        Builder(builder: (context) {
+          final gain = ref.watch(micGainProvider).valueOrNull ?? 1.3;
+          return Padding(
+            padding: const EdgeInsets.only(left: 30),
+            child: Row(
+              children: [
+                Icon(LucideIcons.volume1, size: 14, color: hollow.textSecondary),
+                const SizedBox(width: HollowSpacing.sm),
+                Text(
+                  'Gain',
+                  style: HollowTypography.bodySmall.copyWith(
+                    color: hollow.textSecondary,
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.md),
+                Expanded(
+                  child: SliderTheme(
+                    data: SliderThemeData(
+                      activeTrackColor: hollow.accent,
+                      inactiveTrackColor: hollow.border,
+                      thumbColor: hollow.accent,
+                      overlayColor: hollow.accent.withValues(alpha: 0.08),
+                      trackHeight: 2,
+                      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+                      overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
+                    ),
+                    child: Slider(
+                      value: gain.clamp(0.0, 2.0),
+                      min: 0.0,
+                      max: 2.0,
+                      divisions: 40,
+                      onChanged: (v) => ref.read(micGainProvider.notifier).setGain(v),
+                    ),
+                  ),
+                ),
+                SizedBox(
+                  width: 40,
+                  child: Text(
+                    '${(gain * 100).round()}%',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.accent,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    textAlign: TextAlign.right,
+                  ),
+                ),
+              ],
+            ),
+          );
+        }),
         const SizedBox(height: HollowSpacing.md),
 
         // Speaker output (win32audio)

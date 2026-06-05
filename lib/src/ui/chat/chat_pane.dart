@@ -39,6 +39,7 @@ import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
@@ -2244,14 +2245,20 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                 // Center: avatars (audio-only — when video is on, they're in the rectangles)
                 if (!hasAnyVideo) ...[
                   const Spacer(),
-                  HollowAvatar(
-                    peerId: localPeerId,
-                    size: 60,
+                  SpeakingBorder(
+                    isSpeaking: call.isLocalSpeaking,
+                    child: HollowAvatar(
+                      peerId: localPeerId,
+                      size: 60,
+                    ),
                   ),
                   const SizedBox(width: HollowSpacing.sm),
-                  HollowAvatar(
-                    peerId: widget.peerId,
-                    size: 60,
+                  SpeakingBorder(
+                    isSpeaking: call.isRemoteSpeaking,
+                    child: HollowAvatar(
+                      peerId: widget.peerId,
+                      size: 60,
+                    ),
                   ),
                 ],
 

@@ -384,7 +384,7 @@ Watches `callProvider`, `profileProvider`. Reads `identityProvider` for local pe
 
 **Control bar**: Row with:
 - Left: Green pulsing `StatusDot` + "Connecting..." or formatted duration (MM:SS with tabular figures)
-- Center (audio-only): Two 60px `HollowAvatar`s
+- Center (audio-only): Two 60px `HollowAvatar`s wrapped in `SpeakingBorder(isSpeaking: call.isLocalSpeaking / call.isRemoteSpeaking)` — animated accent glow border on voice activity
 - Right: `_buildControls()` -- Mute, Camera, Screen Share (desktop only), End Call buttons
 
 ### _showVolumePopup()

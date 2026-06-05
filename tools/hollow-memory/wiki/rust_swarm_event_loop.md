@@ -216,6 +216,7 @@ Critical path — triggers most of the sync machinery:
    - For each shared server: sends CRDT SyncReq (always plaintext — MLS epoch may be stale after reconnect), registers for channel sync via coordinator, requests MLS KeyPackage if coordinator.
    - Re-broadcasts voice channel joins to reconnecting peer.
    - Sends DmSyncRequest for DM history.
+   - Requests proxy profiles: for offline server members without cached profiles, sends `ProfileRequestFor` to this peer (max 10 per PeerJoined). Relayed profile includes avatar but no banner.
 7. If room matches a pending server join: sends ServerJoinRequest.
 
 ### WsEvent::PeerLeft { room, peer_id }
@@ -287,7 +288,10 @@ These are handled directly in `handle_incoming_request()`:
 - `TypingIndicator` — emits TypingStarted.
 - `StatusUpdate` — emits PeerStatusChanged.
 - `ProfileUpdate` — validates sizes, decodes avatar/banner base64, saves to DB, updates server member display names, emits ProfileUpdated.
-- `PeerDisconnecting` ��� emits PeerDisconnected.
+- `ProfileRequest` — sends own profile via `social::send_own_profile_to_peer()`.
+- `ProfileRequestFor { target_peer_id }` — delegates to `social::handle_profile_request_for()` (looks up target's cached profile, sends back as ProfileRelay).
+- `ProfileRelay` — delegates to `social::handle_profile_relay()` (saves profile + avatar with timestamp check, emits ProfileUpdated).
+- `PeerDisconnecting` — emits PeerDisconnected.
 
 **Public channel messages (plaintext, no MLS):**
 - `PublicChannelMessage` / `PublicChannelEdit` / `PublicChannelDelete` / `PublicChannelAddReaction` / `PublicChannelRemoveReaction` — skip-if-self, delegate to existing `message_ops::handle_envelope_*()` functions. Broadcast via SendToRoom (received by members AND guests).

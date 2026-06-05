@@ -6,6 +6,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 // ─────────────────────────────────────────────────
@@ -90,7 +91,7 @@ class MobileClusteredAvatars extends StatelessWidget {
 // Single avatar with animated teal speaking glow (rounded square)
 // ─────────────────────────────────────────────────
 
-class MobileSpeakingAvatar extends ConsumerStatefulWidget {
+class MobileSpeakingAvatar extends ConsumerWidget {
   final String peerId;
   final double size;
   final bool isSpeaking;
@@ -105,87 +106,28 @@ class MobileSpeakingAvatar extends ConsumerStatefulWidget {
   });
 
   @override
-  ConsumerState<MobileSpeakingAvatar> createState() =>
-      _MobileSpeakingAvatarState();
-}
-
-class _MobileSpeakingAvatarState extends ConsumerState<MobileSpeakingAvatar>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _glowController;
-  late Animation<double> _glowAnim;
-
-  @override
-  void initState() {
-    super.initState();
-    _glowController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 300),
-    );
-    _glowAnim = CurvedAnimation(
-      parent: _glowController,
-      curve: Curves.easeOut,
-    );
-    if (widget.isSpeaking) _glowController.forward();
-  }
-
-  @override
-  void didUpdateWidget(MobileSpeakingAvatar old) {
-    super.didUpdateWidget(old);
-    if (widget.isSpeaking && !old.isSpeaking) {
-      _glowController.forward();
-    } else if (!widget.isSpeaking && old.isSpeaking) {
-      _glowController.reverse();
-    }
-  }
-
-  @override
-  void dispose() {
-    _glowController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final profiles = ref.watch(profileProvider);
-    final displayName = displayNameFor(profiles, widget.peerId);
+    final displayName = displayNameFor(profiles, peerId);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
-    final isMe = widget.peerId == localPeerId;
+    final isMe = peerId == localPeerId;
     final radius = hollow.radiusMd;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        AnimatedBuilder(
-          animation: _glowAnim,
-          builder: (context, child) {
-            return Container(
-              padding: const EdgeInsets.all(4),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(radius + 4),
-                border: Border.all(
-                  color: hollow.accent
-                      .withValues(alpha: _glowAnim.value * 0.9),
-                  width: 3 * _glowAnim.value,
-                ),
-                boxShadow: _glowAnim.value > 0.01
-                    ? [
-                        BoxShadow(
-                          color: hollow.accent
-                              .withValues(alpha: _glowAnim.value * 0.3),
-                          blurRadius: 16 * _glowAnim.value,
-                          spreadRadius: 2 * _glowAnim.value,
-                        ),
-                      ]
-                    : null,
-              ),
-              child: child,
-            );
-          },
+        SpeakingBorder(
+          isSpeaking: isSpeaking,
+          borderWidth: 3.0,
+          glowBlur: 16,
+          glowSpread: 2.0,
+          padding: 4.0,
+          borderRadius: BorderRadius.circular(radius + 4),
           child: Stack(
             children: [
-              HollowAvatar(peerId: widget.peerId, size: widget.size),
-              if (widget.isMuted)
+              HollowAvatar(peerId: peerId, size: size),
+              if (isMuted)
                 Positioned(
                   right: 0,
                   bottom: 0,

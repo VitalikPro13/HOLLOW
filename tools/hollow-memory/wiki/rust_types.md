@@ -417,6 +417,8 @@ Helper struct: `PublicChannelEntry { channel_id, name, category }`. FFI structs:
 
 - **`ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible }`** — `"profile_update"` — broadcast profile update (plaintext, not sensitive). `avatar_b64`/`banner_b64` are base64-encoded images. `is_invisible` for invisible mode (Phase 6.75).
 - **`ProfileRequest`** — `"profile_request"` — request a peer's profile (they respond with `ProfileUpdate`).
+- **`ProfileRequestFor { target_peer_id }`** — `"profile_request_for"` — ask an online peer to relay an offline peer's cached profile.
+- **`ProfileRelay { source_peer_id, display_name, status, about_me, updated_at, avatar_b64, twitch_username }`** — `"profile_relay"` — relayed profile for an offline peer (avatar included, no banner). Timestamp-checked before saving.
 
 ### Friends
 

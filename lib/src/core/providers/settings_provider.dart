@@ -190,7 +190,7 @@ class AudioQualityNotifier extends AsyncNotifier<AudioQualityPreset> {
   }
 }
 
-/// Microphone input gain (0.0 to 2.0). Default: 1.0 (no boost).
+/// Microphone input gain (0.0 to 2.0). Default: 1.3 (slight boost).
 /// Values >1.0 boost, <1.0 reduce. Applied to the local audio track.
 final micGainProvider =
     AsyncNotifierProvider<MicGainNotifier, double>(MicGainNotifier.new);
@@ -199,8 +199,8 @@ class MicGainNotifier extends AsyncNotifier<double> {
   @override
   Future<double> build() async {
     final val = await storage_api.loadSetting(key: 'mic_gain');
-    if (val == null || val.isEmpty) return 1.0;
-    return double.tryParse(val) ?? 1.0;
+    if (val == null || val.isEmpty) return 1.3;
+    return double.tryParse(val) ?? 1.3;
   }
 
   Future<void> setGain(double gain) async {
