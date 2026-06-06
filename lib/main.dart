@@ -17,6 +17,7 @@ import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/ui/app.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/ui/shader_warmup.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -165,6 +166,16 @@ Future<void> main() async {
   // On mobile, dirs crate returns None — pass the app data path to Rust.
   if (Platform.isAndroid || Platform.isIOS) {
     await identity_api.setDataDir(path: hollowDataDir);
+  }
+
+  // Initialize Firebase early (required before FCM token generation).
+  if (Platform.isAndroid || Platform.isIOS) {
+    try {
+      await Firebase.initializeApp();
+      debugPrint('████ [HOLLOW] Firebase initialized in main()');
+    } catch (e) {
+      debugPrint('████ [HOLLOW] Firebase init failed in main(): $e');
+    }
   }
 
   // fvp provides the video_player backend on Windows/Linux (where the official

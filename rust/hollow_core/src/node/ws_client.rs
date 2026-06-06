@@ -42,6 +42,8 @@ pub enum WsCommand {
     ReleaseNickname,
     /// Resolve a nickname to a peer_id via the relay.
     ResolveNickname { nickname: String },
+    /// Register FCM/APNs push token with the relay for offline notifications.
+    RegisterPushToken { token: String, platform: String },
 }
 
 /// Events received from the WebSocket relay, forwarded to the swarm.
@@ -78,6 +80,8 @@ pub enum WsEvent {
 
 // -- Wire protocol (matches relay/src/ws_router.rs) --
 
+fn is_false(v: &bool) -> bool { !*v }
+
 #[derive(Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -89,6 +93,8 @@ enum ClientMsg {
         signature: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         license_key: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        fetch: bool,
     },
     Join { room: String },
     Leave { room: String },
@@ -132,11 +138,12 @@ pub fn spawn_ws_client(
     keypair_proto: Vec<u8>,
     pub_key_b64: String,
     license_key: Option<String>,
+    fetch: bool,
     cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
     event_tx: mpsc::UnboundedSender<WsEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        ws_client_loop(relay_url, peer_id, keypair_proto, pub_key_b64, license_key, cmd_rx, event_tx).await;
+        ws_client_loop(relay_url, peer_id, keypair_proto, pub_key_b64, license_key, fetch, cmd_rx, event_tx).await;
     })
 }
 
@@ -146,6 +153,7 @@ async fn ws_client_loop(
     keypair_proto: Vec<u8>,
     pub_key_b64: String,
     license_key: Option<String>,
+    fetch: bool,
     mut cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
     event_tx: mpsc::UnboundedSender<WsEvent>,
 ) {
@@ -160,7 +168,7 @@ async fn ws_client_loop(
     loop {
         hollow_log!("[HOLLOW-WS] Connecting to {relay_url}...");
 
-        match connect_and_auth(&relay_url, &peer_id, &keypair_proto, &pub_key_b64, license_key.as_deref()).await {
+        match connect_and_auth(&relay_url, &peer_id, &keypair_proto, &pub_key_b64, license_key.as_deref(), fetch).await {
             Ok(ws_stream) => {
                 backoff_secs = 1; // Reset backoff on successful connect.
                 let _ = event_tx.send(WsEvent::Connected);
@@ -311,16 +319,17 @@ async fn ws_client_loop(
 
 // -- Connection + Auth --
 
-type WsStream = tokio_tungstenite::WebSocketStream<
+pub(crate) type WsStream = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
-async fn connect_and_auth(
+pub(crate) async fn connect_and_auth(
     url: &str,
     peer_id: &str,
     keypair_proto: &[u8],
     pub_key_b64: &str,
     license_key: Option<&str>,
+    fetch: bool,
 ) -> Result<WsStream, String> {
     // Connect.
     let (ws_stream, _response) = tokio_tungstenite::connect_async(url)
@@ -349,6 +358,7 @@ async fn connect_and_auth(
         timestamp,
         signature: sig_b64,
         license_key: license_key.map(|s| s.to_string()),
+        fetch,
     };
     let auth_json = serde_json::to_string(&auth).map_err(|e| format!("JSON error: {e}"))?;
     write.send(Message::Text(auth_json.into()))
@@ -447,6 +457,14 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             let msg = serde_json::json!({ "type": "resolve_nickname", "nickname": nickname });
             if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] ResolveNickname send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::RegisterPushToken { token, platform } => {
+            let msg = serde_json::json!({ "type": "register_push_token", "token": token, "platform": platform });
+            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] RegisterPushToken send failed: {e}");
                 return false;
             }
             return true;
@@ -619,11 +637,24 @@ mod tests {
             timestamp: 1234567890,
             signature: "c2lnbmF0dXJl".into(),
             license_key: None,
+            fetch: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"auth\""));
         assert!(json.contains("\"peer_id\":\"12D3KooWTest\""));
         assert!(json.contains("\"timestamp\":1234567890"));
+        assert!(!json.contains("\"fetch\""));
+
+        let msg_fetch = ClientMsg::Auth {
+            peer_id: "12D3KooWTest".into(),
+            public_key: "AQID".into(),
+            timestamp: 1234567890,
+            signature: "c2lnbmF0dXJl".into(),
+            license_key: None,
+            fetch: true,
+        };
+        let json_fetch = serde_json::to_string(&msg_fetch).unwrap();
+        assert!(json_fetch.contains("\"fetch\":true"));
     }
 
     #[test]

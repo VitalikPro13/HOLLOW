@@ -113,6 +113,8 @@ Only allows overriding: `chunksReceived`, `isComplete`, `diskPath`, `videoThumb`
 
 Private helper. Appends `message` to the list for `peerId`. If the list exceeds `_maxMessages` (200), trims from the front (oldest messages dropped). Creates a shallow copy of the state map and the list to trigger Riverpod rebuild.
 
+**CRITICAL — message_id dedup:** Before appending, `_addMessage` skips when a non-null `message_id` already exists in the list. Messages without a message_id (system / send-failure notices) always append. Without this, a message persisted to SQLCipher by the FCM background push-fetch node (then loaded by `loadHistory`) is shown TWICE when the full node re-delivers it as a live `DirectMessage` event. The DB layer is already dedup-correct (`dm_message_exists`); this guards the in-memory list. See memory `feedback_ui_dedup_by_message_id.md`.
+
 ### sendMessage(peerId, text, {replyToMid?, linkPreview?})
 
 **Optimistic send flow:**
@@ -129,7 +131,8 @@ Private helper. Appends `message` to the list for `peerId`. If the list exceeds 
 Called from the event stream handler when a `DirectMessage` network event arrives.
 1. Converts `timestamp` (int, milliseconds since epoch) to `DateTime`.
 2. Creates a `ChatMessage` with `isMe: false`. Empty strings for `messageId` and `replyToMid` are converted to null.
-3. Calls `_addMessage()`. No DB save here — Rust already persisted before emitting the event.
+3. Dedup guard: if a message with this `message_id` already exists in memory (loaded from DB / written by the push-fetch node), returns early — the loaded copy is authoritative (reflects any edit already in the DB).
+4. Otherwise calls `_addMessage()`. No DB save here — Rust already persisted before emitting the event.
 
 ### hydrateSignature(peerId, messageId, timestampMs, signature?, publicKey?)
 

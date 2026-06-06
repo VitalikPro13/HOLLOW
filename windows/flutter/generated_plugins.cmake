@@ -5,6 +5,7 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_windows
   desktop_drop
+  firebase_core
   flutter_webrtc
   fvp
   irondash_engine_context

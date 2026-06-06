@@ -76,25 +76,61 @@ pub(crate) async fn handle_send_message(
         }
     }
 
-    if olm.has_session(&peer_id_str) && peer_is_reachable(ws_room_peers, &peer_id_str) {
-        // Session exists and peer is online — encrypt and send.
-        send_encrypted_message(
-            olm,
-            crypto_store,
-            &peer_id_str,
-            &envelope_json,
-            event_tx,
-            ws_cmd_tx, ws_room_peers,
-        ).await;
+    if olm.has_session(&peer_id_str) {
+        if peer_is_reachable(ws_room_peers, &peer_id_str) {
+            // Session exists and peer is online — encrypt and send.
+            send_encrypted_message(
+                olm,
+                crypto_store,
+                &peer_id_str,
+                &envelope_json,
+                event_tx,
+                ws_cmd_tx, ws_room_peers,
+            ).await;
+        } else {
+            // Session exists but peer is offline — encrypt and send to DM room anyway.
+            // The relay will see the target isn't in the room and trigger a push notification.
+            match olm.encrypt(&peer_id_str, envelope_json.as_bytes()) {
+                Ok((msg_type, ciphertext)) => {
+                    super::crypto_handler::persist_olm_session(olm, crypto_store, &peer_id_str);
+                    let identity_key = if msg_type == 0 {
+                        Some(olm.identity_key_base64())
+                    } else {
+                        None
+                    };
+                    let haven_msg = HavenMessage::Encrypted {
+                        message_type: msg_type,
+                        body: OlmManager::encode_base64(&ciphertext),
+                        identity_key,
+                    };
+                    let dm_room = dm_room_code(local_peer_str, &peer_id_str);
+                    let json = serde_json::to_string(&haven_msg).unwrap_or_default();
+                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                        room_code: dm_room,
+                        target_peer: peer_id_str.clone(),
+                        data: json.into_bytes(),
+                    });
+                    hollow_log!("[HOLLOW-PUSH] Sent encrypted DM to offline {peer_id_str} via DM room (push trigger)");
+                }
+                Err(e) => {
+                    hollow_log!("[HOLLOW-PUSH] Encrypt for offline {peer_id_str} failed: {e}");
+                }
+            }
+            // Also queue for when they come back online (in case push doesn't work).
+            pending_messages
+                .entry(peer_id_str.clone())
+                .or_default()
+                .push(envelope_json);
+        }
     } else {
-        // No session or peer offline — queue the signed envelope.
+        // No session — queue the signed envelope.
         // Messages will be drained when the peer reconnects (PeerJoined/RoomMembers).
         pending_messages
             .entry(peer_id_str.clone())
             .or_default()
             .push(envelope_json);
 
-        if !olm.has_session(&peer_id_str) && !key_request_in_flight.contains(&peer_id_str) {
+        if !key_request_in_flight.contains(&peer_id_str) {
             hollow_log!("[HOLLOW-SWARM] No session for {peer_id_str}, sending KeyRequest");
             if peer_is_reachable(ws_room_peers, &peer_id_str) {
                 send_message_to_peer(
@@ -520,12 +556,47 @@ pub(crate) async fn handle_edit_dm_message(
     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
     if olm.has_session(&peer_id_str) {
-        send_encrypted_message(
-                                olm, crypto_store,
-                                &peer_id_str, &envelope_json,
-            event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-        ).await;
+        if peer_is_reachable(ws_room_peers, &peer_id_str) {
+            // Peer online — normal in-room delivery.
+            send_encrypted_message(
+                olm, crypto_store,
+                &peer_id_str, &envelope_json,
+                event_tx,
+                ws_cmd_tx, ws_room_peers,
+            ).await;
+        } else {
+            // Peer offline — encrypt and send to the DM room anyway so the relay
+            // buffers it (offline buffer) and fires a push. Without this, edits to
+            // an offline peer are silently dropped until a full DM-sync, which is
+            // also where the "edit shows as a duplicate" bug came from. Mirrors the
+            // offline branch in handle_send_dm/message.
+            match olm.encrypt(&peer_id_str, envelope_json.as_bytes()) {
+                Ok((msg_type, ciphertext)) => {
+                    super::crypto_handler::persist_olm_session(olm, crypto_store, &peer_id_str);
+                    let identity_key = if msg_type == 0 {
+                        Some(olm.identity_key_base64())
+                    } else {
+                        None
+                    };
+                    let haven_msg = HavenMessage::Encrypted {
+                        message_type: msg_type,
+                        body: OlmManager::encode_base64(&ciphertext),
+                        identity_key,
+                    };
+                    let dm_room = dm_room_code(local_peer_str, &peer_id_str);
+                    let json = serde_json::to_string(&haven_msg).unwrap_or_default();
+                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                        room_code: dm_room,
+                        target_peer: peer_id_str.clone(),
+                        data: json.into_bytes(),
+                    });
+                    hollow_log!("[HOLLOW-EDIT] Sent edit for {message_id} to offline {peer_id_str} via DM room (push trigger)");
+                }
+                Err(e) => {
+                    hollow_log!("[HOLLOW-EDIT] Encrypt edit for offline {peer_id_str} failed: {e}");
+                }
+            }
+        }
     }
 
     // Emit event so Dart updates UI — include sig/pk so the

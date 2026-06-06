@@ -709,6 +709,59 @@ impl MessageStore {
             .map_err(|e| format!("COMMIT failed: {e}"))
     }
 
+    /// Reconcile a synced/edited DM against an existing local row that shares the
+    /// same (peer_id, timestamp, is_mine=0) but has a NULL or different
+    /// message_id. This happens when the original message was delivered via one
+    /// path (e.g. offline fetch) and its edit arrives via another (DM sync) — the
+    /// mid-based dedup misses, and a naive insert creates a duplicate row.
+    ///
+    /// If such a row is found, it adopts the canonical `message_id` and applies
+    /// the new text/edited_at in place. Returns true if a row was reconciled (so
+    /// the caller must NOT insert a new row).
+    pub fn reconcile_dm_by_timestamp(
+        &self,
+        peer_id: &str,
+        message_id: &str,
+        new_text: &str,
+        timestamp: i64,
+        edited_at: Option<i64>,
+        signature: Option<&str>,
+        public_key: Option<&str>,
+    ) -> Result<bool, String> {
+        // Find a candidate row: same peer + timestamp, received (is_mine=0),
+        // whose message_id is NULL or different from the canonical one.
+        let existing_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM messages
+                 WHERE peer_id = ?1 AND timestamp = ?2 AND is_mine = 0
+                   AND (message_id IS NULL OR message_id != ?3)
+                 LIMIT 1",
+                params![peer_id, timestamp, message_id],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let Some(row_id) = existing_id else {
+            return Ok(false);
+        };
+
+        // Adopt the canonical message_id, update text + edit metadata in place.
+        let edit_ts = edited_at.unwrap_or(timestamp);
+        self.conn
+            .execute(
+                "UPDATE messages
+                 SET message_id = ?1, text = ?2, edited_at = ?3,
+                     signature = COALESCE(?4, signature),
+                     public_key = COALESCE(?5, public_key),
+                     updated_at = ?3
+                 WHERE id = ?6",
+                params![message_id, new_text, edit_ts, signature, public_key, row_id],
+            )
+            .map_err(|e| format!("Failed to reconcile DM row: {e}"))?;
+        Ok(true)
+    }
+
     /// Check if a DM message with the given message_id exists.
     pub fn dm_message_exists(&self, message_id: &str) -> bool {
         self.conn

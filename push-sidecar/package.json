@@ -1,0 +1,13 @@
+{
+  "name": "hollow-push-sidecar",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lightweight FCM/APNs push notification sidecar for Hollow relay",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0"
+  }
+}

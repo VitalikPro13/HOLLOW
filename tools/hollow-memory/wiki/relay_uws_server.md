@@ -887,13 +887,33 @@ The relay binary is SSL-only (`uWS::SSLApp`) — cannot run without TLS certs. N
 | Invalid room code | `{"type":"error","error":"Invalid room code"}` |
 | Message to non-existent room | Silently dropped |
 | Message from non-member | Silently dropped |
-| Direct to offline target | Silently dropped |
+| Direct to offline target | Buffered (offline_buffer) + FCM push fired |
 | Backpressure > 64 MB (hard) | uWebSockets force-closes dead connection |
 | No data for 120s | uWebSockets idle timeout, connection closed |
 | keys.json removed keys | Affected peers kicked within 30s |
 | TLS cert/key missing on startup | Fatal exit |
 | Port already in use | Fatal exit |
 | libsodium init failure | Fatal exit |
+
+---
+
+## Push notifications & offline message buffer (FCM Tier 2)
+
+The relay is normally a dumb pipe, but to make FCM push notifications deliver real message content it holds offline DMs briefly in RAM.
+
+**State (`RelayState`, state.h):**
+- `push_tokens`: `peer_id -> {token, platform}`. Registered via `register_push_token` WS message (`handle_register_push_token`). RAM only, re-registered each app launch.
+- `last_push_sent`: `peer_id -> time_point`. Debounce, `PUSH_DEBOUNCE_SECS = 10` (was 30). Throttles FCM call rate only — does NOT drop messages (the buffer keeps them).
+- `offline_buffer`: `peer_id -> deque<BufferedMsg{room, frame, at}>`. Each `frame` is a ready-to-send `0x06` direct frame (ciphertext only). `MAX_BUFFERED_MSGS_PER_PEER = 100`, `OFFLINE_BUFFER_TTL_SECS = 86400` (24h).
+
+**Flow (ws_handler.cpp):**
+1. `handle_binary_direct_msg` (0x04) / `handle_direct` (text): target offline (`peer_sockets` miss) → `buffer_offline_msg()` stores the `0x06` frame → `try_push_notify()` → `notify_push_sidecar()` POSTs `{token, platform, sender}` to localhost:3001.
+2. The peer's FCM fetch node (or full node) later joins the DM room → `handle_join` calls `replay_buffered_msgs()` → sends all buffered frames for that room, drops delivered entries.
+3. `sweep_offline_buffer()` (5-min timer in main.cpp) evicts entries older than 24h.
+
+**Fetch-mode peers** (`is_fetch`, set from `fetch:true` in Auth): excluded from `peer_sockets`, `PeerJoined`, member lists — invisible, so waking via push doesn't show the user online. Buffer replay works for them via `handle_join`.
+
+E2EE preserved — buffer holds ciphertext only. Durable delivery still owned by full-node DM-sync; the buffer is latency glue so push previews are accurate. Client side: `rust/hollow_core/src/node/fetch.rs` + `lib/src/core/services/push_notification_service.dart`. See memory `project_push_notification_implementation.md`.
 
 ---
 

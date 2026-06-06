@@ -63,6 +63,8 @@ vendor/ffmpeg/
 alpha_keys.txt
 keys.json
 turnserver.conf
+android/app/google-services.json
+ios/Runner/GoogleService-Info.plist
 
 # Deprecated (replaced by relay/)
 signaling/
@@ -77,6 +79,7 @@ snow_leopard_chat_mockup.html
 macOS_SnowLeopard.txt
 discord_migration_plan.md
 important/
+drafts/
 
 # YouTube video assets
 yt_videos/

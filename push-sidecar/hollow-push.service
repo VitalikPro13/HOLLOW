@@ -1,0 +1,16 @@
+[Unit]
+Description=Hollow Push Notification Sidecar
+After=network.target hollow-relay.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/push-sidecar
+ExecStart=/usr/bin/node index.js
+Restart=always
+RestartSec=3
+Environment=PUSH_PORT=3001
+Environment=FIREBASE_KEY_PATH=/home/ubuntu/push-sidecar/service-account.json
+
+[Install]
+WantedBy=multi-user.target

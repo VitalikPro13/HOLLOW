@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  APNs environment for push notifications.
+	  - "development" for debug builds / TestFlight side-loading.
+	  - Switch to "production" for App Store release builds.
+	  This file must be linked via Xcode: Runner target →
+	  Signing & Capabilities → "+ Capability" → Push Notifications,
+	  which sets CODE_SIGN_ENTITLEMENTS in the Xcode project.
+	-->
+	<key>aps-environment</key>
+	<string>development</string>
+</dict>
+</plist>

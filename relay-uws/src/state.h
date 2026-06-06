@@ -19,6 +19,14 @@ static constexpr size_t MAX_GUEST_ROOMS = 3;
 static constexpr int GUEST_IDLE_SECS = 1800;
 static constexpr uint32_t GUEST_BINARY_PER_MIN = 10;
 
+// Offline message store-and-forward buffer (RAM only).
+// Bridges the gap between "sender sends to offline peer" and "peer's FCM
+// fetch node (or full app) wakes up and joins the DM room". Holds ciphertext
+// only — E2EE preserved. Durable delivery is still owned by full-node DM-sync;
+// this buffer just makes push-notification previews accurate.
+static constexpr size_t MAX_BUFFERED_MSGS_PER_PEER = 100;
+static constexpr int64_t OFFLINE_BUFFER_TTL_SECS = 86400;  // 24 hours
+
 using SSLWebSocket = uWS::WebSocket<true, true, struct PerSocketData>;
 
 struct PerSocketData {
@@ -28,6 +36,7 @@ struct PerSocketData {
     std::string license_key;
     bool is_guest = false;
     std::string ip_key;
+    bool is_fetch = false;  // Invisible background fetch mode (FCM wake-up)
     std::chrono::steady_clock::time_point last_binary_activity;
     uint32_t binary_frames_this_minute = 0;
     std::chrono::steady_clock::time_point minute_window_start;
@@ -91,6 +100,26 @@ struct RelayState {
     // Temporary nickname registry (RAM only, released on disconnect)
     std::unordered_map<std::string, std::string> nickname_to_peer;  // nickname -> peer_id
     std::unordered_map<std::string, std::string> peer_to_nickname;  // peer_id -> nickname
+
+    // Push notification tokens (RAM only — re-registered on each app launch)
+    // peer_id -> { token, platform ("android"/"ios") }
+    struct PushToken {
+        std::string token;
+        std::string platform;
+    };
+    std::unordered_map<std::string, PushToken> push_tokens;
+    // Debounce: track last push time per peer to avoid flooding
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_push_sent;
+
+    // Offline message buffer (RAM only). Key = target peer_id.
+    // Each entry is the fully-formed 0x06 direct-message frame to replay when
+    // the target joins the matching DM room. Capped per-peer + TTL-swept.
+    struct BufferedMsg {
+        std::string room;              // DM room code the frame belongs to
+        std::string frame;             // ready-to-send 0x06 binary frame
+        std::chrono::steady_clock::time_point at;
+    };
+    std::unordered_map<std::string, std::deque<BufferedMsg>> offline_buffer;
 
     size_t online_users() const { return peer_sockets.size() - guest_count; }
 };

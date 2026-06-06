@@ -1,4 +1,5 @@
 use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use flutter_rust_bridge::frb;
 use tokio::sync::mpsc;
@@ -9,6 +10,8 @@ use crate::identity;
 use crate::node;
 use crate::node::CrdtStore;
 use crate::storage::MessageStore;
+
+static FETCH_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// A discovered peer on the local network.
 pub struct DiscoveredPeer {
@@ -1018,6 +1021,14 @@ pub fn start_node() -> Result<String, String> {
         return Err("Node is already running".to_string());
     }
 
+    // Wait for any in-progress background fetch to finish (up to 5s).
+    for _ in 0..50 {
+        if !FETCH_ACTIVE.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
     // Initialize debug log file (writes next to executable, works in release builds).
     crate::log::init();
     hollow_log!("[HOLLOW] === Node starting ===");
@@ -1596,6 +1607,223 @@ pub fn release_nickname() -> Result<(), String> {
 
     let rt = get_runtime();
     rt.block_on(state.cmd_tx.send(node::NodeCommand::ReleaseNickname))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Profile data for push notifications (Tier 1: cached profile, no node needed).
+pub struct PushProfile {
+    pub display_name: String,
+    pub avatar_bytes: Option<Vec<u8>>,
+}
+
+/// Load a peer's cached profile directly from SQLCipher for push notification display.
+/// Works without a running node — opens its own DB connection.
+/// Returns None if the peer has no cached profile or identity is locked.
+#[frb]
+pub fn get_push_profile(peer_id: String) -> Result<Option<PushProfile>, String> {
+    crate::log::init();
+    // Use the existing identity ONLY — never generate a new one in a background
+    // isolate. A fresh identity would produce a different DB passphrase and
+    // silently open an empty database, breaking Tier 1 (name/avatar) on every
+    // wake after the first.
+    let id = match identity::load_existing_identity() {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            hollow_log!("[HOLLOW-PUSH] get_push_profile: no identity file — generic fallback");
+            return Ok(None);
+        }
+        Err(e) => {
+            hollow_log!("[HOLLOW-PUSH] get_push_profile: identity load failed ({e}) — generic fallback");
+            return Ok(None); // e.g. encrypted + not unlocked
+        }
+    };
+    let proto = id
+        .keypair
+        .to_protobuf_encoding()
+        .map_err(|e| format!("Failed to encode keypair: {e}"))?;
+    let key_bytes = &proto[..32.min(proto.len())];
+    let passphrase = hex::encode(key_bytes);
+
+    let hollow_dir = crate::identity::data_dir()?;
+    let db_path = hollow_dir
+        .join("messages.db")
+        .to_str()
+        .ok_or("Invalid path encoding")?
+        .to_string();
+
+    let store = match MessageStore::open(&db_path, &passphrase) {
+        Ok(s) => s,
+        Err(e) => {
+            hollow_log!("[HOLLOW-PUSH] get_push_profile: DB open failed ({e}) — generic fallback");
+            return Ok(None);
+        }
+    };
+    let profile = store.load_profile_light(&peer_id)?;
+    match profile {
+        Some(p) => {
+            let avatar = store.load_avatar(&peer_id).unwrap_or(None);
+            hollow_log!("[HOLLOW-PUSH] get_push_profile: loaded '{}' (avatar={})",
+                p.display_name, avatar.is_some());
+            Ok(Some(PushProfile {
+                display_name: p.display_name,
+                avatar_bytes: avatar,
+            }))
+        }
+        None => {
+            hollow_log!("[HOLLOW-PUSH] get_push_profile: no cached profile for {peer_id}");
+            Ok(None)
+        }
+    }
+}
+
+/// A message fetched during background push processing (Tier 2).
+pub struct FetchedMessage {
+    pub from_peer: String,
+    pub text: String,
+    pub timestamp: i64,
+    pub message_id: String,
+}
+
+/// Start a lightweight invisible fetch node to receive DM messages from a specific peer.
+/// Connects to relay with fetch=true (invisible), joins only the DM room for sender_peer_id,
+/// waits for messages up to timeout_secs, decrypts via Olm, and returns.
+/// Cannot run while the full node is active. Blocks the calling thread.
+#[frb]
+pub fn start_fetch_node(
+    sender_peer_id: String,
+    timeout_secs: u32,
+) -> Result<Vec<FetchedMessage>, String> {
+    if FETCH_ACTIVE.swap(true, Ordering::SeqCst) {
+        return Err("Fetch already in progress".to_string());
+    }
+
+    // Ensure cleanup on all exit paths.
+    struct FetchGuard;
+    impl Drop for FetchGuard {
+        fn drop(&mut self) {
+            FETCH_ACTIVE.store(false, Ordering::SeqCst);
+        }
+    }
+    let _guard = FetchGuard;
+
+    // Cannot run concurrently with full node.
+    {
+        let node = get_node();
+        let node_guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        if node_guard.is_some() {
+            return Err("Full node is running — cannot start fetch node".to_string());
+        }
+    }
+
+    crate::log::init();
+    hollow_log!("[HOLLOW-FETCH] Starting fetch node for sender {sender_peer_id}");
+
+    // Existing identity only — generating one here would connect with the wrong
+    // peer_id and decrypt with the wrong keys.
+    let id = match identity::load_existing_identity()? {
+        Some(id) => id,
+        None => {
+            hollow_log!("[HOLLOW-FETCH] No identity file — cannot fetch, returning empty");
+            return Ok(vec![]);
+        }
+    };
+    let proto = id
+        .keypair
+        .to_protobuf_encoding()
+        .map_err(|e| format!("Failed to encode keypair: {e}"))?;
+    let key_bytes = &proto[..32.min(proto.len())];
+    let passphrase = hex::encode(key_bytes);
+
+    let hollow_dir = crate::identity::data_dir()?;
+    std::fs::create_dir_all(&hollow_dir)
+        .map_err(|e| format!("Failed to create data dir: {e}"))?;
+    let db_path = hollow_dir
+        .join("messages.db")
+        .to_str()
+        .ok_or("Invalid path encoding")?
+        .to_string();
+
+    // Load Olm state from DB.
+    let mut olm = {
+        let store = MessageStore::open(&db_path, &passphrase)?;
+        match store.load_olm_account()? {
+            Some(account_json) => {
+                let sessions = store.load_all_olm_sessions()?;
+                OlmManager::from_pickles(&account_json, sessions)?
+            }
+            None => {
+                hollow_log!("[HOLLOW-FETCH] No Olm account — cannot decrypt, returning empty");
+                return Ok(vec![]);
+            }
+        }
+    };
+
+    use base64::Engine;
+    let pub_key_b64 = base64::engine::general_purpose::STANDARD.encode(
+        id.keypair.public_key_protobuf(),
+    );
+    let peer_id = id.keypair.peer_id();
+
+    let license_key = get_license_key()
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?
+        .clone();
+    let relay_domain = get_relay_domain()
+        .lock()
+        .map_err(|e| format!("Lock poisoned: {e}"))?
+        .clone()
+        .unwrap_or_else(|| "relay.anonlisten.com".to_string());
+
+    // Open CryptoStore for session persistence.
+    let rt = get_runtime();
+    let crypto_store = rt.block_on(async {
+        CryptoStore::open(db_path.clone(), passphrase.clone())
+    })?;
+
+    let timeout = std::time::Duration::from_secs(timeout_secs as u64);
+
+    let results = rt.block_on(node::fetch::run_fetch(
+        &relay_domain,
+        &peer_id,
+        &proto,
+        &pub_key_b64,
+        license_key.as_deref(),
+        &sender_peer_id,
+        timeout,
+        &mut olm,
+        &crypto_store,
+        &db_path,
+        &passphrase,
+    ))?;
+
+    // Persist final Olm account state (one-time keys may have been consumed).
+    if let Ok(account_json) = olm.account_pickle_json() {
+        crypto_store.save_account(account_json);
+    }
+
+    hollow_log!("[HOLLOW-FETCH] Fetch complete, {} messages", results.len());
+
+    Ok(results
+        .into_iter()
+        .map(|dm| FetchedMessage {
+            from_peer: dm.from_peer,
+            text: dm.text,
+            timestamp: dm.timestamp,
+            message_id: dm.message_id,
+        })
+        .collect())
+}
+
+/// Register an FCM/APNs push token with the relay for offline wake-up notifications.
+#[frb]
+pub fn register_push_token(token: String, platform: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::RegisterPushToken { token, platform }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }

@@ -67,7 +67,7 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 | iOS | Waiting |
 | Web | Not planned |
 
-Current Progress: Mac is coming! Linux is experimental and not properly tested but core features work. Mobile port to Android/iOS is done at 99% (push notifications is the final boss!)
+Current Progress: Mac is coming! Linux is experimental and not properly tested but core features work. Mobile port to Android/iOS is FINALLY DONE! 100% of the features are implemented, including the push notifications support (iOS is in the process). v0.5 will be released soon.
 
 ## Tech Stack
 

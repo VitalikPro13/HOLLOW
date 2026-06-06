@@ -20,6 +20,13 @@ pub(crate) mod log {
                 .unwrap_or_else(|| std::path::PathBuf::from("hollow_debug.log"));
         }
 
+        // Mobile sets the data dir via set_data_dir() (DATA_DIR_OVERRIDE), not the
+        // env var. Honor it so the log lands in the same app dir as messages.db
+        // (otherwise Rust logs vanish into an inaccessible location on Android).
+        if let Ok(dir) = crate::identity::data_dir() {
+            return dir.join("hollow_debug.log");
+        }
+
         if let Ok(custom) = std::env::var("HOLLOW_DATA_DIR") {
             let dir = std::path::PathBuf::from(custom);
             let _ = std::fs::create_dir_all(&dir);

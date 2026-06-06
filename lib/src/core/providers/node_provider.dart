@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/node_status.dart';
@@ -5,6 +7,7 @@ import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
+import 'package:hollow/src/core/services/push_notification_service.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// Node state: status + last error.
@@ -57,6 +60,13 @@ class NodeNotifier extends Notifier<NodeState> {
 
       // Auto-join saved guest rooms (realtime + onLaunch).
       autoJoinGuestRooms(ref);
+
+      // Initialize push notifications on mobile (registers FCM token with relay).
+      if (Platform.isAndroid || Platform.isIOS) {
+        PushNotificationService().initialize().catchError((e) {
+          debugPrint('[HOLLOW] Push notification init failed: $e');
+        });
+      }
     } catch (e) {
       debugPrint('[HOLLOW] Node start error: $e');
       state = state.copyWith(status: NodeStatus.error, error: e.toString());

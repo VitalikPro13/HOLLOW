@@ -114,6 +114,41 @@ pub(crate) fn load_or_create_identity() -> Result<IdentityData, String> {
     }
 }
 
+/// Load an existing identity from disk WITHOUT falling back to generating a
+/// new one. Returns Ok(None) if no identity file exists yet.
+///
+/// Used by background push handlers (FCM fetch): generating a fresh identity
+/// there would yield a different peer_id and a different DB passphrase, which
+/// silently opens an empty database (no cached profiles, wrong decrypt keys).
+/// The background isolate must use the REAL identity or do nothing.
+pub(crate) fn load_existing_identity() -> Result<Option<IdentityData>, String> {
+    let path = keypair_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let bytes = fs::read(&path).map_err(|e| format!("Failed to read identity file: {e}"))?;
+
+    let plaintext = match super::encryption::detect_format(&bytes)? {
+        super::encryption::IdentityFormat::Plaintext => bytes,
+        super::encryption::IdentityFormat::Encrypted { .. } => {
+            let key = super::encryption::get_session_key()
+                .ok_or("Identity is encrypted. Call unlock_identity() first.")?;
+            super::encryption::decrypt_identity(&bytes, &key)?
+        }
+    };
+
+    let keypair = NativeKeypair::from_protobuf_encoding(&plaintext)
+        .map_err(|e| format!("Failed to decode identity: {e}"))?;
+    let peer_id = keypair.peer_id();
+
+    Ok(Some(IdentityData {
+        keypair,
+        peer_id,
+        mnemonic: None,
+    }))
+}
+
 /// Save a keypair to disk. If encryption is active (session key set),
 /// the file is written as an encrypted HKEYV1 envelope. Otherwise plaintext protobuf.
 fn save_keypair(keypair: &NativeKeypair) -> Result<(), String> {

@@ -1,5 +1,6 @@
 pub(crate) mod crdt_store;
 pub(crate) mod crypto_handler;
+pub(crate) mod fetch;
 pub(crate) mod file_handler;
 pub(crate) mod file_transfer;
 pub(crate) mod gossip;

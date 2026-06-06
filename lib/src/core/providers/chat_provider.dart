@@ -66,6 +66,19 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
       signature: signature,
       publicKey: publicKey,
     );
+    // Dedup by message_id: the same message can arrive both from loadHistory
+    // (DB — possibly already written by the background push-fetch node) and as a
+    // live network event when the full node connects. Without this guard, a
+    // message the FCM fetch persisted shows TWICE when the app opens. If it's
+    // already present, the loaded copy is authoritative (it reflects any edit
+    // already applied in the DB), so skip the duplicate.
+    if (msg.messageId != null) {
+      final current = state[fromPeer];
+      if (current != null &&
+          current.any((m) => m.messageId == msg.messageId)) {
+        return;
+      }
+    }
     _addMessage(fromPeer, msg);
   }
 
@@ -440,6 +453,13 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
 
   void _addMessage(String peerId, ChatMessage message) {
     final current = state[peerId] ?? <ChatMessage>[];
+    // Guard against duplicate inserts of the same identified message (e.g. a
+    // message persisted by the background push-fetch then re-delivered live).
+    // Messages without a messageId (system/failure notices) always append.
+    if (message.messageId != null &&
+        current.any((m) => m.messageId == message.messageId)) {
+      return;
+    }
     var list = <ChatMessage>[...current, message];
     // Trim oldest messages to prevent unbounded memory growth.
     if (list.length > _maxMessages) {

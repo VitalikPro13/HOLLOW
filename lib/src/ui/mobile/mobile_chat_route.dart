@@ -41,8 +41,10 @@ import 'package:hollow/src/ui/mobile/mobile_voice_channel_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_message_actions.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/pinned_provider.dart';
+import 'package:hollow/src/core/services/push_notification_service.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
@@ -109,6 +111,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     super.initState();
     _positionsListener.itemPositions.addListener(_checkAutoScroll);
     if (widget.isDm) {
+      // Opening the chat: clear any stacked push-notification lines + dismiss the
+      // OS notification for this peer so the next message starts a fresh stack.
+      clearNotificationLines(widget.peerId!);
+      FlutterLocalNotificationsPlugin().cancel(widget.peerId!.hashCode);
       ref.read(chatProvider.notifier).loadHistory(widget.peerId!).then((_) {
         if (mounted) {
           setState(() {});

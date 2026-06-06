@@ -403,6 +403,8 @@ pub(crate) enum NodeCommand {
     // -- Temporary nicknames --
     ClaimNickname { nickname: String },
     ReleaseNickname,
+    // -- Push notifications --
+    RegisterPushToken { token: String, platform: String },
     // -- Typing indicators (Phase 3.5) --
     SendTypingIndicator { server_id: String, channel_id: String },
     // -- Presence (Phase 6.75) --

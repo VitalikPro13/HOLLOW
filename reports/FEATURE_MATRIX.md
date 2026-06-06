@@ -387,7 +387,7 @@
 
 | # | Feature | Desktop File(s) | Mobile | Interaction | Notes |
 |---|---------|-----------------|--------|-------------|-------|
-| 231 | System tray notifications | `system_notification_provider.dart` | Not impl | Native OS toast | **Mobile per plan (post-launch):** needs FCM (Android) / APNs (iOS). `local_notifier` is desktop-only |
+| 231 | System tray notifications | `system_notification_provider.dart` | Done | Native OS toast | **Mobile per plan (post-launch):** needs FCM (Android) / APNs (iOS). `local_notifier` is desktop-only |
 | 232 | In-app notification overlay | `notification_overlay.dart` | Done | Card popup in chat | Mobile: MobileNotificationBanner — slide-down banner, auto-dismiss, tap to navigate |
 | 233 | In-app toast (success) | `hollow_toast.dart` | Done | Green slide-up | Auto-dismiss 3s, all three types used on mobile |
 | 234 | In-app toast (error) | `hollow_toast.dart` | Done | Red slide-up | Auto-dismiss 3s |
@@ -484,11 +484,13 @@
 
 | Category | Total | Done | Partial | Not Impl | N/A |
 |----------|-------|------|---------|----------|-----|
-| All features | 288 | 235 | 0 | 1 | 52 |
+| All features | 288 | 236 | 0 | 0 | 52 |
 
-**Actionable (excl. N/A): 236 total, 235 Done (99%), 0 Partial, 1 Not impl.**
+**Actionable (excl. N/A): 236 total, 236 Done (100%), 0 Partial, 0 Not impl.**
 
-Refer to Exclusions of Session 2026-05-31 progress below.
+*Updated 2026-06-06. Push notifications complete.*
+
+It's done, oh my goodness, FINALLY! That was a bit tough, but we managed to do it. Let's go!
 
 *Updated 2026-05-31. Sections 25-33 complete.*
 

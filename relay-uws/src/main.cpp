@@ -121,6 +121,14 @@ int main(int argc, char** argv) {
                 }
             }, 60000, 60000);
 
+            // Offline message buffer TTL sweep (300s)
+            auto* buffer_timer = us_create_timer(loop, 0, sizeof(RelayState*));
+            *reinterpret_cast<RelayState**>(us_timer_ext(buffer_timer)) = &state;
+            us_timer_set(buffer_timer, [](struct us_timer_t* t) {
+                auto* s = *reinterpret_cast<RelayState**>(us_timer_ext(t));
+                sweep_offline_buffer(*s);
+            }, 300000, 300000);
+
             // Shutdown check timer (1s)
             auto* shutdown_timer = us_create_timer(loop, 0, sizeof(void*));
             *reinterpret_cast<struct us_listen_socket_t**>(us_timer_ext(shutdown_timer)) = listen_socket;

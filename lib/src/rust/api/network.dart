@@ -238,6 +238,33 @@ Future<void> claimNickname({required String nickname}) =>
 Future<void> releaseNickname() =>
     RustLib.instance.api.crateApiNetworkReleaseNickname();
 
+/// Load a peer's cached profile directly from SQLCipher for push notification display.
+/// Works without a running node — opens its own DB connection.
+/// Returns None if the peer has no cached profile or identity is locked.
+Future<PushProfile?> getPushProfile({required String peerId}) =>
+    RustLib.instance.api.crateApiNetworkGetPushProfile(peerId: peerId);
+
+/// Start a lightweight invisible fetch node to receive DM messages from a specific peer.
+/// Connects to relay with fetch=true (invisible), joins only the DM room for sender_peer_id,
+/// waits for messages up to timeout_secs, decrypts via Olm, and returns.
+/// Cannot run while the full node is active. Blocks the calling thread.
+Future<List<FetchedMessage>> startFetchNode({
+  required String senderPeerId,
+  required int timeoutSecs,
+}) => RustLib.instance.api.crateApiNetworkStartFetchNode(
+  senderPeerId: senderPeerId,
+  timeoutSecs: timeoutSecs,
+);
+
+/// Register an FCM/APNs push token with the relay for offline wake-up notifications.
+Future<void> registerPushToken({
+  required String token,
+  required String platform,
+}) => RustLib.instance.api.crateApiNetworkRegisterPushToken(
+  token: token,
+  platform: platform,
+);
+
 /// Send a typing indicator to peers. Ephemeral, not stored.
 /// For DMs: server_id = "", channel_id = peer ID.
 /// For channels: server_id and channel_id as normal.
@@ -542,6 +569,38 @@ class DiscoveredPeer {
           runtimeType == other.runtimeType &&
           peerId == other.peerId &&
           addresses == other.addresses;
+}
+
+/// A message fetched during background push processing (Tier 2).
+class FetchedMessage {
+  final String fromPeer;
+  final String text;
+  final PlatformInt64 timestamp;
+  final String messageId;
+
+  const FetchedMessage({
+    required this.fromPeer,
+    required this.text,
+    required this.timestamp,
+    required this.messageId,
+  });
+
+  @override
+  int get hashCode =>
+      fromPeer.hashCode ^
+      text.hashCode ^
+      timestamp.hashCode ^
+      messageId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FetchedMessage &&
+          runtimeType == other.runtimeType &&
+          fromPeer == other.fromPeer &&
+          text == other.text &&
+          timestamp == other.timestamp &&
+          messageId == other.messageId;
 }
 
 /// FFI-facing guest reaction.
@@ -1269,6 +1328,25 @@ class PublicChannelEntryFfi {
           channelId == other.channelId &&
           name == other.name &&
           category == other.category;
+}
+
+/// Profile data for push notifications (Tier 1: cached profile, no node needed).
+class PushProfile {
+  final String displayName;
+  final Uint8List? avatarBytes;
+
+  const PushProfile({required this.displayName, this.avatarBytes});
+
+  @override
+  int get hashCode => displayName.hashCode ^ avatarBytes.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PushProfile &&
+          runtimeType == other.runtimeType &&
+          displayName == other.displayName &&
+          avatarBytes == other.avatarBytes;
 }
 
 /// Lightweight FFI mirror of node::types::ShareEntryRef.

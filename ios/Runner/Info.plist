@@ -49,5 +49,9 @@
 	<string>Hollow needs microphone access for voice and video calls.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Hollow needs camera access for video calls.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 </dict>
 </plist>

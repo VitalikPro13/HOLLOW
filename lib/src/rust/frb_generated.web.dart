@@ -95,6 +95,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   NetworkEvent dco_decode_box_autoadd_network_event(dynamic raw);
 
   @protected
+  PushProfile dco_decode_box_autoadd_push_profile(dynamic raw);
+
+  @protected
   StoredFileInfo dco_decode_box_autoadd_stored_file_info(dynamic raw);
 
   @protected
@@ -117,6 +120,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   double dco_decode_f_32(dynamic raw);
+
+  @protected
+  FetchedMessage dco_decode_fetched_message(dynamic raw);
 
   @protected
   FriendFfi dco_decode_friend_ffi(dynamic raw);
@@ -175,6 +181,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ChannelFfi> dco_decode_list_channel_ffi(dynamic raw);
+
+  @protected
+  List<FetchedMessage> dco_decode_list_fetched_message(dynamic raw);
 
   @protected
   List<FriendFfi> dco_decode_list_friend_ffi(dynamic raw);
@@ -267,6 +276,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   NetworkEvent? dco_decode_opt_box_autoadd_network_event(dynamic raw);
 
   @protected
+  PushProfile? dco_decode_opt_box_autoadd_push_profile(dynamic raw);
+
+  @protected
   StoredFileInfo? dco_decode_opt_box_autoadd_stored_file_info(dynamic raw);
 
   @protected
@@ -286,6 +298,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PublicChannelEntryFfi dco_decode_public_channel_entry_ffi(dynamic raw);
+
+  @protected
+  PushProfile dco_decode_push_profile(dynamic raw);
 
   @protected
   (String, PlatformInt64) dco_decode_record_string_i_64(dynamic raw);
@@ -439,6 +454,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PushProfile sse_decode_box_autoadd_push_profile(SseDeserializer deserializer);
+
+  @protected
   StoredFileInfo sse_decode_box_autoadd_stored_file_info(
     SseDeserializer deserializer,
   );
@@ -465,6 +483,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   double sse_decode_f_32(SseDeserializer deserializer);
+
+  @protected
+  FetchedMessage sse_decode_fetched_message(SseDeserializer deserializer);
 
   @protected
   FriendFfi sse_decode_friend_ffi(SseDeserializer deserializer);
@@ -537,6 +558,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ChannelFfi> sse_decode_list_channel_ffi(SseDeserializer deserializer);
+
+  @protected
+  List<FetchedMessage> sse_decode_list_fetched_message(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<FriendFfi> sse_decode_list_friend_ffi(SseDeserializer deserializer);
@@ -649,6 +675,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PushProfile? sse_decode_opt_box_autoadd_push_profile(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   StoredFileInfo? sse_decode_opt_box_autoadd_stored_file_info(
     SseDeserializer deserializer,
   );
@@ -676,6 +707,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PublicChannelEntryFfi sse_decode_public_channel_entry_ffi(
     SseDeserializer deserializer,
   );
+
+  @protected
+  PushProfile sse_decode_push_profile(SseDeserializer deserializer);
 
   @protected
   (String, PlatformInt64) sse_decode_record_string_i_64(
@@ -871,6 +905,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_push_profile(
+    PushProfile self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_stored_file_info(
     StoredFileInfo self,
     SseSerializer serializer,
@@ -908,6 +948,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_f_32(double self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_fetched_message(
+    FetchedMessage self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_friend_ffi(FriendFfi self, SseSerializer serializer);
@@ -996,6 +1042,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_channel_ffi(
     List<ChannelFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_fetched_message(
+    List<FetchedMessage> self,
     SseSerializer serializer,
   );
 
@@ -1150,6 +1202,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_push_profile(
+    PushProfile? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_stored_file_info(
     StoredFileInfo? self,
     SseSerializer serializer,
@@ -1187,6 +1245,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     PublicChannelEntryFfi self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_push_profile(PushProfile self, SseSerializer serializer);
 
   @protected
   void sse_encode_record_string_i_64(

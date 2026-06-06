@@ -3,16 +3,35 @@
 #include "json.hpp"
 #include <cstdio>
 #include <cstring>
+#include <thread>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 
 using json = nlohmann::json;
 
 static constexpr uint64_t TIMESTAMP_SKEW_SECS = 60;
 static constexpr size_t MAX_ROOMS_PER_PEER = 10000;
+static constexpr int PUSH_SIDECAR_PORT = 3001;
+static constexpr int PUSH_DEBOUNCE_SECS = 10;
 
 static bool is_guest_peer(const RelayState& state, const std::string& peer_id) {
     auto it = state.peer_sockets.find(peer_id);
     if (it == state.peer_sockets.end()) return false;
     return it->second->getUserData()->is_guest;
+}
+
+// Check if a peer in a room is invisible (guest or fetch-mode).
+// Looks up the room peers map since fetch-mode peers aren't in peer_sockets.
+static bool is_invisible_in_room(const RelayState& state, const std::string& peer_id,
+                                  const std::string& room) {
+    auto rit = state.ws_rooms.find(room);
+    if (rit == state.ws_rooms.end()) return true;
+    auto pit = rit->second.peers.find(peer_id);
+    if (pit == rit->second.peers.end()) return true;
+    auto* d = pit->second->getUserData();
+    return d->is_guest || d->is_fetch;
 }
 
 static bool is_valid_nickname(std::string_view nick) {
@@ -52,6 +71,12 @@ static void send_to_peer(SSLWebSocket* ws, std::string_view data, uWS::OpCode op
     ws->send(data, op);
 }
 
+// Forward declarations — offline buffer replay is used by handle_join (defined
+// earlier than the buffer helpers).
+static void replay_buffered_msgs(SSLWebSocket* ws, const std::string& peer_id,
+                                 const std::string& room, bool full_node,
+                                 RelayState& state);
+
 static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
                          std::string_view message, RelayState& state) {
     json j;
@@ -76,6 +101,7 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
     std::string license_key_val = j.value("license_key", "");
     const std::string* license_key_ptr = license_key_val.empty() ? nullptr : &license_key_val;
     bool guest = j.value("guest", false);
+    bool fetch = j.value("fetch", false);
 
     if (peer_id.empty() || public_key.empty() || signature.empty()) {
         send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
@@ -131,13 +157,21 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         state.guest_sockets.insert(ws);
     }
 
+    if (fetch) {
+        data->is_fetch = true;
+    }
+
     if (data->auth_timer) {
         us_timer_close(data->auth_timer);
         data->auth_timer = nullptr;
     }
 
     state.peer_rooms[peer_id] = {};
-    state.peer_sockets[peer_id] = ws;
+    // Fetch-mode peers stay invisible — don't register in peer_sockets
+    // so check_peers reports them as offline and push logic isn't affected.
+    if (!data->is_fetch) {
+        state.peer_sockets[peer_id] = ws;
+    }
 
     send_json(ws, {{"type", "auth_ok"}});
     // privacy: no connection logging
@@ -161,7 +195,8 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     std::vector<std::string> existing_peers;
     auto& ws_room = state.ws_rooms[room];
     for (auto& [pid, peer_ws] : ws_room.peers) {
-        if (!peer_ws->getUserData()->is_guest) {
+        auto* pd = peer_ws->getUserData();
+        if (!pd->is_guest && !pd->is_fetch) {
             existing_peers.push_back(pid);
         }
     }
@@ -172,9 +207,9 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     // Track room on peer
     state.peer_rooms[data->peer_id].insert(room);
 
-    // Send member list to joiner (excluding guests)
+    // Send member list to joiner (excluding guests and fetch-mode peers)
     std::vector<std::string> all_peers = existing_peers;
-    if (!data->is_guest) {
+    if (!data->is_guest && !data->is_fetch) {
         all_peers.push_back(data->peer_id);
     }
     json members_msg = {
@@ -184,8 +219,8 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     };
     send_json(ws, members_msg);
 
-    // Notify existing non-guest peers (skip if joiner is a guest)
-    if (!data->is_guest) {
+    // Notify existing non-guest peers (skip if joiner is a guest or fetch-mode)
+    if (!data->is_guest && !data->is_fetch) {
         json join_msg = {
             {"type", "peer_joined"},
             {"room", room},
@@ -198,12 +233,22 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
             }
         }
     }
+
+    // Replay any buffered offline messages for this peer in this room.
+    // Works for both fetch-mode (FCM wake) and full-node joins. Guests never
+    // have offline buffers (they don't register push tokens).
+    if (!data->is_guest) {
+        replay_buffered_msgs(ws, data->peer_id, room, !data->is_fetch, state);
+    }
 }
 
 static void leave_room(RelayState& state, const std::string& peer_id,
                         const std::string& room) {
     auto rit = state.ws_rooms.find(room);
     if (rit == state.ws_rooms.end()) return;
+
+    // Check visibility BEFORE erasing from room
+    bool leaving_peer_invisible = is_invisible_in_room(state, peer_id, room);
 
     rit->second.peers.erase(peer_id);
 
@@ -218,8 +263,7 @@ static void leave_room(RelayState& state, const std::string& peer_id,
         pit->second.erase(room);
     }
 
-    bool leaving_peer_is_guest = is_guest_peer(state, peer_id);
-    if (should_notify && !leaving_peer_is_guest) {
+    if (should_notify && !leaving_peer_invisible) {
         json leave_msg = {
             {"type", "peer_left"},
             {"room", room},
@@ -235,6 +279,164 @@ static void leave_room(RelayState& state, const std::string& peer_id,
             }
         }
     }
+}
+
+// Fire-and-forget HTTP POST to localhost push sidecar (detached thread).
+static void notify_push_sidecar(const std::string& token, const std::string& platform,
+                                 const std::string& sender) {
+    std::thread([token, platform, sender]() {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return;
+
+        struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(PUSH_SIDECAR_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+        if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            close(fd);
+            return;
+        }
+
+        json body = {{"token", token}, {"platform", platform}, {"sender", sender}};
+        std::string payload = body.dump();
+
+        std::string req = "POST /push HTTP/1.1\r\n"
+                          "Host: 127.0.0.1\r\n"
+                          "Content-Type: application/json\r\n"
+                          "Content-Length: " + std::to_string(payload.size()) + "\r\n"
+                          "Connection: close\r\n\r\n" + payload;
+
+        send(fd, req.data(), req.size(), MSG_NOSIGNAL);
+        char buf[128];
+        recv(fd, buf, sizeof(buf), 0);
+        close(fd);
+    }).detach();
+}
+
+// Build the 0x06 direct-message frame the receiver expects:
+// [0x06][room\0][sender\0][payload]
+static std::string build_direct_frame(std::string_view room,
+                                       std::string_view sender,
+                                       std::string_view payload) {
+    std::string frame;
+    frame.reserve(1 + room.size() + 1 + sender.size() + 1 + payload.size());
+    frame.push_back(0x06);
+    frame.append(room);
+    frame.push_back(0x00);
+    frame.append(sender);
+    frame.push_back(0x00);
+    frame.append(payload);
+    return frame;
+}
+
+// Buffer an offline DM frame for later replay when the target joins its DM room.
+// RAM only, ciphertext only. Capped per-peer (drop oldest on overflow).
+static void buffer_offline_msg(const std::string& target_peer_id,
+                               const std::string& room,
+                               std::string frame, RelayState& state) {
+    auto& q = state.offline_buffer[target_peer_id];
+    q.push_back({room, std::move(frame), std::chrono::steady_clock::now()});
+    while (q.size() > MAX_BUFFERED_MSGS_PER_PEER) {
+        q.pop_front();
+    }
+    fprintf(stderr, "[push] Buffered offline msg for %.12s... (room=%.8s..., queued=%zu)\n",
+            target_peer_id.c_str(), room.c_str(), q.size());
+}
+
+// Replay any buffered messages for `peer_id` that belong to `room`, sending
+// them to `ws`. Delivered entries are removed. If `full_node` is true, ALL
+// buffered messages for the peer in this room are dropped afterwards regardless
+// (the full node will own durability via DM-sync from here on).
+static void replay_buffered_msgs(SSLWebSocket* ws, const std::string& peer_id,
+                                 const std::string& room, bool full_node,
+                                 RelayState& state) {
+    auto it = state.offline_buffer.find(peer_id);
+    if (it == state.offline_buffer.end()) return;
+
+    auto& q = it->second;
+    std::deque<RelayState::BufferedMsg> remaining;
+    size_t delivered = 0;
+    for (auto& m : q) {
+        if (m.room == room) {
+            send_to_peer(ws, m.frame, uWS::OpCode::BINARY);
+            delivered++;
+        } else {
+            remaining.push_back(std::move(m));
+        }
+    }
+    q = std::move(remaining);
+    if (q.empty()) {
+        state.offline_buffer.erase(it);
+    }
+    if (delivered > 0) {
+        fprintf(stderr, "[push] Replayed %zu buffered msg(s) to %.12s... (room=%.8s..., full_node=%d)\n",
+                delivered, peer_id.c_str(), room.c_str(), full_node);
+    }
+    (void)full_node;
+}
+
+// Evict offline-buffer entries older than the TTL. Drops empty per-peer queues.
+void sweep_offline_buffer(RelayState& state) {
+    auto now = std::chrono::steady_clock::now();
+    size_t evicted = 0;
+    for (auto it = state.offline_buffer.begin(); it != state.offline_buffer.end(); ) {
+        auto& q = it->second;
+        while (!q.empty()) {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                now - q.front().at).count();
+            if (age >= OFFLINE_BUFFER_TTL_SECS) {
+                q.pop_front();
+                evicted++;
+            } else {
+                break;  // deque is FIFO by insertion time — front is oldest
+            }
+        }
+        if (q.empty()) {
+            it = state.offline_buffer.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (evicted > 0) {
+        fprintf(stderr, "[push] Swept %zu expired buffered msg(s)\n", evicted);
+    }
+}
+
+static void try_push_notify(const std::string& target_peer_id,
+                            const std::string& sender_peer_id, RelayState& state) {
+    auto tok_it = state.push_tokens.find(target_peer_id);
+    if (tok_it == state.push_tokens.end()) {
+        fprintf(stderr, "[push] No token for %.12s... (tokens=%zu)\n",
+                target_peer_id.c_str(), state.push_tokens.size());
+        return;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    auto& last = state.last_push_sent[target_peer_id];
+    if ((now - last) < std::chrono::seconds(PUSH_DEBOUNCE_SECS)) {
+        fprintf(stderr, "[push] Debounced for %.12s...\n", target_peer_id.c_str());
+        return;
+    }
+    last = now;
+
+    fprintf(stderr, "[push] Sending push for %.12s... from %.12s...\n",
+            target_peer_id.c_str(), sender_peer_id.c_str());
+    notify_push_sidecar(tok_it->second.token, tok_it->second.platform, sender_peer_id);
+}
+
+static void handle_register_push_token(SSLWebSocket* ws, PerSocketData* data,
+                                        const std::string& token, const std::string& platform,
+                                        RelayState& state) {
+    if (data->is_guest || token.empty()) return;
+    state.push_tokens[data->peer_id] = { token, platform };
+    send_json(ws, {{"type", "push_token_registered"}});
+    fprintf(stderr, "[push] Token registered for %.12s... (platform=%s, total=%zu)\n",
+            data->peer_id.c_str(), platform.c_str(), state.push_tokens.size());
 }
 
 static void handle_msg(PerSocketData* data, const std::string& room,
@@ -273,7 +475,20 @@ static void handle_direct(PerSocketData* data, const std::string& room,
     }
 
     auto tit = rit->second.peers.find(target);
-    if (tit == rit->second.peers.end()) return;
+    if (tit == rit->second.peers.end()) {
+        // Target not in room — buffer + push notification if they're fully offline.
+        bool in_sockets = state.peer_sockets.find(target) != state.peer_sockets.end();
+        fprintf(stderr, "[push] direct: target %.12s... not in room, in_sockets=%d\n",
+                target.c_str(), in_sockets);
+        if (!in_sockets) {
+            // Buffer as a 0x06 frame so the fetch node's binary parser handles it
+            // uniformly with binary DMs.
+            buffer_offline_msg(target, room,
+                               build_direct_frame(room, data->peer_id, msg_data), state);
+            try_push_notify(target, data->peer_id, state);
+        }
+        return;
+    }
 
     json direct = {
         {"type", "direct"},
@@ -407,26 +622,35 @@ static void handle_binary_direct_msg(PerSocketData* data,
         ? raw.substr(payload_start) : std::string_view{};
 
     std::string room_str(room_code);
+    std::string target_str(target_peer);
+
     auto rit = state.ws_rooms.find(room_str);
-    if (rit == state.ws_rooms.end()) return;
+    if (rit == state.ws_rooms.end()) {
+        // Room doesn't exist — target is offline. Buffer the message for replay
+        // when they wake up, then fire a push.
+        if (state.peer_sockets.find(target_str) == state.peer_sockets.end()) {
+            buffer_offline_msg(target_str, room_str,
+                               build_direct_frame(room_code, data->peer_id, payload), state);
+            try_push_notify(target_str, data->peer_id, state);
+        }
+        return;
+    }
 
     if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return;
 
-    std::string target_str(target_peer);
     auto tit = rit->second.peers.find(target_str);
-    if (tit == rit->second.peers.end()) return;
+    if (tit == rit->second.peers.end()) {
+        // Target not in room — buffer + push if fully offline.
+        if (state.peer_sockets.find(target_str) == state.peer_sockets.end()) {
+            buffer_offline_msg(target_str, room_str,
+                               build_direct_frame(room_code, data->peer_id, payload), state);
+            try_push_notify(target_str, data->peer_id, state);
+        }
+        return;
+    }
 
-    // Build: [0x06][room\0][sender\0][payload]
-    std::string forwarded;
-    forwarded.reserve(1 + room_code.size() + 1 + data->peer_id.size() + 1 + payload.size());
-    forwarded.push_back(0x06);
-    forwarded.append(room_code);
-    forwarded.push_back(0x00);
-    forwarded.append(data->peer_id);
-    forwarded.push_back(0x00);
-    forwarded.append(payload);
-
-    send_to_peer(tit->second, forwarded, uWS::OpCode::BINARY);
+    send_to_peer(tit->second, build_direct_frame(room_code, data->peer_id, payload),
+                 uWS::OpCode::BINARY);
 }
 
 static void handle_subscribe(PerSocketData* data, const std::string& room,
@@ -604,6 +828,9 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         handle_release_nickname(ws, data, state);
     } else if (type == "resolve_nickname") {
         handle_resolve_nickname(ws, data, j.value("nickname", ""), state);
+    } else if (type == "register_push_token") {
+        handle_register_push_token(ws, data, j.value("token", ""),
+                                   j.value("platform", ""), state);
     }
 }
 
@@ -618,6 +845,9 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id) {
         state.nickname_to_peer.erase(nit->second);
         state.peer_to_nickname.erase(nit);
     }
+
+    // Clear push debounce on disconnect (token stays — needed for offline pushes)
+    state.last_push_sent.erase(peer_id);
 
     state.license.release_key(peer_id);
     state.peer_sockets.erase(peer_id);

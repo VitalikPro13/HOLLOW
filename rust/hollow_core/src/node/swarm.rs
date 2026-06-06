@@ -65,7 +65,7 @@ pub(crate) async fn spawn_node(
     let ws_relay_url = format!("wss://{relay_domain}/ws");
     let _ws_handle = super::ws_client::spawn_ws_client(
         ws_relay_url, peer_id_str.clone(), ws_proto, ws_pub_b64,
-        license_key, ws_cmd_rx, ws_event_tx,
+        license_key, false, ws_cmd_rx, ws_event_tx,
     );
 
     let handle = tokio::spawn(run_event_loop(
@@ -373,6 +373,9 @@ async fn run_event_loop(
     // SECURITY (Phase 6.25): Sub-rate-limiter for VC signaling messages within MLS.
     // Tighter limit: 30 burst, 10/sec per peer (VC signals are less frequent than chat).
     let mut vc_signal_rate_tokens: HashMap<String, (u32, std::time::Instant)> = HashMap::new();
+
+    // Push notification token — cached for re-registration on WS reconnect.
+    let mut push_token: Option<(String, String)> = None; // (token, platform)
 
     // Re-bootstrap timer (30 seconds) for signaling re-registration.
     let mut rebootstrap_timer = tokio::time::interval(Duration::from_secs(30));
@@ -924,6 +927,11 @@ async fn run_event_loop(
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ReleaseNickname);
                     }
 
+                    NodeCommand::RegisterPushToken { token, platform } => {
+                        push_token = Some((token.clone(), platform.clone()));
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::RegisterPushToken { token, platform });
+                    }
+
                     NodeCommand::AcceptFriendRequest { peer_id: peer_id_str } => {
                         social::handle_accept_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers, &sig_cmd_tx,
@@ -1399,6 +1407,13 @@ async fn run_event_loop(
                             }
                         }
                     }
+                        // Re-register push token on reconnect.
+                        if let Some((ref tok, ref plat)) = push_token {
+                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::RegisterPushToken {
+                                token: tok.clone(),
+                                platform: plat.clone(),
+                            });
+                        }
                     }
 
                     WsEvent::Disconnected => {
@@ -3775,8 +3790,42 @@ async fn handle_incoming_request(
                             let already_exists = msg.mid.as_ref()
                                 .map(|mid| store.dm_message_exists(mid))
                                 .unwrap_or(false);
+                            hollow_log!(
+                                "[HOLLOW-SYNC] dm item mid={:?} ts={} edited_at={:?} exists={} text_len={}",
+                                msg.mid, msg.ts, msg.edited_at, already_exists, msg.t.len()
+                            );
 
-                            if !already_exists {
+                            // Reconcile against a row delivered via another path
+                            // (e.g. offline fetch) that has a NULL/different mid.
+                            // Without this, an edited message whose original was
+                            // fetched separately would insert as a duplicate row.
+                            let reconciled = if !already_exists {
+                                if let Some(mid) = msg.mid.as_deref() {
+                                    store.reconcile_dm_by_timestamp(
+                                        &peer_str, mid, &msg.t, msg.ts, msg.edited_at,
+                                        msg.sig.as_deref(), msg.pk.as_deref(),
+                                    ).unwrap_or(false)
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            if reconciled {
+                                hollow_log!("[HOLLOW-SYNC] reconciled dm mid={:?} into existing row", msg.mid);
+                                if let Some(mid) = &msg.mid {
+                                    let _ = event_tx.send(NetworkEvent::DmMessageEdited {
+                                        peer_id: peer_str.to_string(),
+                                        message_id: mid.clone(),
+                                        new_text: msg.t.clone(),
+                                        edited_at: msg.edited_at.unwrap_or(msg.ts),
+                                        signature: msg.sig.clone(),
+                                        public_key: msg.pk.clone(),
+                                    }).await;
+                                }
+                            }
+
+                            if !already_exists && !reconciled {
                                 match store.insert(
                                     &peer_str, &msg.t, false, msg.ts,
                                     msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
