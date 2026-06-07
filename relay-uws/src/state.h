@@ -25,6 +25,10 @@ static constexpr uint32_t GUEST_BINARY_PER_MIN = 10;
 // only — E2EE preserved. Durable delivery is still owned by full-node DM-sync;
 // this buffer just makes push-notification previews accurate.
 static constexpr size_t MAX_BUFFERED_MSGS_PER_PEER = 100;
+// Separate, tiny cap for inlined-image frames: a push notification can only
+// show ONE image preview and we send one notification per peer, so buffering
+// more than the latest image per peer is wasted RAM.
+static constexpr size_t MAX_BUFFERED_IMAGES_PER_PEER = 1;
 static constexpr int64_t OFFLINE_BUFFER_TTL_SECS = 86400;  // 24 hours
 
 using SSLWebSocket = uWS::WebSocket<true, true, struct PerSocketData>;
@@ -118,6 +122,7 @@ struct RelayState {
         std::string room;              // DM room code the frame belongs to
         std::string frame;             // ready-to-send 0x06 binary frame
         std::chrono::steady_clock::time_point at;
+        bool is_image = false;         // inlined-image frame (separate cap)
     };
     std::unordered_map<std::string, std::deque<BufferedMsg>> offline_buffer;
 

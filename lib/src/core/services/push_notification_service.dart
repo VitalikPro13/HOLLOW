@@ -227,24 +227,45 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
       if (messages.isNotEmpty) {
         // FIFO order — oldest first. Truncate each, then merge with previously
         // cached lines (keyed by message_id so edits replace, not stack).
+        // An image DM's caption is the literal "[file:<id>]" sentinel when it has
+        // no text — show a friendly "📷 Photo" line instead.
+        String previewText(network_api.FetchedMessage m) {
+          if (m.text.isEmpty || m.text.startsWith('[file:')) {
+            return m.imagePath != null ? '📷 Photo' : m.text;
+          }
+          return m.text.length > 200 ? '${m.text.substring(0, 200)}...' : m.text;
+        }
+
         final batch = messages
-            .map((m) => MapEntry(
-                  m.messageId,
-                  m.text.length > 200
-                      ? '${m.text.substring(0, 200)}...'
-                      : m.text,
-                ))
+            .map((m) => MapEntry(m.messageId, previewText(m)))
             .toList();
         final texts = await _accumulateLines(sender, batch);
+
+        // If the most recent fetched message carries an image, show a BigPicture
+        // preview. Only ONE image can be previewed per notification (Android), and
+        // we send one notification per peer, so we use the latest image only.
+        final latestImage = messages.lastWhere(
+          (m) => m.imagePath != null &&
+              File(m.imagePath!).existsSync(),
+          orElse: () => messages.first,
+        );
+        final imagePath = (latestImage.imagePath != null &&
+                File(latestImage.imagePath!).existsSync())
+            ? latestImage.imagePath
+            : null;
+
         await _showNotification(
           sender: sender,
           title: displayName,
           body: texts.last,
           lines: texts,
           avatarBytes: avatarBytes,
+          imagePath: imagePath,
           silent: true, // update in place without re-alerting
         );
-        await _pushLog('Tier 2 notification updated with ${texts.length} line(s)');
+        await _pushLog(
+            'Tier 2 notification updated with ${texts.length} line(s)'
+            '${imagePath != null ? " + image preview" : ""}');
       }
     } catch (e) {
       await _pushLog('Tier 2 FAILED: $e');
@@ -285,6 +306,7 @@ Future<void> _showNotification({
   required String body,
   List<String>? lines,
   Uint8List? avatarBytes,
+  String? imagePath,
   bool silent = false,
 }) async {
   final plugin = FlutterLocalNotificationsPlugin();
@@ -295,11 +317,21 @@ Future<void> _showNotification({
     largeIcon = ByteArrayAndroidBitmap(avatarBytes);
   }
 
-  // When multiple messages are present, render an expandable inbox-style stack
-  // showing the most recent few (newest at the bottom) with a "+N more" summary
-  // — like other messaging apps — instead of a single replaced line.
+  // Style priority:
+  //   1. BigPicture — when the message carries an image (shows the photo
+  //      expanded). Android can preview only ONE image, so this wins over the
+  //      inbox stack when present.
+  //   2. Inbox — multiple text messages stacked (most recent few + "+N more").
   StyleInformation? style;
-  if (lines != null && lines.length > 1) {
+  if (imagePath != null) {
+    style = BigPictureStyleInformation(
+      FilePathAndroidBitmap(imagePath),
+      largeIcon: largeIcon,
+      contentTitle: title,
+      summaryText: body,
+      hideExpandedLargeIcon: false,
+    );
+  } else if (lines != null && lines.length > 1) {
     const maxLines = 3;
     final shown = lines.length > maxLines
         ? lines.sublist(lines.length - maxLines)

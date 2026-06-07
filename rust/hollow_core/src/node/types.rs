@@ -1273,6 +1273,14 @@ pub(crate) struct FileHeaderPayload {
     pub vthumb: Option<VideoThumbRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_ref: Option<ShareRef>,
+    /// Base64 of the AES-encrypted file bytes, INLINED into the header.
+    /// Only set when delivering a small image to an OFFLINE peer: the bytes ride
+    /// inside the Olm-encrypted FileHeader (via SendDirectImage / 0x08) so the
+    /// relay buffers them alongside the message, and the FCM fetch node can write
+    /// the file to disk without a live stream. None for the normal online path
+    /// (bytes stream separately) and for non-image / large files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_bytes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

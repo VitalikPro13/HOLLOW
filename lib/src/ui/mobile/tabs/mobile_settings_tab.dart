@@ -426,15 +426,17 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                       ],
 
                       // Peer ID footer
-                      const SizedBox(height: HollowSpacing.sm),
-                      Text(
-                        '${peerId.substring(0, 8)}...${peerId.substring(peerId.length - 8)}',
-                        style: HollowTypography.mono.copyWith(
-                          color: hollow.textSecondary.withValues(alpha: 0.4),
-                          fontSize: 9,
+                      if (peerId.length >= 16) ...[
+                        const SizedBox(height: HollowSpacing.sm),
+                        Text(
+                          '${peerId.substring(0, 8)}...${peerId.substring(peerId.length - 8)}',
+                          style: HollowTypography.mono.copyWith(
+                            color: hollow.textSecondary.withValues(alpha: 0.4),
+                            fontSize: 9,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: HollowSpacing.xs),
+                        const SizedBox(height: HollowSpacing.xs),
+                      ],
                     ],
                   ),
                 ),

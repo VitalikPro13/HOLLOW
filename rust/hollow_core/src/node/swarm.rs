@@ -7195,6 +7195,7 @@ async fn handle_incoming_request(
                                                 target: None,
                                                 vthumb: file_meta.video_thumb.clone(),
                                                 share_ref: None,
+                                                inline_bytes: None,
                                             }),
                                         };
                                         // Send FileHeader via Olm (targeted) + SendDirect.

@@ -7547,11 +7547,13 @@ impl SseDecode for crate::api::network::FetchedMessage {
         let mut var_text = <String>::sse_decode(deserializer);
         let mut var_timestamp = <i64>::sse_decode(deserializer);
         let mut var_messageId = <String>::sse_decode(deserializer);
+        let mut var_imagePath = <Option<String>>::sse_decode(deserializer);
         return crate::api::network::FetchedMessage {
             from_peer: var_fromPeer,
             text: var_text,
             timestamp: var_timestamp,
             message_id: var_messageId,
+            image_path: var_imagePath,
         };
     }
 }
@@ -10656,6 +10658,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::FetchedMessage {
             self.text.into_into_dart().into_dart(),
             self.timestamp.into_into_dart().into_dart(),
             self.message_id.into_into_dart().into_dart(),
+            self.image_path.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -12635,6 +12638,7 @@ impl SseEncode for crate::api::network::FetchedMessage {
         <String>::sse_encode(self.text, serializer);
         <i64>::sse_encode(self.timestamp, serializer);
         <String>::sse_encode(self.message_id, serializer);
+        <Option<String>>::sse_encode(self.image_path, serializer);
     }
 }
 

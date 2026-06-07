@@ -5,6 +5,7 @@
 
 use std::time::Duration;
 
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -21,6 +22,9 @@ pub(crate) struct FetchedDm {
     pub text: String,
     pub timestamp: i64,
     pub message_id: String,
+    /// On-disk path to an inlined image written for this message (by message_id),
+    /// for the notification's BigPicture preview. None for text-only messages.
+    pub image_path: Option<String>,
 }
 
 /// Run a one-shot fetch: connect invisibly, join one DM room, collect messages, return.
@@ -58,22 +62,36 @@ pub(crate) async fn run_fetch(
 
     hollow_log!("[HOLLOW-FETCH] Joined DM room, waiting for messages (timeout: {}s)", timeout.as_secs());
 
-    let mut messages = Vec::new();
+    let mut messages: Vec<FetchedDm> = Vec::new();
     let deadline = tokio::time::Instant::now() + timeout;
     // After the first message arrives, the relay replays its whole buffer
     // back-to-back. Switch to a short idle window so we drain the burst then
-    // return promptly (Android only grants ~30s total).
-    const IDLE_AFTER_FIRST: Duration = Duration::from_secs(2);
+    // return promptly (Android only grants ~30s total). 4s (not 2s) gives the
+    // LARGER inlined-image FileHeader frame time to arrive after its companion
+    // text DM on a slow mobile link.
+    const IDLE_AFTER_FIRST: Duration = Duration::from_secs(4);
 
     loop {
         // Overall deadline caps the wait for the FIRST message; once we have
-        // messages we only wait IDLE_AFTER_FIRST between subsequent frames.
+        // messages we only wait IDLE_AFTER_FIRST between subsequent frames —
+        // UNLESS we're still expecting a companion image (a text DM with a
+        // file_id arrived but its image marker hasn't), in which case we hold
+        // out to the full deadline so the image isn't cut off.
+        // Outstanding image = a DM references a file (caption "[file:...]" or a
+        // file_id) but no entry has delivered the image bytes (image_path) yet.
+        // Hold the connection open to the full deadline so the larger FileHeader
+        // frame isn't cut off by the short idle window.
+        let outstanding_image = {
+            let have_image = messages.iter().any(|m| m.image_path.is_some());
+            let want_image = messages.iter().any(|m| m.text.starts_with("[file:"));
+            want_image && !have_image
+        };
         let until_deadline = deadline.saturating_duration_since(tokio::time::Instant::now());
         if until_deadline.is_zero() {
             hollow_log!("[HOLLOW-FETCH] Timeout reached, returning {} messages", messages.len());
             break;
         }
-        let wait = if messages.is_empty() {
+        let wait = if messages.is_empty() || outstanding_image {
             until_deadline
         } else {
             IDLE_AFTER_FIRST.min(until_deadline)
@@ -159,8 +177,61 @@ pub(crate) async fn run_fetch(
     // Close WebSocket gracefully.
     let _ = write.close().await;
 
-    hollow_log!("[HOLLOW-FETCH] Fetch complete, returning {} messages", messages.len());
-    Ok(messages)
+    // A FileHeader and its companion text DM can arrive as TWO entries sharing
+    // one message_id: the FileHeader entry has text "[file:<id>]" + image_path,
+    // and (for a CAPTIONED image) the text DM has the real caption. Dedup by mid:
+    // keep ONE entry per mid, preferring the real caption text but always carrying
+    // the image_path. The FileHeader entry alone (captionless image) is kept as-is.
+    let mut image_paths: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for m in &messages {
+        if let Some(p) = &m.image_path {
+            if !m.message_id.is_empty() {
+                image_paths.insert(m.message_id.clone(), p.clone());
+            }
+        }
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut by_mid: std::collections::HashMap<String, FetchedDm> =
+        std::collections::HashMap::new();
+    let mut no_mid: Vec<FetchedDm> = Vec::new();
+    for mut m in messages.into_iter() {
+        // Attach the image path to whatever entry references this mid.
+        if m.image_path.is_none() && !m.message_id.is_empty() {
+            if let Some(path) = image_paths.get(&m.message_id) {
+                m.image_path = Some(path.clone());
+            }
+        }
+        if m.message_id.is_empty() {
+            no_mid.push(m);
+            continue;
+        }
+        match by_mid.get_mut(&m.message_id) {
+            None => {
+                order.push(m.message_id.clone());
+                by_mid.insert(m.message_id.clone(), m);
+            }
+            Some(existing) => {
+                // Prefer the real caption over the "[file:...]" sentinel; keep
+                // the image_path from whichever had it.
+                let img = existing.image_path.clone().or_else(|| m.image_path.clone());
+                if existing.text.starts_with("[file:") && !m.text.starts_with("[file:") {
+                    *existing = m;
+                }
+                existing.image_path = img;
+            }
+        }
+    }
+    let mut merged: Vec<FetchedDm> = Vec::with_capacity(order.len() + no_mid.len());
+    for mid in order {
+        if let Some(m) = by_mid.remove(&mid) {
+            merged.push(m);
+        }
+    }
+    merged.extend(no_mid);
+
+    hollow_log!("[HOLLOW-FETCH] Fetch complete, returning {} messages", merged.len());
+    Ok(merged)
 }
 
 /// Parse the body of a relay direct frame (after the leading 0x06 type byte):
@@ -302,6 +373,7 @@ fn try_decrypt_dm(
                         text: msg_text,
                         timestamp: ts,
                         message_id: mid.unwrap_or_default(),
+                        image_path: None,
                     })
                 }
                 Ok(MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, .. }) => {
@@ -337,7 +409,93 @@ fn try_decrypt_dm(
                         text: new_text,
                         timestamp: ts,
                         message_id: mid,
+                        image_path: None,
                     })
+                }
+                Ok(MessageEnvelope::FileHeader { inner }) => {
+                    // An offline image DM inlines its AES-encrypted bytes in the
+                    // FileHeader (file_handler.rs send_encrypted_image_to_peer).
+                    // Decrypt + write the file to disk and record COMPLETE metadata
+                    // so the message renders as a real image (and the notification
+                    // can show a preview) — no live stream needed. Returns None: the
+                    // FileHeader is not itself a notifiable message; its companion
+                    // text DM (same mid) is what gets surfaced.
+                    let p = *inner;
+                    if let (Some(b64), Some(key_hex), Some(nonce_hex)) =
+                        (p.inline_bytes.as_ref(), p.aes_key.as_ref(), p.aes_nonce.as_ref())
+                    {
+                        let decoded = base64::engine::general_purpose::STANDARD
+                            .decode(b64)
+                            .ok()
+                            .and_then(|ct| {
+                                let key = hex::decode(key_hex).ok()?;
+                                let nonce = hex::decode(nonce_hex).ok()?;
+                                if key.len() != 32 || nonce.len() != 12 {
+                                    return None;
+                                }
+                                let mut k = [0u8; 32];
+                                let mut n = [0u8; 12];
+                                k.copy_from_slice(&key);
+                                n.copy_from_slice(&nonce);
+                                crate::vault::pipeline::aes_decrypt(&ct, &k, &n).ok()
+                            });
+                        if let Some(plaintext) = decoded {
+                            let files_dir = crate::node::file_transfer::files_dir();
+                            let _ = std::fs::create_dir_all(&files_dir);
+                            let disk_path = files_dir.join(format!("{}.{}", p.fid, p.ext));
+                            if std::fs::write(&disk_path, &plaintext).is_ok() {
+                                let disk_str = disk_path.to_string_lossy().to_string();
+                                // The companion text DM ("[file:...]") is sent via a
+                                // path that drops to OFFLINE peers (file_handler uses
+                                // a room lookup that fails when the peer isn't in a
+                                // room), so the fetch often gets ONLY this FileHeader.
+                                // Insert the MESSAGE row ourselves (INSERT OR IGNORE,
+                                // so a later DM-sync / companion DM won't duplicate it)
+                                // — otherwise the image file lands on disk with no
+                                // message referencing it and renders as nothing.
+                                let mid_str = p.mid.clone().unwrap_or_default();
+                                let msg_text = format!("[file:{}]", p.fid);
+                                if let Ok(store) =
+                                    crate::storage::MessageStore::open(db_path, db_passphrase)
+                                {
+                                    if !p.mid.as_deref()
+                                        .map(|m| store.dm_message_exists(m))
+                                        .unwrap_or(false)
+                                    {
+                                        let _ = store.insert(
+                                            from, &msg_text, false, p.ts,
+                                            p.sig.as_deref(), p.pk.as_deref(),
+                                            p.mid.as_deref(), None, Some(&p.fid),
+                                        );
+                                    }
+                                    let _ = store.insert_file_metadata(
+                                        &p.fid, &p.name, &p.ext, &p.mime,
+                                        p.size, 0, p.img, p.w, p.h,
+                                        p.mid.as_deref(), "dm", from,
+                                        from, false, p.ts,
+                                        p.vthumb.as_ref(),
+                                    );
+                                    let _ = store.mark_file_complete(&p.fid, &disk_str);
+                                }
+                                hollow_log!(
+                                    "[HOLLOW-FETCH] wrote inline image {} ({} bytes) -> {}",
+                                    p.fid, plaintext.len(), disk_str
+                                );
+                                // Return a REAL image message (text "[file:...]",
+                                // image_path set). run_fetch keeps it (non-empty
+                                // text) and, if the companion text DM also arrived,
+                                // merges this image_path onto it by mid.
+                                return Some(FetchedDm {
+                                    from_peer: from.to_string(),
+                                    text: msg_text,
+                                    timestamp: p.ts,
+                                    message_id: p.mid.clone().unwrap_or_default(),
+                                    image_path: Some(disk_str),
+                                });
+                            }
+                        }
+                    }
+                    None
                 }
                 _ => None, // Other envelope types — ignore in fetch mode.
             }

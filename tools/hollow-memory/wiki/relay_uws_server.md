@@ -574,8 +574,9 @@ The type change from 0x04 to 0x06 lets receivers distinguish forwarded direct me
 | `0x02` | `0x02` (target->sender rewrite) | Direct | NUL-delimited string |
 | `0x03` | `0x05` (type change + sender inject) | Broadcast | NUL-delimited string |
 | `0x04` | `0x06` (type change + sender inject) | Direct | NUL-delimited string |
+| `0x08` | `0x06` (same as 0x04) | Direct (image) | NUL-delimited string |
 
-The 0x01 broadcast is the only type that doesn't rewrite — it forwards the entire frame as-is (the sender identity is embedded in the encrypted MLS payload, not the routing header).
+The 0x01 broadcast is the only type that doesn't rewrite — it forwards the entire frame as-is (the sender identity is embedded in the encrypted MLS payload, not the routing header). `0x08` is identical to `0x04` on the wire/forward path — the only difference is the offline buffer tags it `is_image` so it counts against the per-peer image cap (1) instead of the text cap (100). Used for offline inlined-image delivery (see Push notifications section).
 
 ### ws_handler.cpp — Binary rate limiting (REMOVED)
 
@@ -903,17 +904,19 @@ The relay is normally a dumb pipe, but to make FCM push notifications deliver re
 
 **State (`RelayState`, state.h):**
 - `push_tokens`: `peer_id -> {token, platform}`. Registered via `register_push_token` WS message (`handle_register_push_token`). RAM only, re-registered each app launch.
-- `last_push_sent`: `peer_id -> time_point`. Debounce, `PUSH_DEBOUNCE_SECS = 10` (was 30). Throttles FCM call rate only — does NOT drop messages (the buffer keeps them).
-- `offline_buffer`: `peer_id -> deque<BufferedMsg{room, frame, at}>`. Each `frame` is a ready-to-send `0x06` direct frame (ciphertext only). `MAX_BUFFERED_MSGS_PER_PEER = 100`, `OFFLINE_BUFFER_TTL_SECS = 86400` (24h).
+- `last_push_sent`: `peer_id -> time_point`. Debounce, `PUSH_DEBOUNCE_SECS = 10` (was 30). Throttles FCM call rate only — does NOT drop messages (the buffer keeps them). NOTE: rapid-fire sends within the debounce window suppress later FCM wakes, so some Tier-2 previews won't run until the next un-debounced send — looks flaky under burst testing, fine under normal use.
+- `offline_buffer`: `peer_id -> deque<BufferedMsg{room, frame, at, is_image}>`. Each `frame` is a ready-to-send `0x06` direct frame (ciphertext only). **Two independent per-peer caps**: `MAX_BUFFERED_MSGS_PER_PEER = 100` (text) and `MAX_BUFFERED_IMAGES_PER_PEER = 1` (image — a notification shows only one image preview + one notif/peer). `OFFLINE_BUFFER_TTL_SECS = 86400` (24h).
 
 **Flow (ws_handler.cpp):**
-1. `handle_binary_direct_msg` (0x04) / `handle_direct` (text): target offline (`peer_sockets` miss) → `buffer_offline_msg()` stores the `0x06` frame → `try_push_notify()` → `notify_push_sidecar()` POSTs `{token, platform, sender}` to localhost:3001.
-2. The peer's FCM fetch node (or full node) later joins the DM room → `handle_join` calls `replay_buffered_msgs()` → sends all buffered frames for that room, drops delivered entries.
+1. `handle_binary_direct_msg` (0x04 text / **0x08 image**) / `handle_direct` (text): target offline (`peer_sockets` miss) → `buffer_offline_msg(.., is_image)` stores the `0x06` frame → `try_push_notify()` → `notify_push_sidecar()` POSTs `{token, platform, sender}` to localhost:3001. `buffer_offline_msg` evicts oldest of each kind independently (`count_kind`/`drop_oldest_kind`) so an image burst never pushes out buffered text.
+2. The peer's FCM fetch node (or full node) later joins the DM room → `handle_join` calls `replay_buffered_msgs()` → sends ALL buffered frames for that room (text + image, both as 0x06), drops delivered entries.
 3. `sweep_offline_buffer()` (5-min timer in main.cpp) evicts entries older than 24h.
+
+**Inlined-image delivery (0x08):** An image DM is two wire messages: the text DM (carries only `file_id`) and a separate FileHeader (metadata + AES key) + streamed bytes. The stream is NEVER sent to an offline peer. So for offline images the **sender inlines the AES-encrypted bytes (base64) into the FileHeader's `inline_bytes` field** and sends the Olm-encrypted FileHeader via a **`0x08` SendDirectImage** frame (ws_client.rs `SendDirectImage`, crypto_handler.rs `send_encrypted_image_to_peer` — targets `dm_room_code(local,peer)` DIRECTLY since an offline peer is in no room). The relay buffers it under the image cap. The fetch node (`fetch.rs`) parses `MessageEnvelope::FileHeader`, decrypts the inline bytes, writes `files/{fid}.{ext}`, and **inserts the `messages` row itself** (`[file:{fid}]`, INSERT OR IGNORE) + `insert_file_metadata` + `mark_file_complete` — because the companion text DM is dropped to offline peers. `FetchedMessage.image_path` flows to the notification for a `BigPictureStyleInformation` photo preview. Guests blocked from 0x08. iOS: works once APNs is configured (same path).
 
 **Fetch-mode peers** (`is_fetch`, set from `fetch:true` in Auth): excluded from `peer_sockets`, `PeerJoined`, member lists — invisible, so waking via push doesn't show the user online. Buffer replay works for them via `handle_join`.
 
-E2EE preserved — buffer holds ciphertext only. Durable delivery still owned by full-node DM-sync; the buffer is latency glue so push previews are accurate. Client side: `rust/hollow_core/src/node/fetch.rs` + `lib/src/core/services/push_notification_service.dart`. See memory `project_push_notification_implementation.md`.
+E2EE preserved — buffer holds ciphertext only (image bytes are AES-encrypted inside the Olm-encrypted FileHeader). Durable delivery still owned by full-node DM-sync; the buffer is latency glue so push previews are accurate. Client side: `rust/hollow_core/src/node/fetch.rs` + `lib/src/core/services/push_notification_service.dart`. See memory `project_push_notification_implementation.md`, `feedback_fcm_image_invisible_bubble.md`.
 
 ---
 

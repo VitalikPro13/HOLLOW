@@ -28,6 +28,11 @@ pub enum WsCommand {
     SendToRoom { room_code: String, data: Vec<u8> },
     /// Send directly to a specific peer in a room (for shard transfers).
     SendDirect { room_code: String, target_peer: String, data: Vec<u8> },
+    /// Send directly to a specific peer, flagged as carrying an inlined image
+    /// (Olm-encrypted FileHeader + inline bytes). Identical to SendDirect except
+    /// it emits a 0x08 frame, so the relay applies the separate image cap
+    /// (3 images/peer) to its offline buffer instead of the text cap.
+    SendDirectImage { room_code: String, target_peer: String, data: Vec<u8> },
     /// Send binary data directly to a specific peer (for file/shard streaming).
     SendBinaryDirect { room_code: String, target_peer: String, data: Vec<u8> },
     /// Subscribe to specific channel topics in a room (reduces fan-out).
@@ -508,6 +513,25 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             frame.extend_from_slice(data);
             if let Err(e) = write.send(Message::Binary(frame.into())).await {
                 hollow_log!("[HOLLOW-WS] Direct send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::SendDirectImage { room_code, target_peer, data } => {
+            // Same layout as 0x04 SendDirect, but a 0x08 type byte tells the relay
+            // this direct carries an inlined image so its offline buffer applies
+            // the image cap (3/peer) rather than the text cap (100/peer).
+            let room = room_code.as_bytes();
+            let target = target_peer.as_bytes();
+            let mut frame = Vec::with_capacity(1 + room.len() + 1 + target.len() + 1 + data.len());
+            frame.push(0x08);
+            frame.extend_from_slice(room);
+            frame.push(0x00);
+            frame.extend_from_slice(target);
+            frame.push(0x00);
+            frame.extend_from_slice(data);
+            if let Err(e) = write.send(Message::Binary(frame.into())).await {
+                hollow_log!("[HOLLOW-WS] Direct image send failed: {e}");
                 return false;
             }
             return true;

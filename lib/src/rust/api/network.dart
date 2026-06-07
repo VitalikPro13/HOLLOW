@@ -578,11 +578,17 @@ class FetchedMessage {
   final PlatformInt64 timestamp;
   final String messageId;
 
+  /// On-disk path to the message's image, if this DM carried an inlined image
+  /// that the fetch node decrypted and wrote. Lets the push notification show
+  /// a BigPicture preview. None for text-only messages.
+  final String? imagePath;
+
   const FetchedMessage({
     required this.fromPeer,
     required this.text,
     required this.timestamp,
     required this.messageId,
+    this.imagePath,
   });
 
   @override
@@ -590,7 +596,8 @@ class FetchedMessage {
       fromPeer.hashCode ^
       text.hashCode ^
       timestamp.hashCode ^
-      messageId.hashCode;
+      messageId.hashCode ^
+      imagePath.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -600,7 +607,8 @@ class FetchedMessage {
           fromPeer == other.fromPeer &&
           text == other.text &&
           timestamp == other.timestamp &&
-          messageId == other.messageId;
+          messageId == other.messageId &&
+          imagePath == other.imagePath;
 }
 
 /// FFI-facing guest reaction.

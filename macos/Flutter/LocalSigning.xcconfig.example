@@ -1,0 +1,15 @@
+// Local code-signing config for macOS — COPY this file to `LocalSigning.xcconfig`
+// (same directory, without the `.example`) and fill in your own values.
+//
+// `LocalSigning.xcconfig` is gitignored, so your Apple Developer Team ID never
+// lands in the public repo. The committed default is empty, which keeps the
+// project team-agnostic: contributors building a signed / notarized macOS app
+// just drop in their own team here. An empty value falls back to ad-hoc signing
+// (fine for local debug runs).
+//
+// To find your Team ID: Xcode > Settings > Accounts > (your Apple ID) > the
+// 10-character ID in parentheses next to the team, or developer.apple.com >
+// Membership > Team ID.
+
+// Your 10-character Apple Developer Team ID, e.g. ABCDE12345
+HOLLOW_DEVELOPMENT_TEAM =

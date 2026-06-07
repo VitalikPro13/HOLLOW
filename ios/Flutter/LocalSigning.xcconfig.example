@@ -1,0 +1,18 @@
+// Local code-signing config for iOS — COPY this file to `LocalSigning.xcconfig`
+// (same directory, without the `.example`) and fill in your own values.
+//
+// `LocalSigning.xcconfig` is gitignored, so your Apple Developer Team ID never
+// lands in the public repo. The committed default is empty, which keeps the
+// project team-agnostic: anyone can build for the Simulator with no setup, and
+// contributors building for a real device / TestFlight just drop in their own team.
+//
+// To find your Team ID: Xcode > Settings > Accounts > (your Apple ID) > the
+// 10-character ID in parentheses next to the team, or developer.apple.com >
+// Membership > Team ID.
+
+// Your 10-character Apple Developer Team ID, e.g. ABCDE12345
+HOLLOW_DEVELOPMENT_TEAM =
+
+// Automatic signing is recommended for development. Leave as-is unless you
+// manage provisioning profiles manually.
+CODE_SIGN_STYLE = Automatic

@@ -8029,13 +8029,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   FetchedMessage dco_decode_fetched_message(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
     return FetchedMessage(
       fromPeer: dco_decode_String(arr[0]),
       text: dco_decode_String(arr[1]),
       timestamp: dco_decode_i_64(arr[2]),
       messageId: dco_decode_String(arr[3]),
+      imagePath: dco_decode_opt_String(arr[4]),
     );
   }
 
@@ -9880,11 +9881,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_text = sse_decode_String(deserializer);
     var var_timestamp = sse_decode_i_64(deserializer);
     var var_messageId = sse_decode_String(deserializer);
+    var var_imagePath = sse_decode_opt_String(deserializer);
     return FetchedMessage(
       fromPeer: var_fromPeer,
       text: var_text,
       timestamp: var_timestamp,
       messageId: var_messageId,
+      imagePath: var_imagePath,
     );
   }
 
@@ -12338,6 +12341,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.text, serializer);
     sse_encode_i_64(self.timestamp, serializer);
     sse_encode_String(self.messageId, serializer);
+    sse_encode_opt_String(self.imagePath, serializer);
   }
 
   @protected

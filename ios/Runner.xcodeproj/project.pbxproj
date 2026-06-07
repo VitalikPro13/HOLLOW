@@ -368,6 +368,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				DEVELOPMENT_TEAM = "$(HOLLOW_DEVELOPMENT_TEAM)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.anonlisten.hollow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
@@ -547,6 +548,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				DEVELOPMENT_TEAM = "$(HOLLOW_DEVELOPMENT_TEAM)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.anonlisten.hollow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
@@ -569,6 +571,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				DEVELOPMENT_TEAM = "$(HOLLOW_DEVELOPMENT_TEAM)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.anonlisten.hollow;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";

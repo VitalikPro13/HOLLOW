@@ -1923,6 +1923,7 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] Add VAD for DM calls on desktop.
 - [X] Input mic gain control for desktop/mobiles.
 - [X] Temporary nickname taking for accepting the friends
+- [ ] Annotation on someone else's screen
 
 **Deliverable:** A polished, feature-complete communication platform ready for public release — with private, encrypted P2P file sharing that rivals torrent performance without any of the privacy/legal exposure.
 

@@ -3024,14 +3024,34 @@ impl MessageStore {
     ) -> Result<(), String> {
         let vthumb_json = video_thumb
             .and_then(|v| serde_json::to_string(v).ok());
+        // UPSERT (not INSERT OR IGNORE): the FCM background-fetch node may have
+        // already inserted a MINIMAL placeholder row for this file (it only had
+        // the file_id from the DM payload — the real FileHeader is never sent to
+        // an offline peer, see file_handler.rs). When the real FileHeader later
+        // arrives via self-heal, we must FILL IN the true name/ext/size/dimensions,
+        // not silently ignore them. We deliberately do NOT touch completed_at,
+        // disk_path, or chunks_received here — those are owned by the download
+        // path (mark_file_complete / mark_chunk_received) and a re-arriving
+        // header must never reset a finished file back to "incomplete".
         self.conn
             .execute(
-                "INSERT OR IGNORE INTO files
+                "INSERT INTO files
                  (file_id, file_name, file_ext, mime_type, size_bytes,
                   chunk_count, is_image, width, height, message_id,
                   context_type, context_id, sender_id, is_mine, created_at,
                   video_thumb_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                 ON CONFLICT(file_id) DO UPDATE SET
+                   file_name      = excluded.file_name,
+                   file_ext       = excluded.file_ext,
+                   mime_type      = excluded.mime_type,
+                   size_bytes     = excluded.size_bytes,
+                   chunk_count    = excluded.chunk_count,
+                   is_image       = excluded.is_image,
+                   width          = excluded.width,
+                   height         = excluded.height,
+                   message_id     = COALESCE(files.message_id, excluded.message_id),
+                   video_thumb_json = COALESCE(excluded.video_thumb_json, files.video_thumb_json)",
                 params![
                     file_id, file_name, file_ext, mime_type,
                     size_bytes as i64, chunk_count, is_image as i32,
@@ -3043,6 +3063,7 @@ impl MessageStore {
             .map_err(|e| format!("Failed to insert file metadata: {e}"))?;
         Ok(())
     }
+
 
     /// Helper: deserialize a VideoThumbRef JSON blob from the DB. Returns None
     /// on null or parse failure (forward-compat).
@@ -3109,6 +3130,34 @@ impl MessageStore {
         Ok(())
     }
 
+    /// Re-resolve a completed file's `disk_path` against the CURRENT files
+    /// directory.
+    ///
+    /// The DB stores an absolute `disk_path` captured when the file finished
+    /// downloading. On iOS the app's data-container path is NOT stable across
+    /// launches/reinstalls (the `Application/<UUID>` segment changes), so a
+    /// stored absolute path can point at a now-nonexistent old container even
+    /// though the file itself moved with the container and still exists. Files
+    /// are stored as `{file_id}.{file_ext}`, so we can deterministically rebuild
+    /// the correct current path. If the rebuilt path exists on disk we use it;
+    /// otherwise we leave the stored value untouched (desktop paths are stable
+    /// and some callers rely on the original string).
+    fn resolve_disk_path(file: &mut StoredFile) {
+        if file.completed_at.is_none() {
+            return;
+        }
+        let Ok(files_dir) = crate::identity::data_dir().map(|d| d.join("files")) else {
+            return;
+        };
+        let current = files_dir.join(format!("{}.{}", file.file_id, file.file_ext));
+        if current.exists() {
+            let current_str = current.to_string_lossy().to_string();
+            if file.disk_path.as_deref() != Some(current_str.as_str()) {
+                file.disk_path = Some(current_str);
+            }
+        }
+    }
+
     /// Get file metadata by file_id.
     pub fn get_file_metadata(&self, file_id: &str) -> Result<Option<StoredFile>, String> {
         let mut stmt = self
@@ -3150,6 +3199,11 @@ impl MessageStore {
                 })
             })
             .ok();
+
+        let result = result.map(|mut f| {
+            Self::resolve_disk_path(&mut f);
+            f
+        });
 
         Ok(result)
     }
@@ -3196,7 +3250,8 @@ impl MessageStore {
             })
         }).map_err(|e| format!("Failed to query batch file metadata: {e}"))?;
         let mut map = HashMap::new();
-        for row in rows.flatten() {
+        for mut row in rows.flatten() {
+            Self::resolve_disk_path(&mut row);
             map.insert(row.file_id.clone(), row);
         }
         Ok(map)
@@ -3246,7 +3301,9 @@ impl MessageStore {
 
         let mut files = Vec::new();
         for row in rows {
-            files.push(row.map_err(|e| format!("Failed to read file row: {e}"))?);
+            let mut f = row.map_err(|e| format!("Failed to read file row: {e}"))?;
+            Self::resolve_disk_path(&mut f);
+            files.push(f);
         }
         Ok(files)
     }

@@ -1683,6 +1683,10 @@ pub struct FetchedMessage {
     pub text: String,
     pub timestamp: i64,
     pub message_id: String,
+    /// On-disk path to the message's image, if this DM carried an inlined image
+    /// that the fetch node decrypted and wrote. Lets the push notification show
+    /// a BigPicture preview. None for text-only messages.
+    pub image_path: Option<String>,
 }
 
 /// Start a lightweight invisible fetch node to receive DM messages from a specific peer.
@@ -1811,6 +1815,7 @@ pub fn start_fetch_node(
             text: dm.text,
             timestamp: dm.timestamp,
             message_id: dm.message_id,
+            image_path: dm.image_path,
         })
         .collect())
 }

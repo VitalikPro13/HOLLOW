@@ -83,6 +83,10 @@ turnserver.conf
 android/app/google-services.json
 ios/Runner/GoogleService-Info.plist
 
+# Local code-signing (keeps Apple Developer Team ID out of the public repo)
+ios/Flutter/LocalSigning.xcconfig
+macos/Flutter/LocalSigning.xcconfig
+
 # Deprecated (replaced by relay/)
 signaling/
 

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
@@ -29,6 +30,19 @@ class MobileShell extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final currentTab = ref.watch(mobileTabProvider);
     final bg = ref.watch(backgroundProvider);
+
+    // Refresh archive data whenever the user switches TO the Archive tab (index 2).
+    // The list providers are non-autoDispose FutureProviders that cache their first
+    // result for the app lifetime, so without this the Archive tab shows stale
+    // conversation/message counts until the next app launch. This mirrors desktop,
+    // which invalidates these providers in its archive-open handlers (bottom_bar /
+    // server_strip). Applies to both Android and iOS — single mobile codebase.
+    ref.listen<int>(mobileTabProvider, (prev, next) {
+      if (next == 2 && prev != 2) {
+        ref.invalidate(archiveDmListProvider);
+        ref.invalidate(archiveChannelListProvider);
+      }
+    });
 
     Widget scaffold = Scaffold(
       backgroundColor: bg.hasBackground ? Colors.transparent : hollow.background,

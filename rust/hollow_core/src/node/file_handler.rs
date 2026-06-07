@@ -337,6 +337,7 @@ pub(crate) async fn handle_send_file(
                             target: None,
                             vthumb: vthumb.clone(),
                             share_ref: None,
+                            inline_bytes: None,
                         }),
                     };
                     let header_json = serde_json::to_string(&header).unwrap_or_default();
@@ -356,7 +357,56 @@ pub(crate) async fn handle_send_file(
                     hollow_log!("[HOLLOW-FILE] Streaming {file_id} ({} bytes) to DM {peer_str}", enc.ciphertext.len());
                 }
             }
-            } // if connected_peers (file data only)
+            } else if is_image {
+                // Peer is OFFLINE and this is an image: inline the AES-encrypted
+                // bytes INTO the FileHeader and send it via SendDirectImage (0x08)
+                // so the relay buffers it under the per-peer image cap. The FCM
+                // fetch node then writes the file to disk and renders a real image
+                // preview in the push notification — no live stream needed. Larger
+                // non-image files still fall back to request-on-open via DM-sync.
+                if let Ok(enc) = crate::vault::pipeline::aes_encrypt(&final_data) {
+                    let header = MessageEnvelope::FileHeader {
+                        inner: Box::new(FileHeaderPayload {
+                            fid: file_id.clone(),
+                            name: original_name.clone(),
+                            ext: final_ext.clone(),
+                            mime: final_mime.clone(),
+                            size: file_size,
+                            chunks: 0,
+                            img: is_image,
+                            w: width,
+                            h: height,
+                            mid: Some(message_id.clone()),
+                            sid: None,
+                            cid: None,
+                            ts: timestamp,
+                            sig: None,
+                            pk: None,
+                            aes_key: Some(hex::encode(enc.key)),
+                            aes_nonce: Some(hex::encode(enc.nonce)),
+                            target: None,
+                            vthumb: vthumb.clone(),
+                            share_ref: None,
+                            inline_bytes: Some(
+                                base64::engine::general_purpose::STANDARD
+                                    .encode(&enc.ciphertext),
+                            ),
+                        }),
+                    };
+                    let header_json = serde_json::to_string(&header).unwrap_or_default();
+                    // Target the deterministic DM room directly — the offline peer
+                    // is not a member of any known room, so a lookup would drop the
+                    // message. The relay buffers it under the image cap (mirrors the
+                    // offline text-DM path).
+                    let dm_room = crate::node::types::dm_room_code(&local_peer, &peer_str);
+                    crate::node::crypto_handler::send_encrypted_image_to_peer(
+                        olm, crypto_store,
+                        &peer_str, dm_room, &header_json, event_tx,
+                        &ws_cmd_tx,
+                    ).await;
+                    hollow_log!("[HOLLOW-FILE] Inlined offline image {file_id} ({} enc bytes) to DM {peer_str}", enc.ciphertext.len());
+                }
+            } // if peer reachable (live stream) / else offline image (inline)
         }
 
         hollow_log!("[HOLLOW-FILE] Sent {total_chunks} chunks for {file_id} to DM {peer_str}");
@@ -480,6 +530,7 @@ pub(crate) async fn handle_send_file(
                     target: None,
                     vthumb: vthumb.clone(),
                     share_ref: share_ref.clone(),
+                    inline_bytes: None,
                 }),
             };
             let header_json = serde_json::to_string(&header).unwrap_or_default();

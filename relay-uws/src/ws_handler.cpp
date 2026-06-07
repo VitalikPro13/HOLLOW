@@ -338,13 +338,26 @@ static std::string build_direct_frame(std::string_view room,
 // RAM only, ciphertext only. Capped per-peer (drop oldest on overflow).
 static void buffer_offline_msg(const std::string& target_peer_id,
                                const std::string& room,
-                               std::string frame, RelayState& state) {
+                               std::string frame, RelayState& state,
+                               bool is_image = false) {
     auto& q = state.offline_buffer[target_peer_id];
-    q.push_back({room, std::move(frame), std::chrono::steady_clock::now()});
-    while (q.size() > MAX_BUFFERED_MSGS_PER_PEER) {
-        q.pop_front();
-    }
-    fprintf(stderr, "[push] Buffered offline msg for %.12s... (room=%.8s..., queued=%zu)\n",
+    q.push_back({room, std::move(frame), std::chrono::steady_clock::now(), is_image});
+    // Two independent caps: text and inlined-image frames evict separately so a
+    // burst of images never pushes out buffered text (and vice-versa).
+    auto count_kind = [&](bool img) {
+        size_t n = 0;
+        for (const auto& m : q) if (m.is_image == img) n++;
+        return n;
+    };
+    auto drop_oldest_kind = [&](bool img) {
+        for (auto it = q.begin(); it != q.end(); ++it) {
+            if (it->is_image == img) { q.erase(it); return; }
+        }
+    };
+    while (count_kind(false) > MAX_BUFFERED_MSGS_PER_PEER)   drop_oldest_kind(false);
+    while (count_kind(true)  > MAX_BUFFERED_IMAGES_PER_PEER) drop_oldest_kind(true);
+    fprintf(stderr, "[push] Buffered offline %s for %.12s... (room=%.8s..., queued=%zu)\n",
+            is_image ? "image" : "msg",
             target_peer_id.c_str(), room.c_str(), q.size());
 }
 
@@ -600,7 +613,8 @@ static void handle_binary_msg(PerSocketData* data,
 }
 
 static void handle_binary_direct_msg(PerSocketData* data,
-                                      std::string_view raw, RelayState& state) {
+                                      std::string_view raw, RelayState& state,
+                                      bool is_image = false) {
     // Parse: [0x04][room\0][target\0][payload]
     if (raw.size() < 5) return;
 
@@ -630,7 +644,8 @@ static void handle_binary_direct_msg(PerSocketData* data,
         // when they wake up, then fire a push.
         if (state.peer_sockets.find(target_str) == state.peer_sockets.end()) {
             buffer_offline_msg(target_str, room_str,
-                               build_direct_frame(room_code, data->peer_id, payload), state);
+                               build_direct_frame(room_code, data->peer_id, payload), state,
+                               is_image);
             try_push_notify(target_str, data->peer_id, state);
         }
         return;
@@ -643,7 +658,8 @@ static void handle_binary_direct_msg(PerSocketData* data,
         // Target not in room — buffer + push if fully offline.
         if (state.peer_sockets.find(target_str) == state.peer_sockets.end()) {
             buffer_offline_msg(target_str, room_str,
-                               build_direct_frame(room_code, data->peer_id, payload), state);
+                               build_direct_frame(room_code, data->peer_id, payload), state,
+                               is_image);
             try_push_notify(target_str, data->peer_id, state);
         }
         return;
@@ -938,7 +954,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state) {
 
                     // Guest binary restrictions
                     if (data->is_guest) {
-                        if (opcode == 0x04) return; // no SendDirect for guests
+                        if (opcode == 0x04 || opcode == 0x08) return; // no SendDirect for guests
                         if (opcode == 0x03) {
                             auto now = std::chrono::steady_clock::now();
                             if ((now - data->minute_window_start) > std::chrono::seconds(60)) {
@@ -963,6 +979,11 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state) {
                             break;
                         case 0x04:
                             handle_binary_direct_msg(data, message, state);
+                            break;
+                        case 0x08:
+                            // Direct message carrying an inlined image —
+                            // buffered under the per-peer image cap when offline.
+                            handle_binary_direct_msg(data, message, state, /*is_image=*/true);
                             break;
                         case 0x07:
                             handle_binary_topic_msg(data, message, state);
