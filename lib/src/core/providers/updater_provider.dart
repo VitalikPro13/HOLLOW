@@ -10,22 +10,38 @@ const kManifestUrl = 'https://anonlisten.com/hollow/releases/manifest.json';
 class VersionInfo {
   final String version;
   final String date;
-  final String url;
+  final String urlWindows;
+  final String urlMacos;
+  final String urlLinux;
   final String notes;
 
   const VersionInfo({
     required this.version,
     required this.date,
-    required this.url,
+    this.urlWindows = '',
+    this.urlMacos = '',
+    this.urlLinux = '',
     required this.notes,
   });
 
   factory VersionInfo.fromJson(Map<String, dynamic> json) => VersionInfo(
         version: json['version'] as String? ?? '',
         date: json['date'] as String? ?? '',
-        url: json['url'] as String? ?? '',
+        urlWindows: json['url_windows'] as String? ?? '',
+        urlMacos: json['url_macos'] as String? ?? '',
+        urlLinux: json['url_linux'] as String? ?? '',
         notes: json['notes'] as String? ?? '',
       );
+
+  /// The download URL for the current platform (empty if unsupported).
+  String get platformUrl {
+    if (Platform.isMacOS) return urlMacos;
+    if (Platform.isLinux) return urlLinux;
+    return urlWindows; // Windows
+  }
+
+  /// Whether an update is actually downloadable on this platform.
+  bool get hasPlatformUrl => platformUrl.isNotEmpty;
 }
 
 class VersionManifest {
@@ -140,7 +156,7 @@ class UpdateNotifier extends Notifier<UpdateState> {
 
     try {
       final stream = updater_api.downloadUpdate(
-        url: version.url,
+        url: version.platformUrl,
         destPath: destPath,
       );
 
@@ -165,7 +181,22 @@ class UpdateNotifier extends Notifier<UpdateState> {
         downloadedZipPath: destPath,
       );
 
-      final appDir = File(Platform.resolvedExecutable).parent.path;
+      // appDir = the directory that CONTAINS the app unit.
+      // Windows/Linux: the folder holding the executable.
+      // macOS: the folder holding the `.app` bundle (e.g. /Applications).
+      //   resolvedExecutable = .../Hollow.app/Contents/MacOS/Hollow
+      //   → up 3 dirs = Hollow.app, up 4 = its containing folder.
+      final String appDir;
+      if (Platform.isMacOS) {
+        appDir = File(Platform.resolvedExecutable) // .../MacOS/Hollow
+            .parent // .../MacOS
+            .parent // .../Contents
+            .parent // .../Hollow.app
+            .parent // containing folder (e.g. /Applications)
+            .path;
+      } else {
+        appDir = File(Platform.resolvedExecutable).parent.path;
+      }
       final batPath = await updater_api.applyUpdate(
         zipPath: destPath,
         appDir: appDir,
@@ -185,11 +216,18 @@ class UpdateNotifier extends Notifier<UpdateState> {
   }
 
   Future<void> installAndRestart() async {
-    final batPath = state.batPath;
-    if (batPath == null) return;
+    final scriptPath = state.batPath;
+    if (scriptPath == null) return;
 
-    await Process.start('cmd', ['/c', 'start', '', batPath],
-        mode: ProcessStartMode.detached);
+    if (Platform.isMacOS) {
+      // Detached shell script: waits for us to quit, swaps the .app, relaunches.
+      await Process.start('/bin/sh', [scriptPath],
+          mode: ProcessStartMode.detached);
+    } else {
+      // Windows: detached batch script via cmd.
+      await Process.start('cmd', ['/c', 'start', '', scriptPath],
+          mode: ProcessStartMode.detached);
+    }
     exit(0);
   }
 

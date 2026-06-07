@@ -165,7 +165,7 @@ mod win {
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+    use security_framework::item::{ItemClass, ItemSearchOptions, Limit, SearchResult};
     use security_framework::passwords::{delete_generic_password, set_generic_password};
 
     const SERVICE: &str = "com.hollow.identity";
@@ -188,14 +188,11 @@ mod mac {
 
         match search.search() {
             Ok(results) => {
-                if let Some(item) = results.first() {
-                    if let Some(data) = item.data.as_ref() {
-                        Ok(Some(data.to_vec()))
-                    } else {
-                        Ok(None)
-                    }
-                } else {
-                    Ok(None)
+                // With `.load_data(true)`, a matching item is returned as
+                // `SearchResult::Data`. Other variants mean no usable payload.
+                match results.into_iter().next() {
+                    Some(SearchResult::Data(data)) => Ok(Some(data)),
+                    _ => Ok(None),
                 }
             }
             Err(e) if e.code() == -25300 => Ok(None), // errSecItemNotFound

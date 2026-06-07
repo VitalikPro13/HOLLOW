@@ -8,7 +8,13 @@ BUILD_DIR="$SCRIPT_DIR/.flatpak-builder"
 REPO_DIR="$SCRIPT_DIR/repo"
 FLUTTER_BUNDLE="$PROJECT_DIR/build/linux/x64/release/bundle"
 
-echo "=== Hollow Flatpak Build ==="
+# Derive the version from the single source of truth (updater.rs APP_VERSION)
+# so the bundle filename never has to be hand-edited per release.
+VERSION="$(grep -oP 'APP_VERSION: &str = "\K[^"]+' "$PROJECT_DIR/rust/hollow_core/src/api/updater.rs")"
+VERSION="${VERSION:-0.0.0}"
+FLATPAK_OUT="$SCRIPT_DIR/hollow-${VERSION}-linux-x86_64.flatpak"
+
+echo "=== Hollow Flatpak Build (v${VERSION}) ==="
 
 # Check prerequisites
 if ! command -v flatpak &>/dev/null; then
@@ -100,13 +106,13 @@ rm -rf "$REPO_DIR"
 flatpak-builder --user --repo="$REPO_DIR" --force-clean \
     "$BUILD_DIR/build" "$SCRIPT_DIR/com.anonlisten.Hollow.yml"
 
-flatpak build-bundle "$REPO_DIR" "$SCRIPT_DIR/Hollow-0.4.2-linux-x86_64.flatpak" \
+flatpak build-bundle "$REPO_DIR" "$FLATPAK_OUT" \
     com.anonlisten.Hollow
 
 echo ""
 echo "=== Done! ==="
-echo "Flatpak bundle: $SCRIPT_DIR/Hollow-0.4.2-linux-x86_64.flatpak"
+echo "Flatpak bundle: $FLATPAK_OUT"
 echo ""
-echo "To install:  flatpak install --user Hollow-0.4.2-linux-x86_64.flatpak"
+echo "To install:  flatpak install --user $FLATPAK_OUT"
 echo "To run:      flatpak run com.anonlisten.Hollow"
 echo "To remove:   flatpak uninstall com.anonlisten.Hollow"

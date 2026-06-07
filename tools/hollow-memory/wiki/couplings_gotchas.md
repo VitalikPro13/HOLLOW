@@ -578,6 +578,14 @@ let _ = state.apply_op(&op);
 
 **Where:** `lib/main.dart:_HollowWindowListener.onWindowClose()` (Linux branch), `_linuxQuit()` helper.
 
+### Window close on macOS uses the native Dock idiom, not tray (and AppDelegate must not auto-terminate)
+
+**Rule:** On macOS, `onWindowClose()` (minimize-to-tray setting on) just calls `windowManager.hide()` — NO tray icon. The app keeps running in the Dock with the active dot; clicking the Dock icon re-shows the window. This requires `macos/Runner/AppDelegate.swift` to override `applicationShouldTerminateAfterLastWindowClosed` to return **`false`** (the Flutter template default is `true`, which terminates the process on window close and bypasses the Dart handler entirely) plus `applicationShouldHandleReopen` to re-show/focus the window on Dock click. `onWindowFocus()` syncs `windowVisibleProvider = true` on macOS since the native reopen path doesn't go through the tray restore.
+
+**Why:** macOS has no system tray; the native convention is window-less background running. The AppDelegate's `applicationShouldTerminateAfterLastWindowClosed = true` was silently killing the app on X (ignoring the minimize-to-tray setting).
+
+**Where:** `lib/main.dart:_HollowWindowListener.onWindowClose()` (macOS branch) + `onWindowFocus()`; `macos/Runner/AppDelegate.swift` (`applicationShouldTerminateAfterLastWindowClosed` → false, `applicationShouldHandleReopen`).
+
 ### record package Linux backend requires parecord
 
 **Rule:** The `record` Dart package (`record_linux` v1.3.0) shells out to `parecord` from `pulseaudio-utils`. This is not installed on PipeWire-only systems (modern Ubuntu 24.04+, Fedora).

@@ -213,11 +213,11 @@ Returns the stored Twitch username, or `None` if empty/missing.
 
 ## Updater API (`api/updater.rs`)
 
-Application self-update system. Fetches a version manifest from a remote URL, downloads update ZIPs with progress streaming, and generates a Windows batch script for file replacement while the app is closed.
+Cross-platform application self-update system (Windows + macOS). Fetches a version manifest from a remote URL, downloads update ZIPs with progress streaming, and generates a platform-specific helper script that replaces the app while it is closed, then relaunches it. Linux returns "Auto-update is not supported on this platform yet" (Flatpak updates via Flathub).
 
 ### Constants
 
-- `APP_VERSION: &str = "0.1.0"` -- current hardcoded version string.
+- `APP_VERSION: &str = "0.5.0"` -- current version string (single source of truth; the Flatpak build script also derives the bundle filename from it).
 
 ### FFI struct: `DownloadProgress`
 
@@ -230,11 +230,13 @@ pub struct DownloadProgress {
 
 ### `get_current_version() -> String`
 
-Sync function (`#[frb(sync)]`). Returns `APP_VERSION` ("0.1.0").
+Sync function (`#[frb(sync)]`). Returns `APP_VERSION`.
 
 ### `fetch_version_manifest(manifest_url: String) -> Result<String, String>`
 
 Fetches the remote version manifest JSON via HTTP GET with a 10-second timeout and `Cache-Control: no-cache` header. Returns the raw response body as a string. Dart parses the JSON to determine if an update is available by comparing versions. The manifest is hosted at `legal/manifest.json` on the CDN.
+
+**Per-platform manifest URLs (no legacy single `url` field as of v0.5.0):** each version entry has `url_windows`, `url_macos` (zip, used by the updater), `url_macos_dmg` (DMG, used by the website's new-user download button), `url_linux` (Flatpak), `url_android` (APK). Dart `VersionInfo.platformUrl` (in `updater_provider.dart`) selects by `Platform`.
 
 ### `download_update(url: String, dest_path: String, sink: StreamSink<DownloadProgress>) -> Result<(), String>`
 
@@ -242,21 +244,23 @@ Spawns an async download task on the tokio runtime (non-blocking). Streams the u
 
 ### `apply_update(zip_path: String, app_dir: String, version: String) -> Result<String, String>`
 
-Generates a Windows batch script that performs the update after the app exits. Full flow:
-1. Creates staging directory at `~/.hollow/updates/staging-{version}`.
-2. Opens the downloaded ZIP and detects if all entries share a common top-level prefix (e.g., `Release/`) via `detect_common_prefix()`. If so, strips it during extraction.
-3. Extracts all ZIP entries to the staging directory, creating subdirectories as needed.
-4. Generates `~/.hollow/updates/update.bat` with the following steps:
-   - Polls `tasklist` in a loop waiting for `hollow.exe` to exit.
-   - `xcopy /E /Y /Q` from staging to `app_dir`.
-   - Removes staging directory and ZIP file.
-   - Displays a countdown (5 to 1).
-   - Launches `hollow.exe` from `app_dir`.
-5. Returns the path to the generated `.bat` file. Dart launches this script and then exits.
+Extracts the update and generates a platform-specific helper script that performs the swap after the app exits, then relaunches. Returns the path to the generated script; Dart's `installAndRestart` launches it detached and then `exit(0)`s. Branches by `#[cfg(target_os)]`:
+
+**Windows:**
+1. Creates staging dir `~/.hollow/updates/staging-{version}`.
+2. Extracts the ZIP with the Rust `zip` crate, stripping a common top-level prefix (e.g. `Release/`) via `detect_common_prefix()`.
+3. Generates `update.bat`: polls `tasklist` until `hollow.exe` exits, `xcopy /E /Y /Q` staging → `app_dir`, removes staging + ZIP, 5-1 countdown, relaunches `hollow.exe`.
+
+**macOS** (`write_macos_update_script()`):
+1. Extracts the ZIP with **`ditto -x -k`** (NOT the `zip` crate — `ditto` preserves the `.app` bundle's symlinks, executable bit, and code signature; the crate corrupts them).
+2. Finds the single `*.app` bundle in staging.
+3. Generates an executable `update.sh`: waits via `pgrep -f "<installed_app>/Contents/MacOS/"` for the app to quit, `rm -rf` the old bundle, `ditto` the staged bundle into `app_dir`, strips quarantine (`xattr -dr com.apple.quarantine`), cleans staging + ZIP, relaunches with `open -n`. Logs to `~/.hollow/updates/update.log`. `app_dir` is the bundle's containing folder (e.g. `/Applications`).
+
+**Linux / other:** returns an error ("not supported yet").
 
 ### `detect_common_prefix(archive) -> Option<String>`
 
-Internal helper. Iterates all ZIP entries and checks if they all share the same first path component (e.g., `Release/`). Returns `Some("Release/")` if uniform, `None` otherwise. Used to strip wrapper directories from release ZIPs.
+Internal helper (Windows path only). Iterates all ZIP entries and checks if they all share the same first path component (e.g., `Release/`). Returns `Some("Release/")` if uniform, `None` otherwise. Used to strip wrapper directories from release ZIPs.
 
 ## Archive API (`api/archive.rs`)
 

@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License">
-  <img src="https://img.shields.io/badge/platform-Windows%20·%20Linux%20·%20Android-0078D4" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-Windows%20·%20macOS%20·%20Linux%20·%20Android-0078D4" alt="Platform">
   <img src="https://img.shields.io/badge/encryption-end--to--end-blueviolet" alt="Encryption">
   <a href="https://codecov.io/gh/VitalikPro13/HOLLOW" > 
   <img src="https://codecov.io/gh/VitalikPro13/HOLLOW/graph/badge.svg?token=F0TBC256BF" alt="Rust Coverage"></a>
@@ -45,7 +45,7 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 - **End-to-end encrypted messaging** -- Olm (Double Ratchet) for DMs, OpenMLS for servers. Forward secrecy by default
 - **Encrypted voice and video calls** -- peer-to-peer WebRTC with SFrame (AES-128-GCM)
-- **Screen sharing** -- with system audio capture (Windows), encrypted with the same SFrame pipeline
+- **Screen sharing** -- with system audio capture (Windows & macOS), encrypted with the same SFrame pipeline
 - **File sharing** -- encrypted peer-to-peer transfers. Files up to 34 MB transfer directly. Larger files automatically use Hollow Share (BitTorrent-like swarmed distribution)
 - **Distributed storage (Vault)** -- erasure-coded encrypted shards distributed across server members. Files survive even when individual peers go offline
 - **Servers and channels** -- create communities with text channels, voice channels, roles, and permissions. All state synchronized via CRDTs with no authoritative server. Optional: secure Twitch verification to limit members only to your followers/subs
@@ -60,14 +60,14 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 | Platform | Link |
 |----------|------|
-| Windows | [Download latest release](https://hollow.anonlisten.com) |
-| macOS | Waiting |
-| Linux | [Experimental Flatpak](https://github.com/VitalikPro13/HOLLOW/releases) |
-| Android | [Experimental APK](https://github.com/VitalikPro13/HOLLOW/releases) |
-| iOS | Waiting |
+| Windows (10+) | [Download (.zip)](https://hollow.anonlisten.com) |
+| macOS (14.2+) | [Download (.dmg)](https://hollow.anonlisten.com) |
+| Linux | [Download (Experimental Flatpak)](https://hollow.anonlisten.com) |
+| Android (7+) | [Download (Experimental APK)](https://hollow.anonlisten.com) |
+| iOS | Coming soon |
 | Web | Not planned |
 
-Current Progress: Mac is coming! Linux is experimental and not properly tested but core features work. Mobile port to Android/iOS is FINALLY DONE! 100% of the features are implemented, including the push notifications support (iOS is in the process). v0.5 will be released soon.
+Current Progress: macOS is fully working! Linux is experimental and not properly tested but core features work. Mobile port to Android/iOS is FINALLY DONE! 100% of the features are implemented, including the push notifications support (iOS is in the process). Websites are updated, so now you can enjoy the proper cross-platform release. There are areas for improvement, but everything will come in its time!
 
 ## Tech Stack
 

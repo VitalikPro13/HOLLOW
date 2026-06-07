@@ -1,17 +1,15 @@
 {
-  "latest": "0.4.2",
+  "latest": "0.5.0",
   "versions": [
     {
-      "version": "0.4.2",
-      "date": "May 26, 2026",
-      "url": "https://anonlisten.com/hollow/releases/hollow-0.4.2-win64.zip",
-      "notes": "Identity Protection Patch"
-    },
-    {
-      "version": "0.4.0",
-      "date": "May 20, 2026",
-      "url": "https://anonlisten.com/hollow/releases/hollow-0.4.0-win64.zip",
-      "notes": "Android & macOS ports (in progress), screen share audio, native recording, annotation overlay"
+      "version": "0.5.0",
+      "date": "Jun 7, 2026",
+      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.5.0-win64.zip",
+      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.5.0-macos.zip",
+      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.5.0.dmg",
+      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.5.0-linux-x86_64.flatpak",
+      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.5.0-android.apk",
+      "notes": "macOS Release, Cross-Platform Auto-Updater & Mobile Port"
     }
   ]
 }

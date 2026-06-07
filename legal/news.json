@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-06-07-v050",
+    "date": "Jun 7, 2026",
+    "title": "v0.5 — macOS Release, Cross-Platform Auto-Updater & Mobile Port",
+    "body": "Hi! With a miracle, I got my hands on macOS and successfully packaged it with proper signing! Now it's freely available to download and auto-updater works without any issues. Mobile porting is also finished, Android is working great together with push notifications. Some of the new features:\n\n- Temporary nicknames for friend requests (relay-scoped, ephemeral)\n\n- Mic gain slider\n\n- DM call voice activity animation\n\n- Offline peer profile fetching\n\n- Engine upgrade and encryption stability improvements\n\nThis was a massive amount of work, but we did it! I feel like that we need to add the syncing between mobile and desktop identities. Cool idea, but implementation would probably take a while. Don't worry, I'll think of something. Stay tuned and don't forget to write your feedback!"
+  },
+  {
     "id": "2026-05-26-v042",
     "date": "May 26, 2026",
     "title": "v0.4.2 — Identity Protection Patch",

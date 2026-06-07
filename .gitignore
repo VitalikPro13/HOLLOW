@@ -4,6 +4,23 @@
 *.pyc
 *.swp
 .DS_Store
+
+# Personal build/release guide
+BUILD_GUIDE.md
+
+# Release artifacts staged in project root for upload
+hollow-*-macos.zip
+hollow-*-win64.zip
+hollow-*-linux.tar.gz
+hollow-*.flatpak
+hollow-*.dmg
+hollow-*-android.apk
+Hollow-*.dmg
+Hollow.app/
+
+# Xcode-generated SwiftPM workspace metadata (machine-specific, empty)
+macos/Runner.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+macos/Runner.xcworkspace/xcshareddata/swiftpm/
 .atom/
 .build/
 .buildlog/

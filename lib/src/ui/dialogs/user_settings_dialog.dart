@@ -1881,25 +1881,27 @@ class _SecurityTabState extends State<_SecurityTab> {
                   child: const Text('Enable Device Protection'),
                 ),
               ],
-              const SizedBox(height: HollowSpacing.sm),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Icon(LucideIcons.alertTriangle, size: 14, color: hollow.warning),
-                  ),
-                  const SizedBox(width: HollowSpacing.xs),
-                  Expanded(
-                    child: Text(
-                      'Windows may lose device credentials after OS reinstalls or admin password resets. Always keep your 24-word recovery phrase backed up.',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.warning, fontSize: 11,
+              if (Platform.isWindows) ...[
+                const SizedBox(height: HollowSpacing.sm),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Icon(LucideIcons.alertTriangle, size: 14, color: hollow.warning),
+                    ),
+                    const SizedBox(width: HollowSpacing.xs),
+                    Expanded(
+                      child: Text(
+                        'Windows may lose device credentials after OS reinstalls or admin password resets. Always keep your 24-word recovery phrase backed up.',
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.warning, fontSize: 11,
+                        ),
                       ),
                     ),
-                  ),
-                ],
-              ),
+                  ],
+                ),
+              ],
             ],
 
             const SizedBox(height: HollowSpacing.sm),

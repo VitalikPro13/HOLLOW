@@ -415,6 +415,12 @@ class _HollowWindowListener extends WindowListener {
   @override
   void onWindowFocus() {
     SharedTickers.instance.resume();
+    // On macOS the window is re-shown natively from the Dock
+    // (applicationShouldHandleReopen) without going through the tray restore
+    // path, so sync the visible state here.
+    if (Platform.isMacOS) {
+      _container.read(windowVisibleProvider.notifier).state = true;
+    }
   }
 
   @override
@@ -435,8 +441,16 @@ class _HollowWindowListener extends WindowListener {
         } else {
           await windowManager.minimize();
         }
+      } else if (Platform.isMacOS) {
+        // macOS-native idiom: hide the window, app keeps running in the Dock
+        // with the active dot. No tray icon (macOS has no system tray).
+        // Clicking the Dock icon re-shows it via `applicationShouldHandleReopen`
+        // in AppDelegate.swift, which fires onWindowFocus → tickers resume.
+        _container.read(windowVisibleProvider.notifier).state = false;
+        SharedTickers.instance.pause();
+        await windowManager.hide();
       } else {
-        // Minimize to system tray — app keeps running in background.
+        // Windows: minimize to system tray — app keeps running in background.
         await _showTrayIcon();
         _container.read(windowVisibleProvider.notifier).state = false;
         SharedTickers.instance.pause();
