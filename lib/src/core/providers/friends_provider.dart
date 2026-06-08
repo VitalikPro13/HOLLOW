@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/services/push_hints_cache.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
@@ -43,6 +44,11 @@ class FriendsNotifier extends Notifier<Map<String, FriendInfo>> {
         );
       }
       state = map;
+      // Refresh the iOS push-hints cache (friend name + avatar for the
+      // Notification Service Extension). Debounced + iOS-gated internally, so
+      // this is a cheap no-op on other platforms. Covers startup + every friend
+      // mutation since they all funnel through loadAll().
+      PushHintsCache.scheduleWrite(map.keys);
     } catch (e) {
       debugPrint('[HOLLOW] Failed to load friends: $e');
     }

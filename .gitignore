@@ -61,6 +61,22 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# iOS / Xcode build artifacts (ios/build holds ~20k generated files)
+ios/build/
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/Flutter/ephemeral/
+ios/Runner.xcworkspace/xcshareddata/swiftpm/
+ios/Runner.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+ios/Runner.xcodeproj/project.xcworkspace/xcuserdata/
+ios/Runner.xcworkspace/xcuserdata/
+**/*.xcuserstate
+
+# Editor
+.vscode/
+
 # Rust
 rust/hollow_core/target/
 rust/target/
@@ -81,7 +97,9 @@ alpha_keys.txt
 keys.json
 turnserver.conf
 android/app/google-services.json
-ios/Runner/GoogleService-Info.plist
+# Firebase config — match GoogleService-Info.plist anywhere under ios/ (repo is
+# public; contributors bring their own Firebase project)
+**/GoogleService-Info.plist
 
 # Local code-signing (keeps Apple Developer Team ID out of the public repo)
 ios/Flutter/LocalSigning.xcconfig

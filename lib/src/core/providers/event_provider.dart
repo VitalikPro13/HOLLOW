@@ -38,6 +38,7 @@ import 'package:hollow/src/core/providers/recovery_pool_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
+import 'package:hollow/src/core/services/push_hints_cache.dart';
 import 'package:hollow/src/core/providers/license_key_provider.dart';
 import 'package:hollow/src/core/providers/room_budget_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
@@ -78,6 +79,17 @@ class EventStreamNotifier extends Notifier<bool> {
 
   @override
   bool build() => false; // streaming?
+
+  /// Refresh the iOS push-hints cache (friend name + avatar) read by the
+  /// Notification Service Extension. Debounced + iOS-gated inside the cache, so
+  /// this is a cheap no-op on other platforms / under bursts. Sources the friend
+  /// list from `friendsProvider` (all known peers; the extension only ever looks
+  /// up the actual sender).
+  void _refreshPushHints() {
+    final friends = ref.read(friendsProvider);
+    if (friends.isEmpty) return;
+    PushHintsCache.scheduleWrite(friends.keys);
+  }
 
   void start() {
     if (_subscription != null) return;
@@ -524,6 +536,7 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(profileProvider.notifier).reloadProfile(peerId);
         ref.read(avatarProvider.notifier).invalidate(peerId);
         ref.invalidate(bannerProvider(peerId));
+        _refreshPushHints();
 
       case NetworkEvent_ChannelMessageEdited(
             :final serverId, :final channelId, :final messageId, :final newText, :final editedAt, :final signature, :final publicKey):

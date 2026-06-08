@@ -24,33 +24,29 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<!--
+	  US export compliance: Hollow uses ONLY standard encryption algorithms
+	  (AES-GCM, Curve25519/Ed25519, Double Ratchet, OpenMLS, SFrame) — no
+	  proprietary crypto — so all encryption is EXEMPT (EAR 740.17(b)(1),
+	  mass-market). "false" = "no NON-exempt encryption", which skips the
+	  per-upload questionnaire in App Store Connect. NOTE: claiming this
+	  exemption obligates a one-time annual self-classification email to
+	  BIS + NSA ENC (does not block TestFlight/App Store).
+	-->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Hollow needs camera access for video calls.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Hollow needs microphone access for voice and video calls.</string>
-	<key>UIApplicationSceneManifest</key>
-	<dict>
-		<key>UIApplicationSupportsMultipleScenes</key>
-		<false/>
-		<key>UISceneConfigurations</key>
-		<dict>
-			<key>UIWindowSceneSessionRoleApplication</key>
-			<array>
-				<dict>
-					<key>UISceneClassName</key>
-					<string>UIWindowScene</string>
-					<key>UISceneConfigurationName</key>
-					<string>flutter</string>
-					<key>UISceneDelegateClassName</key>
-					<string>FlutterSceneDelegate</string>
-					<key>UISceneStoryboardFile</key>
-					<string>Main</string>
-				</dict>
-			</array>
-		</dict>
-	</dict>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Hollow needs photo library access so you can send images in chats.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Hollow needs permission to save images you receive to your photo library.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Hollow uses network information to choose the best connection route for voice and video calls.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIBackgroundModes</key>

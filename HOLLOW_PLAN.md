@@ -1924,6 +1924,10 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] Input mic gain control for desktop/mobiles.
 - [X] Temporary nickname taking for accepting the friends
 - [ ] Annotation on someone else's screen
+- [ ] Connection stability between peers/no rendering when in Chats tab on mobile during instability of connection to somebody
+- [ ] Fix notification timing under rapid sends
+- [ ] Unread notification about your own message when the other DM peer didn't read it
+- [ ] Jumping chat on mobile
 
 **Deliverable:** A polished, feature-complete communication platform ready for public release — with private, encrypted P2P file sharing that rivals torrent performance without any of the privacy/legal exposure.
 

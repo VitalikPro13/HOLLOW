@@ -4,6 +4,21 @@
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
 
+# Xcode 26+ writes project.pbxproj as objectVersion 70, which CocoaPods 1.16.2
+# (xcodeproj 1.27.0) cannot parse. Xcode silently re-bumps it on every project
+# edit. Patch it back to a compatible version at the TOP of the Podfile — before
+# the `project 'Runner'` line below makes CocoaPods read the project — so a single
+# `pod install` succeeds. Remove once CocoaPods/xcodeproj supports objectVersion 70.
+_pbxproj = File.join(__dir__, 'Runner.xcodeproj', 'project.pbxproj')
+if File.exist?(_pbxproj)
+  _contents = File.read(_pbxproj)
+  _patched = _contents.sub(/objectVersion = 70;/, 'objectVersion = 54;')
+  if _patched != _contents
+    File.write(_pbxproj, _patched)
+    puts '[hollow] Patched project.pbxproj objectVersion 70 -> 54 for CocoaPods compatibility'
+  end
+end
+
 project 'Runner', {
   'Debug' => :debug,
   'Profile' => :release,

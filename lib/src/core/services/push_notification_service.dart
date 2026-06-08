@@ -438,6 +438,13 @@ class PushNotificationService {
 
       if (settings.authorizationStatus == AuthorizationStatus.authorized ||
           settings.authorizationStatus == AuthorizationStatus.provisional) {
+        // iOS only: the APNs device token arrives asynchronously from Apple
+        // AFTER requestPermission returns. FirebaseMessaging.getToken() returns
+        // null / throws if it has no APNs token yet, so wait for it first.
+        // No-op on Android (getAPNSToken returns null there immediately).
+        if (Platform.isIOS) {
+          await _waitForApnsToken();
+        }
         _currentToken = await _messaging.getToken();
         debugPrint('████ [HOLLOW-PUSH] FCM token: ${_currentToken != null ? "${_currentToken!.substring(0, 20)}..." : "NULL"}');
         if (_currentToken != null) {
@@ -460,6 +467,27 @@ class PushNotificationService {
 
     _initialized = true;
     debugPrint('[HOLLOW-PUSH] Push notification service initialized');
+  }
+
+  /// iOS: poll for the APNs device token (delivered async by Apple after
+  /// permission is granted) before requesting the FCM token. Returns once the
+  /// token is available or after ~10s. On the Simulator the token never
+  /// arrives — we time out and let getToken() fail gracefully.
+  Future<void> _waitForApnsToken() async {
+    for (var i = 0; i < 20; i++) {
+      try {
+        final apnsToken = await _messaging.getAPNSToken();
+        if (apnsToken != null) {
+          debugPrint('████ [HOLLOW-PUSH] APNs token acquired after ${i * 500}ms');
+          return;
+        }
+      } catch (e) {
+        debugPrint('████ [HOLLOW-PUSH] getAPNSToken attempt $i failed: $e');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+    debugPrint('████ [HOLLOW-PUSH] APNs token unavailable after 10s '
+        '(Simulator, or APNs not configured) — FCM token may be null');
   }
 
   Future<void> _initLocalNotifications() async {

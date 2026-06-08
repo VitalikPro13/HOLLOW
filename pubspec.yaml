@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+version: 0.5.0+6
 
 environment:
   sdk: ^3.10.4
@@ -57,8 +57,14 @@ dependencies:
   url_launcher: ^6.3.2
   flutter_markdown_plus: ^1.0.7
   path_provider: ^2.1.5
-  firebase_core: ^3.13.0
-  firebase_messaging: ^15.2.5
+  # Pinned BELOW the iOS-SDK-v12 breaking change (firebase_core 4.0 /
+  # firebase_messaging 16.0) to keep the iOS 13 deployment target — core 4.6+
+  # forces an iOS 15 minimum. We use the CLASSIC (non-UIScene) iOS AppDelegate,
+  # so scene-delegate support (added in messaging 16.1) is not needed: APNs binds
+  # via classic plugin registration. Do NOT bump these without also adopting
+  # UIScene + raising the iOS floor to 15. See ios/Runner/AppDelegate.swift.
+  firebase_core: ^3.15.2
+  firebase_messaging: ^15.2.10
   flutter_local_notifications: ^18.0.1
 
 dev_dependencies:

@@ -4,13 +4,23 @@
 <dict>
 	<!--
 	  APNs environment for push notifications.
-	  - "development" for debug builds / TestFlight side-loading.
-	  - Switch to "production" for App Store release builds.
-	  This file must be linked via Xcode: Runner target →
-	  Signing & Capabilities → "+ Capability" → Push Notifications,
-	  which sets CODE_SIGN_ENTITLEMENTS in the Xcode project.
+	  - "production" for TestFlight + App Store builds (uses prod APNs gateway).
+	  - "development" only for `flutter run`/Xcode Run to a cable-connected device.
+	  TestFlight (even internal) is a release-signed build → MUST be production,
+	  or APNs silently drops the token (no error). This file is linked via
+	  CODE_SIGN_ENTITLEMENTS in project.pbxproj (Push Notifications capability).
 	-->
 	<key>aps-environment</key>
-	<string>development</string>
+	<string>production</string>
+	<!--
+	  Shared App Group with the NotificationService extension. The app writes a
+	  push-hints cache (friend name + avatar) here; the extension reads it to show
+	  rich push banners. Must match NotificationService.entitlements + the
+	  appGroupId in AppDelegate.swift / NotificationService.swift / PushHintsCache.
+	-->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.anonlisten.hollow</string>
+	</array>
 </dict>
 </plist>
