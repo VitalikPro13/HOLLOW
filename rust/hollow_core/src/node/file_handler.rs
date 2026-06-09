@@ -295,16 +295,31 @@ pub(crate) async fn handle_send_file(
 
         // Encrypt and send the message + FileHeader + FileChunks via Olm.
         if olm.has_session(&peer_str) {
-            // Send message envelope.
-            send_encrypted_message(
-                            olm, crypto_store,
-                            &peer_str, &envelope_json, event_tx,
-                                        &ws_cmd_tx, &ws_room_peers,
-            ).await;
+            let reachable = peer_is_reachable(&ws_room_peers, &peer_str);
+
+            // Send the message (caption / "[file:...]") envelope.
+            //
+            // CRITICAL — Olm ratchet ordering: `send_encrypted_message` ALWAYS
+            // calls olm.encrypt() (advancing + persisting the ratchet) BEFORE it
+            // checks reachability, and DISCARDS the ciphertext if the peer is
+            // offline. For an OFFLINE IMAGE that wasted encryption burns a ratchet
+            // slot the receiver never sees — a permanent gap that breaks decrypt
+            // of the FileHeader/caption that follow. So when offline-and-image we
+            // must NOT call it here; the caption is sent exactly once below via
+            // the DM-room-direct path (which also actually delivers to the buffer).
+            // The online path and the non-image offline path are unchanged.
+            let offline_image = !reachable && is_image;
+            if !offline_image {
+                send_encrypted_message(
+                                olm, crypto_store,
+                                &peer_str, &envelope_json, event_tx,
+                                            &ws_cmd_tx, &ws_room_peers,
+                ).await;
+            }
 
             // Only send file data if peer is reachable right now.
             // If offline, the file_id is in the message — sync will request it later.
-            if peer_is_reachable(&ws_room_peers, &peer_str) {
+            if reachable {
 
             // AES-encrypt the file, write ciphertext to temp file.
             let encrypted = crate::vault::pipeline::aes_encrypt(&final_data);
@@ -380,8 +395,17 @@ pub(crate) async fn handle_send_file(
                             sid: None,
                             cid: None,
                             ts: timestamp,
-                            sig: None,
-                            pk: None,
+                            // Carry the signature on the offline-image FileHeader.
+                            // For a CAPTIONLESS image this is the ONLY transmitted
+                            // signature (the "[file:...]" companion DM is dropped
+                            // to offline peers), and it's signed over the same
+                            // "[file:<id>]" text the fetch node stores — so the
+                            // row verifies instead of showing "Unsigned". For a
+                            // CAPTIONED image the caption DM carries its own sig
+                            // over the caption text and overwrites this via
+                            // promote_file_sentinel_to_caption; harmless here.
+                            sig: sig.clone(),
+                            pk: pk.clone(),
                             aes_key: Some(hex::encode(enc.key)),
                             aes_nonce: Some(hex::encode(enc.nonce)),
                             target: None,
@@ -401,10 +425,28 @@ pub(crate) async fn handle_send_file(
                     let dm_room = crate::node::types::dm_room_code(&local_peer, &peer_str);
                     crate::node::crypto_handler::send_encrypted_image_to_peer(
                         olm, crypto_store,
-                        &peer_str, dm_room, &header_json, event_tx,
+                        &peer_str, dm_room.clone(), &header_json, event_tx,
                         &ws_cmd_tx,
                     ).await;
                     hollow_log!("[HOLLOW-FILE] Inlined offline image {file_id} ({} enc bytes) to DM {peer_str}", enc.ciphertext.len());
+
+                    // If this image has a CAPTION, send it now — exactly once,
+                    // AFTER the FileHeader — straight to the DM room (0x04, text
+                    // cap). We deliberately skipped the caption's normal send
+                    // above (offline_image guard) to avoid a wasted Olm
+                    // encryption that would corrupt the ratchet. The caption
+                    // shares the FileHeader's message_id, so the fetch node merges
+                    // them (real caption wins over the "[file:...]" sentinel) and
+                    // the offline peer sees the captioned image. Encryption order
+                    // on the wire is FileHeader (#N) then caption (#N+1) — no gap.
+                    if !message_text.is_empty() {
+                        crate::node::crypto_handler::send_encrypted_text_to_peer(
+                            olm, crypto_store,
+                            &peer_str, dm_room, &envelope_json, event_tx,
+                            &ws_cmd_tx,
+                        ).await;
+                        hollow_log!("[HOLLOW-FILE] Buffered offline image caption for DM {peer_str}");
+                    }
                 }
             } // if peer reachable (live stream) / else offline image (inline)
         }

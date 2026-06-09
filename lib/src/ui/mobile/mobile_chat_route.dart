@@ -41,7 +41,6 @@ import 'package:hollow/src/ui/mobile/mobile_voice_channel_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_message_actions.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/pinned_provider.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
@@ -114,7 +113,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       // Opening the chat: clear any stacked push-notification lines + dismiss the
       // OS notification for this peer so the next message starts a fresh stack.
       clearNotificationLines(widget.peerId!);
-      FlutterLocalNotificationsPlugin().cancel(widget.peerId!.hashCode);
+      // Dismiss this peer's notification (and the group summary if it was the
+      // last one) — a bare cancel() would leave an empty "Hollow" group header.
+      dismissPeerNotification(widget.peerId!);
       ref.read(chatProvider.notifier).loadHistory(widget.peerId!).then((_) {
         if (mounted) {
           setState(() {});

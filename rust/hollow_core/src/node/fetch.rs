@@ -66,10 +66,14 @@ pub(crate) async fn run_fetch(
     let deadline = tokio::time::Instant::now() + timeout;
     // After the first message arrives, the relay replays its whole buffer
     // back-to-back. Switch to a short idle window so we drain the burst then
-    // return promptly (Android only grants ~30s total). 4s (not 2s) gives the
-    // LARGER inlined-image FileHeader frame time to arrive after its companion
-    // text DM on a slow mobile link.
-    const IDLE_AFTER_FIRST: Duration = Duration::from_secs(4);
+    // return PROMPTLY — the notification can't render content until run_fetch
+    // returns, so this idle directly gates how fast the user sees the message.
+    // 1.2s is enough to catch a back-to-back buffer replay over a mobile link
+    // while keeping perceived latency low. The larger inlined-image FileHeader
+    // case does NOT rely on this: when a text DM references a file but its image
+    // bytes haven't arrived, `outstanding_image` below holds the connection open
+    // to the full deadline instead, so images are never cut off.
+    const IDLE_AFTER_FIRST: Duration = Duration::from_millis(1200);
 
     loop {
         // Overall deadline caps the wait for the FIRST message; once we have
@@ -364,6 +368,23 @@ fn try_decrypt_dm(
                                 if let Ok(lp_json) = serde_json::to_string(lp) {
                                     let _ = store.update_link_preview(message_id, &lp_json);
                                 }
+                            }
+                        } else if !msg_text.starts_with("[file:") {
+                            // Row already exists — likely the inlined-image
+                            // FileHeader for this same mid won the INSERT OR
+                            // IGNORE and stored a "[file:<id>]" sentinel (with no
+                            // signature). This is the real CAPTION (shares the
+                            // mid): promote the sentinel to the caption text AND
+                            // its sig/pk so the captioned image renders correctly
+                            // and verifies (otherwise it shows "Unsigned"). No-op
+                            // if the row already has real text.
+                            if let Some(message_id) = mid.as_deref() {
+                                let _ = store.promote_file_sentinel_to_caption(
+                                    message_id,
+                                    &msg_text,
+                                    sig.as_deref(),
+                                    pk.as_deref(),
+                                );
                             }
                         }
                     }

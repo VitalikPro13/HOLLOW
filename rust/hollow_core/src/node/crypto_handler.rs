@@ -420,6 +420,57 @@ pub(crate) async fn send_encrypted_image_to_peer(
     }
 }
 
+/// Send an Olm-encrypted TEXT DM directly to an explicit DM room (0x04), without
+/// the `ws_room_for_peer` reachability check that `send_encrypted_message` does.
+/// Used for the CAPTION of an offline image DM: the recipient is in no known
+/// room, so the normal send drops it — but the relay still buffers a 0x04 frame
+/// addressed to the deterministic DM room (under the TEXT cap, independent of the
+/// image cap). The caption shares its `message_id` with the inlined-image
+/// FileHeader, so the fetch node merges them (preferring the real caption over
+/// the "[file:...]" sentinel). Mirrors [`send_encrypted_image_to_peer`] but emits
+/// SendDirect (0x04) instead of SendDirectImage (0x08).
+pub(crate) async fn send_encrypted_text_to_peer(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    peer_id_str: &str,
+    dm_room: String,
+    text: &str,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+) -> bool {
+    match olm.encrypt(peer_id_str, text.as_bytes()) {
+        Ok((msg_type, ciphertext)) => {
+            persist_olm_session(olm, crypto_store, peer_id_str);
+            let identity_key = if msg_type == 0 {
+                Some(olm.identity_key_base64())
+            } else {
+                None
+            };
+            let haven_msg = HavenMessage::Encrypted {
+                message_type: msg_type,
+                body: OlmManager::encode_base64(&ciphertext),
+                identity_key,
+            };
+            let json = serde_json::to_string(&haven_msg).unwrap_or_default();
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                room_code: dm_room,
+                target_peer: peer_id_str.to_string(),
+                data: json.into_bytes(),
+            });
+            true
+        }
+        Err(e) => {
+            let _ = event_tx
+                .send(NetworkEvent::MessageSendFailed {
+                    to_peer: peer_id_str.to_string(),
+                    error: format!("Encryption failed: {e}"),
+                })
+                .await;
+            false
+        }
+    }
+}
+
 /// Persist both account and session state to DB (fire-and-forget).
 /// Use for session creation/destruction events where account state changes.
 pub(crate) fn persist_crypto_state(olm: &OlmManager, crypto_store: &CryptoStore, peer_id: &str) {

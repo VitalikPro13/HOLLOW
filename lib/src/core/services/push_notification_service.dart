@@ -92,6 +92,29 @@ Future<List<String>> _accumulateLines(
   return windowed.map((m) => m['text'] ?? '').toList();
 }
 
+/// Dismiss the OS notification for [sender] (call when the user opens that
+/// chat). With Android grouping, also removes the lingering group SUMMARY when
+/// no per-peer message children remain — otherwise an empty "Hollow" header
+/// banner stays in the tray. Safe to call on any platform.
+Future<void> dismissPeerNotification(String sender) async {
+  final plugin = FlutterLocalNotificationsPlugin();
+  await plugin.cancel(sender.hashCode);
+  if (!Platform.isAndroid) return;
+  try {
+    final android = plugin.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+    final active = await android?.getActiveNotifications() ?? const [];
+    // If the only thing left in our group is the summary itself, drop it.
+    final messageChildren = active.where((n) =>
+        n.id != null && n.id != _groupSummaryId && n.id != 0);
+    if (messageChildren.isEmpty) {
+      await plugin.cancel(_groupSummaryId);
+    }
+  } catch (_) {
+    // getActiveNotifications is unsupported below API 23 — harmless to skip.
+  }
+}
+
 /// Clear cached notification lines for a sender (call when the user opens that
 /// chat so the next message starts a fresh stack). Pass null to clear all.
 Future<void> clearNotificationLines(String? sender) async {
@@ -187,7 +210,11 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
     await _pushLog('Rust init FAILED: $e');
   }
 
-  // Tier 1: Show notification from cached profile (no node needed).
+  // Resolve the cached profile (name + avatar) but DO NOT post yet. On the
+  // happy path we wait for the fetched message content and post ONE already-
+  // populated notification — no generic "Sent you a message" flash, no visible
+  // swap. We only fall back to a content-free banner if the fetch fails / times
+  // out / returns nothing (or Rust never initialized).
   String displayName = _truncatePeerId(sender);
   Uint8List? avatarBytes;
 
@@ -204,36 +231,45 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
     }
   }
 
-  await _showNotification(
-    sender: sender,
-    title: displayName,
-    body: 'Sent you a message',
-    avatarBytes: avatarBytes,
-  );
-  await _pushLog('Tier 1 notification shown: $displayName');
-
-  // Tier 2: Attempt background fetch for message preview.
+  // Tier 2: fetch + decrypt the message content BEFORE showing the banner so the
+  // user sees a correct, populated notification on its first appearance.
+  bool contentShown = false;
   if (rustReady) {
     try {
-      await _pushLog('Starting Tier 2 fetch for $sender...');
-      // Keep this well under Android's background window. The relay now replays
-      // buffered offline messages immediately on join, so the fetch node
-      // collects them within ~1-2s; the timeout only bounds the empty case.
+      await _pushLog('Starting fetch for $sender...');
+      // The relay replays buffered offline messages immediately on join, so the
+      // fetch node collects them within ~1-1.5s (short idle window in fetch.rs);
+      // the timeout only bounds the empty case. Kept well under Android's
+      // background window.
       final messages = await network_api.startFetchNode(
         senderPeerId: sender,
         timeoutSecs: 12,
       );
-      await _pushLog('Tier 2 returned ${messages.length} messages');
+      await _pushLog('Fetch returned ${messages.length} messages');
       if (messages.isNotEmpty) {
         // FIFO order — oldest first. Truncate each, then merge with previously
         // cached lines (keyed by message_id so edits replace, not stack).
-        // An image DM's caption is the literal "[file:<id>]" sentinel when it has
-        // no text — show a friendly "📷 Photo" line instead.
+        // Image DMs show a lightweight "📷 Image" line — NOT a BigPicture
+        // preview. The image still arrives (fetch decrypts + writes it to disk
+        // and inserts the DB row); we just skip rendering the photo in the
+        // banner because the BigPicture path (decode + downscale on the
+        // notification thread) made the whole notification noticeably slow. An
+        // image DM whose text is the "[file:<id>]" sentinel OR that carries an
+        // image_path is rendered as the "📷 Image" placeholder; a captioned
+        // image shows its caption text (the caption is the real message text).
+        // A captionless image's text is the "[file:<id>]" sentinel → "📷 Image".
+        // A captioned image carries the real caption as its text AND has its
+        // image_path attached (the fetch merges the inlined-image path onto the
+        // caption entry by message_id), so prefix the caption with 📷 to signal
+        // the attachment: "📷 <caption>". Plain text messages have no image_path
+        // → shown as-is. The 📷 always means "there's a photo here."
         String previewText(network_api.FetchedMessage m) {
           if (m.text.isEmpty || m.text.startsWith('[file:')) {
-            return m.imagePath != null ? '📷 Photo' : m.text;
+            return '📷 Image';
           }
-          return m.text.length > 200 ? '${m.text.substring(0, 200)}...' : m.text;
+          final clipped =
+              m.text.length > 200 ? '${m.text.substring(0, 200)}...' : m.text;
+          return m.imagePath != null ? '📷 $clipped' : clipped;
         }
 
         final batch = messages
@@ -241,35 +277,34 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
             .toList();
         final texts = await _accumulateLines(sender, batch);
 
-        // If the most recent fetched message carries an image, show a BigPicture
-        // preview. Only ONE image can be previewed per notification (Android), and
-        // we send one notification per peer, so we use the latest image only.
-        final latestImage = messages.lastWhere(
-          (m) => m.imagePath != null &&
-              File(m.imagePath!).existsSync(),
-          orElse: () => messages.first,
-        );
-        final imagePath = (latestImage.imagePath != null &&
-                File(latestImage.imagePath!).existsSync())
-            ? latestImage.imagePath
-            : null;
-
+        // First (and only) post on the happy path — already populated, alerting.
+        // No imagePath: BigPicture is intentionally omitted for speed (see above).
         await _showNotification(
           sender: sender,
           title: displayName,
           body: texts.last,
           lines: texts,
           avatarBytes: avatarBytes,
-          imagePath: imagePath,
-          silent: true, // update in place without re-alerting
         );
+        contentShown = true;
         await _pushLog(
-            'Tier 2 notification updated with ${texts.length} line(s)'
-            '${imagePath != null ? " + image preview" : ""}');
+            'Populated notification shown with ${texts.length} line(s)');
       }
     } catch (e) {
-      await _pushLog('Tier 2 FAILED: $e');
+      await _pushLog('Fetch FAILED: $e');
     }
+  }
+
+  // Fallback: only if we couldn't show real content. Shows name + avatar (or a
+  // truncated peer id) with a generic body — never a silent miss.
+  if (!contentShown) {
+    await _showNotification(
+      sender: sender,
+      title: displayName,
+      body: 'Sent you a message',
+      avatarBytes: avatarBytes,
+    );
+    await _pushLog('Fallback notification shown: $displayName');
   }
 
   await _pushLog('Handler complete');
@@ -279,6 +314,17 @@ String _truncatePeerId(String peerId) {
   if (peerId.length > 12) return '${peerId.substring(0, 12)}...';
   return peerId;
 }
+
+// ── Android notification grouping ──────────────────────────────────────────
+// Every per-peer message notification shares this group key so Android bundles
+// them under ONE expandable "Hollow" header instead of N loose banners when
+// several different peers message you. A separate summary notification (fixed
+// ID) is the bundle header. iOS ignores groupKey (it threads by its own rules).
+const String _dmGroupKey = 'hollow_dm_group';
+// Fixed ID for the group-summary notification. Per-peer notifications use
+// sender.hashCode; this constant must never collide with one. Generic/fallback
+// uses 0, so we pick a distinct sentinel far from typical hashCodes.
+const int _groupSummaryId = 0x40000001;
 
 Future<void> _showGenericNotification() async {
   final plugin = FlutterLocalNotificationsPlugin();
@@ -294,6 +340,11 @@ Future<void> _showGenericNotification() async {
         channelDescription: 'Hollow message notifications',
         importance: Importance.high,
         priority: Priority.high,
+        icon: '@drawable/ic_stat_hollow',
+        // Join the Hollow group so a generic notification bundles with the
+        // per-peer cards rather than floating as a stray banner.
+        groupKey: _dmGroupKey,
+        groupAlertBehavior: GroupAlertBehavior.all,
       ),
       iOS: DarwinNotificationDetails(),
     ),
@@ -306,7 +357,6 @@ Future<void> _showNotification({
   required String body,
   List<String>? lines,
   Uint8List? avatarBytes,
-  String? imagePath,
   bool silent = false,
 }) async {
   final plugin = FlutterLocalNotificationsPlugin();
@@ -317,21 +367,14 @@ Future<void> _showNotification({
     largeIcon = ByteArrayAndroidBitmap(avatarBytes);
   }
 
-  // Style priority:
-  //   1. BigPicture — when the message carries an image (shows the photo
-  //      expanded). Android can preview only ONE image, so this wins over the
-  //      inbox stack when present.
-  //   2. Inbox — multiple text messages stacked (most recent few + "+N more").
+  // Inbox style when there are multiple messages — most recent few + "+N more".
+  // Image DMs render as a lightweight "📷 Image" line within this stack; we do
+  // NOT use BigPictureStyleInformation: decoding + downscaling the photo on the
+  // notification thread made the whole banner noticeably slow to appear. The
+  // image itself still syncs to the DB via the fetch — only the heavy preview
+  // render is dropped.
   StyleInformation? style;
-  if (imagePath != null) {
-    style = BigPictureStyleInformation(
-      FilePathAndroidBitmap(imagePath),
-      largeIcon: largeIcon,
-      contentTitle: title,
-      summaryText: body,
-      hideExpandedLargeIcon: false,
-    );
-  } else if (lines != null && lines.length > 1) {
+  if (lines != null && lines.length > 1) {
     const maxLines = 3;
     final shown = lines.length > maxLines
         ? lines.sublist(lines.length - maxLines)
@@ -346,10 +389,13 @@ Future<void> _showNotification({
     );
   }
 
-  // Tier 1 alerts (sound + heads-up). Tier 2 reuses the SAME notification ID to
-  // swap in the real message text, but does so silently (onlyAlertOnce + silent)
-  // so it updates in place without a second buzz/peek. This is the two-tier
-  // design: fast alert first, content quietly filled in a moment later.
+  // The populated content banner alerts (sound + heads-up). The `silent` flag is
+  // reserved for in-place updates (Phase 3 iOS) that must not re-buzz —
+  // onlyAlertOnce + low importance.
+  //
+  // Grouping: this per-peer notification joins the Hollow group (groupKey). The
+  // CHILD alerts (GroupAlertBehavior.children) so the peer's message buzzes; the
+  // summary posted below stays silent — otherwise both would alert (double buzz).
   await plugin.show(
     sender.hashCode,
     title,
@@ -361,25 +407,60 @@ Future<void> _showNotification({
         channelDescription: 'Hollow message notifications',
         importance: silent ? Importance.low : Importance.high,
         priority: silent ? Priority.low : Priority.high,
+        icon: '@drawable/ic_stat_hollow',
         largeIcon: largeIcon,
         onlyAlertOnce: true,
         silent: silent,
         styleInformation: style,
         number: lines != null && lines.length > 1 ? lines.length : null,
+        groupKey: _dmGroupKey,
+        setAsGroupSummary: false,
+        groupAlertBehavior: GroupAlertBehavior.children,
       ),
       iOS: DarwinNotificationDetails(
+        threadIdentifier: sender,
         presentSound: !silent,
         presentBanner: !silent,
         presentAlert: !silent,
       ),
     ),
   );
+
+  // Post/refresh the group SUMMARY (the bundle header). Android only visibly
+  // bundles when ≥2 children share the group, but posting the summary
+  // unconditionally is harmless for a single child. Summary is SILENT so it
+  // never adds a second buzz alongside the child that just alerted.
+  if (Platform.isAndroid) {
+    await plugin.show(
+      _groupSummaryId,
+      'Hollow',
+      'New messages',
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'hollow_messages',
+          'Messages',
+          channelDescription: 'Hollow message notifications',
+          importance: Importance.high,
+          priority: Priority.high,
+          icon: '@drawable/ic_stat_hollow',
+          onlyAlertOnce: true,
+          silent: true,
+          groupKey: _dmGroupKey,
+          setAsGroupSummary: true,
+          groupAlertBehavior: GroupAlertBehavior.children,
+        ),
+      ),
+    );
+  }
 }
 
 Future<void> _initNotificationPlugin(
     FlutterLocalNotificationsPlugin plugin) async {
+  // Status-bar small icon = the white-silhouette H vector. Android keeps only
+  // the alpha channel, so a full-color '@mipmap/ic_launcher' would render as a
+  // white blob/circle — use the dedicated monochrome drawable instead.
   const androidSettings =
-      AndroidInitializationSettings('@mipmap/ic_launcher');
+      AndroidInitializationSettings('@drawable/ic_stat_hollow');
   const iosSettings = DarwinInitializationSettings(
     requestAlertPermission: false,
     requestBadgePermission: false,
@@ -491,8 +572,9 @@ class PushNotificationService {
   }
 
   Future<void> _initLocalNotifications() async {
+    // Monochrome status-bar icon (see _initNotificationPlugin note).
     const androidSettings =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
+        AndroidInitializationSettings('@drawable/ic_stat_hollow');
     const iosSettings = DarwinInitializationSettings(
       requestAlertPermission: false,
       requestBadgePermission: false,

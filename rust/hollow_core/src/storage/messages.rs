@@ -810,6 +810,33 @@ impl MessageStore {
         }
     }
 
+    /// Overwrite a DM row's text + signature with the caption's ONLY when the
+    /// current text is a "[file:...]" sentinel (a captionless-image placeholder).
+    /// Used by the push fetch node: an offline captioned image arrives as TWO
+    /// frames sharing one message_id — the inlined FileHeader (text "[file:<id>]",
+    /// no signature) and the caption DM (carries the real sig/pk over the caption
+    /// text). Whichever inserts first wins the INSERT OR IGNORE; if the FileHeader
+    /// won, this promotes the row to the real caption AND its signature when the
+    /// caption arrives — otherwise the message would render "Unsigned" because the
+    /// FileHeader carried no sig. No-op if no row matches or the row already has
+    /// real (non-sentinel) text.
+    pub fn promote_file_sentinel_to_caption(
+        &self,
+        message_id: &str,
+        text: &str,
+        signature: Option<&str>,
+        public_key: Option<&str>,
+    ) -> Result<bool, String> {
+        let rows = self.conn
+            .execute(
+                "UPDATE messages SET text = ?1, signature = ?2, public_key = ?3 \
+                 WHERE message_id = ?4 AND text LIKE '[file:%]'",
+                params![text, signature, public_key, message_id],
+            )
+            .map_err(|e| format!("promote_file_sentinel_to_caption: {e}"))?;
+        Ok(rows > 0)
+    }
+
     /// Set the link preview JSON for a DM row identified by `message_id`.
     /// No-op if no row matches. Phase 6.75.
     pub fn update_link_preview(&self, message_id: &str, link_preview_json: &str) -> Result<(), String> {

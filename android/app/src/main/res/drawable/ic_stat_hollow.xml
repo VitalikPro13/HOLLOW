@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Status-bar notification icon. Android keeps ONLY the alpha channel of a
+  notification icon and renders it as a flat white silhouette, so this is a
+  monochrome white "H-with-lock" glyph (the keyhole detail is intentionally
+  dropped — it's invisible at status-bar size). Path data is the Hollow mark
+  from assets/hollow_icon_foreground.svg, on the original 1000x1000 viewport.
+  Pointed at by AndroidInitializationSettings('@drawable/ic_stat_hollow').
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="1000"
+    android:viewportHeight="1000"
+    android:tint="#FFFFFF">
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M 260 234 A 14 14 0 0 1 274 220 L 324 220 A 14 14 0 0 1 338 234 L 338 448 L 400 448 L 400 412 L 414 412 L 414 335 A 86 86 0 0 1 586 335 L 586 412 L 600 412 L 600 448 L 662 448 L 662 234 A 14 14 0 0 1 676 220 L 726 220 A 14 14 0 0 1 740 234 L 740 766 A 14 14 0 0 1 726 780 L 676 780 A 14 14 0 0 1 662 766 L 662 536 L 600 536 L 600 552 A 16 16 0 0 1 584 568 L 416 568 A 16 16 0 0 1 400 552 L 400 536 L 338 536 L 338 766 A 14 14 0 0 1 324 780 L 274 780 A 14 14 0 0 1 260 766 L 260 234 Z M 450 412 L 450 335 A 50 50 0 0 1 550 335 L 550 412 Z" />
+</vector>
