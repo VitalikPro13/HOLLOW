@@ -40,7 +40,7 @@ The loop owns ~40 mutable state variables. They are NOT consolidated into a stru
 - `olm: OlmManager` — mutable Olm encryption manager for DM sessions.
 - `mls: Option<MlsManager>` — MLS group encryption for servers. Created or restored from DB during init.
 - `decrypt_fail_cooldown: HashMap<String, Instant>` — last session-kill time per peer. 5-second cooldown prevents rapid session thrashing when many in-flight chunks fail decrypt.
-- `key_request_in_flight: HashSet<String>` — peers with active KeyRequest to avoid duplicates.
+- `key_request_in_flight: HashMap<String, Instant>` — peers with an in-flight KeyRequest, timestamped. A bare `HashSet` (no timeout) previously stranded the flag forever when a handshake frame dropped (the relay never ACKs), so a session could never re-key without both peers restarting. Now mirrors `mls_bootstrap_requested`'s timestamped-retry idiom: guard with `key_request_is_fresh()` (`OLM_KEY_REQUEST_TIMEOUT` = 10s), not `.contains()`. A stale/absent entry allows a resend.
 - `pending_messages: HashMap<String, Vec<String>>` — messages buffered while key exchange is in progress.
 - `pending_mls_key_packages: HashMap<String, Vec<(String, Vec<u8>)>>` — KeyPackages queued for batch MLS addition.
 - `mls_bootstrap_requested: HashSet<String>` — server_ids for which we already sent a KeyPackage to the owner.
@@ -424,6 +424,14 @@ The event loop coordinates all three transport layers:
 4. Send `KeyRequest` to re-establish session.
 5. Within cooldown window: silently drop the stale message.
 
+### Olm session establishment self-heal
+The relay never ACKs a direct message, so a dropped KeyRequest/KeyBundle/SessionAck/PreKey would strand the handshake (recoverable only by both peers restarting). Hardening:
+- **Confirmed vs unconfirmed sessions** — `OlmManager` exposes `has_confirmed_session()` (inbound-derived, or outbound that the peer acknowledged via SessionAck / a decrypted reply that cleared `outbound_only`) and `has_unconfirmed_session()`. `SessionEstablished` is emitted ONLY on real confirmation (SessionAck received at the `MessageEnvelope::SessionAck` arm, or a successful normal-decrypt that flips an unconfirmed session) — never optimistically on outbound-session creation. Optimistic emit was the "A sends, B never sees it" bug.
+- **Reconciliation sweep** — in the 30s `rebootstrap_timer`, for every online peer (in `ws_room_peers`, gated to shared-server members / peers with queued DMs / half-built sessions) lacking a confirmed session whose `key_request_in_flight` entry is stale, resend `KeyRequest`. This converts "wedged until restart" into "self-heals within ~30s".
+- **KeyRequest against an existing session** — no longer silently ignored: if the session is unconfirmed or the peer re-requests, tear down + re-bundle (gated by the 5s `decrypt_fail_cooldown`).
+- **Glare defer** (higher peer) REFRESHES its in-flight timestamp instead of clearing it, so a dropped low-peer PreKey self-heals via the sweep.
+- **Prune** (`prune_stale_sessions`) returns pruned peer IDs; the caller clears their `key_request_in_flight` + `decrypt_fail_cooldown`.
+
 ### MLS decrypt failure
 1. **Immediate sync from sender** — request `ChannelSyncRequest` for all subscribed channels from the peer who sent the undecryptable message (5s dedup). Recovers the dropped message before the sender's next successful message advances per-sender timestamps past the gap.
 2. Increment per-server failure counter.
@@ -445,7 +453,10 @@ The KeyPackage handler excludes the sender from coordinator election (they sent 
 Drop stale local group, send KeyPackage to coordinator for re-bootstrap.
 
 ### WebRTC transfer failure
-`file_handler::handle_webrtc_transfer_failed()` removes peer from `webrtc_peers`, falls back to WS stream for the pending send.
+`file_handler::handle_webrtc_transfer_failed()` removes peer from `webrtc_peers`, falls back to WS stream for the pending send. Also serves as the receiver-side re-request path: the Dart flush-verify (short on-disk file after `sink.close()`) and the Rust decrypt-failure auto-retry both route here / through `FileRequest`. See `rust_file_handler.md` → Decrypt-failure auto-retry.
+
+### Peer discovery (WS-based, replaces HTTP /bootstrap)
+Primary peer discovery rides the LIVE WS connection, not the HTTP `/bootstrap` poll (which paid a fresh TLS handshake per request and could stall under a WS frame burst on the relay's single event loop). The `rebootstrap_timer` sends `WsCommand::DiscoverPeers { room }` for the active room + each server; the relay responds with `discovered_peers` (the room's `ws_rooms` peer set). `WsEvent::DiscoveredPeers` populates `ws_room_peers` and key-exchanges with any peer lacking a confirmed session (reusing the sweep's freshness guard). HTTP bootstrap is kept as a non-fatal fallback — its failures are logged quietly, never surfaced as `NetworkEvent::Error`. The relay's `members`-on-join response already covers most discovery, so this is belt-and-suspenders.
 
 ### WS disconnect
 Clears `ws_room_peers`, `synced_peers`, `key_request_in_flight`, `mls_bootstrap_requested`, drains `pending_messages`, and cleans up in-progress WS transfers. The WS client auto-reconnects; on reconnect (`WsEvent::Connected`), rooms are re-joined and full sync is retriggered for all peers.

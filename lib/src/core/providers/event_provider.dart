@@ -158,9 +158,15 @@ class EventStreamNotifier extends Notifier<bool> {
         // Don't deselect — friends stay visible when offline.
 
       case NetworkEvent_RoomCleared():
-        debugPrint('[HOLLOW] Room cleared');
-        ref.read(peersProvider.notifier).clearAll();
-        ref.read(selectedPeerProvider.notifier).state = null;
+        // Fired on an active-room SWITCH (legacy signaling-room model), NOT on
+        // connection loss. Do NOT clearAll() peers or null the selection: that
+        // blanked the mobile Chats tab / desktop chat pane during transient
+        // instability and flipped every conversation to "offline". Peers
+        // repopulate naturally via PeerJoined / Members on (re)join, and we keep
+        // the open conversation visible — consistent with PeerDisconnected /
+        // PeerExpired above ("friends stay visible when offline"). The relay's
+        // own state is the source of truth for who's online.
+        debugPrint('[HOLLOW] Room cleared (non-destructive — peers/selection preserved)');
 
       case NetworkEvent_Listening(:final address):
         debugPrint('[HOLLOW] Listening: $address');

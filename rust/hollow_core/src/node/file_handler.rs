@@ -18,6 +18,12 @@ use super::gossip;
 use super::types::*;
 use super::ws_stream_transfer;
 
+/// Max automatic re-requests after a failed file decrypt/assembly before giving
+/// up and surfacing FileFailed to the UI. A transient truncation race (bytes not
+/// fully flushed on the sender/receiver under concurrent transfers) clears on the
+/// first or second retry; a genuinely corrupt source won't, so we cap it.
+const FILE_DECRYPT_MAX_RETRIES: u32 = 3;
+
 /// Handle NodeCommand::SendFile — the large file sending handler.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_send_file(
@@ -700,6 +706,8 @@ pub(crate) async fn handle_webrtc_transfer_complete(
     event_tx: &mpsc::Sender<NetworkEvent>,
     gossip_overlays: &mut HashMap<String, gossip::GossipOverlay>,
     webrtc_peers: &std::collections::HashSet<String>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -726,6 +734,8 @@ pub(crate) async fn handle_webrtc_transfer_complete(
         early_file_streams,
         bundle_keypair,
         event_tx,
+        ws_cmd_tx,
+        ws_room_peers,
         db_path,
         db_passphrase,
     ).await;
@@ -829,6 +839,8 @@ pub(crate) async fn handle_completed_stream(
     early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -845,6 +857,13 @@ pub(crate) async fn handle_completed_stream(
             hollow_log!("[HOLLOW-STREAM] Inbound file stream: {file_id} ({} bytes)", request.size);
 
             if let Some(pfs) = pending_file_streams.remove(&file_id) {
+                // Outcome of the decrypt attempt: Some(disk_path) on success, None on
+                // any failure (read error, bad key length, or GCM auth failure). A GCM
+                // failure here is usually a transient assembly/truncation race under
+                // concurrent transfers — the bytes on the source are fine — so we
+                // auto re-request rather than give up (see FILE_DECRYPT_MAX_RETRIES).
+                let mut decrypted_path: Option<String> = None;
+                let mut fail_reason = String::from("unreadable stream");
                 if let Ok(ciphertext) = tokio::fs::read(&request.temp_path).await {
                     let key_bytes = hex::decode(&pfs.aes_key).unwrap_or_default();
                     let nonce_bytes = hex::decode(&pfs.aes_nonce).unwrap_or_default();
@@ -855,31 +874,62 @@ pub(crate) async fn handle_completed_stream(
                             Ok(plaintext) => {
                                 let final_path = file_transfer::final_file_path(&file_id, &pfs.ext);
                                 if let Ok(()) = tokio::fs::write(&final_path, &plaintext).await {
+                                    let disk_path = final_path.to_string_lossy().to_string();
                                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                                        let disk_path = final_path.to_string_lossy().to_string();
                                         let _ = store.mark_file_complete(&file_id, &disk_path);
                                     }
-                                    let disk_path = final_path.to_string_lossy().to_string();
                                     hollow_log!("[HOLLOW-STREAM] File {file_id} complete: {disk_path}");
-                                    let _ = event_tx.send(NetworkEvent::FileCompleted {
-                                        file_id,
-                                        disk_path,
-                                    }).await;
+                                    decrypted_path = Some(disk_path);
                                 } else {
-                                    hollow_log!("[HOLLOW-STREAM] Failed to write decrypted file {file_id}");
+                                    fail_reason = "failed to write decrypted file".to_string();
                                 }
                             }
-                            Err(e) => {
-                                hollow_log!("[HOLLOW-STREAM] AES decrypt failed for {file_id}: {e}");
-                                let _ = event_tx.send(NetworkEvent::FileFailed {
+                            Err(e) => { fail_reason = format!("decrypt failed: {e}"); }
+                        }
+                    } else {
+                        fail_reason = "invalid AES key/nonce length".to_string();
+                    }
+                }
+                // The assembled stream is consumed either way.
+                let _ = std::fs::remove_file(&request.temp_path);
+
+                match decrypted_path {
+                    Some(disk_path) => {
+                        let _ = event_tx.send(NetworkEvent::FileCompleted { file_id, disk_path }).await;
+                    }
+                    None => {
+                        // Auto-retry: re-request from the sender, bounded. Re-insert the
+                        // PendingFileStream (incremented) so the re-arriving stream can
+                        // decrypt against the same key/nonce.
+                        if pfs.retry_count < FILE_DECRYPT_MAX_RETRIES
+                            && peer_is_reachable(ws_room_peers, &pfs.sender)
+                        {
+                            let next = pfs.retry_count + 1;
+                            hollow_log!(
+                                "[HOLLOW-STREAM] File {file_id} {fail_reason} — auto re-requesting (attempt {next}/{FILE_DECRYPT_MAX_RETRIES}) from {}",
+                                pfs.sender
+                            );
+                            let sender = pfs.sender.clone();
+                            let mut retry_pfs = pfs;
+                            retry_pfs.retry_count = next;
+                            pending_file_streams.insert(file_id.clone(), retry_pfs);
+                            send_message_to_peer(
+                                ws_cmd_tx, ws_room_peers,
+                                &sender, HavenMessage::FileRequest {
                                     file_id,
-                                    error: format!("Decrypt failed: {e}"),
-                                }).await;
-                            }
+                                    chunks: vec![],
+                                    offset: 0,
+                                },
+                            );
+                        } else {
+                            hollow_log!("[HOLLOW-STREAM] File {file_id} {fail_reason} — giving up after {} retries", pfs.retry_count);
+                            let _ = event_tx.send(NetworkEvent::FileFailed {
+                                file_id,
+                                error: fail_reason,
+                            }).await;
                         }
                     }
                 }
-                let _ = std::fs::remove_file(&request.temp_path);
             } else {
                 // WebRTC race: bytes arrived before FileHeader. Save for later.
                 hollow_log!("[HOLLOW-STREAM] No pending FileHeader for stream {file_id} — saving as early arrival");
@@ -1140,6 +1190,8 @@ pub(crate) async fn handle_envelope_file_header(
     aes_nonce: Option<String>,
     vthumb: Option<VideoThumbRef>,
     share_ref: Option<super::types::ShareRef>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -1190,6 +1242,7 @@ pub(crate) async fn handle_envelope_file_header(
             is_image: img,
             width: w,
             height: h,
+            retry_count: 0,
         });
         hollow_log!("[HOLLOW-FILE] Registered pending stream for {fid} (MLS streamed transfer)");
 
@@ -1208,6 +1261,7 @@ pub(crate) async fn handle_envelope_file_header(
                 pending_file_streams, pending_shard_streams,
                 &mut empty_vault_dl, early_file_streams,
                 bundle_keypair, event_tx,
+                ws_cmd_tx, ws_room_peers,
                 db_path, db_passphrase,
             ).await;
         }

@@ -833,7 +833,28 @@ class WebRtcService {
     final transfer = _transfers.remove(transferId);
     if (transfer == null) return;
 
-    transfer.sink.close().then((_) {
+    // Completion is triggered by the byte COUNTER (bytesReceived >= totalSize),
+    // which can fire before the async IOSink has durably flushed the tail to disk —
+    // especially when several transfers share Dart's file-I/O thread pool and a
+    // large transfer (e.g. an audio file) hogs the queue ahead of a small one.
+    // If we signal Rust before the last bytes land, Rust reads a SHORT ciphertext
+    // and AES-GCM rejects it (the trailing 16-byte auth tag is missing) → the
+    // transfer fails even though the bytes are otherwise fine. So after close(),
+    // VERIFY the on-disk length matches totalSize before handing off to Rust.
+    transfer.sink.close().then((_) async {
+      final ok = await _verifyFlushedSize(transfer.tempPath, transfer.totalSize);
+      if (!ok) {
+        _log('[HOLLOW-WEBRTC-DART] Receive INCOMPLETE on disk: $transferId '
+            '(expected ${transfer.totalSize} bytes) — treating as failed transfer');
+        try { File(transfer.tempPath).deleteSync(); } catch (_) {}
+        // Signal failure so Rust auto-retries the request (same as a transport drop).
+        network_api.webrtcTransferFailed(
+          transferId: transfer.transferId,
+          peerId: transfer.senderPeerId,
+          error: 'Incomplete on disk (flush verify failed)',
+        );
+        return;
+      }
       _log('[HOLLOW-WEBRTC-DART] Receive complete: $transferId (${transfer.bytesReceived} bytes)');
       onReceiveComplete?.call(
         transfer.transferId,
@@ -860,6 +881,26 @@ class WebRtcService {
         );
       }
     });
+  }
+
+  /// After sink.close(), the bytes should be flushed — but under concurrent
+  /// multi-file I/O the on-disk length can briefly lag. Re-check the file size a
+  /// few times with a short backoff before declaring the transfer short. Returns
+  /// true if the file reaches at least [expected] bytes.
+  Future<bool> _verifyFlushedSize(String path, int expected) async {
+    const attempts = 5;
+    for (var i = 0; i < attempts; i++) {
+      try {
+        final len = await File(path).length();
+        if (len >= expected) return true;
+      } catch (_) {
+        // File not visible yet — fall through to retry.
+      }
+      if (i < attempts - 1) {
+        await Future<void>.delayed(Duration(milliseconds: 20 * (i + 1)));
+      }
+    }
+    return false;
   }
 
   void _resetIdleTimer(String peerId) {

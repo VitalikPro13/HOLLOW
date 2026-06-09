@@ -4,6 +4,10 @@
 #include <cstdio>
 #include <cstring>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <atomic>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -281,41 +285,92 @@ static void leave_room(RelayState& state, const std::string& peer_id,
     }
 }
 
-// Fire-and-forget HTTP POST to localhost push sidecar (detached thread).
+// Push-sidecar notifier — a SINGLE persistent worker thread draining a queue,
+// instead of spawning a detached std::thread per push. Per-push thread creation
+// caused churn during DM/file-sync bursts (each push does a blocking connect/
+// send/recv with 2s timeouts); a single worker serializes those off the event
+// loop with no spawn overhead. The job is one blocking HTTP POST to localhost.
+namespace {
+
+struct PushJob {
+    std::string token;
+    std::string platform;
+    std::string sender;
+};
+
+// Cap the backlog so a wedged/slow sidecar can't grow the queue unbounded during
+// a flood — drop oldest beyond this (push is best-effort; the DM still delivers).
+constexpr size_t PUSH_QUEUE_MAX = 4096;
+
+std::deque<PushJob> g_push_queue;
+std::mutex g_push_mtx;
+std::condition_variable g_push_cv;
+std::atomic<bool> g_push_worker_started{false};
+
+void deliver_push(const PushJob& job) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return;
+
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(PUSH_SIDECAR_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(fd);
+        return;
+    }
+
+    json body = {{"token", job.token}, {"platform", job.platform}, {"sender", job.sender}};
+    std::string payload = body.dump();
+
+    std::string req = "POST /push HTTP/1.1\r\n"
+                      "Host: 127.0.0.1\r\n"
+                      "Content-Type: application/json\r\n"
+                      "Content-Length: " + std::to_string(payload.size()) + "\r\n"
+                      "Connection: close\r\n\r\n" + payload;
+
+    send(fd, req.data(), req.size(), MSG_NOSIGNAL);
+    char buf[128];
+    recv(fd, buf, sizeof(buf), 0);
+    close(fd);
+}
+
+void push_worker_loop() {
+    for (;;) {
+        PushJob job;
+        {
+            std::unique_lock<std::mutex> lock(g_push_mtx);
+            g_push_cv.wait(lock, [] { return !g_push_queue.empty(); });
+            job = std::move(g_push_queue.front());
+            g_push_queue.pop_front();
+        }
+        deliver_push(job);
+    }
+}
+
+} // namespace
+
+// Enqueue a push for the persistent worker (fire-and-forget, off the event loop).
 static void notify_push_sidecar(const std::string& token, const std::string& platform,
                                  const std::string& sender) {
-    std::thread([token, platform, sender]() {
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) return;
-
-        struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(PUSH_SIDECAR_PORT);
-        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-
-        if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-            close(fd);
-            return;
+    // Lazily start the single worker thread on first push.
+    bool expected = false;
+    if (g_push_worker_started.compare_exchange_strong(expected, true)) {
+        std::thread(push_worker_loop).detach();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_push_mtx);
+        if (g_push_queue.size() >= PUSH_QUEUE_MAX) {
+            g_push_queue.pop_front(); // drop oldest — push is best-effort
         }
-
-        json body = {{"token", token}, {"platform", platform}, {"sender", sender}};
-        std::string payload = body.dump();
-
-        std::string req = "POST /push HTTP/1.1\r\n"
-                          "Host: 127.0.0.1\r\n"
-                          "Content-Type: application/json\r\n"
-                          "Content-Length: " + std::to_string(payload.size()) + "\r\n"
-                          "Connection: close\r\n\r\n" + payload;
-
-        send(fd, req.data(), req.size(), MSG_NOSIGNAL);
-        char buf[128];
-        recv(fd, buf, sizeof(buf), 0);
-        close(fd);
-    }).detach();
+        g_push_queue.push_back(PushJob{token, platform, sender});
+    }
+    g_push_cv.notify_one();
 }
 
 // Build the 0x06 direct-message frame the receiver expects:
@@ -835,6 +890,23 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
             }
         }
         send_json(ws, {{"type", "peer_status"}, {"online", online_peers}, {"active_rooms", active_rooms}});
+    } else if (type == "discover_peers") {
+        // Peer discovery over the LIVE WS connection (replaces the HTTP /bootstrap
+        // poll, which paid a fresh TLS handshake per request and could stall under
+        // a WS frame burst on the single event loop). Returns the peers currently
+        // connected to the given WS room. Cheap: one map lookup + bounded copy, no
+        // new connection, no blocking I/O.
+        const std::string room = j.value("room", "");
+        json peers = json::array();
+        if (!room.empty()) {
+            auto rit = state.ws_rooms.find(room);
+            if (rit != state.ws_rooms.end()) {
+                for (const auto& [pid, sock] : rit->second.peers) {
+                    if (pid != data->peer_id) peers.push_back(pid);  // exclude self
+                }
+            }
+        }
+        send_json(ws, {{"type", "discovered_peers"}, {"room", room}, {"peers", peers}});
     } else if (type == "subscribe") {
         handle_subscribe(data, j.value("room", ""),
                          j.contains("topics") ? j["topics"] : json::array());

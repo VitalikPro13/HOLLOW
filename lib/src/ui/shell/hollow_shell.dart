@@ -597,26 +597,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
     final relayDomain = ref.read(relayDomainProvider);
     await network_api.setRelayUrl(domain: relayDomain);
-
-    // License key gate — check relay status and prompt if required.
     await ref.read(licenseKeyProvider.notifier).loadCached();
-    final relayStatus = await fetchRelayStatus(domain: relayDomain);
-    if (relayStatus.licenseRequired) {
-      var cachedKey = ref.read(licenseKeyProvider);
-      if (cachedKey == null && mounted) {
-        final enteredKey = await showLicenseKeyDialog(context);
-        if (!mounted) return;
-        if (enteredKey != null) {
-          await ref.read(licenseKeyProvider.notifier).setKey(enteredKey);
-          cachedKey = enteredKey;
-        } else {
-          return;
-        }
-      }
-      if (cachedKey != null) {
-        await network_api.setLicenseKey(key: cachedKey);
-      }
-    }
+
+    // ── LOCAL-FIRST RENDER ────────────────────────────────────────────────
+    // Load everything the conversation/server list needs from the LOCAL DB
+    // FIRST, before any network call. These are pure SQLCipher reads and don't
+    // need connectivity — populating them up front means the UI shows your
+    // servers/friends/DMs instantly instead of looking like it's "connecting"
+    // while a blocking relay-status HTTP call (below, up to 5s) runs.
 
     // Load servers from local DB (needed for unread computation).
     await ref.read(serverListProvider.notifier).loadFromDb();
@@ -639,6 +627,45 @@ class _HollowShellState extends ConsumerState<HollowShell>
       debugPrint('[HOLLOW] Failed to load unread state: $e');
     }
 
+    // Cached user profiles + friends list (the DM/conversation list source).
+    // Pure local reads — load before the network so the list renders immediately.
+    await ref.read(profileProvider.notifier).loadAll();
+    await ref.read(friendsProvider.notifier).loadAll();
+
+    // Pre-load last message per DM peer for home dashboard / conversation previews.
+    final earlyAcceptedPeerIds = ref
+        .read(friendsProvider)
+        .values
+        .where((f) => f.status == 'accepted')
+        .map((f) => f.peerId)
+        .toList();
+    if (earlyAcceptedPeerIds.isNotEmpty) {
+      ref.read(chatProvider.notifier).loadLastMessagePreviews(earlyAcceptedPeerIds);
+    }
+
+    // ── NETWORK PHASE (after local UI is already populated) ───────────────
+    // License key gate — check relay status and prompt if required. This is the
+    // blocking HTTP call (5s timeout) that previously sat in front of the local
+    // loads; it now runs after the UI is rendered. Non-fatal on failure
+    // (fetchRelayStatus swallows errors and returns license-not-required).
+    final relayStatus = await fetchRelayStatus(domain: relayDomain);
+    if (relayStatus.licenseRequired) {
+      var cachedKey = ref.read(licenseKeyProvider);
+      if (cachedKey == null && mounted) {
+        final enteredKey = await showLicenseKeyDialog(context);
+        if (!mounted) return;
+        if (enteredKey != null) {
+          await ref.read(licenseKeyProvider.notifier).setKey(enteredKey);
+          cachedKey = enteredKey;
+        } else {
+          return;
+        }
+      }
+      if (cachedKey != null) {
+        await network_api.setLicenseKey(key: cachedKey);
+      }
+    }
+
     await ref.read(nodeProvider.notifier).start();
 
     // Load invisible mode preference (non-blocking — Rust already loaded it
@@ -653,8 +680,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final serverIds = ref.read(serverListProvider).keys.toList();
     ref.read(serverAvatarProvider.notifier).loadAll(serverIds);
 
-    // Load cached user profiles into memory.
-    await ref.read(profileProvider.notifier).loadAll();
+    // (profiles + friends + DM previews already loaded above in the local-first
+    // render phase, before the network calls.)
 
     // Load theme mode, accent color, background, local nicknames.
     await ref.read(themeModeProvider.notifier).load();
@@ -664,22 +691,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await ref.read(localNicknameProvider.notifier).loadAll();
     setLocalNicknamesRef(ref.read(localNicknameProvider));
 
-    // Load friends list from local DB.
-    await ref.read(friendsProvider.notifier).loadAll();
-
     // Load share entries so hollow://share cards in chat show correct state.
     ref.read(shareTabProvider.notifier).loadAll();
-
-    // Pre-load last message per DM peer for home dashboard previews.
-    final acceptedPeerIds = ref
-        .read(friendsProvider)
-        .values
-        .where((f) => f.status == 'accepted')
-        .map((f) => f.peerId)
-        .toList();
-    if (acceptedPeerIds.isNotEmpty) {
-      ref.read(chatProvider.notifier).loadLastMessagePreviews(acceptedPeerIds);
-    }
 
     // Load favourite friends order from local DB.
     await ref.read(favouriteFriendsProvider.notifier).load();

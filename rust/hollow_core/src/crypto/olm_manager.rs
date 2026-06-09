@@ -164,6 +164,10 @@ impl OlmManager {
         let plaintext = session
             .decrypt(&olm_msg)
             .map_err(|e| format!("Decryption failed: {e}"))?;
+        // A successful decrypt proves the peer replied to our PreKey, so an
+        // outbound-only session is now confirmed bidirectional. (SessionAck is the
+        // usual confirmation, but any decryptable reply counts.)
+        self.outbound_only.remove(peer_id);
         self.session_last_used.insert(peer_id.to_string(), Instant::now());
         Ok(plaintext)
     }
@@ -188,9 +192,26 @@ impl OlmManager {
             .map_err(|e| format!("PreKey decrypt with existing session failed: {e}"))
     }
 
-    /// Check if we have an established session with a peer.
+    /// Check if we have any session object for a peer (may be unconfirmed
+    /// outbound-only, i.e. the peer may not yet hold the matching half).
     pub fn has_session(&self, peer_id: &str) -> bool {
         self.sessions.contains_key(peer_id)
+    }
+
+    /// Check if we have a session that is CONFIRMED bidirectional — either
+    /// inbound-derived, or outbound that the peer has acknowledged (SessionAck /
+    /// a decrypted reply cleared it from `outbound_only`). Only such a session is
+    /// proven decryptable by the peer; an outbound-only session is "pending" and
+    /// must not be reported to the UI as established.
+    pub fn has_confirmed_session(&self, peer_id: &str) -> bool {
+        self.sessions.contains_key(peer_id) && !self.outbound_only.contains(peer_id)
+    }
+
+    /// Check if we have an outbound-only (unconfirmed) session — we sent a PreKey
+    /// but the peer has not yet confirmed by replying. Used to decide whether a
+    /// repeated KeyRequest from the peer should tear down and re-handshake.
+    pub fn has_unconfirmed_session(&self, peer_id: &str) -> bool {
+        self.sessions.contains_key(peer_id) && self.outbound_only.contains(peer_id)
     }
 
     /// Remove an existing session (e.g., to replace it).
@@ -200,19 +221,21 @@ impl OlmManager {
         self.session_last_used.remove(peer_id);
     }
 
-    /// Remove sessions not used within the given TTL. Returns count pruned.
-    pub fn prune_stale_sessions(&mut self, ttl: Duration) -> usize {
+    /// Remove sessions not used within the given TTL. Returns the pruned peer IDs
+    /// so the caller can clear any related per-peer bookkeeping (e.g. in-flight
+    /// key-request timestamps) — otherwise a stale flag could block the next
+    /// handshake after the session is gone.
+    pub fn prune_stale_sessions(&mut self, ttl: Duration) -> Vec<String> {
         let stale: Vec<String> = self.session_last_used.iter()
             .filter(|(_, last)| last.elapsed() > ttl)
             .map(|(id, _)| id.clone())
             .collect();
-        let count = stale.len();
         for peer_id in &stale {
             self.sessions.remove(peer_id);
             self.outbound_only.remove(peer_id);
             self.session_last_used.remove(peer_id);
         }
-        count
+        stale
     }
 
     /// Mark a session as bidirectional (no longer outbound-only).
@@ -431,6 +454,68 @@ mod tests {
             let (mt, _) = alice.encrypt("bob", format!("Chunk {i}").as_bytes()).unwrap();
             assert_eq!(mt, 1, "Inbound-derived session should always produce Normal (type 1)");
         }
+    }
+
+    #[test]
+    fn test_confirmed_vs_unconfirmed_session_state() {
+        // An outbound session is UNCONFIRMED until the peer replies. has_session is
+        // true but has_confirmed_session is false. After decrypting any reply (or a
+        // SessionAck via mark_session_bidirectional) it becomes confirmed.
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+
+        let bob_id = bob.identity_key_base64();
+        let bob_otk = bob.generate_one_time_key();
+
+        // Alice creates outbound session → unconfirmed.
+        alice.create_outbound_session("bob", &bob_id, &bob_otk).unwrap();
+        assert!(alice.has_session("bob"));
+        assert!(alice.has_unconfirmed_session("bob"));
+        assert!(!alice.has_confirmed_session("bob"), "outbound-only must NOT be confirmed");
+
+        // Alice sends PreKey; Bob builds inbound (immediately confirmed on Bob's side).
+        let (_mt, ct) = alice.encrypt("bob", b"Hello").unwrap();
+        let alice_id = alice.identity_key_base64();
+        bob.create_inbound_session("alice", &alice_id, &ct).unwrap();
+        assert!(bob.has_confirmed_session("alice"), "inbound-derived session is confirmed");
+        assert!(!bob.has_unconfirmed_session("alice"));
+
+        // Bob replies; Alice decrypts → Alice's session becomes confirmed.
+        let (mt2, ct2) = bob.encrypt("alice", b"Reply").unwrap();
+        alice.decrypt("bob", mt2, &ct2).unwrap();
+        assert!(alice.has_confirmed_session("bob"), "decrypting a reply confirms the session");
+        assert!(!alice.has_unconfirmed_session("bob"));
+    }
+
+    #[test]
+    fn test_mark_bidirectional_confirms_session() {
+        // SessionAck path: mark_session_bidirectional flips an unconfirmed outbound
+        // session to confirmed without needing a decrypt.
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+        let bob_id = bob.identity_key_base64();
+        let bob_otk = bob.generate_one_time_key();
+
+        alice.create_outbound_session("bob", &bob_id, &bob_otk).unwrap();
+        assert!(alice.has_unconfirmed_session("bob"));
+        alice.mark_session_bidirectional("bob");
+        assert!(alice.has_confirmed_session("bob"));
+        assert!(!alice.has_unconfirmed_session("bob"));
+    }
+
+    #[test]
+    fn test_prune_returns_pruned_peer_ids() {
+        // prune_stale_sessions returns the pruned peer IDs so the caller can clear
+        // related bookkeeping. With a zero TTL, an existing session is pruned.
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+        let bob_id = bob.identity_key_base64();
+        let bob_otk = bob.generate_one_time_key();
+        alice.create_outbound_session("bob", &bob_id, &bob_otk).unwrap();
+
+        let pruned = alice.prune_stale_sessions(Duration::from_secs(0));
+        assert_eq!(pruned, vec!["bob".to_string()]);
+        assert!(!alice.has_session("bob"));
     }
 
     #[test]

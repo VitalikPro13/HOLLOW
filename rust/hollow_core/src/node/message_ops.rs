@@ -20,7 +20,7 @@ pub(crate) async fn handle_send_message(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
-    key_request_in_flight: &mut HashSet<String>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
@@ -130,14 +130,19 @@ pub(crate) async fn handle_send_message(
             .or_default()
             .push(envelope_json);
 
-        if !key_request_in_flight.contains(&peer_id_str) {
+        let req_fresh = key_request_in_flight
+            .get(&peer_id_str)
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(10));
+        if !req_fresh {
             hollow_log!("[HOLLOW-SWARM] No session for {peer_id_str}, sending KeyRequest");
+            // Only mark in-flight if we actually sent it — peer_is_reachable gates
+            // the send, so don't strand the timestamp on an unreachable peer.
             if peer_is_reachable(ws_room_peers, &peer_id_str) {
                 send_message_to_peer(
                     ws_cmd_tx, ws_room_peers,
                     &peer_id_str, HavenMessage::KeyRequest,
                 );
-                key_request_in_flight.insert(peer_id_str.clone());
+                key_request_in_flight.insert(peer_id_str.clone(), std::time::Instant::now());
             }
         }
     }

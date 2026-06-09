@@ -41,6 +41,9 @@ pub enum WsCommand {
     SendToRoomTopic { room_code: String, topic: String, data: Vec<u8> },
     /// Ask the relay which peers/rooms are actually alive.
     CheckPeers { peers: Vec<String>, rooms: Vec<String> },
+    /// Ask the relay for the peers currently connected to a room, over the live
+    /// WS connection (replaces the HTTP /bootstrap poll — no fresh TLS handshake).
+    DiscoverPeers { room_code: String },
     /// Claim a temporary nickname on the relay (RAM only).
     ClaimNickname { nickname: String },
     /// Release the currently claimed nickname.
@@ -73,6 +76,8 @@ pub enum WsEvent {
     RoomCapHit { room: String },
     /// Response to CheckPeers — which peers/rooms are actually alive.
     PeerStatus { online: Vec<String>, active_rooms: Vec<String> },
+    /// Response to DiscoverPeers — peers currently in the given room.
+    DiscoveredPeers { room: String, peers: Vec<String> },
     /// Temporary nickname successfully claimed.
     NicknameClaimed { nickname: String },
     /// Temporary nickname released.
@@ -115,6 +120,7 @@ enum ServerMsg {
     PeerLeft { room: String, peer_id: String },
     Members { room: String, peers: Vec<String> },
     PeerStatus { online: Vec<String>, active_rooms: Vec<String> },
+    DiscoveredPeers { room: String, peers: Vec<String> },
     Error { error: String },
     NicknameClaimed { nickname: String },
     NicknameReleased,
@@ -429,6 +435,18 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
+        WsCommand::DiscoverPeers { room_code } => {
+            let msg = serde_json::json!({
+                "type": "discover_peers",
+                "room": room_code,
+            });
+            let text = msg.to_string();
+            if let Err(e) = write.send(Message::Text(text.into())).await {
+                hollow_log!("[HOLLOW-WS] DiscoverPeers send failed: {e}");
+                return false;
+            }
+            return true;
+        }
         WsCommand::Subscribe { room_code, topics } => {
             let msg = serde_json::json!({
                 "type": "subscribe",
@@ -608,6 +626,10 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
         ServerMsg::PeerStatus { online, active_rooms } => {
             hollow_log!("[HOLLOW-WS] PeerStatus: {} online, {} active rooms", online.len(), active_rooms.len());
             WsEvent::PeerStatus { online, active_rooms }
+        }
+        ServerMsg::DiscoveredPeers { room, peers } => {
+            hollow_log!("[HOLLOW-WS] DiscoveredPeers: {} peers in room {room}", peers.len());
+            WsEvent::DiscoveredPeers { room, peers }
         }
         ServerMsg::Error { error } => {
             hollow_log!("[HOLLOW-WS] Server error: {error}");

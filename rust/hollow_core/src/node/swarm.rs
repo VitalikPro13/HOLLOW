@@ -6,6 +6,26 @@ use tokio::sync::mpsc;
 
 const MLS_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long an in-flight Olm KeyRequest is considered "live" before the
+/// session-reconciliation sweep is allowed to resend it. The relay never ACKs a
+/// direct message, so a dropped KeyRequest/KeyBundle would otherwise strand the
+/// in-flight flag forever (recoverable only by a full relay reconnect). Mirrors
+/// MLS_BOOTSTRAP_TIMEOUT — same timestamped-retry idiom.
+const OLM_KEY_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Returns true if we have a KeyRequest in flight to `peer` that is still fresh
+/// (sent within OLM_KEY_REQUEST_TIMEOUT). A stale or absent entry returns false,
+/// allowing a resend. `key_request_in_flight` maps peer_id -> when the request
+/// was sent.
+fn key_request_is_fresh(
+    key_request_in_flight: &HashMap<String, std::time::Instant>,
+    peer: &str,
+) -> bool {
+    key_request_in_flight
+        .get(peer)
+        .is_some_and(|t| t.elapsed() < OLM_KEY_REQUEST_TIMEOUT)
+}
+
 use crate::crdt::hlc::Hlc;
 use crate::crdt::operations::{CrdtPayload, Permission};
 use crate::crdt::server_state::ServerState;
@@ -107,7 +127,10 @@ async fn run_event_loop(
     let mut pending_messages: HashMap<String, Vec<String>> = HashMap::new();
 
     // Track which peers have an active key request in flight (avoid duplicate requests).
-    let mut key_request_in_flight: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Maps peer_id -> when the KeyRequest was sent. Entries older than
+    // OLM_KEY_REQUEST_TIMEOUT are treated as stale so the reconciliation sweep can
+    // resend (the relay never ACKs, so a dropped frame must self-heal via retry).
+    let mut key_request_in_flight: HashMap<String, std::time::Instant> = HashMap::new();
     // Track peers we've sent a KeyBundle to (for glare detection at KeyBundle reception).
     let mut key_bundle_sent_to: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1133,6 +1156,7 @@ async fn run_event_loop(
                                 &mut pending_vault_downloads, &mut early_file_streams,
                                 &bundle_keypair, &event_tx,
                                 &mut gossip_overlays, &webrtc_peers,
+                                &ws_cmd_tx, &ws_room_peers,
                                 &db_path, &db_passphrase,
                             ).await;
                         }
@@ -1311,11 +1335,9 @@ async fn run_event_loop(
             Some(sig_event) = sig_event_rx.recv() => {
                 match sig_event {
                     SignalingEvent::BootstrapPeers { peers } => {
-                        let _ = event_tx
-                            .send(NetworkEvent::Error {
-                                message: format!("[DEBUG] Bootstrap returned {} peers", peers.len()),
-                            })
-                            .await;
+                        // Discovery result — log quietly, never as a user-facing Error
+                        // event (0 peers is normal when everyone's already connected via WS).
+                        hollow_log!("[HOLLOW-SIGNALING] Bootstrap returned {} peers", peers.len());
                         for bp in peers {
                             // Skip ourselves.
                             if bp.peer_id == local_peer_str {
@@ -1547,8 +1569,12 @@ async fn run_event_loop(
                                         &db_path, &db_passphrase,
                                     );
 
-                                    // Proactive key exchange if no Olm session.
-                                    if olm.has_session(&peer_id) {
+                                    // Proactive key exchange if no CONFIRMED Olm session.
+                                    // An outbound-only session is NOT proof the peer can decrypt
+                                    // us — only a confirmed (bidirectional) session is. Reporting
+                                    // SessionEstablished for an unconfirmed session is the bug where
+                                    // "A writes and B doesn't see it" (B never built its half).
+                                    if olm.has_confirmed_session(&peer_id) {
                                         let _ = event_tx.send(NetworkEvent::SessionEstablished {
                                             peer_id: peer_id.clone(),
                                         }).await;
@@ -1570,14 +1596,16 @@ async fn run_event_loop(
                                             &crdt_store,
                                             &db_path, &db_passphrase,
                                         ).await;
-                                    } else if !key_request_in_flight.contains(&peer_id) {
-                                        // No Olm session — send KeyRequest via WS.
+                                    } else if !key_request_is_fresh(&key_request_in_flight, &peer_id) {
+                                        // No session, or only an unconfirmed outbound session — send
+                                        // (or resend, if the prior request went stale) a KeyRequest.
+                                        // The reconciliation sweep will retry if this frame is dropped.
                                         hollow_log!("[HOLLOW-WS] Proactive key exchange for {peer_id}");
                                         send_message_to_peer(
                                             &ws_cmd_tx, &ws_room_peers,
                                             &peer_id, HavenMessage::KeyRequest,
                                         );
-                                        key_request_in_flight.insert(peer_id.clone());
+                                        key_request_in_flight.insert(peer_id.clone(), std::time::Instant::now());
                                     }
 
                                     // CRDT sync + message sync for shared servers.
@@ -1999,7 +2027,7 @@ async fn run_event_loop(
                                     // RoomMembers fires on the JOINING peer (us) while PeerJoined
                                     // fires on the EXISTING peer (them). Without this, DM sync is
                                     // one-directional: they ask us, but we never ask them.
-                                    if olm.has_session(pid_str) {
+                                    if olm.has_confirmed_session(pid_str) {
                                         let _ = event_tx.send(NetworkEvent::SessionEstablished {
                                             peer_id: pid_str.clone(),
                                         }).await;
@@ -2021,13 +2049,13 @@ async fn run_event_loop(
                                             &crdt_store,
                                             &db_path, &db_passphrase,
                                         ).await;
-                                    } else if !key_request_in_flight.contains(pid_str) {
+                                    } else if !key_request_is_fresh(&key_request_in_flight, pid_str) {
                                         hollow_log!("[HOLLOW-WS] RoomMembers: proactive key exchange for {pid_str}");
                                         send_message_to_peer(
                                             &ws_cmd_tx, &ws_room_peers,
                                             pid_str, HavenMessage::KeyRequest,
                                         );
-                                        key_request_in_flight.insert(pid_str.clone());
+                                        key_request_in_flight.insert(pid_str.clone(), std::time::Instant::now());
                                     }
 
                                     // DM sync: ask this peer for messages we missed.
@@ -2077,6 +2105,7 @@ async fn run_event_loop(
                                 &mut early_file_streams,
                                 &bundle_keypair,
                                 &event_tx,
+                                &ws_cmd_tx, &ws_room_peers,
                                 &db_path, &db_passphrase,
                             ).await;
                         }
@@ -2105,6 +2134,30 @@ async fn run_event_loop(
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                                 room_code: format!("inbox:{}", local_peer),
                             });
+                        }
+                    }
+                    WsEvent::DiscoveredPeers { room, peers } => {
+                        // Peer discovery over the live WS connection (replaces HTTP
+                        // /bootstrap). Populate ws_room_peers and proactively key-exchange
+                        // with any peer we lack a confirmed session for — reusing the same
+                        // freshness guard as the reconciliation sweep so a dropped frame
+                        // self-heals. Mirrors the members-on-join flow for an explicit refresh.
+                        hollow_log!("[HOLLOW-WS] Discovered {} peers in room {room}", peers.len());
+                        let room_set = ws_room_peers.entry(room.clone()).or_default();
+                        for pid in &peers {
+                            if *pid != local_peer_str {
+                                room_set.insert(pid.clone());
+                            }
+                        }
+                        for pid in &peers {
+                            if *pid == local_peer_str { continue; }
+                            if !olm.has_confirmed_session(pid)
+                                && !key_request_is_fresh(&key_request_in_flight, pid)
+                            {
+                                hollow_log!("[HOLLOW-WS] DiscoveredPeers: key exchange for {pid}");
+                                send_message_to_peer(&ws_cmd_tx, &ws_room_peers, pid, HavenMessage::KeyRequest);
+                                key_request_in_flight.insert(pid.clone(), std::time::Instant::now());
+                            }
                         }
                     }
                     WsEvent::NicknameClaimed { nickname } => {
@@ -2649,7 +2702,22 @@ async fn run_event_loop(
 
             // Periodic re-bootstrap for signaling re-registration.
             _ = rebootstrap_timer.tick() => {
-                // Re-bootstrap signaling rooms to discover new peers.
+                // Primary peer discovery now rides the LIVE WS connection (no fresh TLS
+                // handshake — fixes the bootstrap stall under WS frame bursts). The HTTP
+                // bootstrap below is kept as a non-fatal fallback (legacy address-based
+                // discovery); its failures are logged quietly and never surfaced.
+                if let Some(room) = &active_room {
+                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::DiscoverPeers {
+                        room_code: room.clone(),
+                    });
+                }
+                for sid in server_states.keys() {
+                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::DiscoverPeers {
+                        room_code: sid.clone(),
+                    });
+                }
+
+                // Re-bootstrap signaling rooms (HTTP, non-fatal fallback).
                 if let Some(room) = &active_room {
                     let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
                         room_code: room.clone(),
@@ -2659,6 +2727,51 @@ async fn run_event_loop(
                     let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
                         room_code: sid.clone(),
                     }).await;
+                }
+
+                // ── Olm session reconciliation sweep (self-heal) ──────────────
+                // The relay never ACKs a direct message, so a dropped KeyRequest/
+                // KeyBundle/SessionAck/PreKey would otherwise strand the handshake
+                // until BOTH peers restart (the only thing that clears the in-flight
+                // map is a relay disconnect). This sweep repairs that: for every
+                // online peer we have a relationship with but NO confirmed Olm
+                // session, resend a KeyRequest once the prior request goes stale.
+                // Heals wedges: stuck in-flight flag, dropped glare PreKey, and the
+                // post-reconnect drain race.
+                {
+                    // Online peers across all rooms (deduped), excluding ourselves.
+                    let mut online: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    for peers in ws_room_peers.values() {
+                        for p in peers {
+                            if p.as_str() != local_peer_str {
+                                online.insert(p.clone());
+                            }
+                        }
+                    }
+                    for peer in &online {
+                        // Only reconcile peers we actually have a relationship with —
+                        // a shared-server member, a peer with queued DMs, or one with a
+                        // half-built (unconfirmed) session. Avoids spamming co-room
+                        // strangers (e.g. public-channel guests we never DM).
+                        let is_member = server_states.values()
+                            .any(|s| s.members.contains_key(peer));
+                        let has_pending = pending_messages.contains_key(peer);
+                        let half_session = olm.has_unconfirmed_session(peer);
+                        if !(is_member || has_pending || half_session) {
+                            continue;
+                        }
+                        // Confirmed session → nothing to do.
+                        if olm.has_confirmed_session(peer) {
+                            continue;
+                        }
+                        // A fresh request is still outstanding → give it time.
+                        if key_request_is_fresh(&key_request_in_flight, peer) {
+                            continue;
+                        }
+                        hollow_log!("[HOLLOW-CRYPTO] Reconciliation sweep: re-keying online peer {peer} (no confirmed session)");
+                        send_message_to_peer(&ws_cmd_tx, &ws_room_peers, peer, HavenMessage::KeyRequest);
+                        key_request_in_flight.insert(peer.clone(), std::time::Instant::now());
+                    }
                 }
 
                 // Every 10th tick (~5 min): evict stale entries from in-memory HashMaps.
@@ -2690,8 +2803,15 @@ async fn run_event_loop(
                     }
                     let olm_ttl = Duration::from_secs(7 * 24 * 3600);
                     let pruned = olm.prune_stale_sessions(olm_ttl);
-                    if pruned > 0 {
-                        hollow_log!("[HOLLOW-OLM] Pruned {pruned} stale Olm sessions (>7d inactive)");
+                    if !pruned.is_empty() {
+                        hollow_log!("[HOLLOW-OLM] Pruned {} stale Olm sessions (>7d inactive)", pruned.len());
+                        // Clear per-peer handshake bookkeeping for pruned peers so the
+                        // reconciliation sweep can cleanly re-handshake if they're still
+                        // online (a leftover in-flight/cooldown entry would block it).
+                        for peer in &pruned {
+                            key_request_in_flight.remove(peer);
+                            decrypt_fail_cooldown.remove(peer);
+                        }
                     }
                 }
             }
@@ -3167,7 +3287,7 @@ async fn handle_incoming_request(
     crdt_store: &super::crdt_store::CrdtStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     pending_messages: &mut HashMap<String, Vec<String>>,
-    key_request_in_flight: &mut std::collections::HashSet<String>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
     key_bundle_sent_to: &mut std::collections::HashSet<String>,
     server_states: &mut HashMap<String, ServerState>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
@@ -3206,14 +3326,34 @@ async fn handle_incoming_request(
 
     match request {
         HavenMessage::KeyRequest => {
-            if olm.has_session(peer_str) {
-                hollow_log!("[HOLLOW-CRYPTO] Already have session with {peer_str}, ignoring KeyRequest");
+            // A peer asking for a key bundle means THEIR side has no usable session.
+            // If we hold a CONFIRMED session, our half is stale relative to theirs
+            // (they pruned / lost / restarted) — silently ignoring it strands both
+            // sides until a mutual restart. Tear ours down and re-handshake. If we
+            // only have an UNCONFIRMED outbound session, the peer never got our
+            // PreKey — also rebuild. A decrypt-fail-style cooldown prevents a
+            // KeyRequest flood from thrashing the session.
+            let now = std::time::Instant::now();
+            let cooldown_ok = match decrypt_fail_cooldown.get(peer_str) {
+                Some(last) => now.duration_since(*last) >= Duration::from_secs(5),
+                None => true,
+            };
+            if olm.has_confirmed_session(peer_str) && !cooldown_ok {
+                hollow_log!("[HOLLOW-CRYPTO] KeyRequest from {peer_str} but confirmed session + cooldown active, ignoring");
             } else {
+                if olm.has_session(peer_str) {
+                    // Drop our (now-known-stale) half before re-bundling so the new
+                    // inbound session the peer builds isn't shadowed by a dead one.
+                    hollow_log!("[HOLLOW-CRYPTO] KeyRequest from {peer_str} while we hold a session — peer lost theirs, re-keying");
+                    olm.remove_session(peer_str);
+                    decrypt_fail_cooldown.insert(peer_str.to_string(), now);
+                }
                 let otk = olm.generate_one_time_key();
                 let identity_key = olm.identity_key_base64();
                 if let Ok(pickle) = olm.account_pickle_json() {
                     crypto_store.save_account(pickle);
                 }
+                persist_crypto_state(olm, crypto_store, peer_str);
                 key_bundle_sent_to.insert(peer_str.to_string());
                 send_message_to_peer(ws_cmd_tx, ws_room_peers, peer_str, HavenMessage::KeyBundle {
                     identity_key, one_time_key: otk,
@@ -3232,19 +3372,25 @@ async fn handle_incoming_request(
                 // would create outbound sessions → MAC mismatch. The lower peer ID
                 // creates the outbound session; we're higher, so we wait for their
                 // PreKey/SessionAck to create an inbound session instead.
-                hollow_log!("[HOLLOW-CRYPTO] KeyBundle glare with {peer_str} — we're higher, skipping outbound (will use their PreKey)");
-                key_request_in_flight.remove(peer_str);
+                //
+                // Do NOT clear key_request_in_flight here: if the low peer's PreKey/
+                // SessionAck is dropped, clearing it would strand us sessionless with
+                // no retry. Instead REFRESH the timestamp so the reconciliation sweep
+                // re-requests once the deferral window lapses.
+                hollow_log!("[HOLLOW-CRYPTO] KeyBundle glare with {peer_str} — we're higher, deferring to their PreKey (sweep will retry if dropped)");
+                key_request_in_flight.insert(peer_str.to_string(), std::time::Instant::now());
             } else {
                 key_bundle_sent_to.remove(peer_str);
                 match olm.create_outbound_session(peer_str, &identity_key, &one_time_key) {
                     Ok(()) => {
-                        hollow_log!("[HOLLOW-CRYPTO] Created outbound session with {peer_str} via KeyBundle");
+                        hollow_log!("[HOLLOW-CRYPTO] Created outbound (unconfirmed) session with {peer_str} via KeyBundle");
                         persist_crypto_state(olm, crypto_store, peer_str);
-                        key_request_in_flight.remove(peer_str);
-
-                        let _ = event_tx.send(NetworkEvent::SessionEstablished {
-                            peer_id: peer_str.to_string(),
-                        }).await;
+                        // Keep key_request_in_flight set (refreshed): the session is
+                        // outbound-only/unconfirmed until the peer replies (SessionAck or
+                        // any decrypt). If our PreKey is dropped, the sweep resends.
+                        // Do NOT emit SessionEstablished yet — that would be the optimistic
+                        // "A sends, B never sees it" bug. Confirmation happens on SessionAck.
+                        key_request_in_flight.insert(peer_str.to_string(), std::time::Instant::now());
 
                         // Send encrypted SessionAck to upgrade the ratchet.
                         let ack_json = serde_json::to_string(&MessageEnvelope::SessionAck)
@@ -3371,8 +3517,8 @@ async fn handle_incoming_request(
                                     if should_rekey {
                                         hollow_log!("[HOLLOW-CRYPTO] PreKey session creation also failed for {peer_str}: {e2} — initiating re-key");
                                         decrypt_fail_cooldown.insert(peer_str.to_string(), now);
-                                        if !key_request_in_flight.contains(peer_str) {
-                                            key_request_in_flight.insert(peer_str.to_string());
+                                        if !key_request_is_fresh(key_request_in_flight, peer_str) {
+                                            key_request_in_flight.insert(peer_str.to_string(), now);
                                             send_message_to_peer(
                                                 ws_cmd_tx, ws_room_peers,
                                                 peer_str, HavenMessage::KeyRequest,
@@ -3430,8 +3576,8 @@ async fn handle_incoming_request(
                             if should_rekey {
                                 hollow_log!("[HOLLOW-CRYPTO] PreKey session creation failed for {peer_str}: {e} — initiating re-key");
                                 decrypt_fail_cooldown.insert(peer_str.to_string(), now);
-                                if !key_request_in_flight.contains(peer_str) {
-                                    key_request_in_flight.insert(peer_str.to_string());
+                                if !key_request_is_fresh(key_request_in_flight, peer_str) {
+                                    key_request_in_flight.insert(peer_str.to_string(), now);
                                     send_message_to_peer(
                                         ws_cmd_tx, ws_room_peers,
                                         peer_str, HavenMessage::KeyRequest,
@@ -3446,8 +3592,21 @@ async fn handle_incoming_request(
                 }
             } else {
                 // Normal encrypted message — decrypt with existing session.
+                // Capture confirmation transition: if this was an unconfirmed outbound
+                // session, a successful decrypt proves the peer replied (decrypt() clears
+                // outbound_only internally), so we can now report SessionEstablished.
+                let was_unconfirmed = olm.has_unconfirmed_session(&peer_str);
                 match olm.decrypt(&peer_str, message_type, &ciphertext) {
-                    Ok(pt) => pt,
+                    Ok(pt) => {
+                        if was_unconfirmed {
+                            hollow_log!("[HOLLOW-CRYPTO] Session with {peer_str} confirmed via decrypted reply");
+                            key_request_in_flight.remove(peer_str);
+                            let _ = event_tx.send(NetworkEvent::SessionEstablished {
+                                peer_id: peer_str.to_string(),
+                            }).await;
+                        }
+                        pt
+                    }
                     Err(e) => {
                         // Decrypt failure — check cooldown before killing session.
                         // This prevents rapid session thrashing when many in-flight
@@ -3482,8 +3641,8 @@ async fn handle_incoming_request(
                             }
 
                             // Send a KeyRequest to re-establish the session.
-                            if !key_request_in_flight.contains(peer_str) {
-                                key_request_in_flight.insert(peer_str.to_string());
+                            if !key_request_is_fresh(key_request_in_flight, peer_str) {
+                                key_request_in_flight.insert(peer_str.to_string(), now);
                                 send_message_to_peer(
                                     ws_cmd_tx, ws_room_peers,
                                     peer_str, HavenMessage::KeyRequest,
@@ -4176,6 +4335,7 @@ async fn handle_incoming_request(
                             is_image: img,
                             width: w,
                             height: h,
+                            retry_count: 0,
                         });
                         hollow_log!("[HOLLOW-FILE] Registered pending stream for {fid} (streamed transfer)");
 
@@ -4194,6 +4354,7 @@ async fn handle_incoming_request(
                                 pending_file_streams, pending_shard_streams,
                                 &mut empty_vault_dl, early_file_streams,
                                 bundle_keypair, event_tx,
+                                ws_cmd_tx, ws_room_peers,
                                 db_path, db_passphrase,
                             ).await;
                         }
@@ -4681,8 +4842,19 @@ async fn handle_incoming_request(
                     // Lightweight encrypted ping from peer after they created an inbound
                     // session. The act of decrypting this message upgrades our outbound
                     // session's ratchet so subsequent encrypts produce Normal (type 1).
-                    hollow_log!("[HOLLOW-CRYPTO] SessionAck received from {peer_str} — session ratchet upgraded");
+                    // This is the CONFIRMATION point for an initiator: the peer proved it
+                    // can decrypt us, so the session is now bidirectional. Emit
+                    // SessionEstablished here (not optimistically at outbound creation) and
+                    // clear the in-flight marker so the sweep stops retrying.
+                    hollow_log!("[HOLLOW-CRYPTO] SessionAck received from {peer_str} — session confirmed bidirectional");
+                    let was_unconfirmed = olm.has_unconfirmed_session(&peer_str);
                     olm.mark_session_bidirectional(&peer_str);
+                    key_request_in_flight.remove(peer_str);
+                    if was_unconfirmed {
+                        let _ = event_tx.send(NetworkEvent::SessionEstablished {
+                            peer_id: peer_str.to_string(),
+                        }).await;
+                    }
                 }
 
                 // Phase 6 MLS envelope variants — should not arrive via Olm, log and ignore.
@@ -5089,15 +5261,15 @@ async fn handle_incoming_request(
                                                 },
                                             }).await;
 
-                                            if !olm.has_session(&member.peer_id)
-                                                && !key_request_in_flight.contains(&member.peer_id)
+                                            if !olm.has_confirmed_session(&member.peer_id)
+                                                && !key_request_is_fresh(key_request_in_flight, &member.peer_id)
                                             {
-                                                hollow_log!("[HOLLOW-SWARM] No Olm session with server member {}, sending KeyRequest", member.peer_id);
+                                                hollow_log!("[HOLLOW-SWARM] No confirmed Olm session with server member {}, sending KeyRequest", member.peer_id);
                                                 send_message_to_peer(
                                                     ws_cmd_tx, ws_room_peers,
                                                     &member.peer_id, HavenMessage::KeyRequest,
                                                 );
-                                                key_request_in_flight.insert(member.peer_id.clone());
+                                                key_request_in_flight.insert(member.peer_id.clone(), std::time::Instant::now());
                                             }
                                         }
                                 }
@@ -5589,13 +5761,13 @@ async fn handle_incoming_request(
 
                 // Proactively establish Olm session with the new member so
                 // encrypted channel sync batches can be sent immediately.
-                if !olm.has_session(&peer_str) && !key_request_in_flight.contains(peer_str) {
-                    hollow_log!("[HOLLOW-SWARM] No Olm session with new member {peer_str}, sending KeyRequest");
+                if !olm.has_confirmed_session(&peer_str) && !key_request_is_fresh(key_request_in_flight, peer_str) {
+                    hollow_log!("[HOLLOW-SWARM] No confirmed Olm session with new member {peer_str}, sending KeyRequest");
                     send_message_to_peer(
                         ws_cmd_tx, ws_room_peers,
                         peer_str, HavenMessage::KeyRequest,
                     );
-                    key_request_in_flight.insert(peer_str.to_string());
+                    key_request_in_flight.insert(peer_str.to_string(), std::time::Instant::now());
                 }
             } else {
                 hollow_log!("[HOLLOW-CRDT] ServerJoinRequest for unknown server {server_id}");
@@ -6076,6 +6248,7 @@ async fn handle_incoming_request(
                                     &server_id, sender_peer_id,
                                     fid, name, ext, mime, size, chunks, img, w, h,
                                     mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref,
+                                    ws_cmd_tx, ws_room_peers,
                                     db_path, db_passphrase,
                                 ).await;
                             }

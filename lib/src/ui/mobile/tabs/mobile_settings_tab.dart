@@ -16,6 +16,7 @@ import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
+import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -1997,6 +1998,9 @@ class _AboutTab extends ConsumerWidget {
     final relayStats = ref.watch(relayStatsProvider);
     final newsState = ref.watch(newsProvider);
     final relayDomain = ref.watch(relayDomainProvider);
+    // Single source of truth for the app version — same as desktop About
+    // (Rust APP_VERSION via getCurrentVersion()), not a hardcoded string.
+    final appVersion = ref.watch(updaterProvider).currentVersion;
 
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
@@ -2030,7 +2034,7 @@ class _AboutTab extends ConsumerWidget {
 
         _SectionLabel(label: 'Info'),
         const SizedBox(height: HollowSpacing.sm),
-        _InfoRow(label: 'Version', value: '0.4.2'),
+        _InfoRow(label: 'Version', value: appVersion.isNotEmpty ? appVersion : 'unknown'),
         _InfoRow(label: 'Platform', value: Platform.operatingSystem),
         _InfoRow(label: 'License', value: 'AGPL-3.0'),
 

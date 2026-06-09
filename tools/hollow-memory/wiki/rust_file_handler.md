@@ -360,6 +360,21 @@ WebRTC binary data can arrive before the FileHeader (MLS decryption is slower). 
 
 ---
 
+## Decrypt-failure auto-retry (concurrent multi-file robustness)
+
+Under concurrent multi-file transfer, a file's bytes could be handed to AES-GCM decrypt before the receiver's Dart `IOSink` durably flushed the tail to disk — producing a ciphertext short its trailing 16-byte GCM auth tag → `aead::Error`. Previously `handle_completed_stream()` (`StreamKind::File` arm) emitted `FileFailed` and deleted the temp with **no retry**, leaving a dead placeholder until the user pressed Download.
+
+Now the decrypt path is failure-tolerant and self-healing:
+- `PendingFileStream` carries a `retry_count: u32` field (in-memory, reset on each fresh FileHeader).
+- On any failure (read error, bad key length, GCM auth failure), if `retry_count < FILE_DECRYPT_MAX_RETRIES` (3) and `pfs.sender` is reachable, the handler **re-inserts the `PendingFileStream`** (incremented) and sends `HavenMessage::FileRequest { offset: 0 }` to re-fetch. Only after exhausting retries does it emit `FileFailed`.
+- `handle_completed_stream()` gained `ws_cmd_tx` + `ws_room_peers` params (threaded from all 4 callers) to issue the re-request.
+
+**Dart side (`webrtc_service.dart::_completeIncomingTransfer`):** the receiver no longer trusts the byte counter alone — after `sink.close()` it re-stats the on-disk file length vs `totalSize` (`_verifyFlushedSize`, short backoff). If short, it calls `webrtcTransferFailed` (which triggers the same FileRequest retry) instead of signaling completion with a truncated buffer. This is the root fix; the Rust auto-retry is the safety net.
+
+NOTE: file caps (34 MB default, 64 MB relay payload) are unrelated — files transfer P2P over WebRTC, not through the relay.
+
+---
+
 ## Gossip File Distribution
 
 For servers with gossip overlays (large servers), files are distributed via a gossip relay tree instead of full replication:

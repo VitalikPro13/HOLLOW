@@ -1879,6 +1879,10 @@ pub(crate) struct PendingFileStream {
     pub is_image: bool,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Number of automatic re-requests already attempted after a failed decrypt /
+    /// assembly. Bounded by FILE_DECRYPT_MAX_RETRIES so a genuinely corrupt source
+    /// can't loop forever. In-memory only; reset whenever a fresh FileHeader arrives.
+    pub retry_count: u32,
 }
 
 /// Pending streamed shard transfer — metadata stored here until stream bytes arrive.

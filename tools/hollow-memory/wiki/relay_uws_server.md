@@ -497,6 +497,7 @@ Parses JSON and dispatches on `type` field:
 - `"msg"` -> `handle_msg()`
 - `"direct"` -> `handle_direct()`
 - `"check_peers"` -> inline handler: accepts `peers` (array of peer IDs) and `rooms` (array of room IDs), does O(1) hashmap lookups against `peer_sockets` and `ws_rooms`, returns `{"type":"peer_status","online":[...],"active_rooms":[...]}`. Used by the 60s client-side peer liveness timer for offline friend self-healing. No privacy leak — relay already knows all peer connections and room memberships.
+- `"discover_peers"` -> inline handler: accepts `room`, returns `{"type":"discovered_peers","room":..,"peers":[...]}` listing the room's `ws_rooms` peers (excluding self). Replaces the HTTP `/bootstrap` poll for peer discovery so it rides the live WS connection instead of paying a fresh TLS handshake per request (which could stall under a WS frame burst on the single event loop). Cheap: one map lookup + bounded copy, no blocking I/O. Client side: `WsCommand::DiscoverPeers` / `WsEvent::DiscoveredPeers`.
 - `"subscribe"` -> `handle_subscribe()`
 
 Unknown types are silently ignored. Invalid JSON is silently ignored.
@@ -908,7 +909,7 @@ The relay is normally a dumb pipe, but to make FCM push notifications deliver re
 - `offline_buffer`: `peer_id -> deque<BufferedMsg{room, frame, at, is_image}>`. Each `frame` is a ready-to-send `0x06` direct frame (ciphertext only). **Two independent per-peer caps**: `MAX_BUFFERED_MSGS_PER_PEER = 100` (text) and `MAX_BUFFERED_IMAGES_PER_PEER = 1` (image — a notification shows only one image preview + one notif/peer). `OFFLINE_BUFFER_TTL_SECS = 86400` (24h).
 
 **Flow (ws_handler.cpp):**
-1. `handle_binary_direct_msg` (0x04 text / **0x08 image**) / `handle_direct` (text): target offline (`peer_sockets` miss) → `buffer_offline_msg(.., is_image)` stores the `0x06` frame → `try_push_notify()` → `notify_push_sidecar()` POSTs `{token, platform, sender}` to localhost:3001. `buffer_offline_msg` evicts oldest of each kind independently (`count_kind`/`drop_oldest_kind`) so an image burst never pushes out buffered text.
+1. `handle_binary_direct_msg` (0x04 text / **0x08 image**) / `handle_direct` (text): target offline (`peer_sockets` miss) → `buffer_offline_msg(.., is_image)` stores the `0x06` frame → `try_push_notify()` → `notify_push_sidecar()` enqueues `{token, platform, sender}` for the push worker. `buffer_offline_msg` evicts oldest of each kind independently (`count_kind`/`drop_oldest_kind`) so an image burst never pushes out buffered text. **Push delivery uses a SINGLE persistent worker thread + bounded queue (`PUSH_QUEUE_MAX`), NOT a detached thread per push** — `notify_push_sidecar()` lazily starts one worker (`push_worker_loop`) that drains the queue and does the blocking POST to localhost:3001. Per-push thread spawning previously caused churn during DM/file-sync bursts (each POST is a blocking connect/send/recv with 2s timeouts). Queue overflow drops oldest (push is best-effort; the DM still delivers via the offline buffer).
 2. The peer's FCM fetch node (or full node) later joins the DM room → `handle_join` calls `replay_buffered_msgs()` → sends ALL buffered frames for that room (text + image, both as 0x06), drops delivered entries.
 3. `sweep_offline_buffer()` (5-min timer in main.cpp) evicts entries older than 24h.
 

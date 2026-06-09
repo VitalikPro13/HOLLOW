@@ -87,7 +87,17 @@ async fn signaling_loop(
     mut cmd_rx: mpsc::Receiver<SignalingCmd>,
     event_tx: mpsc::Sender<SignalingEvent>,
 ) {
-    let client = reqwest::Client::new();
+    // Keep idle TLS connections warm so bootstrap/heartbeat polls REUSE a
+    // connection instead of paying a fresh TLS handshake each time. A cold
+    // handshake competes with the relay's WS frame burst on its single event
+    // loop and can time out (the "20-30s disconnect" symptom); a pooled warm
+    // connection sidesteps that. Falls back to default client if the build fails.
+    let client = reqwest::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(4)
+        .connect_timeout(Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let signaling_url = &signaling_url;
 
     // Encode the public key as base64 protobuf (36 bytes for Ed25519).
@@ -113,9 +123,14 @@ async fn signaling_loop(
                                 let _ = event_tx.send(SignalingEvent::BootstrapPeers { peers }).await;
                             }
                             Err(e) => {
-                                let _ = event_tx.send(SignalingEvent::Error {
-                                    message: format!("Bootstrap failed: {e}"),
-                                }).await;
+                                // Bootstrap is best-effort peer DISCOVERY only — the live
+                                // WSS connection already carries all sync/messaging, so a
+                                // bootstrap hiccup must NOT surface as a user-facing error
+                                // or disconnect. The relay's HTTP path can transiently stall
+                                // (fresh TLS handshake per poll) under a WS burst while WSS
+                                // stays healthy. Log quietly; peers re-resolve via WS
+                                // PeerJoined + the next heartbeat. No Error event emitted.
+                                hollow_log!("[HOLLOW-SIGNALING] Bootstrap (discovery) failed, non-fatal: {e}");
                             }
                         }
                     }
