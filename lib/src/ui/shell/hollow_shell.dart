@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/android_platform.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/node_status.dart';
@@ -725,9 +727,28 @@ class _HollowShellState extends ConsumerState<HollowShell>
       debugPrint('[HOLLOW] App resumed — rejoining rooms + WiFi lock');
       acquireWifiLock();
       _rejoinRoomsOnResume();
+      _updateIosPushHeartbeat(active: true);
     } else if (state == AppLifecycleState.paused) {
       debugPrint('[HOLLOW] App paused — releasing WiFi lock');
       releaseWifiLock();
+      // Mark app inactive so the NSE runs its OWN fetch while we're gone (a live
+      // node only receives messages while resumed). iOS-only; no-op elsewhere.
+      _updateIosPushHeartbeat(active: false);
+    }
+  }
+
+  /// iOS push heartbeat: the NSE skips its fetch (and just shows name+avatar) if
+  /// the app reported itself active recently — because the live node already got
+  /// the message. The heartbeat file lives in the App Group container, which is
+  /// the PARENT of the (migrated) data dir.
+  void _updateIosPushHeartbeat({required bool active}) {
+    if (!Platform.isIOS) return;
+    final dataDir = hollowDataDir; // <AppGroupContainer>/hollow_data
+    final container = Directory(dataDir).parent.path;
+    if (active) {
+      IosDataDirMigration.touchHeartbeat(container);
+    } else {
+      IosDataDirMigration.clearHeartbeat(container);
     }
   }
 

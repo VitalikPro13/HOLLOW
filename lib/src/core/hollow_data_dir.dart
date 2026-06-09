@@ -30,3 +30,10 @@ Future<void> initHollowDataDir() async {
     if (!dir.existsSync()) dir.createSync(recursive: true);
   }
 }
+
+/// Override the cached data dir (iOS: after migrating into the App Group
+/// container so the app + Notification Service Extension share one SQLCipher DB).
+/// Must be called after [initHollowDataDir] and before `setDataDir`/`start_node`.
+void overrideHollowDataDir(String path) {
+  _cached = path;
+}

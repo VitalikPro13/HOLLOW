@@ -282,6 +282,144 @@ impl OlmManager {
 mod tests {
     use super::*;
 
+    // ── iOS disposable-NSE spike (Q1 + Q2) ────────────────────────────────
+    // Design under test: when the iOS app is force-killed, the Notification
+    // Service Extension must show the decrypted message TEXT, but it must NOT
+    // advance the canonical Olm ratchet the app relies on. Plan: the NSE FORKS
+    // the session (deserialize a COPY of the pickled session), decrypts on the
+    // fork to get the banner text, and DISCARDS the fork — never writing it
+    // back. Later, the app re-syncs from the relay/peer and decrypts the SAME
+    // message on its untouched canonical session, advancing the ratchet
+    // normally, as if the push never happened.
+    //
+    // This spike proves the two load-bearing assumptions WITHOUT a Mac:
+    //   Q1: a Session can be forked from a pickle and decrypted on the copy
+    //       without mutating the original (fork = serde round-trip of the pickle).
+    //   Q2: after the fork decrypts message N, the ORIGINAL (un-advanced)
+    //       session can still decrypt that exact same message N.
+    // If Q2 holds, the disposable-NSE design is sound and worth building.
+
+    /// Build an ESTABLISHED, mid-stream bidirectional Alice↔Bob pair so the
+    /// ratchet is already advanced (the realistic case — not first contact).
+    /// Returns (alice, bob) where bob is the "phone" whose session the NSE forks.
+    fn established_pair() -> (OlmManager, OlmManager) {
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+
+        let bob_identity = bob.identity_key_base64();
+        let bob_otk = bob.generate_one_time_key();
+        alice
+            .create_outbound_session("bob", &bob_identity, &bob_otk)
+            .unwrap();
+
+        // Alice → Bob (PreKey) establishes Bob's inbound session.
+        let (_t, ct) = alice.encrypt("bob", b"handshake").unwrap();
+        let alice_id = alice.identity_key_base64();
+        bob.create_inbound_session("alice", &alice_id, &ct).unwrap();
+
+        // Bob → Alice reply confirms Alice's session (now bidirectional).
+        let (t2, ct2) = bob.encrypt("alice", b"ack").unwrap();
+        alice.decrypt("bob", t2, &ct2).unwrap();
+
+        // Exchange a couple more rounds so the ratchet is genuinely mid-stream.
+        let (t3, ct3) = alice.encrypt("bob", b"round-1").unwrap();
+        bob.decrypt("alice", t3, &ct3).unwrap();
+        let (t4, ct4) = bob.encrypt("alice", b"round-2").unwrap();
+        alice.decrypt("bob", t4, &ct4).unwrap();
+
+        (alice, bob)
+    }
+
+    #[test]
+    fn spike_nse_fork_decrypt_does_not_consume_canonical() {
+        let (mut alice, bob) = established_pair();
+
+        // Snapshot Bob's canonical session pickle — this is what's in the DB on
+        // the phone when the app is force-killed. The NSE and the app both start
+        // from THIS exact byte string.
+        let canonical_pickle = bob.session_pickle_json("alice").unwrap().unwrap();
+        let account_pickle = bob.account_pickle_json().unwrap();
+
+        // Alice (the friend) sends the message that triggers the push.
+        let (mt, ct) = alice.encrypt("bob", b"secret push body").unwrap();
+
+        // ── NSE path: FORK the session, decrypt on the copy, DISCARD it. ──
+        // The fork is a fresh OlmManager built from the SAME pickle strings; it
+        // owns an independent Session. Decrypting mutates only this throwaway.
+        let nse_plain = {
+            let mut nse_fork = OlmManager::from_pickles(
+                &account_pickle,
+                vec![("alice".to_string(), canonical_pickle.clone())],
+            )
+            .unwrap();
+            nse_fork.decrypt("alice", mt, &ct).unwrap()
+            // nse_fork dropped here — never written back to disk.
+        };
+        assert_eq!(nse_plain, b"secret push body", "Q1: NSE fork decrypts");
+
+        // ── App path: load the ORIGINAL canonical pickle (untouched by the NSE)
+        // and decrypt the SAME ciphertext. This is what happens when the user
+        // opens the app and the relay replays the buffered message. ──
+        let mut app = OlmManager::from_pickles(
+            &account_pickle,
+            vec![("alice".to_string(), canonical_pickle.clone())],
+        )
+        .unwrap();
+        let app_plain = app.decrypt("alice", mt, &ct).unwrap();
+        assert_eq!(
+            app_plain, b"secret push body",
+            "Q2: canonical session still decrypts the same message after the NSE forked"
+        );
+
+        // And the app's now-advanced session keeps working for the NEXT message —
+        // proving the fork didn't poison forward decryption.
+        let (mt2, ct2) = alice.encrypt("bob", b"follow-up").unwrap();
+        let app_plain2 = app.decrypt("alice", mt2, &ct2).unwrap();
+        assert_eq!(app_plain2, b"follow-up", "Q2b: ratchet advances normally after");
+    }
+
+    #[test]
+    fn spike_nse_fork_first_contact_prekey() {
+        // The hardest case: a brand-new session (PreKey / first contact). The NSE
+        // must decrypt the PreKey on a fork WITHOUT consuming the account's
+        // one-time key in a way that stops the app from establishing the session.
+        let mut alice = OlmManager::new();
+        let mut bob = OlmManager::new();
+
+        let bob_identity = bob.identity_key_base64();
+        let bob_otk = bob.generate_one_time_key();
+        alice
+            .create_outbound_session("bob", &bob_identity, &bob_otk)
+            .unwrap();
+        let (_mt, ct) = alice.encrypt("bob", b"first hello").unwrap();
+        let alice_id = alice.identity_key_base64();
+
+        // Bob's pre-push state: an ACCOUNT with the unused OTK, NO session yet.
+        let account_pickle = bob.account_pickle_json().unwrap();
+
+        // ── NSE fork: build a throwaway account, create the inbound session on
+        // it, decrypt. Discarded afterward. ──
+        let nse_plain = {
+            let mut nse_fork =
+                OlmManager::from_pickles(&account_pickle, vec![]).unwrap();
+            nse_fork
+                .create_inbound_session("alice", &alice_id, &ct)
+                .unwrap()
+        };
+        assert_eq!(nse_plain, b"first hello", "Q1: NSE decrypts first-contact PreKey on fork");
+
+        // ── App: from the SAME original account pickle (OTK still unconsumed on
+        // it, since the NSE worked on a copy), establish the session for real. ──
+        let mut app = OlmManager::from_pickles(&account_pickle, vec![]).unwrap();
+        let app_plain = app
+            .create_inbound_session("alice", &alice_id, &ct)
+            .unwrap();
+        assert_eq!(
+            app_plain, b"first hello",
+            "Q2: app still establishes the same first-contact session after NSE forked"
+        );
+    }
+
     #[test]
     fn test_alice_bob_session() {
         let mut alice = OlmManager::new();

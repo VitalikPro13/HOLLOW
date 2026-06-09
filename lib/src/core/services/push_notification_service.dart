@@ -277,7 +277,27 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
             .toList();
         final texts = await _accumulateLines(sender, batch);
 
-        // First (and only) post on the happy path — already populated, alerting.
+        // iOS: the APNs alert banner (rewritten by the NSE to name+avatar) is
+        // ALREADY on screen — it grabbed attention. Remove it now and post ONE
+        // silent content banner in its place so the user ends up with a single
+        // per-peer notification that swapped generic → real text, never two
+        // stacked. The APNs notification's identifier is the apns-collapse-id
+        // (the sidecar set it to _iosCollapseId(sender)); cancel by that exact
+        // integer. The content post is SILENT (no re-buzz) since the alert
+        // already sounded. On Android this is one alerting post (no prior
+        // banner to replace — the handler is the first thing that shows).
+        final iosReplace = Platform.isIOS;
+        if (iosReplace) {
+          try {
+            await FlutterLocalNotificationsPlugin()
+                .cancel(_iosCollapseId(sender));
+            await _pushLog('iOS: cancelled APNs banner id=${_iosCollapseId(sender)}');
+          } catch (e) {
+            await _pushLog('iOS: cancel APNs banner failed: $e');
+          }
+        }
+
+        // First (and only) post on the happy path — already populated.
         // No imagePath: BigPicture is intentionally omitted for speed (see above).
         await _showNotification(
           sender: sender,
@@ -285,6 +305,8 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
           body: texts.last,
           lines: texts,
           avatarBytes: avatarBytes,
+          // iOS content banner is silent (alert already sounded); Android alerts.
+          silent: iosReplace,
         );
         contentShown = true;
         await _pushLog(
@@ -295,9 +317,20 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
     }
   }
 
-  // Fallback: only if we couldn't show real content. Shows name + avatar (or a
-  // truncated peer id) with a generic body — never a silent miss.
-  if (!contentShown) {
+  // Fallback: only if we couldn't show real content (fetch failed/empty/timed
+  // out, or Rust never initialized).
+  //
+  // iOS: the NSE has ALREADY shown a name+avatar banner ("Sent you a message")
+  // from the same push. Posting our own generic banner here would create a
+  // SECOND entry. So on iOS we leave the NSE banner standing and post nothing —
+  // the message still synced to the DB via the fetch (when it ran), it's just
+  // not in the banner. This keeps the single-banner guarantee on the failure
+  // path too.
+  //
+  // Android: the background handler is the ONLY source of a banner (there's no
+  // NSE), so we must post the name+avatar + generic-body fallback — never a
+  // silent miss.
+  if (!contentShown && !Platform.isIOS) {
     await _showNotification(
       sender: sender,
       title: displayName,
@@ -305,6 +338,8 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
       avatarBytes: avatarBytes,
     );
     await _pushLog('Fallback notification shown: $displayName');
+  } else if (!contentShown) {
+    await _pushLog('iOS: no content — leaving NSE banner as-is (no double post)');
   }
 
   await _pushLog('Handler complete');
@@ -313,6 +348,23 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
 String _truncatePeerId(String peerId) {
   if (peerId.length > 12) return '${peerId.substring(0, 12)}...';
   return peerId;
+}
+
+/// Deterministic 31-bit hash of a peer_id. MUST match the sidecar's
+/// `iosCollapseId` (push-sidecar/index.js) byte-for-byte. The sidecar sets this
+/// value as the iOS `apns-collapse-id`, which iOS then uses as the delivered
+/// notification's identifier. `flutter_local_notifications`' `cancel(id)` removes
+/// a delivered iOS notification by its stringified integer id — so to remove the
+/// APNs/NSE banner from the background isolate (where no MethodChannel exists) we
+/// reproduce the same integer here and call `cancel(_iosCollapseId(sender))`.
+/// FNV-1a, masked to 31 bits (positive, fits a Dart int). NOT security-relevant.
+int _iosCollapseId(String peerId) {
+  var h = 0x811c9dc5; // FNV offset basis
+  for (final c in peerId.codeUnits) {
+    h ^= c & 0xff;
+    h = (h * 0x01000193) & 0xffffffff; // FNV prime, keep 32-bit
+  }
+  return h & 0x7fffffff; // 31-bit positive
 }
 
 // ── Android notification grouping ──────────────────────────────────────────
@@ -419,9 +471,18 @@ Future<void> _showNotification({
       ),
       iOS: DarwinNotificationDetails(
         threadIdentifier: sender,
+        // CRITICAL iOS: `silent` here means "don't re-buzz" — NOT "don't show".
+        // On the iOS happy path we cancel the NSE banner and post THIS one as
+        // the replacement, so it MUST still be displayed as a banner (otherwise
+        // the user sees nothing pop up after the swap). Decouple sound from
+        // visibility: silent → no sound, but STILL an active heads-up banner.
+        // (Don't use .passive — that only drops it into the notification list
+        // without a heads-up, so the content swap would be invisible if the
+        // alert banner already auto-dismissed.)
         presentSound: !silent,
-        presentBanner: !silent,
-        presentAlert: !silent,
+        presentBanner: true,
+        presentAlert: true,
+        interruptionLevel: InterruptionLevel.active,
       ),
     ),
   );

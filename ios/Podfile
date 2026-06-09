@@ -51,6 +51,17 @@ target 'Runner' do
   end
 end
 
+# Notification Service Extension (Tier B push): links ONLY the Rust core pod
+# (hollow_core) so it can call hollow_push_fetch_and_decrypt to fetch+decrypt the
+# message on-device. Deliberately does NOT use flutter_install_all_ios_pods —
+# pulling in Firebase/WebRTC/etc. would blow the extension's ~24MB memory cap.
+# hollow_core IS heavy (vodozemac + SQLCipher + networking); whether even it fits
+# is exactly what the on-device footprint measurement validates.
+target 'NotificationService' do
+  use_frameworks!
+  pod 'hollow_core', :path => '.symlinks/plugins/hollow_core/ios'
+end
+
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)

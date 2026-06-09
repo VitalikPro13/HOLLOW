@@ -113,12 +113,29 @@ impl MessageStore {
         }
         let _ = conn.execute_batch("PRAGMA incremental_vacuum(100);");
 
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
+        // Journal mode: WAL everywhere EXCEPT iOS.
+        //
+        // On iOS the messages.db lives in the shared App Group container so the
+        // Notification Service Extension can open it to fetch+decrypt push
+        // messages. WAL keeps a PERSISTENT shared-memory lock file (`-shm`) open;
+        // iOS's RunningBoard watchdog kills any app suspended while holding a
+        // file lock in a shared container (`EXC_CRASH 0xdead10cc`). Rollback-
+        // journal mode (TRUNCATE) only locks DURING a transaction, never
+        // persistently, so the app can be suspended safely while the NSE shares
+        // the file. The mobile write volume (chat) makes the small WAL-vs-
+        // rollback speed difference negligible. Desktop/Android keep WAL.
+        #[cfg(target_os = "ios")]
+        let journal_pragma = "PRAGMA journal_mode = TRUNCATE;";
+        #[cfg(not(target_os = "ios"))]
+        let journal_pragma = "PRAGMA journal_mode = WAL;";
+
+        conn.execute_batch(&format!(
+            "{journal_pragma}
              PRAGMA synchronous = NORMAL;
              PRAGMA cache_size = -8000;
-             PRAGMA temp_store = MEMORY;"
-        ).map_err(|e| format!("Failed to set performance PRAGMAs: {e}"))?;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA busy_timeout = 4000;"
+        )).map_err(|e| format!("Failed to set performance PRAGMAs: {e}"))?;
 
         // Create messages table if it doesn't exist.
         conn.execute(

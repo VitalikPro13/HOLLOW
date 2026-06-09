@@ -16,6 +16,7 @@ import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/ui/app.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
 import 'package:hollow/src/ui/shader_warmup.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:tray_manager/tray_manager.dart';
@@ -160,6 +161,20 @@ Future<void> main() async {
   // Resolve app data directory (async on mobile, sync on desktop).
   // Must be called before RustLib.init crash logging or any file I/O.
   await initHollowDataDir();
+
+  // iOS: migrate the data dir into the App Group container so the Notification
+  // Service Extension can open the SAME SQLCipher DB + identity to fetch &
+  // decrypt push messages on-device. Must happen BEFORE RustLib opens the DB.
+  // No-op on other platforms; falls back to the private dir if the App Group is
+  // unavailable or migration fails.
+  if (Platform.isIOS) {
+    final migrated =
+        await IosDataDirMigration.resolveAndMigrate(hollowDataDir);
+    if (migrated != null) {
+      overrideHollowDataDir(migrated);
+      debugPrint('████ [HOLLOW] iOS data dir → App Group: $migrated');
+    }
+  }
 
   await RustLib.init();
 

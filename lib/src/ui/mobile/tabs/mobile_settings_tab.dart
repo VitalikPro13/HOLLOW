@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:audioplayers/audioplayers.dart';
@@ -6,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/brand_icons.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
@@ -1850,6 +1852,15 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         _SectionLabel(label: 'Recovery'),
         const SizedBox(height: HollowSpacing.sm),
         _RecoveryPhraseButton(),
+
+        // iOS push diagnostics — exports the NSE memory footprint + push logs so
+        // we can validate the Notification Service Extension fits its memory cap.
+        if (Platform.isIOS) ...[
+          const SizedBox(height: HollowSpacing.xl),
+          _SectionLabel(label: 'Push Diagnostics'),
+          const SizedBox(height: HollowSpacing.sm),
+          const _ExportPushDiagnosticsButton(),
+        ],
       ],
     );
   }
@@ -1982,6 +1993,77 @@ class _RecoveryPhraseButton extends ConsumerWidget {
       icon: const Icon(LucideIcons.key, size: 16),
       child: const Text('Recovery Phrase'),
     );
+  }
+}
+
+/// iOS-only: bundle the Notification Service Extension's footprint/metrics log
+/// (written into the App Group) + the app's push_debug.log into one text file and
+/// save it via the file picker, so it can be shared back for diagnosis. There's
+/// no debugger access on TestFlight builds — this is how we read the NSE's
+/// runtime memory and whether the on-device fetch+decrypt succeeded.
+class _ExportPushDiagnosticsButton extends StatelessWidget {
+  const _ExportPushDiagnosticsButton();
+
+  @override
+  Widget build(BuildContext context) {
+    return HollowButton.outline(
+      onPressed: () => _export(context),
+      expand: true,
+      icon: const Icon(LucideIcons.fileText, size: 16),
+      child: const Text('Export Push Diagnostics'),
+    );
+  }
+
+  Future<void> _export(BuildContext context) async {
+    final buf = StringBuffer();
+    buf.writeln('=== Hollow Push Diagnostics ===');
+    buf.writeln('Exported: ${DateTime.now().toIso8601String()}');
+    buf.writeln('Data dir: $hollowDataDir');
+    buf.writeln();
+
+    // App Group container = parent of the (migrated) data dir.
+    final container = Directory(hollowDataDir).parent.path;
+
+    void appendFile(String label, String path) {
+      buf.writeln('----- $label ($path) -----');
+      try {
+        final f = File(path);
+        if (f.existsSync()) {
+          buf.writeln(f.readAsStringSync());
+        } else {
+          buf.writeln('(not found)');
+        }
+      } catch (e) {
+        buf.writeln('(read error: $e)');
+      }
+      buf.writeln();
+    }
+
+    appendFile('NSE metrics', '$container/push_diag/nse_metrics.log');
+    appendFile('App active heartbeat', '$container/push_diag/app_active.txt');
+    appendFile('Dart push log', '$hollowDataDir/push_debug.log');
+    appendFile('Hollow debug log (tail)', '$hollowDataDir/hollow_debug.log');
+
+    final bytes = Uint8List.fromList(utf8.encode(buf.toString()));
+    try {
+      final saved = await FilePicker.platform.saveFile(
+        dialogTitle: 'Export Push Diagnostics',
+        fileName: 'hollow_push_diag.txt',
+        bytes: bytes, // required on iOS/Android
+      );
+      if (context.mounted) {
+        HollowToast.show(
+          context,
+          saved == null ? 'Export cancelled' : 'Diagnostics exported',
+          type: saved == null ? HollowToastType.info : HollowToastType.success,
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        HollowToast.show(context, 'Export failed: $e',
+            type: HollowToastType.error);
+      }
+    }
   }
 }
 
