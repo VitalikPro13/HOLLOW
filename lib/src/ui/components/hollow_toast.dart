@@ -135,9 +135,16 @@ class _HollowToastWidgetState extends State<_HollowToastWidget>
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final iconColor = _colorForType(widget.type, hollow);
+    // Float above the keyboard, and on phones above the 56px bottom nav
+    // (+ gesture inset) so toasts never cover nav icons.
+    final media = MediaQuery.of(context);
+    final isMobileLayout = media.size.width < 600;
+    final navClearance =
+        isMobileLayout ? 56 + media.viewPadding.bottom : 0.0;
+    final bottom = 32 + media.viewInsets.bottom + navClearance;
 
     return Positioned(
-      bottom: 32,
+      bottom: bottom,
       left: 0,
       right: 0,
       child: Center(

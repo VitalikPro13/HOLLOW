@@ -9,9 +9,11 @@
 #include <audioplayers_windows/audioplayers_windows_plugin.h>
 #include <desktop_drop/desktop_drop_plugin.h>
 #include <firebase_core/firebase_core_plugin_c_api.h>
+#include <flutter_secure_storage_windows/flutter_secure_storage_windows_plugin.h>
 #include <flutter_webrtc/flutter_web_r_t_c_plugin.h>
 #include <fvp/fvp_plugin_c_api.h>
 #include <irondash_engine_context/irondash_engine_context_plugin_c_api.h>
+#include <local_auth_windows/local_auth_plugin.h>
 #include <local_notifier/local_notifier_plugin.h>
 #include <record_windows/record_windows_plugin_c_api.h>
 #include <screen_retriever_windows/screen_retriever_windows_plugin_c_api.h>
@@ -28,12 +30,16 @@ void RegisterPlugins(flutter::PluginRegistry* registry) {
       registry->GetRegistrarForPlugin("DesktopDropPlugin"));
   FirebaseCorePluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("FirebaseCorePluginCApi"));
+  FlutterSecureStorageWindowsPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("FlutterSecureStorageWindowsPlugin"));
   FlutterWebRTCPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("FlutterWebRTCPlugin"));
   FvpPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("FvpPluginCApi"));
   IrondashEngineContextPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("IrondashEngineContextPluginCApi"));
+  LocalAuthPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("LocalAuthPlugin"));
   LocalNotifierPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("LocalNotifierPlugin"));
   RecordWindowsPluginCApiRegisterWithRegistrar(

@@ -1687,16 +1687,24 @@ pub struct FetchedMessage {
     /// that the fetch node decrypted and wrote. Lets the push notification show
     /// a BigPicture preview. None for text-only messages.
     pub image_path: Option<String>,
+    /// Set for channel messages (channel wake): owning server.
+    pub server_id: Option<String>,
+    /// Set for channel messages (channel wake): owning channel.
+    pub channel_id: Option<String>,
 }
 
-/// Start a lightweight invisible fetch node to receive DM messages from a specific peer.
-/// Connects to relay with fetch=true (invisible), joins only the DM room for sender_peer_id,
-/// waits for messages up to timeout_secs, decrypts via Olm, and returns.
+/// Start a lightweight invisible fetch node to receive buffered messages.
+///
+/// DM wake (`server_room` = None): joins only the DM room for sender_peer_id
+/// and decrypts via Olm. Channel wake (`server_room` = Some(server_id)): joins
+/// the server room and decrypts buffered channel messages via MLS (or reads
+/// signed public-channel plaintext).
 /// Cannot run while the full node is active. Blocks the calling thread.
 #[frb]
 pub fn start_fetch_node(
     sender_peer_id: String,
     timeout_secs: u32,
+    server_room: Option<String>,
 ) -> Result<Vec<FetchedMessage>, String> {
     if FETCH_ACTIVE.swap(true, Ordering::SeqCst) {
         return Err("Fetch already in progress".to_string());
@@ -1779,6 +1787,30 @@ pub fn start_fetch_node(
         .clone()
         .unwrap_or_else(|| "relay.anonlisten.com".to_string());
 
+    // Channel wake: load the MLS group state for the one server so buffered
+    // group ciphertext can be decrypted. A missing/unrestorable MLS identity
+    // degrades gracefully (content-free banner; the app syncs on next open).
+    let mut mls: Option<crate::crypto::MlsManager> = match server_room {
+        Some(ref room) => {
+            let store = MessageStore::open(&db_path, &passphrase)?;
+            match store.load_mls_identity() {
+                Ok(Some((signer, cred, storage))) => {
+                    match crate::crypto::MlsManager::from_persisted(
+                        &signer, &cred, storage.as_deref(), &[room.clone()],
+                    ) {
+                        Ok(m) => Some(m),
+                        Err(e) => {
+                            hollow_log!("[HOLLOW-FETCH] MLS restore failed: {e} — content-free fallback");
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            }
+        }
+        None => None,
+    };
+
     // Open CryptoStore for session persistence.
     let rt = get_runtime();
     let crypto_store = rt.block_on(async {
@@ -1794,8 +1826,10 @@ pub fn start_fetch_node(
         &pub_key_b64,
         license_key.as_deref(),
         &sender_peer_id,
+        server_room.as_deref(),
         timeout,
         &mut olm,
+        &mut mls,
         &crypto_store,
         &db_path,
         &passphrase,
@@ -1816,6 +1850,8 @@ pub fn start_fetch_node(
             timestamp: dm.timestamp,
             message_id: dm.message_id,
             image_path: dm.image_path,
+            server_id: dm.server_id,
+            channel_id: dm.channel_id,
         })
         .collect())
 }
@@ -1831,6 +1867,105 @@ pub fn register_push_token(token: String, platform: String) -> Result<(), String
     rt.block_on(state.cmd_tx.send(node::NodeCommand::RegisterPushToken { token, platform }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
+}
+
+/// Register per-server/channel push notification prefs with the relay.
+/// `prefs_json` = {"<server_id>": {"level": "all|mentions|nothing",
+/// "channels": {"<channel_id>": "all|mentions|nothing"}}}. RAM-only on the
+/// relay; re-sent automatically on every reconnect. The relay filters channel
+/// pushes against these BEFORE contacting FCM/APNs (iOS alert pushes cannot be
+/// suppressed after delivery).
+#[frb]
+pub fn set_push_prefs(prefs_json: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::SetPushPrefs { prefs_json }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Display metadata for a channel push notification (Tier 1-style: resolved
+/// from the local DB, no node needed).
+pub struct PushChannelMeta {
+    pub server_name: String,
+    pub channel_name: String,
+    /// Effective LOCAL notification level for this channel ("all" / "mentions"
+    /// / "nothing") — channel override falling back to the server default.
+    /// Lets the Android background handler drop a push whose relay-side filter
+    /// was stale.
+    pub notif_level: String,
+}
+
+/// Resolve server + channel names and the effective local notification level
+/// directly from SQLCipher (no running node). Returns None when the server is
+/// unknown locally or identity is locked.
+#[frb]
+pub fn get_push_channel_meta(
+    server_id: String,
+    channel_id: String,
+) -> Result<Option<PushChannelMeta>, String> {
+    crate::log::init();
+    let id = match identity::load_existing_identity() {
+        Ok(Some(id)) => id,
+        _ => return Ok(None),
+    };
+    let proto = id
+        .keypair
+        .to_protobuf_encoding()
+        .map_err(|e| format!("Failed to encode keypair: {e}"))?;
+    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+
+    let hollow_dir = crate::identity::data_dir()?;
+    let db_path = hollow_dir
+        .join("messages.db")
+        .to_str()
+        .ok_or("Invalid path encoding")?
+        .to_string();
+
+    let store = match MessageStore::open(&db_path, &passphrase) {
+        Ok(s) => s,
+        Err(e) => {
+            hollow_log!("[HOLLOW-PUSH] get_push_channel_meta: DB open failed ({e})");
+            return Ok(None);
+        }
+    };
+
+    let Some(state_json) = store.load_server_state(&server_id)? else {
+        hollow_log!("[HOLLOW-PUSH] get_push_channel_meta: unknown server {server_id}");
+        return Ok(None);
+    };
+    let state: crate::crdt::server_state::ServerState = serde_json::from_str(&state_json)
+        .map_err(|e| format!("Failed to parse server state: {e}"))?;
+
+    let server_name = state.name.read().clone();
+    let channel_name = state
+        .channels
+        .get(&channel_id)
+        .map(|c| c.name.clone())
+        .unwrap_or_default();
+
+    // Effective local level: channel override → server default → "all".
+    // Mirrors notification_provider.dart effectiveChannelLevel().
+    let override_val = store
+        .load_setting(&format!("notif:{server_id}:{channel_id}"))
+        .unwrap_or(None);
+    let notif_level = match override_val.as_deref() {
+        Some("all") | Some("mentions") | Some("nothing") => override_val.unwrap(),
+        _ => store
+            .load_setting(&format!("notif:{server_id}"))
+            .unwrap_or(None)
+            .filter(|v| v == "mentions" || v == "nothing")
+            .unwrap_or_else(|| "all".to_string()),
+    };
+
+    Ok(Some(PushChannelMeta {
+        server_name,
+        channel_name,
+        notif_level,
+    }))
 }
 
 /// Send a typing indicator to peers. Ephemeral, not stored.

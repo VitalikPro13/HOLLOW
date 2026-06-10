@@ -47,10 +47,13 @@
 	<string>Hollow needs permission to save images you receive to your photo library.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Hollow uses network information to choose the best connection route for voice and video calls.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Hollow uses Face ID to unlock the app when App Lock is enabled.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
+		<string>audio</string>
 		<string>remote-notification</string>
 	</array>
 	<key>UILaunchStoryboardName</key>

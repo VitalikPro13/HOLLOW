@@ -475,6 +475,54 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.11.1"
+  flutter_secure_storage:
+    dependency: "direct main"
+    description:
+      name: flutter_secure_storage
+      sha256: "7686b1d6a29985dcbb808c59518226e603e3bfa7c0ddfd1a0d00e4cda77c868e"
+      url: "https://pub.dev"
+    source: hosted
+    version: "10.3.1"
+  flutter_secure_storage_darwin:
+    dependency: transitive
+    description:
+      name: flutter_secure_storage_darwin
+      sha256: "82329fa5cdf343773b1b6897dea959105a29f092454259edff92f9f6637e8149"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.3.2"
+  flutter_secure_storage_linux:
+    dependency: transitive
+    description:
+      name: flutter_secure_storage_linux
+      sha256: a5f35ddab43cf5c8215d2feb4ce1957851f28c5c37e6f04335066a0602087bf5
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.1"
+  flutter_secure_storage_platform_interface:
+    dependency: transitive
+    description:
+      name: flutter_secure_storage_platform_interface
+      sha256: "8ceea1223bee3c6ac1a22dabd8feefc550e4729b3675de4b5900f55afcb435d6"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.0.1"
+  flutter_secure_storage_web:
+    dependency: transitive
+    description:
+      name: flutter_secure_storage_web
+      sha256: "073a62b3aeb866ab4ce795f960413948e51e5a42a9b0c8333b6daf5bb3208a1c"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.1.1"
+  flutter_secure_storage_windows:
+    dependency: transitive
+    description:
+      name: flutter_secure_storage_windows
+      sha256: "3b7c8e068875dfd46719ff57c90d8c459c87f2302ed6b00ff006b3c9fcad1613"
+      url: "https://pub.dev"
+    source: hosted
+    version: "4.1.0"
   flutter_svg:
     dependency: "direct main"
     description:
@@ -605,6 +653,14 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  intl:
+    dependency: transitive
+    description:
+      name: intl
+      sha256: "3df61194eb431efc39c4ceba583b95633a403f46c9fd341e550ce0bfa50e9aa5"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.20.2"
   io:
     dependency: transitive
     description:
@@ -677,6 +733,46 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "6.1.0"
+  local_auth:
+    dependency: "direct main"
+    description:
+      name: local_auth
+      sha256: ae6f382f638108c6becd134318d7c3f0a93875383a54010f61d7c97ac05d5137
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.1"
+  local_auth_android:
+    dependency: transitive
+    description:
+      name: local_auth_android
+      sha256: fdb936d59ab945c7af297defd67bd1ed87b11b6db1bc16d01e94677a8f1c38ec
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.0.9"
+  local_auth_darwin:
+    dependency: transitive
+    description:
+      name: local_auth_darwin
+      sha256: a8c3d4e17454111f7fd31ff72a31222359f6059f7fe956c2dcfe0f88f49826d4
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.0.3"
+  local_auth_platform_interface:
+    dependency: transitive
+    description:
+      name: local_auth_platform_interface
+      sha256: f98b8e388588583d3f781f6806e4f4c9f9e189d898d27f0c249b93a1973dd122
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.1.0"
+  local_auth_windows:
+    dependency: transitive
+    description:
+      name: local_auth_windows
+      sha256: be12c5b8ba5e64896983123655c5f67d2484ecfcc95e367952ad6e3bff94cb16
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.0.1"
   local_notifier:
     dependency: "direct main"
     description:
@@ -781,6 +877,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.2.0"
+  package_info_plus:
+    dependency: transitive
+    description:
+      name: package_info_plus
+      sha256: "468c26b4254ab01979fa5e4a98cb343ea3631b9acee6f21028997419a80e1a20"
+      url: "https://pub.dev"
+    source: hosted
+    version: "9.0.1"
+  package_info_plus_platform_interface:
+    dependency: transitive
+    description:
+      name: package_info_plus_platform_interface
+      sha256: "202a487f08836a592a6bd4f901ac69b3a8f146af552bbd14407b6b41e1c3f086"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.2.1"
   path:
     dependency: "direct main"
     description:
@@ -901,6 +1013,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "5.0.5"
+  proximity_sensor:
+    dependency: "direct main"
+    description:
+      name: proximity_sensor
+      sha256: d7771a9f8b92862a11056624582a58c2a9a46f9d67decd30772e7f79f70be706
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.3.10"
   pub_semver:
     dependency: transitive
     description:
@@ -1362,6 +1482,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "15.0.2"
+  wakelock_plus:
+    dependency: "direct main"
+    description:
+      name: wakelock_plus
+      sha256: ddf3db70eaa10c37558ff817519b85d527dbd21034fd5d8e1c2e85f31588f1c1
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.5.2"
+  wakelock_plus_platform_interface:
+    dependency: transitive
+    description:
+      name: wakelock_plus_platform_interface
+      sha256: b13f99e992e7ae6a152e16c5559d3c07ff445b13330192662494e614ca3e7d7b
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.5.1"
   watcher:
     dependency: transitive
     description:
@@ -1467,5 +1603,5 @@ packages:
     source: hosted
     version: "3.1.3"
 sdks:
-  dart: ">=3.10.4 <4.0.0"
-  flutter: ">=3.38.4"
+  dart: ">=3.12.0 <4.0.0"
+  flutter: ">=3.44.0"

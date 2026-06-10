@@ -1,8 +1,10 @@
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -71,14 +73,31 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
   double _startOffsetY = 0;
   Offset _startFocal = Offset.zero;
 
+  static bool get _isMobilePlatform => Platform.isAndroid || Platform.isIOS;
+
   @override
   void initState() {
     super.initState();
+    // Lock orientation while cropping — a rotation re-runs _initLayout and
+    // would silently discard the user's crop position.
+    if (_isMobilePlatform) {
+      SystemChrome.setPreferredOrientations([
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.portraitDown,
+      ]);
+    }
     _decodeImage();
   }
 
   Future<void> _decodeImage() async {
-    final codec = await ui.instantiateImageCodec(widget.imageBytes);
+    // Cap the decode size: a full-res camera photo decoded as raw RGBA can
+    // exceed 100 MB and OOM budget phones. 2048px is plenty for avatar /
+    // banner crops (the Rust processor downsizes further anyway).
+    final codec = await ui.instantiateImageCodec(
+      widget.imageBytes,
+      targetWidth: 2048,
+      allowUpscaling: false,
+    );
     final frame = await codec.getNextFrame();
     if (!mounted) return;
 
@@ -255,6 +274,9 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
 
   @override
   void dispose() {
+    if (_isMobilePlatform) {
+      SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    }
     _decodedImage?.dispose();
     super.dispose();
   }

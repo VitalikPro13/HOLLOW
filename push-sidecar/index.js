@@ -36,16 +36,28 @@ const server = http.createServer((req, res) => {
   req.on('data', chunk => { body += chunk; });
   req.on('end', async () => {
     try {
-      const { token, platform, sender } = JSON.parse(body);
+      const { token, platform, sender, server, channel, mention } = JSON.parse(body);
       if (!token) {
         res.writeHead(400);
         res.end('missing token');
         return;
       }
 
+      // Channel pushes (server set) carry the opaque server/channel ids so the
+      // on-device handler can resolve names + check local notification settings
+      // — same exposure class as the sender peer_id, never any content.
+      const isChannel = !!server;
       const message = {
         token,
-        data: { type: 'wake', ...(sender ? { sender } : {}) },
+        data: isChannel
+          ? {
+              type: 'channel_wake',
+              ...(sender ? { sender } : {}),
+              server,
+              ...(channel ? { channel } : {}),
+              mention: mention ? '1' : '0', // FCM data values must be strings
+            }
+          : { type: 'wake', ...(sender ? { sender } : {}) },
       };
 
       if (platform === 'android') {
@@ -89,7 +101,12 @@ const server = http.createServer((req, res) => {
             // Result: a single per-peer banner that swaps generic → real content,
             // never two stacked. Only set when we have a sender (generic wake
             // has none).
-            ...(sender ? { 'apns-collapse-id': iosCollapseId(sender) } : {}),
+            //
+            // Channel pushes collapse by "server:channel" instead — one banner
+            // per channel that newer pushes replace (matched in Dart/NSE).
+            ...(isChannel
+              ? { 'apns-collapse-id': iosCollapseId(`${server}:${channel || ''}`) }
+              : sender ? { 'apns-collapse-id': iosCollapseId(sender) } : {}),
           },
           payload: {
             aps: {

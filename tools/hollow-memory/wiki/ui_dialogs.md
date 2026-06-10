@@ -906,3 +906,12 @@ Values: `profile`, `system`, `security`, `updates`, `about`
 - `storage_api.getMnemonic()`, `storage_api.saveMnemonic(mnemonic:)`, `storage_api.exportBackup(...)`
 - `network_api.verifyMessageProof(...)`, `network_api.restartNode()`
 - `twitch_api.twitchIsConnected()`, `twitch_api.twitchStartDeviceFlow()`, `twitch_api.twitchPollForToken(...)`, `twitch_api.twitchDisconnect()`
+
+## Keyboard-Aware & Phone-Adaptive Dialogs (2026-06)
+
+- **Global keyboard avoidance**: `showHollowDialog` (hollow_dialog.dart) wraps EVERY dialog's pageBuilder in `AnimatedPadding(padding: MediaQuery.viewInsetsOf(context), 100ms decelerate)` + `MediaQuery.removeViewInsets(removeBottom: true, ...)` — the same pattern as Flutter's `Dialog`. Every dialog (including custom Center-based builders) shifts above the keyboard for free. RULE: never add viewInsets padding inside a dialog builder — it double-pads.
+- **HollowDialog widget**: under 600px screen width, minWidth = screen − 2×24 (full-width feel); content wrapped in `Flexible > SingleChildScrollView`; actions in right-aligned `Wrap`.
+- **CreateServerDialog**: compact screens stack Join above Create with a horizontal divider (desktop keeps two columns); the old `minWidth: 400` (overflowed phones) is compact-aware; autofocus disabled on compact so the keyboard doesn't immediately cover the stacked layout.
+- **MessageProofDialog**: compact-aware width/padding; preview + info rows scroll in a `Flexible`; on phones the actions stack (Copy|Export row + full-width Close).
+- **WelcomeDialog**: compact-aware minWidth (was forced 360) + internal scroll.
+- **Unlock/recovery dialogs** (hollow_shell.dart): widths are `(screenWidth - padding).clamp(0, 380/420)` (were fixed 380/420 — overflowed phones); the password-unlock dialog is PIN-aware (numeric keyboard) and offers biometric retry. See ui_mobile.md "Security Tab (App Lock)".

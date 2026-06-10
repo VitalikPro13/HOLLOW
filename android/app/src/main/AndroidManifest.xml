@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- App lock: fingerprint / face unlock (local_auth). -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <application
         android:label="Hollow"
         android:name="${applicationName}"

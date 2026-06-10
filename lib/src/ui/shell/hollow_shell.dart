@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/android_platform.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
@@ -107,6 +108,13 @@ class HollowShell extends ConsumerStatefulWidget {
 class _HollowShellState extends ConsumerState<HollowShell>
     with TickerProviderStateMixin, WidgetsBindingObserver {
   bool _initialized = false;
+
+  // True while the identity is being unlocked + the local DB is loading after
+  // a successful PIN/password/biometric unlock. The Argon2id key derivation
+  // alone is ~1.5-3s on a phone (intentionally slow — it's the at-rest
+  // protection), so we show a centered "Unlocking…" spinner over the shell
+  // rather than letting it look frozen. Only set when App Lock is active.
+  bool _unlocking = false;
 
   // Startup reveal animation — master controller shared via InheritedWidget.
   late final AnimationController _revealController;
@@ -273,11 +281,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
       barrierDismissible: false,
       builder: (ctx) {
         final hollow = HollowTheme.of(ctx);
+        final screenWidth = MediaQuery.sizeOf(ctx).width;
         return Center(
+          child: Padding(
+            padding: const EdgeInsets.all(HollowSpacing.lg),
           child: Material(
             type: MaterialType.transparency,
             child: Container(
-              width: 420,
+              width: (screenWidth - HollowSpacing.lg * 2).clamp(0.0, 420.0),
               padding: const EdgeInsets.all(HollowSpacing.xl),
               decoration: BoxDecoration(
                 color: hollow.elevated,
@@ -325,6 +336,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
                           try {
                             await identity_api.restoreIdentityFromMnemonic(phrase: phrase);
                             await identity_api.unlockIdentity();
+                            // Identity reset to plaintext — drop stale App
+                            // Lock marker + biometric secret.
+                            await AppLockService().clearAll();
                             if (ctx.mounted) Navigator.of(ctx).pop(true);
                           } catch (e) {
                             if (ctx.mounted) {
@@ -340,6 +354,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
               ),
             ),
           ),
+          ),
         );
       },
     );
@@ -347,6 +362,36 @@ class _HollowShellState extends ConsumerState<HollowShell>
   }
 
   Future<bool> _showPasswordUnlockDialog() async {
+    final appLock = AppLockService();
+    final lockType = await appLock.getLockType();
+    final isPin = lockType == 'pin';
+    final hasBiometric = await appLock.isBiometricEnabled();
+
+    /// One biometric round: OS prompt → stored secret → Rust unlock.
+    Future<bool> tryBiometric() async {
+      final secret = await appLock.authenticateAndGetSecret();
+      if (secret == null) return false;
+      // Secret in hand — the slow Argon2id derivation runs next. Show the
+      // "Unlocking…" spinner now (the biometric OS sheet has dismissed).
+      if (mounted) setState(() => _unlocking = true);
+      try {
+        await identity_api.unlockIdentity(password: secret);
+        appLock.sessionSecret = secret;
+        return true;
+      } catch (_) {
+        if (mounted) setState(() => _unlocking = false);
+        // Stale stored secret (PIN/password changed via recovery) — drop it
+        // so the user isn't stuck in a failing biometric loop.
+        await appLock.disableBiometric();
+        return false;
+      }
+    }
+
+    // Lead with the biometric prompt — most unlocks end right here.
+    if (hasBiometric && await tryBiometric()) return true;
+    if (!mounted) return false;
+
+    final secretLabel = isPin ? 'PIN' : 'password';
     final controller = TextEditingController();
     var attempts = 0;
     while (mounted) {
@@ -355,76 +400,99 @@ class _HollowShellState extends ConsumerState<HollowShell>
         barrierDismissible: false,
         builder: (ctx) {
           final hollow = HollowTheme.of(ctx);
+          final screenWidth = MediaQuery.sizeOf(ctx).width;
           return Center(
-            child: Material(
-              type: MaterialType.transparency,
-              child: Container(
-                width: 380,
-                padding: const EdgeInsets.all(HollowSpacing.xl),
-                decoration: BoxDecoration(
-                  color: hollow.elevated,
-                  borderRadius: BorderRadius.circular(hollow.radiusLg),
-                  border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(LucideIcons.lock, size: 20, color: hollow.accent),
-                        const SizedBox(width: HollowSpacing.sm),
-                        Text('Unlock Hollow', style: HollowTypography.heading.copyWith(
-                          color: hollow.textPrimary, fontSize: 16,
-                        )),
-                      ],
-                    ),
-                    const SizedBox(height: HollowSpacing.sm),
-                    Text(
-                      'Enter your app password to unlock your identity.',
-                      style: HollowTypography.body.copyWith(
-                        color: hollow.textSecondary, fontSize: 12,
+            child: Padding(
+              padding: const EdgeInsets.all(HollowSpacing.lg),
+              child: Material(
+                type: MaterialType.transparency,
+                child: Container(
+                  width: (screenWidth - HollowSpacing.lg * 2).clamp(0.0, 380.0),
+                  padding: const EdgeInsets.all(HollowSpacing.xl),
+                  decoration: BoxDecoration(
+                    color: hollow.elevated,
+                    borderRadius: BorderRadius.circular(hollow.radiusLg),
+                    border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(LucideIcons.lock, size: 20, color: hollow.accent),
+                          const SizedBox(width: HollowSpacing.sm),
+                          Text('Unlock Hollow', style: HollowTypography.heading.copyWith(
+                            color: hollow.textPrimary, fontSize: 16,
+                          )),
+                        ],
                       ),
-                    ),
-                    if (attempts > 0) ...[
-                      const SizedBox(height: HollowSpacing.xs),
+                      const SizedBox(height: HollowSpacing.sm),
                       Text(
-                        'Wrong password. Try again.',
+                        'Enter your app $secretLabel to unlock your identity.',
                         style: HollowTypography.body.copyWith(
-                          color: hollow.error, fontSize: 12,
+                          color: hollow.textSecondary, fontSize: 12,
                         ),
                       ),
-                    ],
-                    const SizedBox(height: HollowSpacing.lg),
-                    HollowTextField(
-                      controller: controller,
-                      obscureText: true,
-                      autofocus: true,
-                      hintText: 'Password',
-                      onSubmitted: (val) {
-                        if (val.isNotEmpty) Navigator.of(ctx).pop(val);
-                      },
-                    ),
-                    const SizedBox(height: HollowSpacing.lg),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        HollowButton.ghost(
-                          onPressed: () => Navigator.of(ctx).pop('__recover__'),
-                          child: Text('Recover with phrase',
-                            style: TextStyle(fontSize: 12, color: hollow.textSecondary),
+                      if (attempts > 0) ...[
+                        const SizedBox(height: HollowSpacing.xs),
+                        Text(
+                          'Wrong ${isPin ? 'PIN' : 'password'}. Try again.',
+                          style: HollowTypography.body.copyWith(
+                            color: hollow.error, fontSize: 12,
                           ),
                         ),
-                        HollowButton.filled(
-                          onPressed: () {
-                            final pass = controller.text.trim();
-                            if (pass.isNotEmpty) Navigator.of(ctx).pop(pass);
-                          },
-                          child: const Text('Unlock'),
-                        ),
                       ],
-                    ),
-                  ],
+                      const SizedBox(height: HollowSpacing.lg),
+                      HollowTextField(
+                        controller: controller,
+                        obscureText: true,
+                        autofocus: true,
+                        hintText: isPin ? 'PIN' : 'Password',
+                        keyboardType: isPin ? TextInputType.number : null,
+                        onSubmitted: (val) {
+                          if (val.isNotEmpty) Navigator.of(ctx).pop(val);
+                        },
+                      ),
+                      const SizedBox(height: HollowSpacing.lg),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          HollowButton.ghost(
+                            onPressed: () => Navigator.of(ctx).pop('__recover__'),
+                            child: Text('Recover with phrase',
+                              style: TextStyle(fontSize: 12, color: hollow.textSecondary),
+                            ),
+                          ),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (hasBiometric) ...[
+                                HollowPressable(
+                                  onTap: () =>
+                                      Navigator.of(ctx).pop('__biometric__'),
+                                  borderRadius:
+                                      BorderRadius.circular(hollow.radiusSm),
+                                  padding:
+                                      const EdgeInsets.all(HollowSpacing.sm),
+                                  child: Icon(LucideIcons.fingerprint,
+                                      size: 18, color: hollow.accent),
+                                ),
+                                const SizedBox(width: HollowSpacing.xs),
+                              ],
+                              HollowButton.filled(
+                                onPressed: () {
+                                  final pass = controller.text.trim();
+                                  if (pass.isNotEmpty) Navigator.of(ctx).pop(pass);
+                                },
+                                child: const Text('Unlock'),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -436,15 +504,29 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
       if (result == '__recover__') {
         final recovered = await _recoverWithMnemonic();
-        if (recovered) return true;
+        if (recovered) {
+          // Identity was reset to plaintext — stale lock state must go.
+          await AppLockService().clearAll();
+          return true;
+        }
         controller.clear();
         continue;
       }
 
+      if (result == '__biometric__') {
+        if (await tryBiometric()) return true;
+        continue;
+      }
+
+      // Correct-secret case runs Argon2id next; show the spinner across it.
+      if (mounted) setState(() => _unlocking = true);
       try {
         await identity_api.unlockIdentity(password: result);
+        appLock.sessionSecret = result;
         return true;
       } catch (_) {
+        // Wrong secret — hide the spinner and let the dialog re-prompt.
+        if (mounted) setState(() => _unlocking = false);
         attempts++;
         controller.clear();
         continue;
@@ -460,11 +542,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
       barrierDismissible: false,
       builder: (ctx) {
         final hollow = HollowTheme.of(ctx);
+        final screenWidth = MediaQuery.sizeOf(ctx).width;
         return Center(
+          child: Padding(
+            padding: const EdgeInsets.all(HollowSpacing.lg),
           child: Material(
             type: MaterialType.transparency,
             child: Container(
-              width: 420,
+              width: (screenWidth - HollowSpacing.lg * 2).clamp(0.0, 420.0),
               padding: const EdgeInsets.all(HollowSpacing.xl),
               decoration: BoxDecoration(
                 color: hollow.elevated,
@@ -527,6 +612,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
               ),
             ),
           ),
+          ),
         );
       },
     );
@@ -566,7 +652,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await ref.read(identityProvider.notifier).load();
 
     final identity = ref.read(identityProvider);
-    if (identity.error != null) return;
+    if (identity.error != null) {
+      if (_unlocking && mounted) setState(() => _unlocking = false);
+      return;
+    }
 
     // Restore animation toggle from DB (must be after identity load opens DB).
     try {
@@ -633,6 +722,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Pure local reads — load before the network so the list renders immediately.
     await ref.read(profileProvider.notifier).loadAll();
     await ref.read(friendsProvider.notifier).loadAll();
+
+    // The conversation/server list is now populated from the local DB — drop
+    // the "Unlocking…" spinner. The remaining network phase runs behind the
+    // already-visible shell (local-first render).
+    if (_unlocking && mounted) setState(() => _unlocking = false);
 
     // Pre-load last message per DM peer for home dashboard / conversation previews.
     final earlyAcceptedPeerIds = ref
@@ -1149,7 +1243,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final layoutMode =
         ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock;
 
-    return LayoutBuilder(
+    final shellBody = LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
         final isDesktop = width >= _kDesktopBreakpoint;
@@ -1209,6 +1303,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
         return _ShellScaffold(body: body);
       },
+    );
+
+    // Overlay the "Unlocking…" spinner across the shell while the identity is
+    // being unlocked + the local DB loads (after a PIN/password/biometric
+    // unlock). Without it the shell looks frozen during the Argon2id wait.
+    if (!_unlocking) return shellBody;
+    return Stack(
+      children: [shellBody, _UnlockingOverlay(hollow: hollow)],
     );
   }
 
@@ -2241,6 +2343,56 @@ class _SplitDividerState extends State<_SplitDivider> {
                 borderRadius: BorderRadius.circular(1),
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Full-screen "Unlocking…" overlay shown while the identity unlocks + the
+/// local DB loads after a PIN/password/biometric unlock. The Argon2id key
+/// derivation alone is ~1.5-3s on a phone, so this replaces a frozen-looking
+/// blank shell with clear feedback. Dismisses itself once the conversation
+/// list is populated from the local DB (see _bootstrap).
+class _UnlockingOverlay extends StatelessWidget {
+  final HollowTheme hollow;
+  const _UnlockingOverlay({required this.hollow});
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: Material(
+        type: MaterialType.transparency,
+        child: Container(
+          color: hollow.background.withValues(alpha: 0.82),
+          alignment: Alignment.center,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(LucideIcons.lockKeyholeOpen, size: 32, color: hollow.accent),
+              const SizedBox(height: HollowSpacing.lg),
+              SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.5,
+                  color: hollow.accent,
+                ),
+              ),
+              const SizedBox(height: HollowSpacing.lg),
+              Text(
+                'Unlocking…',
+                style: HollowTypography.body
+                    .copyWith(color: hollow.textPrimary),
+              ),
+              const SizedBox(height: HollowSpacing.xs),
+              Text(
+                'Decrypting your messages',
+                style: HollowTypography.caption
+                    .copyWith(color: hollow.textSecondary),
+              ),
+            ],
           ),
         ),
       ),

@@ -22,5 +22,14 @@
 	<array>
 		<string>group.com.anonlisten.hollow</string>
 	</array>
+	<!--
+	  Keychain access for flutter_secure_storage (App Lock biometric secret +
+	  lock-type marker). The default access group keeps items private to this
+	  app's team/bundle.
+	-->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.anonlisten.hollow</string>
+	</array>
 </dict>
 </plist>

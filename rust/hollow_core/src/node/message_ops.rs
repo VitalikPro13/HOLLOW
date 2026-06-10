@@ -226,6 +226,29 @@ pub(crate) async fn handle_send_channel_message(
             link_preview: link_preview.clone(),
         }),
     };
+    // Mention metadata — shared by the notification hint and the offline push
+    // fan-out below.
+    let has_at = text.contains('@');
+    let has_everyone = has_at && text.contains("@everyone");
+    let mut mentioned_names: Vec<String> = Vec::new();
+    if has_at {
+        for word in text.split_whitespace() {
+            if let Some(name) = word.strip_prefix('@') {
+                if !name.is_empty() && name != "everyone" {
+                    mentioned_names.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    // Wire bytes of the message as broadcast to the room — re-delivered to
+    // OFFLINE members via targeted 0x09 frames (relay offline buffer). The MLS
+    // group ciphertext / signed public plaintext is decryptable by any member,
+    // so one encryption serves both paths. None on the legacy Olm fan-out path
+    // (pairwise sessions can't pre-encrypt for offline peers without burning
+    // ratchet slots) — those members still get a content-free wake push.
+    let mut offline_wire_bytes: Option<Vec<u8>> = None;
+
     // Public channels: plaintext broadcast (no MLS/Olm). Guests receive it too.
     if server.is_channel_public(&channel_id) {
         let msg = HavenMessage::PublicChannelMessage {
@@ -241,6 +264,7 @@ pub(crate) async fn handle_send_channel_message(
             link_preview: link_preview.clone(),
         };
         if let Ok(data) = serde_json::to_vec(&msg) {
+            offline_wire_bytes = Some(data.clone());
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
                 room_code: server_id.clone(),
                 data,
@@ -251,7 +275,7 @@ pub(crate) async fn handle_send_channel_message(
         let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
         if use_mls {
             match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, &envelope, crypto_store) {
-                Ok(()) => {}
+                Ok(wire_bytes) => { offline_wire_bytes = Some(wire_bytes); }
                 Err(e) => {
                     hollow_log!("[HOLLOW-MLS] Encrypt failed, falling back to Olm: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
@@ -287,24 +311,12 @@ pub(crate) async fn handle_send_channel_message(
 
     // Broadcast notification hint via SendToRoom (reaches all room members, even unsubscribed).
     {
-        let has_at = text.contains('@');
-        let has_everyone = has_at && text.contains("@everyone");
-        let mut mentioned_names = Vec::new();
-        if has_at {
-            for word in text.split_whitespace() {
-                if let Some(name) = word.strip_prefix('@') {
-                    if !name.is_empty() && name != "everyone" {
-                        mentioned_names.push(name.to_string());
-                    }
-                }
-            }
-        }
         let hint = HavenMessage::ChannelNotificationHint {
             server_id: server_id.clone(),
             channel_id: channel_id.clone(),
             message_id: message_id.clone(),
             has_everyone,
-            mentioned_names,
+            mentioned_names: mentioned_names.clone(),
             is_reply: reply_to_mid.is_some(),
         };
         if let Ok(hint_bytes) = serde_json::to_vec(&hint) {
@@ -312,6 +324,55 @@ pub(crate) async fn handle_send_channel_message(
                 room_code: server_id.clone(),
                 data: hint_bytes,
             });
+        }
+    }
+
+    // ── Offline-member push fan-out (channel push notifications) ─────────
+    // Room/topic broadcasts only reach ONLINE peers; offline members get the
+    // message later via channel sync. To make their phones light up NOW, hand
+    // the relay one targeted 0x09 frame per offline member: the same wire bytes
+    // the room just received (buffered + replayed to that member's background
+    // fetch node) plus push metadata (channel + per-target mention flag) the
+    // relay filters against the member's registered push prefs. The relay never
+    // learns server membership — the SENDER picks the targets from its CRDT.
+    {
+        let offline_members: Vec<&String> = server.members.keys()
+            .filter(|p| {
+                p.as_str() != local_peer_str && !peer_is_reachable(ws_room_peers, p)
+            })
+            .collect();
+        if !offline_members.is_empty() {
+            // A reply mentions the replied-to message's author.
+            let reply_author: Option<String> = reply_to_mid.as_deref().and_then(|mid| {
+                crate::storage::MessageStore::open(db_path, db_passphrase)
+                    .ok()
+                    .and_then(|s| s.get_channel_message_sender(mid))
+            });
+            hollow_log!(
+                "[HOLLOW-PUSH] Channel push fan-out: {} offline member(s) for {}/{}",
+                offline_members.len(), server_id, channel_id
+            );
+            for member in offline_members {
+                let mentioned = has_everyone
+                    || reply_author.as_deref() == Some(member.as_str())
+                    || (!mentioned_names.is_empty() && {
+                        let display = server.members.get(member)
+                            .map(|m| m.display_name.as_str())
+                            .unwrap_or("");
+                        let nick = server.nicknames.get(member).map(|n| n.read().as_str());
+                        mentioned_names.iter().any(|n| {
+                            (!display.is_empty() && n.eq_ignore_ascii_case(display))
+                                || nick.is_some_and(|nk| n.eq_ignore_ascii_case(nk))
+                        })
+                    });
+                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendChannelDirect {
+                    room_code: server_id.clone(),
+                    target_peer: member.clone(),
+                    channel_id: channel_id.clone(),
+                    mention: mentioned,
+                    data: offline_wire_bytes.clone().unwrap_or_default(),
+                });
+            }
         }
     }
 
@@ -427,7 +488,7 @@ pub(crate) async fn handle_edit_channel_message(
         let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
         if use_mls {
             match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, &envelope, crypto_store) {
-                Ok(()) => {}
+                Ok(_) => {}
                 Err(e) => {
                     hollow_log!("[HOLLOW-MLS] Edit encrypt failed, falling back to Olm: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
@@ -708,7 +769,7 @@ pub(crate) async fn handle_delete_channel_message(
         let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
         if use_mls {
             match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, &envelope, crypto_store) {
-                Ok(()) => {}
+                Ok(_) => {}
                 Err(e) => {
                     hollow_log!("[HOLLOW-MLS] Delete encrypt failed, falling back to Olm: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
@@ -905,7 +966,7 @@ pub(crate) async fn handle_add_channel_reaction(
         let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
         if use_mls {
             match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, &envelope, crypto_store) {
-                Ok(()) => {}
+                Ok(_) => {}
                 Err(e) => {
                     hollow_log!("[HOLLOW-MLS] Reaction encrypt failed, falling back to Olm: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
@@ -1093,7 +1154,7 @@ pub(crate) async fn handle_remove_channel_reaction(
         let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
         if use_mls {
             match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, &envelope, crypto_store) {
-                Ok(()) => {}
+                Ok(_) => {}
                 Err(e) => {
                     hollow_log!("[HOLLOW-MLS] Remove reaction encrypt failed, Olm fallback: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();

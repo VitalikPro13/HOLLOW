@@ -152,7 +152,7 @@ flutter build linux
 
 The output binary is at `build/linux/x64/release/bundle/hollow`.
 
-> **Note:** Linux desktop support is experimental. The app builds and core features (messaging, calls, file transfer) work, but window management and system tray integration have known issues due to Flutter's GTK embedder maturity. Tested on Ubuntu 24.04 LTS.
+> **Note:** Linux desktop support is experimental. The app builds and core features work. Needs testing.
 
 </details>
 

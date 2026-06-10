@@ -124,6 +124,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         }
       });
     } else {
+      // Opening the channel: clear its accumulated push lines + dismiss the
+      // OS banner (and the channel group summary if it was the last one).
+      dismissChannelNotification(widget.serverId!, widget.channelId!);
       ref.read(channelChatProvider.notifier).loadHistory(
             widget.serverId!,
             widget.channelId!,
@@ -231,16 +234,50 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   void _scrollToBottom() {
-    final count = widget.isDm
-        ? (ref.read(chatProvider)[widget.peerId!]?.length ?? 0)
-        : (ref.read(channelChatProvider)[_channelKey]?.length ?? 0);
-    if (count > 0) {
-      _scrollController.scrollTo(
-        index: count,
-        duration: const Duration(milliseconds: 150),
-      );
-    }
+    // Post-frame so the new message row is laid out before the scroll target
+    // is computed — animating against a stale layout causes a visible
+    // overshoot-and-settle jump (worst on iOS while the keyboard insets are
+    // still moving).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.isAttached) return;
+      final count = widget.isDm
+          ? (ref.read(chatProvider)[widget.peerId!]?.length ?? 0)
+          : (ref.read(channelChatProvider)[_channelKey]?.length ?? 0);
+      if (count > 0) {
+        _scrollController.scrollTo(
+          index: count,
+          alignment: 1.0,
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOutCubic,
+        );
+      }
+    });
     _markSeen();
+  }
+
+  void _startEditing(String messageId) {
+    setState(() => _editingMessageId = messageId);
+    // Scroll the inline editor into view AFTER the keyboard has animated in,
+    // otherwise it can sit hidden behind the keyboard.
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (!mounted || !_scrollController.isAttached) return;
+      int index = -1;
+      if (widget.isDm) {
+        final msgs = ref.read(chatProvider)[widget.peerId!] ?? const [];
+        index = msgs.indexWhere((m) => m.messageId == messageId);
+      } else {
+        final msgs = ref.read(channelChatProvider)[_channelKey] ?? const [];
+        index = msgs.indexWhere((m) => m.messageId == messageId);
+      }
+      if (index >= 0) {
+        _scrollController.scrollTo(
+          index: index,
+          alignment: 0.15,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOutCubic,
+        );
+      }
+    });
   }
 
   void _onTextChanged(String text) {
@@ -312,7 +349,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             linkPreview: preview,
           );
     }
-    _scrollToBottom();
+    // Instant post-frame jump, not an animated scrollTo: the sender is
+    // already at the bottom, and animating here races the chatProvider
+    // listener's auto-scroll + the input bar collapsing after clear() —
+    // that overlap is the iOS "jump for a second" after sending.
+    _jumpToBottom();
+    _markSeen();
   }
 
   Future<void> _pickFile() async {
@@ -1135,7 +1177,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           ? () => _setReply(msg.messageId!, senderName, msg.text)
           : null,
       onEdit: msg.messageId != null && msg.isMe && msg.fileAttachment == null
-          ? () => setState(() => _editingMessageId = msg.messageId)
+          ? () => _startEditing(msg.messageId!)
           : null,
       onDelete: msg.messageId != null && msg.isMe
           ? () => ref.read(chatProvider.notifier)
@@ -1211,7 +1253,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           ? () => _setReply(msg.messageId!, senderName, msg.text)
           : null,
       onEdit: msg.messageId != null && msg.isMe && msg.fileAttachment == null
-          ? () => setState(() => _editingMessageId = msg.messageId)
+          ? () => _startEditing(msg.messageId!)
           : null,
       onDelete: msg.messageId != null && msg.isMe
           ? () => ref.read(channelChatProvider.notifier)
@@ -1354,7 +1396,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           ),
           if (_searchResults.isNotEmpty)
             ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 200),
+              // Size to the space actually left above the keyboard so more
+              // than ~2 results are visible while typing on small phones.
+              constraints: BoxConstraints(
+                maxHeight: ((MediaQuery.sizeOf(context).height -
+                            MediaQuery.viewInsetsOf(context).bottom) *
+                        0.35)
+                    .clamp(120.0, 360.0),
+              ),
               child: ListView.builder(
                 shrinkWrap: true,
                 itemCount: _searchResults.length,

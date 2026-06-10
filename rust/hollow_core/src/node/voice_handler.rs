@@ -160,6 +160,18 @@ pub(crate) fn handle_call_send_signal(
                 return;
             }
         }
+        "audio_state" => {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                HavenMessage::CallAudioState {
+                    call_id: v["call_id"].as_str().unwrap_or("").to_string(),
+                    muted: v["muted"].as_bool().unwrap_or(false),
+                    deafened: v["deafened"].as_bool().unwrap_or(false),
+                }
+            } else {
+                hollow_log!("[HOLLOW-CALL] Failed to parse audio_state payload");
+                return;
+            }
+        }
         "screen_state" => {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
                 HavenMessage::CallScreenState {

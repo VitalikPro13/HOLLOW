@@ -255,6 +255,11 @@ pub(crate) fn send_mls_broadcast(
 /// MLS-encrypt an envelope and broadcast to subscribed peers only (topic = channel_id).
 /// Peers not subscribed to this topic won't receive the message in real-time
 /// but will sync it when they navigate to the channel.
+///
+/// Returns the serialized `HavenMessage::MlsChannelMessage` wire bytes on
+/// success so callers can re-deliver the SAME group ciphertext to offline
+/// members (relay offline buffer via 0x09 frames) — MLS application messages
+/// are decryptable by every member, so one encryption serves both paths.
 pub(crate) fn send_mls_broadcast_topic(
     mls: &mut MlsManager,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -262,7 +267,7 @@ pub(crate) fn send_mls_broadcast_topic(
     topic: &str,
     envelope: &MessageEnvelope,
     crypto_store: &CryptoStore,
-) -> Result<(), String> {
+) -> Result<Vec<u8>, String> {
     let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
     let ciphertext = mls.encrypt(server_id, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
@@ -275,9 +280,9 @@ pub(crate) fn send_mls_broadcast_topic(
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoomTopic {
         room_code: server_id.to_string(),
         topic: topic.to_string(),
-        data,
+        data: data.clone(),
     });
-    Ok(())
+    Ok(data)
 }
 
 /// MLS-encrypt a targeted envelope and broadcast to the server room.

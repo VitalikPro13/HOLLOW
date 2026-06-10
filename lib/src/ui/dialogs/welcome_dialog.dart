@@ -140,14 +140,21 @@ class _WelcomeContentState extends State<_WelcomeContent> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final radius = BorderRadius.circular(hollow.radiusLg);
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final isCompact = screenWidth < 600;
+    // Phones: full width minus padding; never force a 360px minimum that
+    // exceeds the screen.
+    final minWidth = isCompact
+        ? (screenWidth - HollowSpacing.xl * 2).clamp(0.0, 480.0)
+        : 360.0;
 
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(HollowSpacing.xl),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(
+          constraints: BoxConstraints(
             maxWidth: 480,
-            minWidth: 360,
+            minWidth: minWidth,
           ),
           child: Material(
             color: Colors.transparent,
@@ -166,9 +173,13 @@ class _WelcomeContentState extends State<_WelcomeContent> {
                 ],
               ),
               padding: const EdgeInsets.all(HollowSpacing.xl),
-              child: _view == _WelcomeView.menu
-                  ? _buildMenu(hollow)
-                  : _buildRestorePhrase(hollow),
+              // Scrolls when the keyboard (restore-phrase view) or a short
+              // screen squeezes the available height.
+              child: SingleChildScrollView(
+                child: _view == _WelcomeView.menu
+                    ? _buildMenu(hollow)
+                    : _buildRestorePhrase(hollow),
+              ),
             ),
           ),
         ),

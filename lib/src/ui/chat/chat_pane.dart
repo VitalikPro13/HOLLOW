@@ -2247,17 +2247,21 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                   const Spacer(),
                   SpeakingBorder(
                     isSpeaking: call.isLocalSpeaking,
-                    child: HollowAvatar(
+                    child: _badgedCallAvatar(
+                      hollow: hollow,
                       peerId: localPeerId,
-                      size: 60,
+                      muted: call.isMuted,
+                      deafened: call.isDeafened,
                     ),
                   ),
                   const SizedBox(width: HollowSpacing.sm),
                   SpeakingBorder(
                     isSpeaking: call.isRemoteSpeaking,
-                    child: HollowAvatar(
+                    child: _badgedCallAvatar(
+                      hollow: hollow,
                       peerId: widget.peerId,
-                      size: 60,
+                      muted: call.remoteMuted,
+                      deafened: call.remoteDeafened,
                     ),
                   ),
                 ],
@@ -2800,6 +2804,36 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   }
 
   /// Shared row of call controls: mute, camera, screen share, record, end call.
+  /// Call avatar with muted (bottom-left) / deafened (bottom-right) badges —
+  /// same convention as the mobile voice avatars.
+  Widget _badgedCallAvatar({
+    required HollowTheme hollow,
+    required String peerId,
+    required bool muted,
+    required bool deafened,
+  }) {
+    Widget badge(IconData icon) => Container(
+          padding: const EdgeInsets.all(2),
+          decoration: BoxDecoration(
+            color: hollow.error,
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            border: Border.all(color: hollow.background, width: 1.5),
+          ),
+          child: Icon(icon, size: 10, color: Colors.white),
+        );
+
+    return Stack(
+      children: [
+        HollowAvatar(peerId: peerId, size: 60),
+        if (muted)
+          Positioned(left: 0, bottom: 0, child: badge(LucideIcons.micOff)),
+        if (deafened)
+          Positioned(
+              right: 0, bottom: 0, child: badge(LucideIcons.headphoneOff)),
+      ],
+    );
+  }
+
   Widget _buildControls(CallState call, HollowTheme hollow) {
     final rec = ref.watch(recordingProvider);
     const iconSize = 20.0;
@@ -2824,6 +2858,22 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
               call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
               size: iconSize,
               color: call.isMuted ? hollow.error : hollow.textSecondary,
+            ),
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.xs),
+        HollowTooltip(
+          message: call.isDeafened ? 'Undeafen' : 'Deafen',
+          child: HollowPressable(
+            onTap: call.status == CallStatus.active
+                ? () => ref.read(callProvider.notifier).toggleDeafen()
+                : null,
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            padding: buttonPadding,
+            child: Icon(
+              LucideIcons.headphones,
+              size: iconSize,
+              color: call.isDeafened ? hollow.error : hollow.textSecondary,
             ),
           ),
         ),

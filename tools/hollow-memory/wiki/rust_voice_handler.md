@@ -403,3 +403,12 @@ All emit `NetworkEvent::CallSignal { peer_id, signal_type, payload }`:
 ## PeerJoined Voice Channel Sync
 
 When a new peer joins a WS room (`PeerJoined` event in swarm.rs), the existing node sends `HavenMessage::VoiceChannelJoin` for every voice channel the local user is currently in. This ensures newly connected peers immediately learn about existing voice channel participants. The sync iterates `voice_channel_participants`, splits each vc_key back into server_id and channel_id, and sends individual plaintext join messages.
+
+## Call Signal Whitelist + CallAudioState (2026-06)
+
+`handle_call_send_signal` (1:1) and `handle_voice_channel_send_signal` (VC) are **whitelists**: each Dart `signalType` string maps to a dedicated `HavenMessage`/`MessageEnvelope` variant; unknown types fall into `_ =>` and are SILENTLY dropped (hollow_log only). Adding a new 1:1 signal type requires three touches:
+1. `HavenMessage` variant in `types.rs` (use `#[serde(default)]` on fields so old builds' messages don't fail deserialization) — e.g. `CallAudioState { call_id, muted, deafened }` (`#[serde(rename = "call_audio_state")]`).
+2. The match arm in `handle_call_send_signal` (voice_handler.rs) parsing the JSON payload.
+3. The incoming dispatch arm in `swarm.rs` (next to `CallVideoState`) re-emitting `NetworkEvent::CallSignal { signal_type, payload }` to Dart.
+
+No frb codegen needed — `HavenMessage` is internal, and `call_send_signal`/`NetworkEvent::CallSignal` are already generic over the type string. `CallAudioState` carries the 1:1 mute/deafen badge sync (Dart `audio_state`).

@@ -405,6 +405,9 @@ pub(crate) enum NodeCommand {
     ReleaseNickname,
     // -- Push notifications --
     RegisterPushToken { token: String, platform: String },
+    /// Register per-server/channel push notification prefs with the relay
+    /// (RAM only, re-sent on reconnect). See `WsCommand::SetPushPrefs`.
+    SetPushPrefs { prefs_json: String },
     // -- Typing indicators (Phase 3.5) --
     SendTypingIndicator { server_id: String, channel_id: String },
     // -- Presence (Phase 6.75) --
@@ -949,6 +952,17 @@ pub(crate) enum HavenMessage {
     /// Video state change during a call (camera on/off).
     #[serde(rename = "call_video_state")]
     CallVideoState { call_id: String, enabled: bool },
+
+    /// Mute/deafen state change during a 1:1 call (badge sync).
+    #[serde(rename = "call_audio_state")]
+    CallAudioState {
+        #[serde(default)]
+        call_id: String,
+        #[serde(default)]
+        muted: bool,
+        #[serde(default)]
+        deafened: bool,
+    },
 
     /// Screen share state change during a call (on/off).
     #[serde(rename = "call_screen_state")]

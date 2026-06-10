@@ -48,6 +48,16 @@ class CallState {
   final bool isLocalSpeaking;
   final bool isRemoteSpeaking;
 
+  /// Mobile audio route: true = loudspeaker, false = earpiece.
+  final bool isSpeakerOn;
+
+  /// Local deafen state (remote audio silenced, mic muted).
+  final bool isDeafened;
+
+  /// Remote peer's mute/deafen state (synced via 'audio_state' signals).
+  final bool remoteMuted;
+  final bool remoteDeafened;
+
   /// Quality label for the local screen share (e.g. "1080p60"). Null when not sharing.
   final String? screenShareLabel;
 
@@ -69,6 +79,10 @@ class CallState {
     this.sframeKey = '',
     this.isLocalSpeaking = false,
     this.isRemoteSpeaking = false,
+    this.isSpeakerOn = false,
+    this.isDeafened = false,
+    this.remoteMuted = false,
+    this.remoteDeafened = false,
     this.screenShareLabel,
     this.remoteScreenShareLabel,
   });
@@ -88,6 +102,10 @@ class CallState {
     String? sframeKey,
     bool? isLocalSpeaking,
     bool? isRemoteSpeaking,
+    bool? isSpeakerOn,
+    bool? isDeafened,
+    bool? remoteMuted,
+    bool? remoteDeafened,
     String? screenShareLabel,
     bool clearScreenShareLabel = false,
     String? remoteScreenShareLabel,
@@ -108,6 +126,10 @@ class CallState {
         sframeKey: sframeKey ?? this.sframeKey,
         isLocalSpeaking: isLocalSpeaking ?? this.isLocalSpeaking,
         isRemoteSpeaking: isRemoteSpeaking ?? this.isRemoteSpeaking,
+        isSpeakerOn: isSpeakerOn ?? this.isSpeakerOn,
+        isDeafened: isDeafened ?? this.isDeafened,
+        remoteMuted: remoteMuted ?? this.remoteMuted,
+        remoteDeafened: remoteDeafened ?? this.remoteDeafened,
         screenShareLabel: clearScreenShareLabel
             ? null
             : (screenShareLabel ?? this.screenShareLabel),
@@ -126,6 +148,17 @@ class CallNotifier extends Notifier<CallState> {
 
   /// SECURITY (Phase 6.25): Guard against concurrent renegotiations.
   bool _renegotiationInProgress = false;
+
+  /// Remote renegotiation offer that arrived while we were busy — processed
+  /// when the current renegotiation settles instead of being dropped (a
+  /// dropped offer means the remote's new track is never announced →
+  /// one-way video).
+  String? _queuedRenegOfferPeer;
+  String? _queuedRenegOfferPayload;
+  int _renegOfferAttempts = 0;
+
+  /// Last user-chosen remote volume — restored when un-deafening.
+  double _lastRemoteVolume = 1.0;
 
   /// Separate PCs for screen sharing (one per direction).
   ScreenShareService? _outgoingScreenShare; // We share our screen to them
@@ -183,6 +216,10 @@ class CallNotifier extends Notifier<CallState> {
         );
         _scheduleStatsDump(peerId);
 
+        // Mobile audio route: voice calls start on the earpiece, video
+        // calls on the loudspeaker.
+        _setSpeakerRoute(state.isVideoCall);
+
         // Start VAD for speaking indicators.
         _voiceService!.onSpeakingChanged = (localSpeaking, remoteSpeaking) {
           if (state.status == CallStatus.active) {
@@ -217,11 +254,16 @@ class CallNotifier extends Notifier<CallState> {
         // with a camera goes through the mid-call addTrack/renegotiate
         // path which is the proven-working flow for cross-peer video.
         if (state.isVideoCall) {
+          // Stagger the auto-enable deterministically: both sides firing
+          // toggleVideo ~simultaneously creates renegotiation glare (both
+          // offers collide, one is never processed → one-way video). The
+          // polite peer (lower peer_id, same convention as invite glare)
+          // goes first; the other waits for that round-trip to settle.
+          final autoEnableMs =
+              localPeerId.compareTo(peerId) < 0 ? 300 : 1500;
           _callLog('[HOLLOW-CALL] Video call connected — scheduling '
-              'auto-toggle in 300ms');
-          // Small delay so the SDP/ICE handshake fully settles before we
-          // start a renegotiation on top of it.
-          Future.delayed(const Duration(milliseconds: 300), () {
+              'auto-toggle in ${autoEnableMs}ms');
+          Future.delayed(Duration(milliseconds: autoEnableMs), () {
             if (state.status == CallStatus.active &&
                 state.isVideoCall &&
                 !state.isVideoEnabled) {
@@ -284,6 +326,8 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Set the remote peer's audio volume (how loud you hear them).
   Future<void> setRemoteVolume(double volume) async {
+    _lastRemoteVolume = volume;
+    if (state.isDeafened) return; // applied on un-deafen
     await _service.setRemoteAudioVolume(volume);
   }
 
@@ -387,6 +431,53 @@ class CallNotifier extends Notifier<CallState> {
     if (state.status != CallStatus.active) return;
     _service.toggleMute();
     state = state.copyWith(isMuted: _service.isMuted);
+    _sendAudioState();
+  }
+
+  /// Toggle deafen: silence the remote peer AND mute our mic. Mirrors voice
+  /// channels — un-deafening keeps the mic muted.
+  void toggleDeafen() {
+    if (state.status != CallStatus.active) return;
+    final newDeafened = !state.isDeafened;
+    if (newDeafened && !_service.isMuted) _service.toggleMute();
+    unawaited(_service
+        .setRemoteAudioVolume(newDeafened ? 0.0 : _lastRemoteVolume)
+        .catchError((_) {}));
+    state = state.copyWith(
+      isDeafened: newDeafened,
+      isMuted: _service.isMuted,
+    );
+    _sendAudioState();
+  }
+
+  /// Tell the remote peer our mute/deafen state so their UI can show badges.
+  void _sendAudioState() {
+    final peerId = state.peerId;
+    final callId = state.callId;
+    if (peerId == null || callId == null) return;
+    _sendSignal(
+        peerId,
+        'audio_state',
+        jsonEncode({
+          'call_id': callId,
+          'muted': state.isMuted,
+          'deafened': state.isDeafened,
+        }));
+  }
+
+  static bool get _isMobile => Platform.isAndroid || Platform.isIOS;
+
+  /// Route audio to the loudspeaker (true) or earpiece (false). Mobile only.
+  void _setSpeakerRoute(bool speaker) {
+    if (!_isMobile) return;
+    unawaited(Helper.setSpeakerphoneOn(speaker).catchError((_) {}));
+    state = state.copyWith(isSpeakerOn: speaker);
+  }
+
+  /// Toggle loudspeaker/earpiece during a call. Mobile only.
+  void toggleSpeaker() {
+    if (state.status == CallStatus.idle) return;
+    _setSpeakerRoute(!state.isSpeakerOn);
   }
 
   /// Toggle camera on/off.
@@ -405,6 +496,12 @@ class CallNotifier extends Notifier<CallState> {
     final wasEnabled = state.isVideoEnabled;
     final enabled = await _service.toggleVideo();
     state = state.copyWith(isVideoEnabled: enabled);
+
+    // Turning the camera on mid-call implies hands-off use — switch to the
+    // loudspeaker (mobile). Turning it off keeps whatever route is active.
+    if (enabled && !wasEnabled && _isMobile && !state.isSpeakerOn) {
+      _setSpeakerRoute(true);
+    }
 
     final peerId = state.peerId;
     final callId = state.callId;
@@ -580,6 +677,8 @@ class CallNotifier extends Notifier<CallState> {
           await _handleIce(peerId, payload);
         case 'video_state':
           _handleVideoState(peerId, payload);
+        case 'audio_state':
+          _handleAudioState(peerId, payload);
         case 'screen_state':
           _handleScreenState(peerId, payload);
         case 'screen_offer':
@@ -817,12 +916,16 @@ class CallNotifier extends Notifier<CallState> {
     if (state.callId != callId) return;
 
     if (state.status == CallStatus.active && _service.hasActiveCall) {
-      // SECURITY (Phase 6.25): Prevent concurrent renegotiations.
+      // SECURITY (Phase 6.25): Prevent concurrent renegotiations — but queue
+      // the offer instead of dropping it (a dropped offer is never retried by
+      // the sender → its new track is never announced → one-way video).
       if (_renegotiationInProgress) {
-        _callLog('[HOLLOW-CALL] Renegotiation already in progress, dropping offer');
+        _callLog('[HOLLOW-CALL] Renegotiation in progress — queueing offer');
+        _queueRenegOffer(peerId, payload);
         return;
       }
       _renegotiationInProgress = true;
+      var answered = false;
       try {
         // Renegotiation on existing voice PC (e.g., remote toggled video).
         final answerSdp = await _service.handleRenegotiationOffer(sdp);
@@ -830,9 +933,27 @@ class CallNotifier extends Notifier<CallState> {
           final answerPayload =
               jsonEncode({'call_id': callId, 'sdp': answerSdp});
           _sendSignal(peerId, 'sdp_answer', answerPayload);
+          answered = true;
         }
+      } catch (e) {
+        _callLog('[HOLLOW-CALL] Renegotiation answer failed: $e');
       } finally {
         _renegotiationInProgress = false;
+      }
+      if (answered) {
+        _renegOfferAttempts = 0;
+        _drainQueuedRenegOffer();
+      } else if (_renegOfferAttempts < 2) {
+        // Likely SDP glare: this offer arrived while our own offer was
+        // unanswered (have-local-offer). Retry after our round-trip settles.
+        _renegOfferAttempts++;
+        _callLog('[HOLLOW-CALL] Scheduling renegotiation offer retry '
+            '(attempt $_renegOfferAttempts)');
+        Future.delayed(const Duration(milliseconds: 1200), () {
+          if (state.status == CallStatus.active && state.peerId == peerId) {
+            _handleSdpOffer(peerId, payload);
+          }
+        });
       }
     } else {
       // Ensure device preferences are loaded before starting media.
@@ -870,6 +991,29 @@ class CallNotifier extends Notifier<CallState> {
     if (state.callId != callId) return;
 
     await _service.handleAnswer(sdp);
+    // Our renegotiation round-trip just settled (PC back to stable) —
+    // process any remote offer that collided with it.
+    _drainQueuedRenegOffer();
+  }
+
+  void _queueRenegOffer(String peerId, String payload) {
+    _queuedRenegOfferPeer = peerId;
+    _queuedRenegOfferPayload = payload;
+    // Safety net: drain even if no answer ever arrives for our own offer.
+    Future.delayed(const Duration(milliseconds: 2000), _drainQueuedRenegOffer);
+  }
+
+  void _drainQueuedRenegOffer() {
+    final peer = _queuedRenegOfferPeer;
+    final payload = _queuedRenegOfferPayload;
+    if (peer == null || payload == null) return;
+    if (_renegotiationInProgress) return; // drained at next settle point
+    _queuedRenegOfferPeer = null;
+    _queuedRenegOfferPayload = null;
+    if (state.status == CallStatus.active && state.peerId == peer) {
+      _callLog('[HOLLOW-CALL] Processing queued renegotiation offer');
+      unawaited(_handleSdpOffer(peer, payload));
+    }
   }
 
   Future<void> _handleIce(String peerId, String payload) async {
@@ -895,6 +1039,17 @@ class CallNotifier extends Notifier<CallState> {
     debugPrint(
         '[HOLLOW-CALL] Remote video state: enabled=$enabled from $peerId');
     state = state.copyWith(remoteVideoEnabled: enabled);
+  }
+
+  void _handleAudioState(String peerId, String payload) {
+    final json = jsonDecode(payload) as Map<String, dynamic>;
+    final callId = json['call_id'] as String?;
+    if (callId != null && state.callId != callId) return;
+
+    state = state.copyWith(
+      remoteMuted: json['muted'] as bool? ?? false,
+      remoteDeafened: json['deafened'] as bool? ?? false,
+    );
   }
 
   void _handleScreenState(String peerId, String payload) {
@@ -1033,6 +1188,10 @@ class CallNotifier extends Notifier<CallState> {
     _statsTimer?.cancel();
     _statsTimer = null;
     _renegotiationInProgress = false;
+    _queuedRenegOfferPeer = null;
+    _queuedRenegOfferPayload = null;
+    _renegOfferAttempts = 0;
+    _lastRemoteVolume = 1.0;
     // Stop out-of-process screen audio renderer.
     if (_screenAudioRenderer != null) {
       await _screenAudioRenderer!.stop();
@@ -1049,6 +1208,11 @@ class CallNotifier extends Notifier<CallState> {
     // Reset the screen-share view focus so the next call starts fresh.
     ref.read(focusedDmSourceProvider.notifier).state =
         const DmFocusedSource.none();
+    // Restore the default audio route so the next call doesn't inherit a
+    // stale speakerphone state.
+    if (_isMobile) {
+      unawaited(Helper.setSpeakerphoneOn(false).catchError((_) {}));
+    }
     state = const CallState();
   }
 

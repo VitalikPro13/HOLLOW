@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.5.0+9
+version: 0.5.0+10
 
 environment:
   sdk: ^3.10.4
@@ -48,6 +48,18 @@ dependencies:
   record: ^6.2.0
   win32audio: ^1.5.0
   audioplayers: ^6.6.0
+  # Screen-off when the phone is held to the ear during earpiece calls
+  # (Android needs WAKE_LOCK — already in the manifest; iOS blanks natively
+  # while the events stream is subscribed).
+  proximity_sensor: ^1.3.10
+  # Keep the screen awake while video/screen share is on screen during calls.
+  # Pinned to 1.5.x: 1.6+ needs win32 ^6 which conflicts with file_picker.
+  wakelock_plus: ^1.5.2
+  # App lock: fingerprint / Face ID prompt (mobile).
+  local_auth: ^3.0.1
+  # App lock: holds the lock-type marker + the biometric-released secret
+  # (Android Keystore / iOS Keychain).
+  flutter_secure_storage: ^10.3.1
   super_clipboard: ^0.9.1
   desktop_drop: ^0.7.0
   path: ^1.9.0

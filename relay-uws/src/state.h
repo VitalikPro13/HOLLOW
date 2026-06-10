@@ -31,6 +31,18 @@ static constexpr size_t MAX_BUFFERED_MSGS_PER_PEER = 100;
 static constexpr size_t MAX_BUFFERED_IMAGES_PER_PEER = 1;
 static constexpr int64_t OFFLINE_BUFFER_TTL_SECS = 86400;  // 24 hours
 
+// Channel push notifications (0x09 frames — per-offline-member channel
+// message copies fanned out by the SENDER; the relay never learns server
+// membership). Separate buffer cap so chatty servers can't evict buffered DMs.
+static constexpr size_t MAX_BUFFERED_CHANNEL_MSGS_PER_PEER = 30;
+// Anti-spam: non-mention channel pushes are heavily throttled — the banner has
+// no content until the device fetches, so repeats add nothing. Mentions are
+// urgent and bypass the long window.
+static constexpr int CHANNEL_PUSH_DEBOUNCE_SECS = 120;         // non-mention, per (peer, server)
+static constexpr int CHANNEL_PUSH_MENTION_DEBOUNCE_SECS = 10;  // mention, per (peer, server)
+static constexpr int CHANNEL_PUSH_MIN_GAP_SECS = 5;            // any channel push, per peer
+static constexpr uint32_t CHANNEL_PUSH_MAX_WHILE_OFFLINE = 3;  // non-mention cap until app reconnects
+
 using SSLWebSocket = uWS::WebSocket<true, true, struct PerSocketData>;
 
 struct PerSocketData {
@@ -119,12 +131,35 @@ struct RelayState {
     // Each entry is the fully-formed 0x06 direct-message frame to replay when
     // the target joins the matching DM room. Capped per-peer + TTL-swept.
     struct BufferedMsg {
-        std::string room;              // DM room code the frame belongs to
+        std::string room;              // DM/server room code the frame belongs to
         std::string frame;             // ready-to-send 0x06 binary frame
         std::chrono::steady_clock::time_point at;
         bool is_image = false;         // inlined-image frame (separate cap)
+        bool is_channel = false;       // channel message frame (separate cap)
     };
     std::unordered_map<std::string, std::deque<BufferedMsg>> offline_buffer;
+
+    // Channel push prefs (RAM only — replaced wholesale by set_push_prefs,
+    // re-sent by the app on every connect). peer_id -> server room -> pref.
+    // Filtering happens HERE because iOS alert pushes can't be suppressed
+    // after delivery. Unknown server / unregistered peer defaults to "all".
+    struct ServerPushPref {
+        std::string level;  // "all" / "mentions" / "nothing"
+        std::unordered_map<std::string, std::string> channels;  // channel_id -> level
+    };
+    std::unordered_map<std::string,
+        std::unordered_map<std::string, ServerPushPref>> push_prefs;
+
+    // Channel push throttling state. count_since_offline resets when the full
+    // app (non-fetch) rejoins the server room.
+    struct ChannelPushState {
+        std::chrono::steady_clock::time_point last{};
+        uint32_t count_since_offline = 0;
+    };
+    std::unordered_map<std::string,
+        std::unordered_map<std::string, ChannelPushState>> channel_push_state;
+    // Per-peer floor across ALL channel pushes (multi-server burst guard).
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_channel_push_any;
 
     size_t online_users() const { return peer_sockets.size() - guest_count; }
 };

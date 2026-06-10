@@ -7,8 +7,11 @@ Covers all mobile-specific UI: the shell layout, chat route, message actions bot
 ## MobileShell
 
 **File:** `lib/src/ui/mobile/mobile_shell.dart`
-**Class:** `MobileShell extends ConsumerWidget`
+**Class:** `MobileShell extends ConsumerStatefulWidget` (stateful since 2026-06: registers push-notification tap handlers)
 **Purpose:** 4-tab mobile layout replacing desktop HollowShell below 600px breakpoint.
+
+### Push-tap navigation registration
+`initState` (mobile platforms only) registers `PushNotificationService.registerOpenChatHandler(_openChatFromPush)` and `registerOpenChannelHandler(...)`. `_openChatFromPush(peerId)`: no-op if `selectedPeerProvider` already == peerId; else set selectedPeer, null selectedServer, `markDmSeen`, push `MobileChatRoute(peerId)` via rootNavigator, clear selection in `.then()` — identical to the in-app banner pattern. Taps that arrive BEFORE the shell mounts (cold start) are buffered inside PushNotificationService and delivered on registration.
 
 ### Tabs (indexed 0-3)
 | Index | Tab | Widget | Icon |
@@ -336,10 +339,16 @@ Name field (max 24) + 9 preset color circles. `crdt_api.createLabel()`.
 ## MobileSettingsTab (Restructured)
 
 **File:** `lib/src/ui/mobile/tabs/mobile_settings_tab.dart`
-**Purpose:** Full settings with pill tab bar. Replaces old single-section layout.
+**Purpose:** Settings ROOT LIST that pushes full-screen subpages (iOS-Settings style). The old pill-tab bar + AnimatedSwitcher design was removed (2026-06).
 
-### Tab Bar
-Horizontal scrollable `_PillTab` widgets: Profile, System, Security, About. Selected = accent fill + white text, unselected = surface bg + secondary text.
+### Root List (`MobileSettingsTab` — `ConsumerWidget`)
+- "Settings" heading + **profile card** (HollowAvatar 48px, display name via `displayNameFor`, "Name, status, avatar & banner" caption, chevron) → pushes the Profile subpage.
+- Divider (`hollow.textSecondary` @ 0.35 alpha) separates the profile card from the nav tiles.
+- `_SettingsNavTile` rows (accent icon box 36px + title + subtitle + chevron): **System**, **Security**, **About**.
+- `_push()` → `Navigator.push(MaterialPageRoute(_SettingsSubPage(title, child)))`.
+
+### _SettingsSubPage
+Full-screen scaffold matching MobileServerSettingsRoute chrome: `SafeArea > Column[back-arrow header row (HollowPressable + heading), Divider, Expanded(child)]`. The four bodies are the unchanged `_ProfileTab`/`_SystemTab`/`_SecurityTab`/`_AboutTab` widgets.
 
 ### Profile Tab
 - **Live preview card** — bordered container (`surface` bg, `border` outline, `radiusMd`) with:
@@ -367,10 +376,13 @@ Sections in order:
 5. **Files** — `_ImageQualityPicker` (Lossless/Balanced/Small pills via `imageQualityProvider`), `_AutoDownloadSlider` (34-2048 MB), `_CacheCapSlider` (256-10240 MB, formatted as GB when ≥1024)
 6. **Ringtone** — ringtone picker + volume slider
 
-### Security Tab
-- Password Protection: enable (with confirm dialog) / remove
+### Security Tab (App Lock: PIN / password / biometric)
+- **App Lock row**: status "PIN enabled" / "Password enabled" / "Not set". Enable → `_chooseLockType()` bottom sheet (`_LockTypeOption` rows: PIN 4-8 digits / Password / a THIRD grayed-out "Fingerprint / face unlock" entry, `onTap: null` → 0.55 opacity, no chevron, not pressable, subtitle "Available once a PIN or password is set" — biometric is a layer on top of a PIN/password, not its own lock type) → `_askSecret()` dialog (numeric keyboard + `FilteringTextInputFormatter.digitsOnly` + maxLength 8 for PIN, confirm field, min-4-digit check) → `identity_api.enablePasswordProtection` (PIN = numeric secret through the SAME Rust Argon2id flow) + `AppLockService.setLockType` + `sessionSecret` cache. Remove → ask current secret → `removePasswordProtection` + `AppLockService.clearAll()`. **Enable/Remove run Argon2id (~seconds)** → the button is swapped for an inline 18px `CircularProgressIndicator` while busy (`_appLockBusy` flag, reset in `finally`).
+- **Biometric row** (mobile + lock enabled + `canUseBiometrics()`): Switch (`activeThumbColor`). ON → needs the secret (`sessionSecret` or re-ask) → one live `promptBiometric()` check → `enableBiometric(secret)` stores it in flutter_secure_storage. See `lib/src/core/services/app_lock_service.dart`. (`canUseBiometrics()` requires `getAvailableBiometrics().isNotEmpty` — some Pixels report Face Unlock as class-2/weak and return empty even with enrolled biometrics; relax that check if the Switch never appears.)
 - Device Protection: enable/disable OS keychain (Windows/macOS only)
 - Recovery Phrase button (loads from identity or storage API)
+- Unlock-at-launch flow lives in `hollow_shell.dart _showPasswordUnlockDialog`: biometric prompt FIRST, then PIN/password dialog (fingerprint retry button); all unlock/recovery dialogs use `(screenWidth - padding).clamp(0, maxW)` widths.
+- **Unlocking… spinner** (`_UnlockingOverlay`, flag-driven `Stack` over the shell — NOT a dialog, so nothing races it dismissed): the post-unlock Argon2id derivation (~1.5-3s) + the local DB load can't begin until unlock finishes (the SQLCipher passphrase is derived from the just-unlocked identity — local-first render can't help). `_unlocking` is set the instant a secret is in hand (both `tryBiometric` and the password-entry path) and cleared after `profileProvider`/`friendsProvider` load in `_bootstrap` (conversation list renderable). Only shows when an App Lock is active; wrong-secret + identity-error paths clear it. See `feedback_app_lock_unlock_ux` memory.
 
 ### About Tab
 - Centered `hollow_logo_rounded.png` (96x96, ClipRRect rounded) + "Hollow" display text + tagline
@@ -824,3 +836,42 @@ Brand icon row: YouTube, X, Twitch, Kick | shimmer divider | Patreon, Ko-Fi. `_M
 ### System Tab Notes
 - Auto-Download slider removed (Share system is N/A on mobile, setting has no effect)
 - Ringtone picker: resets `ringtoneStart`/`ringtoneEnd` and probes duration via `AudioPlayer` when new file selected (matches desktop pattern). "Trim" button opens shared `showRingtoneClipEditor()` dialog.
+- Accent swatches (`_MobileColorSwatch` + save-preset button) are 36×36 (touch-target minimum; were 28×28).
+
+## Mobile Call Screens — Audio Routing, Badges, Proximity, Wakelock, Screen Share
+
+Implemented 2026-06 across `mobile_call_video_view.dart` (1:1) and `mobile_voice_channel_route.dart` (VC).
+
+### Control rows (identical order in 1:1 and VC)
+mute, deafen (headphones, red when active), speaker (`LucideIcons.speaker`, accent when on), camera, [flip — VC only when camera on], hang up. VC row shrinks buttons 56→46px when ≥6 buttons (Row overflow on 360dp). The 1:1 remote-volume sheet was REMOVED from mobile (desktop volume popup remains).
+
+### Speaker routing (`Helper.setSpeakerphoneOn`, mobile-gated)
+Defaults: 1:1 voice → earpiece, 1:1 video → speaker, camera-on mid-call → auto-switch to speaker, VC join → speaker. Reset to earpiece in `_cleanup()` / `onLocalLeft()` so the next call never inherits a stale route. State: `CallState.isSpeakerOn` / `VoiceChannelState.isSpeakerOn`.
+
+### Mute/deafen badges (convention everywhere)
+Muted badge = bottom-LEFT, deafened badge = bottom-RIGHT (red box, white icon, `micOff`/`headphoneOff`). Widgets: `_AvatarBadge` in `mobile_voice_avatars.dart` (`MobileSpeakingAvatar.isMuted/isDeafened`, `MobileClusteredAvatars.mutedSet/deafenedSet`), desktop 1:1 `_badgedCallAvatar` in `chat_pane.dart`. Data: VC = `peerAudioStates`; 1:1 = `CallState.isMuted/isDeafened/remoteMuted/remoteDeafened` (synced via the `audio_state` call signal — see providers_voice_files.md).
+
+### Proximity + wakelock
+`_syncProximity` in both screens: `proximity_sensor` screen-off when in earpiece mode (no speaker, no video/screenshare); Android needs WAKE_LOCK (present), iOS blanks natively while the events stream is subscribed. `_syncWakelock`: `wakelock_plus` (^1.5.2 — 1.6+ conflicts with file_picker via win32) keeps the screen on while video/screen share is displayed; disabled in dispose.
+
+### Incoming screen share on mobile (1:1)
+`_hasRealVideo` and `_buildVideoView` check `call.remoteScreenSharing && notifier.screenShareRenderer?.srcObject != null`; the share renders full-bleed inside `InteractiveViewer(maxScale: 6)` (pinch-zoom), taking priority over camera feeds, with the local camera PiP on top. The VC screen-share view got the same InteractiveViewer wrap. (Before 2026-06 the mobile 1:1 view was camera-only and silently ignored an incoming share.)
+
+### PiP drag bounds
+Both screens clamp the camera PiP to `dy: 0..(screenHeight - 260)` (was hard-coded 400 — PiP got stuck mid-screen on tall phones).
+
+## Mobile UX Hardening (2026-06)
+
+One-pass fixes from the production-readiness audit:
+
+- **Keyboard-aware dialogs (global):** `showHollowDialog` wraps every pageBuilder in `AnimatedPadding(MediaQuery.viewInsetsOf)` + `MediaQuery.removeViewInsets` (mirrors Flutter's Dialog). NEVER add viewInsets padding inside a dialog builder — double-pad. `HollowDialog` itself: full-width-minus-padding under 600px, content in `Flexible > SingleChildScrollView`, actions in `Wrap`.
+- **Add Friend** is a bottom sheet (`_AddFriendSheet` in mobile_friends_tab.dart): input + full-width Send Friend Request directly below, temporary-nickname claim boxed off in a separate "Want them to add you instead?" card. `isScrollControlled` + manual viewInsets bottom padding + SafeArea.
+- **Send jump fix (mobile_chat_route.dart):** sending uses post-frame `_jumpToBottom()` (instant), never animated scrollTo — the animated path raced the chatProvider listener auto-scroll + the input bar collapsing after `clear()` (the iOS "jump for a second"). `_scrollToBottom` (incoming messages) is post-frame-safe with mounted/isAttached guards.
+- **In-channel search:** results box sizes to `(visible height - keyboard) * 0.35` clamped 120–360 (was fixed 200px).
+- **Inline edit:** `_startEditing` scrolls the editor to alignment 0.15 after a 300ms delay (post keyboard animation) so it's never hidden behind the keyboard.
+- **Message actions sheet:** `isScrollControlled` + 85%-height cap + internal `SingleChildScrollView` (emoji grid clipped on short phones).
+- **Toast position:** `HollowToast` bottom = 32 + keyboard inset + (width<600 ? 56 + viewPadding.bottom : 0) — floats above the nav bar and keyboard.
+- **Pills:** both `MobileActiveCallPill` and `MobileVoiceChannelPill` clamp `_dragOffset` (dx ±(w/2−80), dy −(h−136−topInset)..0) — can't be dragged into the nav or off-screen.
+- **Image crop:** portrait orientation lock while open (rotation reset the crop), decode capped at `targetWidth: 2048, allowUpscaling: false` (raw RGBA OOM guard).
+- **Welcome dialog:** compact-aware minWidth + internal scroll.
+- **iOS:** `audio` added to UIBackgroundModes (calls survive backgrounding).

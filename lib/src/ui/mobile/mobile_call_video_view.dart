@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:proximity_sensor/proximity_sensor.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -29,12 +32,53 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
   Timer? _durationTimer;
   Duration _duration = Duration.zero;
   Offset _pipOffset = const Offset(12, 12);
-  double _remoteVolume = 1.0;
+  StreamSubscription<int>? _proximitySub;
+  bool _wakelockOn = false;
 
   @override
   void dispose() {
     _durationTimer?.cancel();
+    _disableProximity();
+    if (_wakelockOn) {
+      unawaited(WakelockPlus.disable().catchError((_) {}));
+    }
     super.dispose();
+  }
+
+  /// Keep the screen awake while video is displayed.
+  void _syncWakelock(bool videoShown) {
+    if (videoShown == _wakelockOn) return;
+    _wakelockOn = videoShown;
+    unawaited(WakelockPlus.toggle(enable: videoShown).catchError((_) {}));
+  }
+
+  static bool get _isMobilePlatform => Platform.isAndroid || Platform.isIOS;
+
+  /// Blank the screen when the phone is held to the ear — but only while
+  /// audio actually plays through the earpiece (no speaker, no video).
+  void _syncProximity(CallState call) {
+    if (!_isMobilePlatform) return;
+    final earpieceMode = call.status == CallStatus.active &&
+        !call.isSpeakerOn &&
+        !call.isVideoEnabled &&
+        !call.remoteVideoEnabled;
+    if (earpieceMode && _proximitySub == null) {
+      // Android: explicit wake-lock-backed screen-off. iOS blanks natively
+      // while the events stream is subscribed (proximityMonitoringEnabled).
+      unawaited(
+          ProximitySensor.setProximityScreenOff(true).catchError((_) => false));
+      _proximitySub = ProximitySensor.events.listen((_) {}, onError: (_) {});
+    } else if (!earpieceMode && _proximitySub != null) {
+      _disableProximity();
+    }
+  }
+
+  void _disableProximity() {
+    if (_proximitySub == null) return;
+    _proximitySub?.cancel();
+    _proximitySub = null;
+    unawaited(
+        ProximitySensor.setProximityScreenOff(false).catchError((_) => false));
   }
 
   void _startTimer(DateTime startedAt) {
@@ -75,8 +119,13 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
   /// avatars even when no camera is actually sending.
   bool _hasRealVideo(CallState call) {
     if (call.status != CallStatus.active) return false;
-    final vs = ref.read(callProvider.notifier).voiceService;
+    final notifier = ref.read(callProvider.notifier);
+    final vs = notifier.voiceService;
 
+    final screen = notifier.screenShareRenderer;
+    final remoteHasScreen = call.remoteScreenSharing &&
+        screen != null &&
+        screen.srcObject != null;
     final remoteHasVideo = call.remoteVideoEnabled &&
         vs?.remoteRenderer != null &&
         vs!.remoteRenderer!.srcObject != null;
@@ -84,7 +133,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
         vs?.localRenderer != null &&
         vs!.localRenderer!.srcObject != null;
 
-    return remoteHasVideo || localHasVideo;
+    return remoteHasScreen || remoteHasVideo || localHasVideo;
   }
 
   @override
@@ -110,7 +159,10 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
       _durationTimer = null;
     }
 
+    _syncProximity(call);
+
     final showVideo = _hasRealVideo(call);
+    _syncWakelock(showVideo);
 
     return Scaffold(
       backgroundColor: hollow.background,
@@ -190,32 +242,59 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
         },
         mutedSet: {
           if (call.isMuted) localPeerId,
+          if (call.remoteMuted) widget.peerId,
+        },
+        deafenedSet: {
+          if (call.isDeafened) localPeerId,
+          if (call.remoteDeafened) widget.peerId,
         },
       ),
     );
   }
 
   Widget _buildVideoView(HollowTheme hollow, CallState call) {
-    final voiceService = ref.read(callProvider.notifier).voiceService;
+    final notifier = ref.read(callProvider.notifier);
+    final voiceService = notifier.voiceService;
     final remoteRenderer = voiceService?.remoteRenderer;
     final localRenderer = voiceService?.localRenderer;
+    final screenRenderer = notifier.screenShareRenderer;
     final screenWidth = MediaQuery.sizeOf(context).width;
 
-    final showRemoteFull = call.remoteVideoEnabled &&
+    // Incoming screen share takes priority over camera feeds.
+    final showScreen = call.remoteScreenSharing &&
+        screenRenderer != null &&
+        screenRenderer.srcObject != null;
+    final showRemoteFull = !showScreen &&
+        call.remoteVideoEnabled &&
         remoteRenderer != null &&
         remoteRenderer.srcObject != null;
-    final showLocalFull = !showRemoteFull &&
+    final showLocalFull = !showScreen &&
+        !showRemoteFull &&
         call.isVideoEnabled &&
         localRenderer != null &&
         localRenderer.srcObject != null;
-    final showLocalPip = showRemoteFull &&
+    final showLocalPip = (showScreen || showRemoteFull) &&
         call.isVideoEnabled &&
         localRenderer != null &&
         localRenderer.srcObject != null;
 
     return Stack(
       children: [
-        if (showRemoteFull)
+        if (showScreen)
+          Positioned.fill(
+            // Pinch-zoom + pan for reading a desktop screen on a phone.
+            child: InteractiveViewer(
+              maxScale: 6,
+              child: RepaintBoundary(
+                child: RTCVideoView(
+                  screenRenderer,
+                  objectFit:
+                      RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                ),
+              ),
+            ),
+          )
+        else if (showRemoteFull)
           Positioned.fill(
             child: RepaintBoundary(
               child: RTCVideoView(
@@ -253,10 +332,11 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
             child: GestureDetector(
               onPanUpdate: (details) {
                 setState(() {
+                  final maxDy = MediaQuery.sizeOf(context).height - 260.0;
                   _pipOffset = Offset(
                     (_pipOffset.dx - details.delta.dx)
                         .clamp(0.0, screenWidth - 110.0),
-                    (_pipOffset.dy - details.delta.dy).clamp(0.0, 400.0),
+                    (_pipOffset.dy - details.delta.dy).clamp(0.0, maxDy),
                   );
                 });
               },
@@ -297,29 +377,13 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     final canControl = call.status == CallStatus.active ||
         call.status == CallStatus.connecting;
 
-    final volumeIcon = _remoteVolume == 0
-        ? LucideIcons.volumeX
-        : _remoteVolume < 0.5
-            ? LucideIcons.volume
-            : _remoteVolume < 1.5
-                ? LucideIcons.volume1
-                : LucideIcons.volume2;
-
+    // Same button order as the voice channel screen:
+    // mute, deafen, speaker, camera, hang up.
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          MobileControlButton(
-            icon: volumeIcon,
-            iconSize: iconSize,
-            size: buttonSize,
-            color: hollow.textPrimary,
-            backgroundColor: hollow.elevated,
-            onTap: canControl
-                ? () => _showVolumeSheet(context, hollow)
-                : null,
-          ),
           MobileControlButton(
             icon: call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
             iconSize: iconSize,
@@ -330,6 +394,30 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                 : hollow.elevated,
             onTap: canControl
                 ? () => ref.read(callProvider.notifier).toggleMute()
+                : null,
+          ),
+          MobileControlButton(
+            icon: LucideIcons.headphones,
+            iconSize: iconSize,
+            size: buttonSize,
+            color: call.isDeafened ? hollow.error : hollow.textPrimary,
+            backgroundColor: call.isDeafened
+                ? hollow.error.withValues(alpha: 0.15)
+                : hollow.elevated,
+            onTap: call.status == CallStatus.active
+                ? () => ref.read(callProvider.notifier).toggleDeafen()
+                : null,
+          ),
+          MobileControlButton(
+            icon: LucideIcons.speaker,
+            iconSize: iconSize,
+            size: buttonSize,
+            color: call.isSpeakerOn ? hollow.accent : hollow.textPrimary,
+            backgroundColor: call.isSpeakerOn
+                ? hollow.accent.withValues(alpha: 0.15)
+                : hollow.elevated,
+            onTap: canControl
+                ? () => ref.read(callProvider.notifier).toggleSpeaker()
                 : null,
           ),
           MobileControlButton(
@@ -360,78 +448,6 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     );
   }
 
-  void _showVolumeSheet(BuildContext context, HollowTheme hollow) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: hollow.surface,
-      shape: RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
-      ),
-      builder: (_) => StatefulBuilder(
-        builder: (context, setSheetState) => SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(HollowSpacing.lg),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 32,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: hollow.border,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                const SizedBox(height: HollowSpacing.lg),
-                Text('Remote Volume',
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textPrimary,
-                      fontWeight: FontWeight.w600,
-                    )),
-                const SizedBox(height: HollowSpacing.md),
-                Row(
-                  children: [
-                    Icon(LucideIcons.volume2,
-                        size: 18, color: hollow.textSecondary),
-                    Expanded(
-                      child: Slider(
-                        value: _remoteVolume,
-                        min: 0.0,
-                        max: 2.0,
-                        divisions: 40,
-                        activeColor: hollow.accent,
-                        inactiveColor: hollow.border,
-                        onChanged: (v) {
-                          setSheetState(() {});
-                          setState(() => _remoteVolume = v);
-                          ref
-                              .read(callProvider.notifier)
-                              .setRemoteVolume(v);
-                        },
-                      ),
-                    ),
-                    SizedBox(
-                      width: 40,
-                      child: Text(
-                        '${(_remoteVolume * 100).round()}%',
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        textAlign: TextAlign.right,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: HollowSpacing.sm),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 // ─────────────────────────────────────────────────

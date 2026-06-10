@@ -656,3 +656,24 @@ Persists download path via SQLCipher settings (`storage_api.loadSetting` / `stor
 
 ### All Providers <-> event_provider
 All five providers are driven by events from `event_provider.dart`, which watches the Rust `StreamSink` and dispatches `NetworkEvent` variants to the appropriate provider methods.
+
+## Call Audio State, Speaker Routing & Renegotiation Glare (2026-06)
+
+### CallState additions (call_provider.dart)
+`isSpeakerOn` (mobile audio route), `isDeafened` (local), `remoteMuted` + `remoteDeafened` (synced from the peer). All reset by `_cleanup()` (state → `CallState()`).
+
+### toggleDeafen() / toggleSpeaker() (CallNotifier)
+- `toggleDeafen`: silences the remote via `_service.setRemoteAudioVolume(0.0)` AND forces mic mute; un-deafen restores `_lastRemoteVolume` (tracked in `setRemoteVolume`, which becomes store-only while deafened) and KEEPS the mic muted (mirrors voice channels).
+- `toggleSpeaker` / `_setSpeakerRoute`: `Helper.setSpeakerphoneOn` (Android/iOS only). Defaults applied in `onConnected` (video call → speaker, voice → earpiece); camera-on mid-call in `toggleVideo` auto-switches to speaker; `_cleanup()` resets the OS route to earpiece.
+
+### audio_state signal (1:1 mute/deafen badge sync)
+`_sendAudioState()` fires from `toggleMute`/`toggleDeafen`: `_sendSignal(peerId, 'audio_state', {call_id, muted, deafened})` → handled by `_handleAudioState` → `remoteMuted`/`remoteDeafened`. **CRITICAL: call signal types are WHITELISTED in Rust** — `handle_call_send_signal` (voice_handler.rs) maps each type to a dedicated `HavenMessage` variant and silently DROPS unknown types. A new signal type needs: (1) `HavenMessage` variant in types.rs, (2) the send match arm, (3) the incoming dispatch arm in swarm.rs re-emitting `NetworkEvent::CallSignal`. `audio_state` ↔ `HavenMessage::CallAudioState`.
+
+### Renegotiation glare fix (one-way video)
+Root cause: on video-call connect BOTH peers auto-enabled cameras ~300ms later → both sent `sdp_offer`s simultaneously → each side's `_renegotiationInProgress` guard dropped the other's offer with no retry → one peer's track never announced → one-way video. Fixes in call_provider.dart:
+- **Staggered auto-enable**: polite peer (`localPeerId.compareTo(peerId) < 0`, same convention as invite glare) waits 300ms, the other 1500ms.
+- **Queue, never drop**: `_handleSdpOffer` while busy → `_queueRenegOffer` (drained in `_handleSdpAnswer` after the round-trip settles + a 2s safety timer); a failed answer (SDP glare / have-local-offer) retries the same payload after 1200ms, max 2 attempts (`_renegOfferAttempts`, reset on success). Queue/attempt state cleared in `_cleanup()`.
+
+### VoiceChannelProvider additions
+- `isSpeakerOn` + `toggleSpeaker()` (speaker ON by default on `onLocalJoined`; OS route reset in `onLocalLeft`).
+- **Late-joiner state push**: `onRemotePeerJoined` sends `audio_state` (when muted/deafened) to the new peer alongside the existing `screen_state`/`camera_state` pushes — audio state is otherwise only broadcast on toggle, so late joiners never saw existing mute badges. Any new toggle-broadcast state must be added there too.

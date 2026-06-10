@@ -132,10 +132,16 @@ pub unsafe extern "C" fn hollow_push_string_free(ptr: *mut c_char) {
 /// - `sender_peer_id`: the peer whose DM triggered the push (from the push data).
 /// - `license_key`: license key or "" if none.
 /// - `timeout_secs`: overall fetch timeout (NSE has ~30s total; pass ~15).
+/// - `server_room`: "" for a DM wake. For a CHANNEL wake, the server_id from the
+///   push data — the fetch joins the server room and decrypts buffered channel
+///   messages via MLS (or signed public plaintext) instead of Olm DMs.
 ///
-/// Returns a heap C string with a JSON array `[{"text","message_id","timestamp"}]`
-/// on success (may be `[]`), or NULL on hard failure (no identity/DB, connect
-/// error). Caller frees with [`hollow_push_string_free`].
+/// Returns a heap C string with a JSON array on success (may be `[]`), or NULL
+/// on hard failure (no identity/DB, connect error). Entries:
+/// `{"text","message_id","timestamp","has_image"}` plus, for channel wakes,
+/// `{"server_id","channel_id","server_name","channel_name","sender_name"}`
+/// resolved on-device from the local DB. Caller frees with
+/// [`hollow_push_string_free`].
 ///
 /// # Safety
 /// All string pointers must be valid NUL-terminated C strings for the call.
@@ -146,8 +152,9 @@ pub unsafe extern "C" fn hollow_push_fetch_and_decrypt(
     sender_peer_id: *const c_char,
     license_key: *const c_char,
     timeout_secs: u32,
+    server_room: *const c_char,
 ) -> *mut c_char {
-    let (data_dir, relay_domain, sender, license) = unsafe {
+    let (data_dir, relay_domain, sender, license, server_room) = unsafe {
         let data_dir = match cstr(data_dir) {
             Some(s) if !s.is_empty() => s,
             _ => return ptr::null_mut(),
@@ -158,10 +165,18 @@ pub unsafe extern "C" fn hollow_push_fetch_and_decrypt(
             _ => return ptr::null_mut(),
         };
         let license = cstr(license_key).filter(|s| !s.is_empty());
-        (data_dir, relay_domain, sender, license)
+        let server_room = cstr(server_room).filter(|s| !s.is_empty());
+        (data_dir, relay_domain, sender, license, server_room)
     };
 
-    match fetch_and_decrypt(&data_dir, &relay_domain, &sender, license.as_deref(), timeout_secs) {
+    match fetch_and_decrypt(
+        &data_dir,
+        &relay_domain,
+        &sender,
+        license.as_deref(),
+        timeout_secs,
+        server_room.as_deref(),
+    ) {
         Ok(json) => CString::new(json).map(|c| c.into_raw()).unwrap_or(ptr::null_mut()),
         Err(_) => ptr::null_mut(),
     }
@@ -177,6 +192,7 @@ fn fetch_and_decrypt(
     sender_peer_id: &str,
     license_key: Option<&str>,
     timeout_secs: u32,
+    server_room: Option<&str>,
 ) -> Result<String, String> {
     use base64::Engine;
 
@@ -223,6 +239,26 @@ fn fetch_and_decrypt(
         relay_domain
     };
 
+    // Channel wake: load the MLS group state for the one server so buffered
+    // group ciphertext can be decrypted. Failure degrades gracefully — the NSE
+    // shows a content-free line and the app syncs on next open.
+    let mut mls: Option<crate::crypto::MlsManager> = match server_room {
+        Some(room) => {
+            let store = crate::storage::MessageStore::open(&db_path, &passphrase)?;
+            match store.load_mls_identity() {
+                Ok(Some((signer, cred, storage))) => crate::crypto::MlsManager::from_persisted(
+                    &signer,
+                    &cred,
+                    storage.as_deref(),
+                    &[room.to_string()],
+                )
+                .ok(),
+                _ => None,
+            }
+        }
+        None => None,
+    };
+
     // Own runtime — the NSE process has no global app runtime. current_thread keeps
     // the memory footprint minimal (the 24 MB NSE cap is the binding constraint).
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -241,8 +277,10 @@ fn fetch_and_decrypt(
         &pub_key_b64,
         license_key,
         sender_peer_id,
+        server_room,
         Duration::from_secs(timeout_secs as u64),
         &mut olm,
+        &mut mls,
         &crypto_store,
         &db_path,
         &passphrase,
@@ -253,17 +291,66 @@ fn fetch_and_decrypt(
         crypto_store.save_account(account_json);
     }
 
+    // Channel wakes: resolve display metadata (server/channel names + sender
+    // display names) on-device so the NSE can render "Server • #channel" +
+    // "Name: text" without any extra round-trips.
+    let mut server_names: std::collections::HashMap<String, (String, std::collections::HashMap<String, String>)> =
+        std::collections::HashMap::new();
+    let mut sender_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if server_room.is_some() && !results.is_empty() {
+        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+            for dm in &results {
+                if let Some(sid) = &dm.server_id {
+                    if !server_names.contains_key(sid) {
+                        if let Ok(Some(json)) = store.load_server_state(sid) {
+                            if let Ok(state) =
+                                serde_json::from_str::<crate::crdt::server_state::ServerState>(&json)
+                            {
+                                let channels = state
+                                    .channels
+                                    .iter()
+                                    .map(|(id, c)| (id.clone(), c.name.clone()))
+                                    .collect();
+                                server_names.insert(sid.clone(), (state.name.read().clone(), channels));
+                            }
+                        }
+                    }
+                }
+                if !sender_names.contains_key(&dm.from_peer) {
+                    if let Ok(Some(p)) = store.load_profile_light(&dm.from_peer) {
+                        sender_names.insert(dm.from_peer.clone(), p.display_name);
+                    }
+                }
+            }
+        }
+    }
+
     // Serialize to JSON by hand (avoid pulling a Serialize derive through the C
     // boundary). Escape the text safely via serde_json::Value.
     let items: Vec<serde_json::Value> = results
         .into_iter()
         .map(|dm| {
-            serde_json::json!({
+            let mut obj = serde_json::json!({
                 "text": dm.text,
                 "message_id": dm.message_id,
                 "timestamp": dm.timestamp,
                 "has_image": dm.image_path.is_some(),
-            })
+            });
+            if let (Some(sid), Some(cid)) = (&dm.server_id, &dm.channel_id) {
+                let map = obj.as_object_mut().unwrap();
+                map.insert("server_id".into(), serde_json::Value::String(sid.clone()));
+                map.insert("channel_id".into(), serde_json::Value::String(cid.clone()));
+                if let Some((sname, channels)) = server_names.get(sid) {
+                    map.insert("server_name".into(), serde_json::Value::String(sname.clone()));
+                    if let Some(cname) = channels.get(cid) {
+                        map.insert("channel_name".into(), serde_json::Value::String(cname.clone()));
+                    }
+                }
+                if let Some(name) = sender_names.get(&dm.from_peer) {
+                    map.insert("sender_name".into(), serde_json::Value::String(name.clone()));
+                }
+            }
+            obj
         })
         .collect();
     Ok(serde_json::Value::Array(items).to_string())

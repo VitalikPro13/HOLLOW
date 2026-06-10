@@ -94,11 +94,20 @@ timeout, &mut olm, &crypto_store, db_path, db_passphrase) -> Vec<FetchedDm>`.
 
 - `register_push_token(token, platform)` — stored on the relay; re-sent on every
   WS reconnect (`swarm.rs`).
+- `set_push_prefs(prefs_json)` — channel push filters
+  (`{server: {level, channels{cid: level}}}`) registered with the relay; cached
+  in swarm.rs and re-sent on every reconnect like the token.
 - `get_push_profile(peer_id) -> PushProfile` — opens its OWN SQLCipher connection,
   reads `load_profile_light` + `load_avatar`. Tier 1 (name + avatar, no node).
-- `start_fetch_node(sender, timeout_secs) -> Vec<FetchedMessage>` — the Dart-facing
-  Tier 2 fetch. `FETCH_ACTIVE` AtomicBool guards against concurrency; refuses to
-  run while the full node is up. Uses `load_existing_identity()` (NEVER generate).
+- `get_push_channel_meta(server_id, channel_id) -> PushChannelMeta` — server +
+  channel names and the effective LOCAL notification level, straight from
+  SQLCipher (no node). Used by the Android channel-wake handler.
+- `start_fetch_node(sender, timeout_secs, server_room) -> Vec<FetchedMessage>` —
+  the Dart-facing Tier 2 fetch. `server_room = null` → DM wake (Olm);
+  `server_room = server_id` → channel wake (MLS, joins the server room).
+  `FetchedMessage` carries `server_id`/`channel_id` for channel entries.
+  `FETCH_ACTIVE` AtomicBool guards against concurrency; refuses to run while the
+  full node is up. Uses `load_existing_identity()` (NEVER generate).
 
 ---
 
@@ -208,12 +217,110 @@ TestFlight, so this is how NSE footprint + fetch success are read off-device.
 
 ---
 
+## Channel push notifications (server channels, 2026-06-10)
+
+DM push extended to server channels. Same privacy invariants: push payload =
+opaque IDs only (`{type:'channel_wake', sender, server, channel, mention:'1'/'0'}`),
+relay never learns server membership, content decrypted on-device.
+
+### Sender fan-out (message_ops.rs `handle_send_channel_message`)
+After the room/topic broadcast, the sender filters `server.members` by
+`!peer_is_reachable` (offline members) and sends each a **0x09 frame**:
+`[0x09][room\0][target\0][channel\0][flags:1][payload]` (flags bit0 = mention).
+Payload = the SAME wire bytes the room broadcast carried — MLS group ciphertext
+is decryptable by every member, so one encryption serves both paths
+(`send_mls_broadcast_topic` now returns the serialized `MlsChannelMessage` bytes;
+public channels reuse the `PublicChannelMessage` JSON). The legacy Olm fan-out
+path sends an EMPTY payload (push trigger only — pairwise Olm can't pre-encrypt
+for offline peers without burning ratchet slots).
+
+Per-target mention flag computed by the sender (only it has plaintext):
+`@everyone` | `@display_name` | `@server_nickname` (case-insensitive vs
+`server.members[].display_name` + `server.nicknames[].read()`) | reply-to-author
+(`get_channel_message_sender(reply_to_mid)`).
+
+### Relay (`handle_binary_channel_direct`, ws_handler.cpp)
+Only acts when the target is FULLY offline (online members got the broadcast):
+buffers the payload (separate cap `MAX_BUFFERED_CHANNEL_MSGS_PER_PEER=30`,
+replayed as 0x06 on room join exactly like DMs) and calls
+`try_channel_push_notify`, which filters by:
+1. **Push prefs registry** (`set_push_prefs` text msg → `RelayState::push_prefs`,
+   `peer → server → {level, channels{cid→level}}`, RAM only, replaced wholesale).
+   Channel override beats server level; unregistered peer/server = "all"
+   (backward compatible). Filtering MUST be relay-side: iOS alert pushes cannot
+   be suppressed after delivery. The app syncs prefs via
+   `notification_provider._syncPushPrefsToRelay()` on loadAll/setServerLevel/
+   setChannelOverride — **MOBILE-ONLY** (desktop sync would overwrite the
+   phone's filters); swarm.rs caches + re-sends on every reconnect like the token.
+2. **Anti-spam throttles** (state.h): non-mention = 120s per (peer,server) +
+   max 3 pushes while continuously offline (`channel_push_state`, reset when the
+   full non-fetch app rejoins that server room in `handle_join`; deliberately NOT
+   cleared on disconnect); mention = 10s per (peer,server); 5s per-peer floor
+   across all servers (`last_channel_push_any`). Mentions bypass the long window.
+
+Sidecar: `channel_wake` data type (FCM data values must be STRINGS — mention is
+'1'/'0'); iOS `apns-collapse-id = iosCollapseId("server:channel")` → one
+replaceable banner per channel; same generic alert body.
+
+### Fetch + MLS decrypt (fetch.rs)
+`run_fetch` gained `server_room: Option<&str>` + `mls: &mut Option<MlsManager>`.
+Channel wake joins the SERVER room (fetch=true, invisible), parses 0x06 replays
++ live 0x05/0x08 frames, decrypts `MlsChannelMessage` via
+`MlsManager::from_persisted(signer, cred, storage, &[server_id])`, inserts
+channel rows (dedup `channel_message_exists`), persists MLS state after the loop
+(single-writer-safe — same heartbeat/FETCH_ACTIVE guards as Olm).
+`PublicChannelMessage` plaintext is verified-by-signature and inserted directly
+(sender = relay-attested frame author). **Stale MLS epoch (missed a commit while
+offline) = graceful**: decrypt fails → content-free banner → app self-heals via
+channel sync + MLS recovery on next open. `FetchedDm`/`FetchedMessage` carry
+`server_id`/`channel_id` (None for DMs).
+
+### Android (`_handleChannelWake`)
+Local re-check via `get_push_channel_meta(server_id, channel_id)` (new FFI: opens
+its own SQLCipher like get_push_profile, returns server/channel names + the
+effective LOCAL level resolved from `notif:` keys — catches stale relay prefs).
+Fetch → group the replay burst by channel (it spans the whole server room; the
+push's mention flag only applies to its channel, other channels need level
+"all") → per-channel banner "ServerName • #channel" / "Name: text", InboxStyle,
+own group `hollow_channel_group` + silent summary (id 0x40000002), notif id =
+`_iosCollapseId('$server:$channel')` (shared FNV impl). Tap payload
+`channel:<sid>:<cid>` → `registerOpenChannelHandler` (MobileShell, cold-start
+buffered). `dismissChannelNotification(server, channel)` wired in
+MobileChatRoute's channel branch.
+
+### iOS NSE (`handleChannelWake`)
+`hollow_push_fetch_and_decrypt` gained a **6th param `server_room`** ("" = DM
+mode) — bridging header + BOTH call sites updated. Channel entries additionally
+carry `server_name/channel_name/sender_name` resolved in Rust
+(`push_enrich.rs`: parses `load_server_state` JSON + `load_profile_light`) — NOT
+via PushHintsCache. `threadIdentifier = server`; renders "Server • #channel" +
+last-3 "Name: text" lines; app-active heartbeat skips the fetch as with DMs.
+
+Scope: TEXT channel messages only in v1 — channel files/images and
+edits/deletes/reactions don't push (reconciled by channel sync).
+
+Observed latency (Pixel, 2026-06-10): handler start → populated banner ~2.5s
+(0.4s Rust init when cold + ~1s relay TLS connect + 1.2s `IDLE_AFTER_FIRST`
+drain window); plus 1-3s FCM delivery upstream.
+
+---
+
 ## Related
 - `relay_uws_server.md` — relay offline buffer details.
 - `rust_ffi_network.md` — FFI signatures.
 - `rust_networking.md` — fetch.rs / ws_client.rs.
-- Memory: `project_ios_push_tier_b_disposable_nse.md`,
+- Memory: `project_channel_push_notifications.md` (channel push),
+  `project_ios_push_tier_b_disposable_nse.md`,
   `project_push_notification_implementation.md`, `feedback_app_group_path_match.md`,
   `feedback_ios_appgroup_sqlite_wal_crash.md`, `feedback_no_ios_build_command.md`,
   `feedback_fcm_image_invisible_bubble.md`, `feedback_rustlib_init_not_idempotent.md`.
 ```
+
+## Notification tap → chat navigation (2026-06)
+
+Tapping any Hollow notification opens the sender's DM chat. Three entry points, ALL required (push_notification_service.dart):
+1. `FirebaseMessaging.onMessageOpenedApp` — system/APNs banner tapped while backgrounded (covers iOS NSE banners; payload `data['sender']`).
+2. `FirebaseMessaging.instance.getInitialMessage()` — app COLD-STARTED by a push tap.
+3. flutter_local_notifications (Android bg-fetch banners): `onDidReceiveNotificationResponse` (app alive) + `getNotificationAppLaunchDetails()` (cold start). Every per-peer `plugin.show()` must pass `payload: sender` or the tap carries no target (the group summary intentionally has none → just opens the app).
+
+Routing: `PushNotificationService.registerOpenChatHandler` (and `registerOpenChannelHandler` for channel pushes) is called from `_MobileShellState.initState`. Taps arriving BEFORE registration (cold start: push init runs in node start, shell mounts after identity unlock) are buffered (`_pendingOpenChatPeer`) and delivered on registration. The handler mirrors the in-app banner: set `selectedPeerProvider`, null `selectedServerProvider`, `markDmSeen`, push `MobileChatRoute` via rootNavigator, clear selection in `.then()`.

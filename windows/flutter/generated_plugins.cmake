@@ -6,9 +6,11 @@ list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_windows
   desktop_drop
   firebase_core
+  flutter_secure_storage_windows
   flutter_webrtc
   fvp
   irondash_engine_context
+  local_auth_windows
   local_notifier
   record_windows
   screen_retriever_windows

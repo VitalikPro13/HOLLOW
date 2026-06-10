@@ -88,6 +88,9 @@ class VoiceChannelState {
   /// Remote peers with camera on (peer_id -> true).
   final Map<String, bool> peerCameraOn;
 
+  /// Mobile audio route: true = loudspeaker, false = earpiece.
+  final bool isSpeakerOn;
+
   const VoiceChannelState({
     this.participants = const {},
     this.currentServerId,
@@ -109,6 +112,7 @@ class VoiceChannelState {
     this.focusedSourceType = 'screen',
     this.isCameraOn = false,
     this.peerCameraOn = const {},
+    this.isSpeakerOn = false,
   });
 
   /// Get participants for a specific voice channel.
@@ -164,6 +168,7 @@ class VoiceChannelState {
     String? focusedSourceType,
     bool? isCameraOn,
     Map<String, bool>? peerCameraOn,
+    bool? isSpeakerOn,
   }) {
     return VoiceChannelState(
       participants: participants ?? this.participants,
@@ -217,6 +222,9 @@ class VoiceChannelState {
       peerCameraOn: clearCurrent
           ? const {}
           : (peerCameraOn ?? this.peerCameraOn),
+      isSpeakerOn: clearCurrent
+          ? false
+          : (isSpeakerOn ?? this.isSpeakerOn),
     );
   }
 }
@@ -363,6 +371,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       joinedAt: DateTime.now(),
     );
 
+    // Group voice channels default to the loudspeaker on mobile.
+    _setSpeakerRoute(true);
+
     // Initialize the WebRTC service.
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     final iceConfig = ref.read(iceConfigProvider);
@@ -504,6 +515,21 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         payload: jsonEncode({'enabled': true}),
       );
     }
+
+    // If we're muted/deafened, tell the late joiner — audio_state is
+    // otherwise only sent on toggle, so they'd never see our badge.
+    if (state.isMuted || state.isDeafened) {
+      network_api.voiceChannelSendSignal(
+        serverId: state.currentServerId!,
+        channelId: state.currentChannelId!,
+        peerId: peerId,
+        signalType: 'audio_state',
+        payload: jsonEncode({
+          'muted': state.isMuted,
+          'deafened': state.isDeafened,
+        }),
+      );
+    }
   }
 
   /// Called when a remote peer leaves our current voice channel.
@@ -629,6 +655,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Called after the local leave event arrives to update state.
   void onLocalLeft() {
     _leaving = false;
+    // Restore the default audio route (mobile) so the next call doesn't
+    // inherit a stale speakerphone state.
+    if (_isMobile) {
+      unawaited(Helper.setSpeakerphoneOn(false).catchError((_) {}));
+    }
     state = state.copyWith(clearCurrent: true);
   }
 
@@ -652,6 +683,21 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // Silence all remote audio when deafened.
     _service?.setDeafened(newDeafened);
     _broadcastAudioState();
+  }
+
+  static bool get _isMobile => Platform.isAndroid || Platform.isIOS;
+
+  /// Route audio to the loudspeaker (true) or earpiece (false). Mobile only.
+  void _setSpeakerRoute(bool speaker) {
+    if (!_isMobile) return;
+    unawaited(Helper.setSpeakerphoneOn(speaker).catchError((_) {}));
+    state = state.copyWith(isSpeakerOn: speaker);
+  }
+
+  /// Toggle loudspeaker/earpiece while in a voice channel. Mobile only.
+  void toggleSpeaker() {
+    if (_leaving || !state.isInVoiceChannel) return;
+    _setSpeakerRoute(!state.isSpeakerOn);
   }
 
   /// Set per-peer volume and apply it.

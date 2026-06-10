@@ -14,6 +14,8 @@ PODS:
   - irondash_engine_context (0.0.1):
     - Flutter
   - mdk (0.35.1)
+  - proximity_sensor (0.0.1):
+    - Flutter
   - super_native_extensions (0.0.1):
     - Flutter
   - WebRTC-SDK (144.7559.01)
@@ -25,6 +27,7 @@ DEPENDENCIES:
   - fvp (from `.symlinks/plugins/fvp/darwin`)
   - hollow_core (from `.symlinks/plugins/hollow_core/ios`)
   - irondash_engine_context (from `.symlinks/plugins/irondash_engine_context/ios`)
+  - proximity_sensor (from `.symlinks/plugins/proximity_sensor/ios`)
   - super_native_extensions (from `.symlinks/plugins/super_native_extensions/ios`)
 
 SPEC REPOS:
@@ -45,6 +48,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/hollow_core/ios"
   irondash_engine_context:
     :path: ".symlinks/plugins/irondash_engine_context/ios"
+  proximity_sensor:
+    :path: ".symlinks/plugins/proximity_sensor/ios"
   super_native_extensions:
     :path: ".symlinks/plugins/super_native_extensions/ios"
 
@@ -56,9 +61,10 @@ SPEC CHECKSUMS:
   hollow_core: 2961c66623031f2236c18450a6f661e5d86e645f
   irondash_engine_context: 8e58ca8e0212ee9d1c7dc6a42121849986c88486
   mdk: 59bbe9e2ac2a052455ab1b076c245680d66cf6c0
+  proximity_sensor: 2aef59f90cf0382935faf58ad0a79e1e860773bd
   super_native_extensions: b763c02dc3a8fd078389f410bf15149179020cb4
   WebRTC-SDK: ab9b5319e458c2bfebdc92b3600740da35d5630d
 
-PODFILE CHECKSUM: 8c60da787deb843fde6e4467dd626ed3465e447f
+PODFILE CHECKSUM: 5750b27f76a542563d9ee2931ce3241dab457935
 
 COCOAPODS: 1.16.2

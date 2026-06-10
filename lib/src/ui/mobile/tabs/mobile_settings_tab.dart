@@ -19,6 +19,7 @@ import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
+import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -46,74 +47,179 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-class MobileSettingsTab extends ConsumerStatefulWidget {
+class MobileSettingsTab extends ConsumerWidget {
   const MobileSettingsTab({super.key});
 
+  void _push(BuildContext context, String title, Widget child) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _SettingsSubPage(title: title, child: child),
+      ),
+    );
+  }
+
   @override
-  ConsumerState<MobileSettingsTab> createState() => _MobileSettingsTabState();
-}
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final myPeerId = ref.watch(identityProvider).peerId ?? '';
+    final profiles = ref.watch(profileProvider);
+    final myName = myPeerId.isEmpty ? '' : displayNameFor(profiles, myPeerId);
 
-class _MobileSettingsTabState extends ConsumerState<MobileSettingsTab> {
-  int _selectedTab = 0;
-
-  static const _tabs = ['Profile', 'System', 'Security', 'About'];
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(
+        HollowSpacing.lg,
+        HollowSpacing.lg,
+        HollowSpacing.lg,
+        HollowSpacing.xl,
+      ),
       children: [
-        // Tab bar
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            HollowSpacing.lg, HollowSpacing.lg, HollowSpacing.lg, HollowSpacing.sm,
-          ),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
+        Text(
+          'Settings',
+          style: HollowTypography.heading.copyWith(color: hollow.textPrimary),
+        ),
+        const SizedBox(height: HollowSpacing.lg),
+
+        // Profile card — tap to edit profile.
+        HollowPressable(
+          onTap: () => _push(
+              context, 'Profile', const _ProfileTab(key: ValueKey('profile'))),
+          borderRadius: BorderRadius.circular(hollow.radiusLg),
+          child: Container(
+            padding: const EdgeInsets.all(HollowSpacing.md),
+            decoration: BoxDecoration(
+              color: hollow.surface,
+              borderRadius: BorderRadius.circular(hollow.radiusLg),
+              border: Border.all(color: hollow.border),
+            ),
             child: Row(
               children: [
-                for (int i = 0; i < _tabs.length; i++) ...[
-                  if (i > 0) const SizedBox(width: HollowSpacing.sm),
-                  _PillTab(
-                    label: _tabs[i],
-                    isSelected: i == _selectedTab,
-                    onTap: () => setState(() => _selectedTab = i),
+                HollowAvatar(peerId: myPeerId, size: 48),
+                const SizedBox(width: HollowSpacing.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        myName.isEmpty ? 'Profile' : myName,
+                        style: HollowTypography.body.copyWith(
+                          color: hollow.textPrimary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Name, status, avatar & banner',
+                        style: HollowTypography.caption
+                            .copyWith(color: hollow.textSecondary),
+                      ),
+                    ],
                   ),
-                ],
+                ),
+                Icon(LucideIcons.chevronRight,
+                    size: 18, color: hollow.textSecondary),
               ],
             ),
           ),
         ),
+        const SizedBox(height: HollowSpacing.lg),
+        Divider(
+          color: hollow.textSecondary.withValues(alpha: 0.50),
+          height: 1,
+        ),
+        const SizedBox(height: HollowSpacing.lg),
 
-        // Content
-        Expanded(
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            child: _buildTab(_selectedTab),
-          ),
+        _SettingsNavTile(
+          icon: LucideIcons.settings,
+          title: 'System',
+          subtitle: 'Appearance, network, audio, files & ringtone',
+          onTap: () => _push(
+              context, 'System', const _SystemTab(key: ValueKey('system'))),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        _SettingsNavTile(
+          icon: LucideIcons.shieldCheck,
+          title: 'Security',
+          subtitle: 'App lock & recovery phrase',
+          onTap: () => _push(context, 'Security',
+              const _SecurityTab(key: ValueKey('security'))),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        _SettingsNavTile(
+          icon: LucideIcons.info,
+          title: 'About',
+          subtitle: 'Version, relay status, news & legal',
+          onTap: () =>
+              _push(context, 'About', const _AboutTab(key: ValueKey('about'))),
         ),
       ],
     );
   }
+}
 
-  Widget _buildTab(int index) {
-    return switch (index) {
-      0 => const _ProfileTab(key: ValueKey('profile')),
-      1 => const _SystemTab(key: ValueKey('system')),
-      2 => const _SecurityTab(key: ValueKey('security')),
-      3 => const _AboutTab(key: ValueKey('about')),
-      _ => const SizedBox.shrink(),
-    };
+/// Full-screen pushed settings subpage — same chrome as
+/// MobileServerSettingsRoute (back arrow + title + divider).
+class _SettingsSubPage extends StatelessWidget {
+  final String title;
+  final Widget child;
+
+  const _SettingsSubPage({required this.title, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Scaffold(
+      backgroundColor: hollow.background,
+      body: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: HollowSpacing.sm,
+                vertical: HollowSpacing.xs,
+              ),
+              child: Row(
+                children: [
+                  HollowPressable(
+                    onTap: () => Navigator.pop(context),
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
+                    padding: const EdgeInsets.all(HollowSpacing.sm),
+                    child: Icon(LucideIcons.arrowLeft,
+                        size: 20, color: hollow.textPrimary),
+                  ),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: HollowTypography.heading
+                          .copyWith(color: hollow.textPrimary),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Divider(color: hollow.border, height: 1),
+            Expanded(child: child),
+          ],
+        ),
+      ),
+    );
   }
 }
 
-class _PillTab extends StatelessWidget {
-  final String label;
-  final bool isSelected;
+class _SettingsNavTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
   final VoidCallback onTap;
 
-  const _PillTab({
-    required this.label,
-    required this.isSelected,
+  const _SettingsNavTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
     required this.onTap,
   });
 
@@ -122,25 +228,51 @@ class _PillTab extends StatelessWidget {
     final hollow = HollowTheme.of(context);
     return HollowPressable(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(20),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm,
-        ),
+      borderRadius: BorderRadius.circular(hollow.radiusLg),
+      child: Container(
+        padding: const EdgeInsets.all(HollowSpacing.md),
         decoration: BoxDecoration(
-          color: isSelected ? hollow.accent : hollow.surface,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: isSelected ? hollow.accent : hollow.border,
-          ),
+          color: hollow.surface,
+          borderRadius: BorderRadius.circular(hollow.radiusLg),
+          border: Border.all(color: hollow.border),
         ),
-        child: Text(
-          label,
-          style: HollowTypography.body.copyWith(
-            color: isSelected ? Colors.white : hollow.textSecondary,
-            fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-          ),
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: hollow.accent.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
+              ),
+              child: Icon(icon, size: 18, color: hollow.accent),
+            ),
+            const SizedBox(width: HollowSpacing.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: HollowTypography.body.copyWith(
+                      color: hollow.textPrimary,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: HollowTypography.caption
+                        .copyWith(color: hollow.textSecondary),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            Icon(LucideIcons.chevronRight,
+                size: 18, color: hollow.textSecondary),
+          ],
         ),
       ),
     );
@@ -1063,8 +1195,8 @@ class _AccentHueSection extends ConsumerWidget {
                       type: HollowToastType.success);
                 },
                 child: Container(
-                  width: 28,
-                  height: 28,
+                  width: 36,
+                  height: 36,
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(6),
                     border: Border.all(
@@ -1100,8 +1232,8 @@ class _MobileColorSwatch extends StatelessWidget {
       onTap: onTap,
       onLongPress: onLongPress,
       child: Container(
-        width: 28,
-        height: 28,
+        width: 36,
+        height: 36,
         decoration: BoxDecoration(
           color: accentFromHue(hue),
           borderRadius: BorderRadius.circular(6),
@@ -1732,6 +1864,12 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
   bool _hasPassword = false;
   bool _hasOsKeychain = false;
   bool _loading = true;
+  bool _appLockBusy = false; // enabling/removing — Argon2id runs (~seconds)
+  String? _lockType; // 'pin' | 'password' | null
+  bool _canBiometric = false;
+  bool _biometricEnabled = false;
+
+  static bool get _isMobilePlatform => Platform.isAndroid || Platform.isIOS;
 
   @override
   void initState() {
@@ -1742,10 +1880,17 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
   Future<void> _loadStatus() async {
     try {
       final status = await identity_api.getIdentityProtectionStatus();
+      final appLock = AppLockService();
+      final lockType = await appLock.getLockType();
+      final canBio = await appLock.canUseBiometrics();
+      final bioEnabled = await appLock.isBiometricEnabled();
       if (mounted) {
         setState(() {
           _hasPassword = status.hasPassword;
           _hasOsKeychain = status.hasOsKeychain;
+          _lockType = lockType;
+          _canBiometric = canBio;
+          _biometricEnabled = bioEnabled;
           _loading = false;
         });
       }
@@ -1783,11 +1928,15 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Password Protection', style: HollowTypography.body.copyWith(
+                    Text('App Lock', style: HollowTypography.body.copyWith(
                       color: hollow.textPrimary,
                     )),
                     Text(
-                      _hasPassword ? 'Enabled' : 'Not set',
+                      _hasPassword
+                          ? (_lockType == 'pin'
+                              ? 'PIN enabled'
+                              : 'Password enabled')
+                          : 'Not set',
                       style: HollowTypography.caption.copyWith(
                         color: _hasPassword ? hollow.success : hollow.textSecondary,
                       ),
@@ -1795,14 +1944,70 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
                   ],
                 ),
               ),
-              HollowButton.outline(
-                onPressed: _hasPassword ? _removePassword : _setPassword,
-                compact: true,
-                child: Text(_hasPassword ? 'Remove' : 'Enable'),
-              ),
+              if (_appLockBusy)
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: hollow.accent,
+                  ),
+                )
+              else
+                HollowButton.outline(
+                  onPressed: _hasPassword ? _removeAppLock : _enableAppLock,
+                  compact: true,
+                  child: Text(_hasPassword ? 'Remove' : 'Enable'),
+                ),
             ],
           ),
         ),
+
+        // Biometric unlock — only when App Lock is on and the device has an
+        // enrolled fingerprint / Face ID.
+        if (_isMobilePlatform && _hasPassword && _canBiometric) ...[
+          const SizedBox(height: HollowSpacing.md),
+          Container(
+            padding: const EdgeInsets.all(HollowSpacing.md),
+            decoration: BoxDecoration(
+              color: hollow.surface,
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
+              border: Border.all(color: hollow.border),
+            ),
+            child: Row(
+              children: [
+                Icon(LucideIcons.fingerprint,
+                    size: 20, color: hollow.textSecondary),
+                const SizedBox(width: HollowSpacing.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        Platform.isIOS
+                            ? 'Face ID / Touch ID'
+                            : 'Fingerprint / face unlock',
+                        style: HollowTypography.body
+                            .copyWith(color: hollow.textPrimary),
+                      ),
+                      Text(
+                        'Unlock without typing your '
+                        '${_lockType == 'pin' ? 'PIN' : 'password'}',
+                        style: HollowTypography.caption
+                            .copyWith(color: hollow.textSecondary),
+                      ),
+                    ],
+                  ),
+                ),
+                Switch(
+                  value: _biometricEnabled,
+                  activeThumbColor: hollow.accent,
+                  onChanged: (v) => _toggleBiometric(v),
+                ),
+              ],
+            ),
+          ),
+        ],
 
         const SizedBox(height: HollowSpacing.md),
 
@@ -1865,30 +2070,144 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
     );
   }
 
-  Future<void> _setPassword() async {
-    final password = await _askPassword(context, confirm: true);
-    if (password == null || password.isEmpty) return;
+  Future<void> _enableAppLock() async {
+    // Mobile: choose PIN or password. Desktop layouts keep password only.
+    final type = _isMobilePlatform ? await _chooseLockType() : 'password';
+    if (type == null) return;
+    if (!mounted) return;
+    final isPin = type == 'pin';
+    final secret = await _askSecret(context, confirm: true, isPin: isPin);
+    if (secret == null || secret.isEmpty) return;
+    if (mounted) setState(() => _appLockBusy = true);
     try {
       await identity_api.enablePasswordProtection(
-        password: password, requireOnLaunch: true,
+        password: secret, requireOnLaunch: true,
       );
+      final appLock = AppLockService();
+      await appLock.setLockType(type);
+      await appLock.disableBiometric(); // any old stored secret is stale now
+      appLock.sessionSecret = secret;
       await _loadStatus();
-      if (mounted) HollowToast.show(context, 'Password set', type: HollowToastType.success);
+      if (mounted) {
+        HollowToast.show(context, isPin ? 'PIN set' : 'Password set',
+            type: HollowToastType.success);
+      }
     } catch (e) {
       if (mounted) HollowToast.show(context, 'Failed', type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _appLockBusy = false);
     }
   }
 
-  Future<void> _removePassword() async {
-    final password = await _askPassword(context);
-    if (password == null || password.isEmpty) return;
+  Future<void> _removeAppLock() async {
+    final isPin = _lockType == 'pin';
+    final secret = await _askSecret(context, isPin: isPin);
+    if (secret == null || secret.isEmpty) return;
+    if (mounted) setState(() => _appLockBusy = true);
     try {
-      await identity_api.removePasswordProtection(password: password);
+      await identity_api.removePasswordProtection(password: secret);
+      await AppLockService().clearAll();
       await _loadStatus();
-      if (mounted) HollowToast.show(context, 'Password removed', type: HollowToastType.success);
+      if (mounted) {
+        HollowToast.show(context, 'App lock removed',
+            type: HollowToastType.success);
+      }
     } catch (e) {
-      if (mounted) HollowToast.show(context, 'Wrong password', type: HollowToastType.error);
+      if (mounted) {
+        HollowToast.show(context, isPin ? 'Wrong PIN' : 'Wrong password',
+            type: HollowToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _appLockBusy = false);
     }
+  }
+
+  Future<void> _toggleBiometric(bool enable) async {
+    final appLock = AppLockService();
+    if (!enable) {
+      await appLock.disableBiometric();
+      await _loadStatus();
+      return;
+    }
+    final isPin = _lockType == 'pin';
+    // Need the current secret to store behind the biometric gate. Use the
+    // one captured this session (set/unlock) or ask for it.
+    var secret = appLock.sessionSecret;
+    secret ??= await _askSecret(context, isPin: isPin);
+    if (secret == null || secret.isEmpty) return;
+    // One live prompt so a broken/cancelled sensor never gets trusted.
+    final ok = await appLock.promptBiometric();
+    if (!ok) {
+      if (mounted) {
+        HollowToast.show(context, 'Biometric check failed',
+            type: HollowToastType.error);
+      }
+      return;
+    }
+    await appLock.enableBiometric(secret);
+    appLock.sessionSecret = secret;
+    await _loadStatus();
+    if (mounted) {
+      HollowToast.show(context, 'Biometric unlock enabled',
+          type: HollowToastType.success);
+    }
+  }
+
+  /// Bottom sheet: PIN or password?
+  Future<String?> _chooseLockType() async {
+    final hollow = HollowTheme.of(context);
+    return showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: hollow.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius:
+            BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: HollowSpacing.sm),
+            Container(
+              width: 32,
+              height: 4,
+              decoration: BoxDecoration(
+                color: hollow.border,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: HollowSpacing.lg),
+            Text('Choose lock type',
+                style: HollowTypography.subheading
+                    .copyWith(color: hollow.textPrimary)),
+            const SizedBox(height: HollowSpacing.md),
+            _LockTypeOption(
+              icon: LucideIcons.hash,
+              title: 'PIN',
+              subtitle: '4-8 digits, quick to type',
+              onTap: () => Navigator.pop(ctx, 'pin'),
+            ),
+            _LockTypeOption(
+              icon: LucideIcons.keyRound,
+              title: 'Password',
+              subtitle: 'Anything you like, stronger',
+              onTap: () => Navigator.pop(ctx, 'password'),
+            ),
+            // Biometric is a layer on top of a PIN/password, not a lock type
+            // of its own — show it here (grayed out) so it's discoverable.
+            _LockTypeOption(
+              icon: LucideIcons.fingerprint,
+              title: Platform.isIOS
+                  ? 'Face ID / Touch ID'
+                  : 'Fingerprint / face unlock',
+              subtitle: 'Available once a PIN or password is set',
+              onTap: null,
+            ),
+            const SizedBox(height: HollowSpacing.lg),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _enableKeychain() async {
@@ -1911,28 +2230,40 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
     }
   }
 
-  Future<String?> _askPassword(BuildContext context, {bool confirm = false}) async {
+  Future<String?> _askSecret(BuildContext context,
+      {bool confirm = false, bool isPin = false}) async {
     final controller = TextEditingController();
     final confirmController = TextEditingController();
+    final label = isPin ? 'PIN' : 'Password';
     return showHollowDialog<String>(
       context: context,
       builder: (ctx) => HollowDialog(
-        title: confirm ? 'Set Password' : 'Enter Password',
+        title: confirm ? 'Set $label' : 'Enter $label',
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             HollowTextField(
               controller: controller,
-              hintText: 'Password',
+              hintText: label,
               obscureText: true,
               autofocus: true,
+              keyboardType: isPin ? TextInputType.number : null,
+              inputFormatters:
+                  isPin ? [FilteringTextInputFormatter.digitsOnly] : null,
+              maxLength: isPin ? 8 : null,
+              showCounter: false,
             ),
             if (confirm) ...[
               const SizedBox(height: HollowSpacing.md),
               HollowTextField(
                 controller: confirmController,
-                hintText: 'Confirm password',
+                hintText: 'Confirm $label',
                 obscureText: true,
+                keyboardType: isPin ? TextInputType.number : null,
+                inputFormatters:
+                    isPin ? [FilteringTextInputFormatter.digitsOnly] : null,
+                maxLength: isPin ? 8 : null,
+                showCounter: false,
               ),
             ],
           ],
@@ -1946,8 +2277,14 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
             onPressed: () {
               final pw = controller.text;
               if (pw.isEmpty) return;
+              if (isPin && confirm && pw.length < 4) {
+                HollowToast.show(ctx, 'PIN must be at least 4 digits',
+                    type: HollowToastType.error);
+                return;
+              }
               if (confirm && pw != confirmController.text) {
-                HollowToast.show(ctx, 'Passwords do not match', type: HollowToastType.error);
+                HollowToast.show(ctx, '${label}s do not match',
+                    type: HollowToastType.error);
                 return;
               }
               Navigator.pop(ctx, pw);
@@ -1957,6 +2294,73 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         ],
       ),
     );
+  }
+}
+
+class _LockTypeOption extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+
+  /// Null = disabled (grayed out, not pressable). Used for the
+  /// Fingerprint / Face ID entry, which only becomes available once a
+  /// PIN or password is set.
+  final VoidCallback? onTap;
+
+  const _LockTypeOption({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final disabled = onTap == null;
+
+    final content = Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.lg,
+        vertical: HollowSpacing.md,
+      ),
+      child: Row(
+        children: [
+          Icon(icon,
+              size: 20,
+              color: disabled ? hollow.textSecondary : hollow.accent),
+          const SizedBox(width: HollowSpacing.md),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title,
+                    style: HollowTypography.body.copyWith(
+                      color: disabled
+                          ? hollow.textSecondary
+                          : hollow.textPrimary,
+                      fontWeight: FontWeight.w600,
+                    )),
+                Text(subtitle,
+                    style: HollowTypography.caption.copyWith(
+                      color: disabled
+                          ? hollow.textSecondary.withValues(alpha: 0.7)
+                          : hollow.textSecondary,
+                    )),
+              ],
+            ),
+          ),
+          if (!disabled)
+            Icon(LucideIcons.chevronRight,
+                size: 16, color: hollow.textSecondary),
+        ],
+      ),
+    );
+
+    if (disabled) {
+      return Opacity(opacity: 0.55, child: content);
+    }
+    return HollowPressable(onTap: onTap, subtle: true, child: content);
   }
 }
 

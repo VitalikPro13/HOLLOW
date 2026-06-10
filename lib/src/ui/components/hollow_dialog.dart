@@ -59,7 +59,24 @@ Future<T?> showHollowDialog<T>({
         child: child,
       );
     },
-    pageBuilder: (context, _, _) => builder(context),
+    pageBuilder: (context, _, _) {
+      // Keyboard avoidance for every dialog (mirrors Flutter's Dialog):
+      // pad by the keyboard inset so centered content shifts up instead of
+      // being covered, and strip viewInsets so inner layouts don't double-pad.
+      return AnimatedPadding(
+        padding: MediaQuery.viewInsetsOf(context),
+        duration: const Duration(milliseconds: 100),
+        curve: Curves.decelerate,
+        child: MediaQuery.removeViewInsets(
+          context: context,
+          removeLeft: true,
+          removeTop: true,
+          removeRight: true,
+          removeBottom: true,
+          child: builder(context),
+        ),
+      );
+    },
   );
 }
 
@@ -82,14 +99,21 @@ class HollowDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final radius = BorderRadius.circular(hollow.radiusLg);
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final isCompact = screenWidth < 600;
+    // Phones: span the available width (minus outer padding) so dialogs feel
+    // native. Desktop: shrink-wrap between 300 and 600 as before.
+    final minWidth = isCompact
+        ? (screenWidth - HollowSpacing.xl * 2).clamp(0.0, 600.0)
+        : 300.0;
 
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(HollowSpacing.xl),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(
+          constraints: BoxConstraints(
             maxWidth: 600,
-            minWidth: 300,
+            minWidth: minWidth,
           ),
           child: Material(
             color: Colors.transparent,
@@ -120,18 +144,23 @@ class HollowDialog extends StatelessWidget {
                     ),
                     const SizedBox(height: HollowSpacing.lg),
                   ],
-                  content,
+                  // Scrolls when content exceeds the space left by the
+                  // keyboard/screen instead of overflowing.
+                  Flexible(
+                    child: SingleChildScrollView(
+                      child: content,
+                    ),
+                  ),
                   if (actions.isNotEmpty) ...[
                     const SizedBox(height: HollowSpacing.xl),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        for (int i = 0; i < actions.length; i++) ...[
-                          if (i > 0)
-                            const SizedBox(width: HollowSpacing.sm),
-                          actions[i],
-                        ],
-                      ],
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Wrap(
+                        alignment: WrapAlignment.end,
+                        spacing: HollowSpacing.sm,
+                        runSpacing: HollowSpacing.sm,
+                        children: actions,
+                      ),
                     ),
                   ],
                 ],

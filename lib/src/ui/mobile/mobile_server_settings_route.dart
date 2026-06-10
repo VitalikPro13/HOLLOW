@@ -811,7 +811,8 @@ class _NotificationSection extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final notifState = ref.watch(notificationSettingsProvider);
     final notifNotifier = ref.read(notificationSettingsProvider.notifier);
-    final channels = ref.watch(channelListProvider);
+    final channels =
+        ref.watch(serverChannelsProvider(serverId)).valueOrNull ?? {};
     final serverLevel = notifState.serverLevels[serverId] ?? NotificationLevel.all;
 
     return Column(

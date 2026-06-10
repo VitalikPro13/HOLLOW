@@ -399,6 +399,8 @@ async fn run_event_loop(
 
     // Push notification token — cached for re-registration on WS reconnect.
     let mut push_token: Option<(String, String)> = None; // (token, platform)
+    // Channel push prefs JSON — cached for re-registration on WS reconnect.
+    let mut push_prefs: Option<String> = None;
 
     // Re-bootstrap timer (30 seconds) for signaling re-registration.
     let mut rebootstrap_timer = tokio::time::interval(Duration::from_secs(30));
@@ -955,6 +957,11 @@ async fn run_event_loop(
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::RegisterPushToken { token, platform });
                     }
 
+                    NodeCommand::SetPushPrefs { prefs_json } => {
+                        push_prefs = Some(prefs_json.clone());
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetPushPrefs { prefs_json });
+                    }
+
                     NodeCommand::AcceptFriendRequest { peer_id: peer_id_str } => {
                         social::handle_accept_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers, &sig_cmd_tx,
@@ -1429,11 +1436,16 @@ async fn run_event_loop(
                             }
                         }
                     }
-                        // Re-register push token on reconnect.
+                        // Re-register push token + channel push prefs on reconnect.
                         if let Some((ref tok, ref plat)) = push_token {
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::RegisterPushToken {
                                 token: tok.clone(),
                                 platform: plat.clone(),
+                            });
+                        }
+                        if let Some(ref prefs) = push_prefs {
+                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetPushPrefs {
+                                prefs_json: prefs.clone(),
                             });
                         }
                     }
@@ -7559,6 +7571,19 @@ async fn handle_incoming_request(
             let _ = event_tx.send(NetworkEvent::CallSignal {
                 peer_id: peer_str.to_string(),
                 signal_type: "video_state".to_string(),
+                payload,
+            }).await;
+        }
+        HavenMessage::CallAudioState { call_id, muted, deafened } => {
+            hollow_log!("[HOLLOW-CALL] CallAudioState from {peer_str} call={call_id} muted={muted} deafened={deafened}");
+            let payload = serde_json::json!({
+                "call_id": call_id,
+                "muted": muted,
+                "deafened": deafened,
+            }).to_string();
+            let _ = event_tx.send(NetworkEvent::CallSignal {
+                peer_id: peer_str.to_string(),
+                signal_type: "audio_state".to_string(),
                 payload,
             }).await;
         }

@@ -34,11 +34,17 @@ extern "C" {
 // sender_peer_id: the peer whose DM triggered the push (from the push data).
 // license_key:    license key, or "" if none.
 // timeout_secs:   overall fetch timeout (NSE has ~30s; pass ~15).
+// server_room:    "" for a DM wake. For a CHANNEL wake (type=channel_wake),
+//                 the server id from the push data — joins the server room and
+//                 decrypts buffered channel messages via MLS instead of Olm.
+//                 Channel entries additionally carry server_id/channel_id/
+//                 server_name/channel_name/sender_name resolved on-device.
 char *hollow_push_fetch_and_decrypt(const char *data_dir,
                                     const char *relay_domain,
                                     const char *sender_peer_id,
                                     const char *license_key,
-                                    uint32_t timeout_secs);
+                                    uint32_t timeout_secs,
+                                    const char *server_room);
 
 // Free a string returned by hollow_push_fetch_and_decrypt / hollow_push_decrypt.
 void hollow_push_string_free(char *ptr);

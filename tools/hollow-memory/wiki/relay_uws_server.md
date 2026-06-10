@@ -923,6 +923,16 @@ The relay is normally a dumb pipe, but to make FCM push notifications deliver re
 
 **Fetch-mode peers** (`is_fetch`, set from `fetch:true` in Auth): excluded from `peer_sockets`, `PeerJoined`, member lists — invisible, so waking via push doesn't show the user online. Buffer replay works for them via `handle_join`.
 
+### Channel push (0x09, 2026-06-10)
+
+Server-channel messages reach offline members' phones via SENDER-targeted **0x09 frames** — the relay still never learns membership (the sender picks targets from its CRDT). Frame: `[0x09][room\0][target\0][channel\0][flags:1][payload]`, flags bit0 = mention, payload = the SAME MLS-group/public wire bytes the room broadcast carried (empty = push trigger only, Olm-legacy servers). `handle_binary_channel_direct`: sender must be in the room; acts only if the target is FULLY offline → `buffer_offline_msg(.., is_channel=true)` (third independent cap `MAX_BUFFERED_CHANNEL_MSGS_PER_PEER = 30`, replayed as 0x06 like everything else) → `try_channel_push_notify`.
+
+`try_channel_push_notify` filters BEFORE contacting the sidecar (iOS alert pushes can't be suppressed after delivery):
+1. **Prefs registry** `push_prefs: peer -> server -> ServerPushPref{level, channels{cid->level}}` — set via the `set_push_prefs` text message (RAM only, replaced wholesale, re-sent by the app on every reconnect; defensive caps 256 servers / 1024 channels). Channel override beats server level; unregistered = "all" (old clients keep working). Guests rejected; 0x09 also guest-blocked.
+2. **Throttles** (state.h): non-mention `CHANNEL_PUSH_DEBOUNCE_SECS = 120` per (peer,server) + `CHANNEL_PUSH_MAX_WHILE_OFFLINE = 3` (counter in `channel_push_state`, reset when the full non-fetch app rejoins THAT server room in `handle_join`; deliberately NOT cleared on disconnect — that's the point of the cap); mention `CHANNEL_PUSH_MENTION_DEBOUNCE_SECS = 10`; `CHANNEL_PUSH_MIN_GAP_SECS = 5` per-peer floor across all servers (`last_channel_push_any`).
+
+Sidecar payload gains `{server, channel, mention}` → FCM `data:{type:'channel_wake', sender, server, channel, mention:'1'/'0'}` (FCM data values must be strings); iOS `apns-collapse-id = iosCollapseId(server + ':' + channel)` so one banner per channel gets replaced by newer pushes. See `push_notifications.md` (Channel push section) + memory `project_channel_push_notifications.md`.
+
 E2EE preserved — buffer holds ciphertext only (image bytes are AES-encrypted inside the Olm-encrypted FileHeader). Durable delivery still owned by full-node DM-sync; the buffer is latency glue so push previews are accurate. Client side: `rust/hollow_core/src/node/fetch.rs` + `lib/src/core/services/push_notification_service.dart`. See memory `project_push_notification_implementation.md`, `feedback_fcm_image_invisible_bubble.md`.
 
 ### Push sidecar payload (`push-sidecar/index.js`, VPS localhost:3001)

@@ -30,6 +30,13 @@ class NotificationService: UNNotificationServiceExtension {
     let content = (request.content.mutableCopy() as! UNMutableNotificationContent)
     self.bestAttempt = content
 
+    // Channel pushes (type=channel_wake) take a separate path: server-room
+    // fetch + MLS decrypt, "Server • #channel" banner.
+    if (request.content.userInfo["type"] as? String) == "channel_wake" {
+      handleChannelWake(request, content: content, contentHandler: contentHandler)
+      return
+    }
+
     // The sidecar puts the sender peer_id in the FCM `data` block; FCM surfaces
     // data fields at the top level of userInfo.
     let senderId = request.content.userInfo["sender"] as? String
@@ -98,7 +105,7 @@ class NotificationService: UNNotificationServiceExtension {
     let relay = (entry["relay"] as? String) ?? "relay.anonlisten.com"
     let started = Date()
     // ~25s of the ~30s budget; leaves headroom for delivery.
-    if let cstr = hollow_push_fetch_and_decrypt(dataDir, relay, sender, "", 18) {
+    if let cstr = hollow_push_fetch_and_decrypt(dataDir, relay, sender, "", 18, "") {
       defer { hollow_push_string_free(cstr) }
       let json = String(cString: cstr)
       let elapsed = Int(Date().timeIntervalSince(started) * 1000)
@@ -116,6 +123,119 @@ class NotificationService: UNNotificationServiceExtension {
     }
 
     contentHandler(content)
+  }
+
+  // MARK: - Channel wake (channel push)
+
+  /// Rewrite a channel push: fetch the buffered channel ciphertext from the
+  /// relay (server-room fetch mode), decrypt via MLS on-device, and render
+  /// "Server • #channel" + "Name: text". Any failure falls back to a generic
+  /// channel banner — never drop the push.
+  private func handleChannelWake(
+    _ request: UNNotificationRequest,
+    content: UNMutableNotificationContent,
+    contentHandler: @escaping (UNNotificationContent) -> Void
+  ) {
+    let info = request.content.userInfo
+    let server = info["server"] as? String ?? ""
+    let channel = info["channel"] as? String ?? ""
+    let mention = (info["mention"] as? String) == "1"
+    let sender = info["sender"] as? String ?? ""
+
+    // Thread by server so iOS groups one server's channel banners natively;
+    // the apns-collapse-id (server:channel hash) makes newer pushes REPLACE
+    // the per-channel banner instead of stacking.
+    if !server.isEmpty {
+      content.threadIdentifier = server
+    }
+    content.title = "Hollow"
+    content.body = mention ? "You were mentioned" : "New channel messages"
+
+    guard
+      !server.isEmpty,
+      let container = FileManager.default
+        .containerURL(forSecurityApplicationGroupIdentifier: appGroupId)
+    else {
+      contentHandler(content)
+      return
+    }
+
+    // App alive → its live node already shows in-app notifications; deliver
+    // the generic banner without racing the canonical MLS state.
+    if appIsActive(container) {
+      log(container, "channel wake: app active — deliver generic")
+      contentHandler(content)
+      return
+    }
+
+    // Relay domain from the push-hints cache when the sender is a known friend;
+    // default otherwise (server members usually aren't in the hints cache).
+    var relay = "relay.anonlisten.com"
+    let hintsURL = container.appendingPathComponent("push_hints/hints.json")
+    if !sender.isEmpty,
+       let data = try? Data(contentsOf: hintsURL),
+       let map = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+       let entry = map[sender] as? [String: Any],
+       let r = entry["relay"] as? String, !r.isEmpty {
+      relay = r
+    }
+
+    let dataDir = container.appendingPathComponent("hollow_data").path
+    let started = Date()
+    if let cstr = hollow_push_fetch_and_decrypt(
+      dataDir, relay, sender.isEmpty ? server : sender, "", 18, server) {
+      defer { hollow_push_string_free(cstr) }
+      let json = String(cString: cstr)
+      let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+      log(container, "channel fetch ok in \(elapsed)ms, footprint=\(currentFootprintMB())MB, json=\(json.prefix(160))")
+      if let banner = channelBannerContent(fromJSON: json, channel: channel) {
+        content.title = banner.title
+        content.body = banner.body
+        if let subtitle = banner.subtitle {
+          content.subtitle = subtitle
+        }
+      }
+    } else {
+      log(container, "channel fetch returned NULL, footprint=\(currentFootprintMB())MB — generic banner")
+    }
+
+    contentHandler(content)
+  }
+
+  /// Render channel-wake fetch JSON. Entries carry server/channel/sender names
+  /// resolved on-device by the Rust side. Prefer the channel that triggered
+  /// the push; if it decrypted nothing, fall back to the most recent channel
+  /// in the burst (the replay covers the whole server room).
+  private func channelBannerContent(
+    fromJSON json: String, channel: String
+  ) -> (title: String, body: String, subtitle: String?)? {
+    guard let data = json.data(using: .utf8),
+          let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]],
+          !arr.isEmpty else { return nil }
+
+    var entries = arr.filter { ($0["channel_id"] as? String) == channel }
+    if entries.isEmpty, let lastCid = arr.last?["channel_id"] as? String {
+      entries = arr.filter { ($0["channel_id"] as? String) == lastCid }
+    }
+    guard !entries.isEmpty else { return nil }
+
+    func line(_ m: [String: Any]) -> String {
+      let text = (m["text"] as? String) ?? ""
+      let name = (m["sender_name"] as? String) ?? ""
+      let rendered = (text.isEmpty || text.hasPrefix("[file:"))
+        ? "📷 Image"
+        : (text.count > 140 ? String(text.prefix(140)) + "…" : text)
+      return name.isEmpty ? rendered : "\(name): \(rendered)"
+    }
+
+    let serverName = (entries.last?["server_name"] as? String) ?? ""
+    let channelName = (entries.last?["channel_name"] as? String) ?? ""
+    var title = serverName.isEmpty ? "Hollow" : serverName
+    if !channelName.isEmpty { title += " • #\(channelName)" }
+
+    let body = entries.suffix(3).map(line).joined(separator: "\n")
+    let subtitle = entries.count > 1 ? "\(entries.count) new messages" : nil
+    return (title, body, subtitle)
   }
 
   // MARK: - Tier B helpers

@@ -52,6 +52,24 @@ pub enum WsCommand {
     ResolveNickname { nickname: String },
     /// Register FCM/APNs push token with the relay for offline notifications.
     RegisterPushToken { token: String, platform: String },
+    /// Register per-server channel push preferences with the relay (RAM only).
+    /// `prefs_json` = {"<server_room>": {"level": "all|mentions|nothing",
+    /// "channels": {"<channel_id>": "all|mentions|nothing"}}}. The relay checks
+    /// these BEFORE firing a channel push (iOS alert pushes can't be suppressed
+    /// after delivery, so filtering must happen relay-side).
+    SetPushPrefs { prefs_json: String },
+    /// Targeted channel-message frame for an OFFLINE server member (0x09).
+    /// The relay buffers `data` (the same MLS-group/public wire bytes the room
+    /// broadcast carried) for replay to the member's background fetch node, and
+    /// fires a channel push filtered by the member's registered prefs +
+    /// `mention`. Empty `data` = push trigger only, nothing to buffer.
+    SendChannelDirect {
+        room_code: String,
+        target_peer: String,
+        channel_id: String,
+        mention: bool,
+        data: Vec<u8>,
+    },
 }
 
 /// Events received from the WebSocket relay, forwarded to the swarm.
@@ -488,6 +506,44 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             let msg = serde_json::json!({ "type": "register_push_token", "token": token, "platform": platform });
             if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] RegisterPushToken send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::SetPushPrefs { prefs_json } => {
+            // Embed the prefs as a real JSON object (not a string) so the relay
+            // parses it directly. A malformed prefs string is dropped here.
+            let Ok(prefs) = serde_json::from_str::<serde_json::Value>(prefs_json) else {
+                hollow_log!("[HOLLOW-WS] SetPushPrefs: invalid prefs JSON — skipped");
+                return true;
+            };
+            let msg = serde_json::json!({ "type": "set_push_prefs", "prefs": prefs });
+            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] SetPushPrefs send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::SendChannelDirect { room_code, target_peer, channel_id, mention, data } => {
+            // [0x09][room\0][target\0][channel\0][flags:1][payload]
+            // flags bit0 = mention. Payload may be empty (push trigger only).
+            let room = room_code.as_bytes();
+            let target = target_peer.as_bytes();
+            let channel = channel_id.as_bytes();
+            let mut frame = Vec::with_capacity(
+                1 + room.len() + 1 + target.len() + 1 + channel.len() + 1 + 1 + data.len(),
+            );
+            frame.push(0x09);
+            frame.extend_from_slice(room);
+            frame.push(0x00);
+            frame.extend_from_slice(target);
+            frame.push(0x00);
+            frame.extend_from_slice(channel);
+            frame.push(0x00);
+            frame.push(if *mention { 0x01 } else { 0x00 });
+            frame.extend_from_slice(data);
+            if let Err(e) = write.send(Message::Binary(frame.into())).await {
+                hollow_log!("[HOLLOW-WS] Channel direct send failed: {e}");
                 return false;
             }
             return true;

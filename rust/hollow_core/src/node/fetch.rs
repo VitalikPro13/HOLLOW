@@ -1,7 +1,10 @@
 //! Minimal background fetch node for FCM/APNs push notification Tier 2.
 //!
-//! Connects invisibly (fetch mode), joins one DM room, decrypts incoming
-//! messages via Olm, and returns them. No servers, no CRDT, no MLS.
+//! Connects invisibly (fetch mode) and joins ONE room:
+//! - DM wake: the DM room for the sender — decrypts buffered DMs via Olm.
+//! - Channel wake: the SERVER room — decrypts buffered channel messages via
+//!   MLS (group ciphertext fanned out per-offline-member as 0x09 frames by the
+//!   sender) or reads signed public-channel plaintext. No CRDT, no gossip.
 
 use std::time::Duration;
 
@@ -9,11 +12,11 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::crypto::{CryptoStore, OlmManager};
+use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 #[allow(unused_imports)]
 use crate::hollow_log;
-use crate::node::crypto_handler::{persist_crypto_state, persist_olm_session};
-use crate::node::types::{DirectMessagePayload, HavenMessage, MessageEnvelope};
+use crate::node::crypto_handler::{persist_crypto_state, persist_mls_state, persist_olm_session};
+use crate::node::types::{ChannelMessagePayload, DirectMessagePayload, HavenMessage, MessageEnvelope};
 use crate::node::ws_client;
 
 /// A message fetched during background push processing.
@@ -25,9 +28,19 @@ pub(crate) struct FetchedDm {
     /// On-disk path to an inlined image written for this message (by message_id),
     /// for the notification's BigPicture preview. None for text-only messages.
     pub image_path: Option<String>,
+    /// Set for channel messages (channel wake): the server this message belongs to.
+    pub server_id: Option<String>,
+    /// Set for channel messages (channel wake): the channel this message belongs to.
+    pub channel_id: Option<String>,
 }
 
-/// Run a one-shot fetch: connect invisibly, join one DM room, collect messages, return.
+/// Run a one-shot fetch: connect invisibly, join one room, collect messages, return.
+///
+/// `server_room`: when Some, this is a CHANNEL wake — join the server room and
+/// decrypt channel messages (MLS via `mls` when available, public plaintext
+/// otherwise). When None, this is a DM wake — join the DM room for
+/// `sender_peer_id` and decrypt via Olm.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_fetch(
     relay_domain: &str,
     peer_id: &str,
@@ -35,16 +48,24 @@ pub(crate) async fn run_fetch(
     pub_key_b64: &str,
     license_key: Option<&str>,
     sender_peer_id: &str,
+    server_room: Option<&str>,
     timeout: Duration,
     olm: &mut OlmManager,
+    mls: &mut Option<MlsManager>,
     crypto_store: &CryptoStore,
     db_path: &str,
     db_passphrase: &str,
 ) -> Result<Vec<FetchedDm>, String> {
     let relay_url = format!("wss://{relay_domain}/ws");
-    let dm_room = crate::node::types::dm_room_code(peer_id, sender_peer_id);
+    let room = match server_room {
+        Some(s) => s.to_string(),
+        None => crate::node::types::dm_room_code(peer_id, sender_peer_id),
+    };
 
-    hollow_log!("[HOLLOW-FETCH] Connecting to {relay_url} (fetch mode) for DM room {dm_room}");
+    hollow_log!(
+        "[HOLLOW-FETCH] Connecting to {relay_url} (fetch mode) for {} room {room}",
+        if server_room.is_some() { "server" } else { "DM" }
+    );
 
     let ws_stream = ws_client::connect_and_auth(
         &relay_url, peer_id, keypair_proto, pub_key_b64, license_key, true,
@@ -53,14 +74,15 @@ pub(crate) async fn run_fetch(
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Join the single DM room.
-    let join_msg = serde_json::json!({"type": "join", "room": dm_room});
+    // Join the single room (DM or server).
+    let join_msg = serde_json::json!({"type": "join", "room": room});
     write
         .send(Message::Text(join_msg.to_string().into()))
         .await
-        .map_err(|e| format!("Failed to join DM room: {e}"))?;
+        .map_err(|e| format!("Failed to join room: {e}"))?;
 
-    hollow_log!("[HOLLOW-FETCH] Joined DM room, waiting for messages (timeout: {}s)", timeout.as_secs());
+    hollow_log!("[HOLLOW-FETCH] Joined room, waiting for messages (timeout: {}s)", timeout.as_secs());
+    let mut mls_dirty = false;
 
     let mut messages: Vec<FetchedDm> = Vec::new();
     let deadline = tokio::time::Instant::now() + timeout;
@@ -153,13 +175,32 @@ pub(crate) async fn run_fetch(
                 }
             }
             Message::Binary(data) => {
-                // Real DMs arrive as binary relay frames. The frame the relay
-                // sends (live or replayed from the offline buffer) is:
-                //   [0x06][room\0][sender\0][payload]
-                // where payload is the HavenMessage JSON. Mirror the full node's
-                // parser (ws_client.rs parse_binary_relay_frame).
-                if data.len() > 3 && data[0] == 0x06 {
-                    if let Some((from, payload)) = parse_direct_frame(&data[1..]) {
+                // Relay frames (payload = HavenMessage JSON):
+                //   0x06 [room\0][sender\0][payload]          — direct (live or offline-buffer replay)
+                //   0x05 [room\0][sender\0][payload]          — room broadcast (live)
+                //   0x08 [room\0][topic\0][sender\0][payload] — topic broadcast (live)
+                // A DM wake only cares about 0x06 (Olm ciphertext, mirrors
+                // ws_client.rs parse_binary_relay_frame). A channel wake reads
+                // channel payloads from any of the three — the buffered 0x09
+                // fan-out replays as 0x06, while messages sent live during the
+                // fetch window arrive as 0x05/0x08.
+                let parsed: Option<(String, String)> = if data.len() > 3 {
+                    match data[0] {
+                        0x06 | 0x05 => parse_direct_frame(&data[1..]),
+                        0x08 => parse_topic_frame(&data[1..]),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some((from, payload)) = parsed {
+                    if server_room.is_some() {
+                        if let Some(entry) = try_process_channel_msg(
+                            &from, &payload, mls, &mut mls_dirty, db_path, db_passphrase,
+                        ) {
+                            messages.push(entry);
+                        }
+                    } else if data[0] == 0x06 {
                         if let Some(dm) = try_decrypt_dm(
                             &from, &payload, olm, crypto_store, db_path, db_passphrase, peer_id,
                         ) {
@@ -168,7 +209,7 @@ pub(crate) async fn run_fetch(
                         }
                     }
                 }
-                // Other binary frames (file transfers, topic broadcast) — ignore.
+                // Other binary frames (file transfers) — ignore.
             }
             Message::Close(_) => {
                 hollow_log!("[HOLLOW-FETCH] WS close frame received");
@@ -180,6 +221,15 @@ pub(crate) async fn run_fetch(
 
     // Close WebSocket gracefully.
     let _ = write.close().await;
+
+    // Persist advanced MLS ratchet state (channel wake). Single-writer-safe:
+    // the fetch only runs when the full node is NOT running (Android guard /
+    // iOS app-active heartbeat), mirroring the Olm session persistence above.
+    if mls_dirty {
+        if let Some(mls_mgr) = mls.as_ref() {
+            persist_mls_state(mls_mgr, crypto_store);
+        }
+    }
 
     // A FileHeader and its companion text DM can arrive as TWO entries sharing
     // one message_id: the FileHeader entry has text "[file:<id>]" + image_path,
@@ -238,10 +288,10 @@ pub(crate) async fn run_fetch(
     Ok(merged)
 }
 
-/// Parse the body of a relay direct frame (after the leading 0x06 type byte):
+/// Parse the body of a relay direct/broadcast frame (after the type byte):
 ///   [room\0][sender\0][payload]
 /// Returns (sender_peer_id, payload_as_utf8_string). The room code is not
-/// needed here — the fetch node only joined the one DM room.
+/// needed here — the fetch node only joined one room.
 fn parse_direct_frame(body: &[u8]) -> Option<(String, String)> {
     let room_end = body.iter().position(|&b| b == 0)?;
     let after_room = &body[room_end + 1..];
@@ -250,6 +300,153 @@ fn parse_direct_frame(body: &[u8]) -> Option<(String, String)> {
     let payload = &after_room[sender_end + 1..];
     let payload_str = String::from_utf8_lossy(payload).to_string();
     Some((sender, payload_str))
+}
+
+/// Parse the body of a relay topic-broadcast frame (after the 0x08 type byte):
+///   [room\0][topic\0][sender\0][payload]
+/// Returns (sender_peer_id, payload_as_utf8_string).
+fn parse_topic_frame(body: &[u8]) -> Option<(String, String)> {
+    let room_end = body.iter().position(|&b| b == 0)?;
+    let after_room = &body[room_end + 1..];
+    let topic_end = after_room.iter().position(|&b| b == 0)?;
+    parse_direct_frame_tail(&after_room[topic_end + 1..])
+}
+
+/// [sender\0][payload] tail shared by topic frames.
+fn parse_direct_frame_tail(body: &[u8]) -> Option<(String, String)> {
+    let sender_end = body.iter().position(|&b| b == 0)?;
+    let sender = String::from_utf8_lossy(&body[..sender_end]).to_string();
+    let payload = String::from_utf8_lossy(&body[sender_end + 1..]).to_string();
+    Some((sender, payload))
+}
+
+/// Process a channel-wake payload: an MLS-encrypted or public channel message.
+///
+/// MLS: decrypts on the loaded group state and persists the row — exactly what
+/// the live node would do. A stale-epoch decrypt failure (member missed a
+/// commit while offline) is logged and skipped: the banner falls back to a
+/// content-free line and the app self-heals via channel sync + MLS recovery on
+/// next open. Public channels: signed plaintext, inserted directly.
+fn try_process_channel_msg(
+    from: &str,
+    data: &str,
+    mls: &mut Option<MlsManager>,
+    mls_dirty: &mut bool,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<FetchedDm> {
+    let haven: HavenMessage = serde_json::from_str(data).ok()?;
+
+    match haven {
+        HavenMessage::MlsChannelMessage { server_id, body } => {
+            let mls_mgr = mls.as_mut()?;
+            if !mls_mgr.has_group(&server_id) {
+                hollow_log!("[HOLLOW-FETCH] No MLS group for {server_id} — skip (app syncs later)");
+                return None;
+            }
+            let ciphertext = OlmManager::decode_base64(&body).ok()?;
+            let (plaintext, sender) = match mls_mgr.decrypt(&server_id, &ciphertext) {
+                Ok(r) => r,
+                Err(e) => {
+                    hollow_log!("[HOLLOW-FETCH] MLS decrypt failed (stale epoch?): {e} — app self-heals via sync");
+                    return None;
+                }
+            };
+            *mls_dirty = true;
+            let envelope_str = String::from_utf8_lossy(&plaintext);
+            match serde_json::from_str::<MessageEnvelope>(&envelope_str).ok()? {
+                MessageEnvelope::ChannelMessage { inner } => {
+                    let ChannelMessagePayload {
+                        sid, cid, text, ts, sig, pk, mid, reply_to, file_id, ..
+                    } = *inner;
+                    let text = clip_text(text);
+                    insert_channel_row(
+                        db_path, db_passphrase, &sid, &cid, &sender, &text, ts,
+                        sig.as_deref(), pk.as_deref(), mid.as_deref(), reply_to.as_deref(),
+                        file_id.as_deref(),
+                    );
+                    Some(FetchedDm {
+                        from_peer: sender,
+                        text,
+                        timestamp: ts,
+                        message_id: mid.unwrap_or_default(),
+                        image_path: None,
+                        server_id: Some(sid),
+                        channel_id: Some(cid),
+                    })
+                }
+                // Edits/deletes/reactions while offline are reconciled by the
+                // full app's channel sync — not notification-worthy here.
+                _ => None,
+            }
+        }
+        HavenMessage::PublicChannelMessage {
+            server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, ..
+        } => {
+            // Public channels: signed plaintext. The sender is the relay-attested
+            // frame author (`from`) — same source the live handler uses.
+            let text = clip_text(text);
+            insert_channel_row(
+                db_path, db_passphrase, &server_id, &channel_id, from, &text, ts,
+                sig.as_deref(), pk.as_deref(), Some(&mid), reply_to.as_deref(),
+                file_id.as_deref(),
+            );
+            Some(FetchedDm {
+                from_peer: from.to_string(),
+                text,
+                timestamp: ts,
+                message_id: mid,
+                image_path: None,
+                server_id: Some(server_id),
+                channel_id: Some(channel_id),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn clip_text(text: String) -> String {
+    if text.len() > 4000 {
+        let mut end = 4000;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text[..end].to_string()
+    } else {
+        text
+    }
+}
+
+/// Insert a fetched channel message row, deduplicated by message_id — the same
+/// message may arrive again via channel sync when the full app opens.
+#[allow(clippy::too_many_arguments)]
+fn insert_channel_row(
+    db_path: &str,
+    db_passphrase: &str,
+    server_id: &str,
+    channel_id: &str,
+    sender: &str,
+    text: &str,
+    ts: i64,
+    sig: Option<&str>,
+    pk: Option<&str>,
+    mid: Option<&str>,
+    reply_to: Option<&str>,
+    file_id: Option<&str>,
+) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        let exists = mid.map(|m| store.channel_message_exists(m)).unwrap_or(false);
+        hollow_log!(
+            "[HOLLOW-FETCH] insert channel msg {}/{} from={} mid={:?} exists={}",
+            server_id, channel_id, sender, mid, exists
+        );
+        if !exists {
+            let _ = store.insert_channel_message(
+                server_id, channel_id, sender, text, false, ts, sig, pk, mid,
+                reply_to, file_id,
+            );
+        }
+    }
 }
 
 /// Attempt to decrypt a single incoming WS message as a DM.
@@ -395,6 +592,8 @@ fn try_decrypt_dm(
                         timestamp: ts,
                         message_id: mid.unwrap_or_default(),
                         image_path: None,
+                        server_id: None,
+                        channel_id: None,
                     })
                 }
                 Ok(MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, .. }) => {
@@ -431,6 +630,8 @@ fn try_decrypt_dm(
                         timestamp: ts,
                         message_id: mid,
                         image_path: None,
+                        server_id: None,
+                        channel_id: None,
                     })
                 }
                 Ok(MessageEnvelope::FileHeader { inner }) => {
@@ -512,6 +713,8 @@ fn try_decrypt_dm(
                                     timestamp: p.ts,
                                     message_id: p.mid.clone().unwrap_or_default(),
                                     image_path: Some(disk_str),
+                                    server_id: None,
+                                    channel_id: None,
                                 });
                             }
                         }

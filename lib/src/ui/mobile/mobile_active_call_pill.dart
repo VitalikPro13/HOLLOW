@@ -87,7 +87,16 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> {
         child: Center(
           child: GestureDetector(
             onPanUpdate: (details) {
-              setState(() => _dragOffset += details.delta);
+              // Clamp so the pill can't be dragged below its anchor (into
+              // the bottom nav) or off-screen.
+              final size = MediaQuery.sizeOf(context);
+              final topInset = MediaQuery.viewPaddingOf(context).top;
+              final next = _dragOffset + details.delta;
+              setState(() => _dragOffset = Offset(
+                    next.dx.clamp(
+                        -(size.width / 2 - 80), size.width / 2 - 80),
+                    next.dy.clamp(-(size.height - 80 - 48 - topInset - 8), 0.0),
+                  ));
             },
             child: Material(
               color: Colors.transparent,

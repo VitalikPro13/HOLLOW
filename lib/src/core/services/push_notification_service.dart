@@ -162,6 +162,13 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
 
   await _pushLog('Handler started, data=${message.data}');
 
+  // Channel pushes carry type=channel_wake + server/channel ids — a separate
+  // pipeline (server-room fetch, MLS decrypt, per-channel banner).
+  if (message.data['type'] == 'channel_wake') {
+    await _handleChannelWake(message);
+    return;
+  }
+
   final sender = message.data['sender'] as String?;
   if (sender == null || sender.isEmpty) {
     await _pushLog('No sender in payload, showing generic');
@@ -169,46 +176,7 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
     return;
   }
 
-  // Initialize Rust FFI. CRITICAL: Android reuses the background isolate across
-  // multiple FCM messages, but `RustLib.init()` is NOT idempotent — calling it a
-  // second time in the same isolate throws "Should not initialize
-  // flutter_rust_bridge twice". When that happens Rust is ALREADY initialized
-  // and fully usable, so we must treat it as success (not failure). The previous
-  // code aborted here, which is exactly why every push after the first degraded
-  // to peer-ID-with-no-avatar.
-  bool rustReady = false;
-  try {
-    await initHollowDataDir();
-    await _pushLog('Data dir initialized: $hollowDataDir');
-
-    if (_rustInitializedInIsolate) {
-      await _pushLog('RustLib already initialized in this isolate — reusing');
-    } else {
-      try {
-        await RustLib.init();
-        _rustInitializedInIsolate = true;
-        await _pushLog('RustLib.init() OK');
-      } catch (e) {
-        // Idempotency guard: a second init in a reused isolate throws but Rust
-        // is in fact ready. Any other init error is a real failure.
-        if (_isAlreadyInitializedError(e)) {
-          _rustInitializedInIsolate = true;
-          await _pushLog('RustLib.init() reported already-initialized — treating as ready');
-        } else {
-          rethrow;
-        }
-      }
-    }
-
-    if (Platform.isAndroid || Platform.isIOS) {
-      // set_data_dir uses a OnceLock on the Rust side — safe to call repeatedly.
-      await identity_api.setDataDir(path: hollowDataDir);
-      await _pushLog('setDataDir OK');
-    }
-    rustReady = true;
-  } catch (e) {
-    await _pushLog('Rust init FAILED: $e');
-  }
+  final bool rustReady = await _initRustForBackground();
 
   // Resolve the cached profile (name + avatar) but DO NOT post yet. On the
   // happy path we wait for the fetched message content and post ONE already-
@@ -345,6 +313,219 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
   await _pushLog('Handler complete');
 }
 
+/// Initialize Rust FFI in the background isolate. CRITICAL: Android reuses the
+/// background isolate across multiple FCM messages, but `RustLib.init()` is NOT
+/// idempotent — calling it a second time in the same isolate throws "Should not
+/// initialize flutter_rust_bridge twice". When that happens Rust is ALREADY
+/// initialized and fully usable, so we must treat it as success (not failure).
+/// Aborting here is exactly why every push after the first used to degrade to
+/// peer-ID-with-no-avatar.
+Future<bool> _initRustForBackground() async {
+  try {
+    await initHollowDataDir();
+    await _pushLog('Data dir initialized: $hollowDataDir');
+
+    if (_rustInitializedInIsolate) {
+      await _pushLog('RustLib already initialized in this isolate — reusing');
+    } else {
+      try {
+        await RustLib.init();
+        _rustInitializedInIsolate = true;
+        await _pushLog('RustLib.init() OK');
+      } catch (e) {
+        // Idempotency guard: a second init in a reused isolate throws but Rust
+        // is in fact ready. Any other init error is a real failure.
+        if (_isAlreadyInitializedError(e)) {
+          _rustInitializedInIsolate = true;
+          await _pushLog('RustLib.init() reported already-initialized — treating as ready');
+        } else {
+          rethrow;
+        }
+      }
+    }
+
+    if (Platform.isAndroid || Platform.isIOS) {
+      // set_data_dir uses a OnceLock on the Rust side — safe to call repeatedly.
+      await identity_api.setDataDir(path: hollowDataDir);
+      await _pushLog('setDataDir OK');
+    }
+    return true;
+  } catch (e) {
+    await _pushLog('Rust init FAILED: $e');
+    return false;
+  }
+}
+
+// ── Channel push (channel_wake) ────────────────────────────────────────────
+// Payload: {type: channel_wake, sender, server, channel, mention: '1'/'0'}.
+// The relay already filtered against the registered push prefs; we re-check
+// the LOCAL effective level (relay prefs can be stale) and then fetch+decrypt
+// the buffered channel ciphertext via the server-room fetch node (MLS).
+Future<void> _handleChannelWake(RemoteMessage message) async {
+  final sender = message.data['sender'] as String? ?? '';
+  final server = message.data['server'] as String? ?? '';
+  final channel = message.data['channel'] as String? ?? '';
+  final mention = message.data['mention'] == '1';
+  if (server.isEmpty) {
+    await _pushLog('channel_wake: no server in payload — ignored');
+    return;
+  }
+
+  final rustReady = await _initRustForBackground();
+
+  // Resolve names + the effective LOCAL notification level from SQLCipher.
+  String serverName = '';
+  String channelName = '';
+  String notifLevel = 'all';
+  if (rustReady) {
+    try {
+      final meta = await network_api.getPushChannelMeta(
+          serverId: server, channelId: channel);
+      if (meta != null) {
+        serverName = meta.serverName;
+        channelName = meta.channelName;
+        notifLevel = meta.notifLevel;
+      }
+    } catch (e) {
+      await _pushLog('getPushChannelMeta FAILED: $e');
+    }
+  }
+  if (notifLevel == 'nothing' || (notifLevel == 'mentions' && !mention)) {
+    // Muted locally — the relay-side prefs were stale. Android data pushes are
+    // invisible unless we post, so dropping silences it; the iOS NSE applies
+    // the same check on its side.
+    await _pushLog(
+        'channel_wake: muted locally (level=$notifLevel mention=$mention) — dropped');
+    return;
+  }
+
+  // Tier 2: fetch the buffered channel ciphertext + decrypt (MLS / public).
+  // The relay replays the whole server-room buffer, so one wake often yields
+  // messages for SEVERAL channels — group and post per channel.
+  final byChannel = <String, List<network_api.FetchedMessage>>{};
+  if (rustReady) {
+    try {
+      final messages = await network_api.startFetchNode(
+        senderPeerId: sender.isEmpty ? server : sender,
+        timeoutSecs: 12,
+        serverRoom: server,
+      );
+      await _pushLog('channel fetch returned ${messages.length} message(s)');
+      for (final m in messages) {
+        final cid = m.channelId;
+        if (cid == null || m.serverId != server) continue;
+        byChannel.putIfAbsent(cid, () => []).add(m);
+      }
+    } catch (e) {
+      await _pushLog('channel fetch FAILED: $e');
+    }
+  }
+
+  final profileNames = <String, String>{};
+  Future<String> nameOf(String peerId) async {
+    final cached = profileNames[peerId];
+    if (cached != null) return cached;
+    var name = _truncatePeerId(peerId);
+    try {
+      final profile = await network_api.getPushProfile(peerId: peerId);
+      if (profile != null && profile.displayName.isNotEmpty) {
+        name = profile.displayName;
+      }
+    } catch (_) {}
+    profileNames[peerId] = name;
+    return name;
+  }
+
+  var posted = false;
+  for (final entry in byChannel.entries) {
+    final cid = entry.key;
+
+    // Per-channel local level check — the replay burst may span channels the
+    // user muted individually. The push's mention flag only applies to the
+    // channel that triggered it; other channels require level "all".
+    var chName = cid == channel ? channelName : '';
+    var level = cid == channel ? notifLevel : 'all';
+    if (rustReady && cid != channel) {
+      try {
+        final meta = await network_api.getPushChannelMeta(
+            serverId: server, channelId: cid);
+        if (meta != null) {
+          chName = meta.channelName;
+          level = meta.notifLevel;
+        }
+      } catch (_) {}
+    }
+    if (level == 'nothing') continue;
+    if (level == 'mentions' && !(mention && cid == channel)) continue;
+
+    final batch = <MapEntry<String, String>>[];
+    for (final m in entry.value) {
+      final name = await nameOf(m.fromPeer);
+      final raw = m.text.isEmpty || m.text.startsWith('[file:')
+          ? '📷 Image'
+          : (m.text.length > 200 ? '${m.text.substring(0, 200)}...' : m.text);
+      batch.add(MapEntry(m.messageId, '$name: $raw'));
+    }
+    final texts = await _accumulateLines(_channelLineKey(server, cid), batch);
+
+    // iOS: replace the APNs/NSE banner (collapse-id = hash of server:channel)
+    // with one silent populated banner — mirrors the DM swap flow.
+    final iosReplace = Platform.isIOS;
+    if (iosReplace) {
+      try {
+        await FlutterLocalNotificationsPlugin()
+            .cancel(_iosCollapseId('$server:$cid'));
+      } catch (_) {}
+    }
+
+    await _showChannelNotification(
+      server: server,
+      channel: cid,
+      title: chName.isNotEmpty
+          ? '${serverName.isNotEmpty ? serverName : 'Server'} • #$chName'
+          : (serverName.isNotEmpty ? serverName : 'Server'),
+      body: texts.isNotEmpty ? texts.last : 'New messages',
+      lines: texts,
+      silent: iosReplace,
+    );
+    posted = true;
+  }
+
+  // Fallback: no decrypted content (fetch failed, stale MLS epoch, Olm-legacy
+  // server). iOS: leave the NSE banner standing (single-banner guarantee).
+  // Android: the handler is the only banner source — post a name-only line.
+  if (!posted) {
+    if (Platform.isIOS) {
+      await _pushLog('channel_wake: no content — leaving NSE banner as-is');
+      return;
+    }
+    final senderName = sender.isEmpty ? '' : await nameOf(sender);
+    await _showChannelNotification(
+      server: server,
+      channel: channel,
+      title: channelName.isNotEmpty
+          ? '${serverName.isNotEmpty ? serverName : 'Server'} • #$channelName'
+          : (serverName.isNotEmpty ? serverName : 'Hollow'),
+      body: mention
+          ? (senderName.isEmpty
+              ? 'You were mentioned'
+              : '$senderName mentioned you')
+          : (senderName.isEmpty
+              ? 'New messages'
+              : '$senderName sent a message'),
+    );
+    await _pushLog('channel_wake: fallback notification shown');
+  }
+}
+
+/// Line-cache key for a channel's accumulated notification lines.
+String _channelLineKey(String server, String channel) => 'ch:$server:$channel';
+
+/// Stable notification id for a channel — one banner per channel, updated in
+/// place. Mirrors `_iosCollapseId('$server:$channel')` semantics on Android.
+int _channelNotifId(String server, String channel) =>
+    _iosCollapseId('$server:$channel');
+
 String _truncatePeerId(String peerId) {
   if (peerId.length > 12) return '${peerId.substring(0, 12)}...';
   return peerId;
@@ -377,6 +558,11 @@ const String _dmGroupKey = 'hollow_dm_group';
 // sender.hashCode; this constant must never collide with one. Generic/fallback
 // uses 0, so we pick a distinct sentinel far from typical hashCodes.
 const int _groupSummaryId = 0x40000001;
+// Channel notifications bundle under their own group ("server" messages),
+// separate from the DM bundle. Per-channel ids use _channelNotifId (31-bit
+// FNV, always positive — never collides with this sentinel).
+const String _channelGroupKey = 'hollow_channel_group';
+const int _channelGroupSummaryId = 0x40000002;
 
 Future<void> _showGenericNotification() async {
   final plugin = FlutterLocalNotificationsPlugin();
@@ -485,6 +671,8 @@ Future<void> _showNotification({
         interruptionLevel: InterruptionLevel.active,
       ),
     ),
+    // Tap target: the sender's DM chat.
+    payload: sender,
   );
 
   // Post/refresh the group SUMMARY (the bundle header). Android only visibly
@@ -515,6 +703,117 @@ Future<void> _showNotification({
   }
 }
 
+/// Post (or update in place) the single banner for a channel. One notification
+/// per channel (stable id), bundled under the channel group on Android and
+/// threaded by server on iOS.
+Future<void> _showChannelNotification({
+  required String server,
+  required String channel,
+  required String title,
+  required String body,
+  List<String>? lines,
+  bool silent = false,
+}) async {
+  final plugin = FlutterLocalNotificationsPlugin();
+  await _initNotificationPlugin(plugin);
+
+  StyleInformation? style;
+  if (lines != null && lines.length > 1) {
+    const maxLines = 3;
+    final shown = lines.length > maxLines
+        ? lines.sublist(lines.length - maxLines)
+        : lines;
+    final hidden = lines.length - shown.length;
+    style = InboxStyleInformation(
+      shown,
+      contentTitle: title,
+      summaryText: hidden > 0
+          ? '+$hidden more · ${lines.length} new messages'
+          : '${lines.length} new messages',
+    );
+  }
+
+  await plugin.show(
+    _channelNotifId(server, channel),
+    title,
+    body,
+    NotificationDetails(
+      android: AndroidNotificationDetails(
+        'hollow_messages',
+        'Messages',
+        channelDescription: 'Hollow message notifications',
+        importance: silent ? Importance.low : Importance.high,
+        priority: silent ? Priority.low : Priority.high,
+        icon: '@drawable/ic_stat_hollow',
+        onlyAlertOnce: true,
+        silent: silent,
+        styleInformation: style,
+        number: lines != null && lines.length > 1 ? lines.length : null,
+        groupKey: _channelGroupKey,
+        setAsGroupSummary: false,
+        groupAlertBehavior: GroupAlertBehavior.children,
+      ),
+      iOS: DarwinNotificationDetails(
+        threadIdentifier: server,
+        // Same decoupling as the DM path: silent = no re-buzz, but STILL a
+        // visible heads-up banner (this post replaces the NSE banner).
+        presentSound: !silent,
+        presentBanner: true,
+        presentAlert: true,
+        interruptionLevel: InterruptionLevel.active,
+      ),
+    ),
+    // Tap target: the channel's chat.
+    payload: 'channel:$server:$channel',
+  );
+
+  // Silent group summary (Android bundle header), mirroring the DM group.
+  if (Platform.isAndroid) {
+    await plugin.show(
+      _channelGroupSummaryId,
+      'Hollow',
+      'New channel messages',
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'hollow_messages',
+          'Messages',
+          channelDescription: 'Hollow message notifications',
+          importance: Importance.high,
+          priority: Priority.high,
+          icon: '@drawable/ic_stat_hollow',
+          onlyAlertOnce: true,
+          silent: true,
+          groupKey: _channelGroupKey,
+          setAsGroupSummary: true,
+          groupAlertBehavior: GroupAlertBehavior.children,
+        ),
+      ),
+    );
+  }
+}
+
+/// Dismiss the OS notification for a channel (call when the user opens that
+/// channel) and clear its accumulated lines. Drops the channel group summary
+/// when no channel banners remain. Safe to call on any platform.
+Future<void> dismissChannelNotification(String server, String channel) async {
+  await clearNotificationLines(_channelLineKey(server, channel));
+  final plugin = FlutterLocalNotificationsPlugin();
+  await plugin.cancel(_channelNotifId(server, channel));
+  if (!Platform.isAndroid) return;
+  try {
+    final android = plugin.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+    final active = await android?.getActiveNotifications() ?? const [];
+    final channelChildren = active.where(
+        (n) => n.groupKey == _channelGroupKey && n.id != _channelGroupSummaryId);
+    if (channelChildren.isEmpty) {
+      await plugin.cancel(_channelGroupSummaryId);
+    }
+  } catch (_) {
+    // getActiveNotifications unsupported below API 23 — harmless to skip.
+  }
+}
+
 Future<void> _initNotificationPlugin(
     FlutterLocalNotificationsPlugin plugin) async {
   // Status-bar small icon = the white-silhouette H vector. Android keeps only
@@ -532,6 +831,8 @@ Future<void> _initNotificationPlugin(
       android: androidSettings,
       iOS: iosSettings,
     ),
+    onDidReceiveNotificationResponse: (response) =>
+        PushNotificationService._deliverOpenChat(response.payload),
   );
   if (Platform.isAndroid) {
     await plugin
@@ -559,6 +860,75 @@ class PushNotificationService {
   String? _currentToken;
 
   String? get currentToken => _currentToken;
+
+  /// UI hook: navigates to the DM chat for a peer id. Registered by the
+  /// mobile shell once a navigator + providers exist. Taps that arrive
+  /// earlier (cold start) are buffered and delivered on registration.
+  static void Function(String peerId)? _openChatHandler;
+  static String? _pendingOpenChatPeer;
+
+  /// UI hook: navigates to a channel chat. Same buffering as the DM hook.
+  static void Function(String serverId, String channelId)? _openChannelHandler;
+  static (String, String)? _pendingOpenChannel;
+
+  static void registerOpenChatHandler(void Function(String peerId) handler) {
+    _openChatHandler = handler;
+    final pending = _pendingOpenChatPeer;
+    _pendingOpenChatPeer = null;
+    if (pending != null) handler(pending);
+  }
+
+  static void registerOpenChannelHandler(
+      void Function(String serverId, String channelId) handler) {
+    _openChannelHandler = handler;
+    final pending = _pendingOpenChannel;
+    _pendingOpenChannel = null;
+    if (pending != null) handler(pending.$1, pending.$2);
+  }
+
+  static void _deliverOpenChat(String? payload) {
+    if (payload == null || payload.isEmpty) return;
+    // Channel banner payloads are 'channel:<serverId>:<channelId>'; everything
+    // else is a bare DM peer id.
+    if (payload.startsWith('channel:')) {
+      final rest = payload.substring('channel:'.length);
+      final sep = rest.indexOf(':');
+      if (sep > 0 && sep < rest.length - 1) {
+        _deliverOpenChannel(rest.substring(0, sep), rest.substring(sep + 1));
+      }
+      return;
+    }
+    debugPrint('[HOLLOW-PUSH] Notification tap → open chat $payload');
+    final handler = _openChatHandler;
+    if (handler != null) {
+      handler(payload);
+    } else {
+      _pendingOpenChatPeer = payload;
+    }
+  }
+
+  static void _deliverOpenChannel(String serverId, String channelId) {
+    if (serverId.isEmpty || channelId.isEmpty) return;
+    debugPrint('[HOLLOW-PUSH] Notification tap → open channel $serverId/$channelId');
+    final handler = _openChannelHandler;
+    if (handler != null) {
+      handler(serverId, channelId);
+    } else {
+      _pendingOpenChannel = (serverId, channelId);
+    }
+  }
+
+  /// Route an FCM tap (banner tapped while backgrounded / cold start) to the
+  /// right chat based on the push type.
+  static void _deliverFromRemote(RemoteMessage? message) {
+    if (message == null) return;
+    if (message.data['type'] == 'channel_wake') {
+      _deliverOpenChannel(message.data['server'] as String? ?? '',
+          message.data['channel'] as String? ?? '');
+      return;
+    }
+    _deliverOpenChat(message.data['sender'] as String?);
+  }
 
   Future<void> initialize() async {
     if (_initialized) return;
@@ -601,6 +971,24 @@ class PushNotificationService {
     }
 
     FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
+
+    // Notification taps — FCM/APNs banner tapped while the app was in the
+    // background: bring the user straight to the sender's chat / channel.
+    FirebaseMessaging.onMessageOpenedApp.listen(_deliverFromRemote);
+    // Cold start: app launched by tapping a push notification.
+    try {
+      final initial = await _messaging.getInitialMessage();
+      _deliverFromRemote(initial);
+    } catch (_) {}
+    // Cold start: app launched by tapping a flutter_local_notifications
+    // banner (Android background fetch posts these; payload = sender id).
+    try {
+      final launch =
+          await _localNotifications.getNotificationAppLaunchDetails();
+      if (launch?.didNotificationLaunchApp == true) {
+        _deliverOpenChat(launch!.notificationResponse?.payload);
+      }
+    } catch (_) {}
 
     _messaging.onTokenRefresh.listen((newToken) {
       _currentToken = newToken;
@@ -647,6 +1035,9 @@ class PushNotificationService {
         android: androidSettings,
         iOS: iosSettings,
       ),
+      // Tap on a local banner while the app is alive (fg/bg, not killed).
+      onDidReceiveNotificationResponse: (response) =>
+          _deliverOpenChat(response.payload),
     );
 
     if (Platform.isAndroid) {

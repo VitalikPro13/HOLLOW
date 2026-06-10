@@ -95,6 +95,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   NetworkEvent dco_decode_box_autoadd_network_event(dynamic raw);
 
   @protected
+  PushChannelMeta dco_decode_box_autoadd_push_channel_meta(dynamic raw);
+
+  @protected
   PushProfile dco_decode_box_autoadd_push_profile(dynamic raw);
 
   @protected
@@ -276,6 +279,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   NetworkEvent? dco_decode_opt_box_autoadd_network_event(dynamic raw);
 
   @protected
+  PushChannelMeta? dco_decode_opt_box_autoadd_push_channel_meta(dynamic raw);
+
+  @protected
   PushProfile? dco_decode_opt_box_autoadd_push_profile(dynamic raw);
 
   @protected
@@ -298,6 +304,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PublicChannelEntryFfi dco_decode_public_channel_entry_ffi(dynamic raw);
+
+  @protected
+  PushChannelMeta dco_decode_push_channel_meta(dynamic raw);
 
   @protected
   PushProfile dco_decode_push_profile(dynamic raw);
@@ -450,6 +459,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   NetworkEvent sse_decode_box_autoadd_network_event(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PushChannelMeta sse_decode_box_autoadd_push_channel_meta(
     SseDeserializer deserializer,
   );
 
@@ -675,6 +689,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PushChannelMeta? sse_decode_opt_box_autoadd_push_channel_meta(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PushProfile? sse_decode_opt_box_autoadd_push_profile(
     SseDeserializer deserializer,
   );
@@ -707,6 +726,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PublicChannelEntryFfi sse_decode_public_channel_entry_ffi(
     SseDeserializer deserializer,
   );
+
+  @protected
+  PushChannelMeta sse_decode_push_channel_meta(SseDeserializer deserializer);
 
   @protected
   PushProfile sse_decode_push_profile(SseDeserializer deserializer);
@@ -901,6 +923,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_network_event(
     NetworkEvent self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_push_channel_meta(
+    PushChannelMeta self,
     SseSerializer serializer,
   );
 
@@ -1202,6 +1230,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_push_channel_meta(
+    PushChannelMeta? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_push_profile(
     PushProfile? self,
     SseSerializer serializer,
@@ -1243,6 +1277,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_public_channel_entry_ffi(
     PublicChannelEntryFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_push_channel_meta(
+    PushChannelMeta self,
     SseSerializer serializer,
   );
 

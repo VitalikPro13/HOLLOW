@@ -17,12 +17,14 @@ class MobileClusteredAvatars extends StatelessWidget {
   final List<String> participants;
   final Set<String> speakingSet;
   final Set<String> mutedSet;
+  final Set<String> deafenedSet;
 
   const MobileClusteredAvatars({
     super.key,
     required this.participants,
     required this.speakingSet,
     this.mutedSet = const {},
+    this.deafenedSet = const {},
   });
 
   @override
@@ -77,6 +79,7 @@ class MobileClusteredAvatars extends StatelessWidget {
                   size: avatarSize,
                   isSpeaking: speakingSet.contains(rows[r][c]),
                   isMuted: mutedSet.contains(rows[r][c]),
+                  isDeafened: deafenedSet.contains(rows[r][c]),
                 ),
               ],
             ],
@@ -96,6 +99,7 @@ class MobileSpeakingAvatar extends ConsumerWidget {
   final double size;
   final bool isSpeaking;
   final bool isMuted;
+  final bool isDeafened;
 
   const MobileSpeakingAvatar({
     super.key,
@@ -103,6 +107,7 @@ class MobileSpeakingAvatar extends ConsumerWidget {
     required this.size,
     required this.isSpeaking,
     this.isMuted = false,
+    this.isDeafened = false,
   });
 
   @override
@@ -127,20 +132,25 @@ class MobileSpeakingAvatar extends ConsumerWidget {
           child: Stack(
             children: [
               HollowAvatar(peerId: peerId, size: size),
+              // Muted badge bottom-left, deafened badge bottom-right.
               if (isMuted)
+                Positioned(
+                  left: 0,
+                  bottom: 0,
+                  child: _AvatarBadge(
+                    icon: LucideIcons.micOff,
+                    hollow: hollow,
+                    radius: radius,
+                  ),
+                ),
+              if (isDeafened)
                 Positioned(
                   right: 0,
                   bottom: 0,
-                  child: Container(
-                    padding: const EdgeInsets.all(3),
-                    decoration: BoxDecoration(
-                      color: hollow.error,
-                      borderRadius: BorderRadius.circular(radius * 0.6),
-                      border:
-                          Border.all(color: hollow.background, width: 2),
-                    ),
-                    child: Icon(LucideIcons.micOff,
-                        size: 12, color: Colors.white),
+                  child: _AvatarBadge(
+                    icon: LucideIcons.headphoneOff,
+                    hollow: hollow,
+                    radius: radius,
                   ),
                 ),
             ],
@@ -156,6 +166,32 @@ class MobileSpeakingAvatar extends ConsumerWidget {
           overflow: TextOverflow.ellipsis,
         ),
       ],
+    );
+  }
+}
+
+/// Small status badge pinned to an avatar corner (muted / deafened).
+class _AvatarBadge extends StatelessWidget {
+  final IconData icon;
+  final HollowTheme hollow;
+  final double radius;
+
+  const _AvatarBadge({
+    required this.icon,
+    required this.hollow,
+    required this.radius,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: hollow.error,
+        borderRadius: BorderRadius.circular(radius * 0.6),
+        border: Border.all(color: hollow.background, width: 2),
+      ),
+      child: Icon(icon, size: 12, color: Colors.white),
     );
   }
 }

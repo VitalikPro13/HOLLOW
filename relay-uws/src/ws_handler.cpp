@@ -238,6 +238,16 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
         }
     }
 
+    // Full-app join: reset the channel-push offline cap for this room — the
+    // app is (re)synced from here, so future offline bursts may push again.
+    if (!data->is_guest && !data->is_fetch) {
+        auto cit = state.channel_push_state.find(data->peer_id);
+        if (cit != state.channel_push_state.end()) {
+            cit->second.erase(room);
+            if (cit->second.empty()) state.channel_push_state.erase(cit);
+        }
+    }
+
     // Replay any buffered offline messages for this peer in this room.
     // Works for both fetch-mode (FCM wake) and full-node joins. Guests never
     // have offline buffers (they don't register push tokens).
@@ -296,6 +306,10 @@ struct PushJob {
     std::string token;
     std::string platform;
     std::string sender;
+    // Channel pushes only (empty/false for DM pushes):
+    std::string server;   // server room code
+    std::string channel;  // channel_id
+    bool mention = false;
 };
 
 // Cap the backlog so a wedged/slow sidecar can't grow the queue unbounded during
@@ -326,6 +340,11 @@ void deliver_push(const PushJob& job) {
     }
 
     json body = {{"token", job.token}, {"platform", job.platform}, {"sender", job.sender}};
+    if (!job.server.empty()) {
+        body["server"] = job.server;
+        body["channel"] = job.channel;
+        body["mention"] = job.mention;
+    }
     std::string payload = body.dump();
 
     std::string req = "POST /push HTTP/1.1\r\n"
@@ -356,8 +375,7 @@ void push_worker_loop() {
 } // namespace
 
 // Enqueue a push for the persistent worker (fire-and-forget, off the event loop).
-static void notify_push_sidecar(const std::string& token, const std::string& platform,
-                                 const std::string& sender) {
+static void notify_push_sidecar(PushJob job) {
     // Lazily start the single worker thread on first push.
     bool expected = false;
     if (g_push_worker_started.compare_exchange_strong(expected, true)) {
@@ -368,9 +386,14 @@ static void notify_push_sidecar(const std::string& token, const std::string& pla
         if (g_push_queue.size() >= PUSH_QUEUE_MAX) {
             g_push_queue.pop_front(); // drop oldest — push is best-effort
         }
-        g_push_queue.push_back(PushJob{token, platform, sender});
+        g_push_queue.push_back(std::move(job));
     }
     g_push_cv.notify_one();
+}
+
+static void notify_push_sidecar(const std::string& token, const std::string& platform,
+                                 const std::string& sender) {
+    notify_push_sidecar(PushJob{token, platform, sender, "", "", false});
 }
 
 // Build the 0x06 direct-message frame the receiver expects:
@@ -394,25 +417,27 @@ static std::string build_direct_frame(std::string_view room,
 static void buffer_offline_msg(const std::string& target_peer_id,
                                const std::string& room,
                                std::string frame, RelayState& state,
-                               bool is_image = false) {
+                               bool is_image = false, bool is_channel = false) {
     auto& q = state.offline_buffer[target_peer_id];
-    q.push_back({room, std::move(frame), std::chrono::steady_clock::now(), is_image});
-    // Two independent caps: text and inlined-image frames evict separately so a
-    // burst of images never pushes out buffered text (and vice-versa).
-    auto count_kind = [&](bool img) {
+    q.push_back({room, std::move(frame), std::chrono::steady_clock::now(), is_image, is_channel});
+    // Three independent caps: DM text, inlined-image and channel frames evict
+    // separately so a chatty server never pushes out buffered DMs (and
+    // vice-versa).
+    auto count_kind = [&](bool img, bool chan) {
         size_t n = 0;
-        for (const auto& m : q) if (m.is_image == img) n++;
+        for (const auto& m : q) if (m.is_image == img && m.is_channel == chan) n++;
         return n;
     };
-    auto drop_oldest_kind = [&](bool img) {
+    auto drop_oldest_kind = [&](bool img, bool chan) {
         for (auto it = q.begin(); it != q.end(); ++it) {
-            if (it->is_image == img) { q.erase(it); return; }
+            if (it->is_image == img && it->is_channel == chan) { q.erase(it); return; }
         }
     };
-    while (count_kind(false) > MAX_BUFFERED_MSGS_PER_PEER)   drop_oldest_kind(false);
-    while (count_kind(true)  > MAX_BUFFERED_IMAGES_PER_PEER) drop_oldest_kind(true);
+    while (count_kind(false, false) > MAX_BUFFERED_MSGS_PER_PEER)          drop_oldest_kind(false, false);
+    while (count_kind(true, false)  > MAX_BUFFERED_IMAGES_PER_PEER)        drop_oldest_kind(true, false);
+    while (count_kind(false, true)  > MAX_BUFFERED_CHANNEL_MSGS_PER_PEER)  drop_oldest_kind(false, true);
     fprintf(stderr, "[push] Buffered offline %s for %.12s... (room=%.8s..., queued=%zu)\n",
-            is_image ? "image" : "msg",
+            is_image ? "image" : (is_channel ? "channel msg" : "msg"),
             target_peer_id.c_str(), room.c_str(), q.size());
 }
 
@@ -505,6 +530,139 @@ static void handle_register_push_token(SSLWebSocket* ws, PerSocketData* data,
     send_json(ws, {{"type", "push_token_registered"}});
     fprintf(stderr, "[push] Token registered for %.12s... (platform=%s, total=%zu)\n",
             data->peer_id.c_str(), platform.c_str(), state.push_tokens.size());
+}
+
+// Store a peer's channel push prefs (RAM only, replaced wholesale). The app
+// sends these on connect and whenever notification settings change; filtering
+// happens relay-side because iOS alert pushes can't be suppressed on-device.
+static void handle_set_push_prefs(PerSocketData* data, const json& j, RelayState& state) {
+    if (data->is_guest) return;
+    if (!j.contains("prefs") || !j["prefs"].is_object()) return;
+
+    std::unordered_map<std::string, RelayState::ServerPushPref> prefs;
+    size_t server_count = 0;
+    for (auto& [server, val] : j["prefs"].items()) {
+        if (++server_count > 256) break;  // defensive cap
+        if (!val.is_object()) continue;
+        RelayState::ServerPushPref p;
+        p.level = val.value("level", "all");
+        if (p.level != "all" && p.level != "mentions" && p.level != "nothing") p.level = "all";
+        if (val.contains("channels") && val["channels"].is_object()) {
+            size_t chan_count = 0;
+            for (auto& [cid, lv] : val["channels"].items()) {
+                if (++chan_count > 1024) break;  // defensive cap
+                if (!lv.is_string()) continue;
+                const std::string& s = lv.get_ref<const std::string&>();
+                if (s == "all" || s == "mentions" || s == "nothing") p.channels[cid] = s;
+            }
+        }
+        prefs[server] = std::move(p);
+    }
+    state.push_prefs[data->peer_id] = std::move(prefs);
+    fprintf(stderr, "[push] Channel push prefs set for %.12s... (%zu server(s))\n",
+            data->peer_id.c_str(), state.push_prefs[data->peer_id].size());
+}
+
+// Fire a channel push for an offline server member, filtered by their
+// registered prefs (default "all") + mention flag, with per-(peer,server)
+// debounce and an offline cap so a chatty server can't spam a phone that
+// never reconnects.
+static void try_channel_push_notify(const std::string& target, const std::string& sender,
+                                    const std::string& server, const std::string& channel,
+                                    bool mention, RelayState& state) {
+    auto tok_it = state.push_tokens.find(target);
+    if (tok_it == state.push_tokens.end()) return;
+
+    // Prefs filter. Unregistered peer / unknown server = "all" (older clients
+    // keep working); per-channel override beats the server level.
+    std::string level = "all";
+    auto pit = state.push_prefs.find(target);
+    if (pit != state.push_prefs.end()) {
+        auto sit = pit->second.find(server);
+        if (sit != pit->second.end()) {
+            level = sit->second.level;
+            auto cit = sit->second.channels.find(channel);
+            if (cit != sit->second.channels.end()) level = cit->second;
+        }
+    }
+    if (level == "nothing") return;
+    if (level == "mentions" && !mention) return;
+
+    auto now = std::chrono::steady_clock::now();
+
+    // Per-peer floor across ALL channel pushes (multi-server burst guard).
+    auto& any_last = state.last_channel_push_any[target];
+    if ((now - any_last) < std::chrono::seconds(CHANNEL_PUSH_MIN_GAP_SECS)) return;
+
+    auto& cps = state.channel_push_state[target][server];
+    int debounce = mention ? CHANNEL_PUSH_MENTION_DEBOUNCE_SECS : CHANNEL_PUSH_DEBOUNCE_SECS;
+    if ((now - cps.last) < std::chrono::seconds(debounce)) return;
+    if (!mention && cps.count_since_offline >= CHANNEL_PUSH_MAX_WHILE_OFFLINE) {
+        return;  // resets when the full app rejoins the server room
+    }
+
+    cps.last = now;
+    if (!mention) cps.count_since_offline++;
+    any_last = now;
+
+    fprintf(stderr, "[push] Channel push for %.12s... (server=%.8s..., mention=%d)\n",
+            target.c_str(), server.c_str(), (int)mention);
+    notify_push_sidecar(PushJob{tok_it->second.token, tok_it->second.platform,
+                                sender, server, channel, mention});
+}
+
+// 0x09: targeted channel-message frame for an OFFLINE server member.
+// Layout: [0x09][room\0][target\0][channel\0][flags:1][payload]
+// flags bit0 = mention. The SENDER picked the target from its CRDT member list
+// (the relay never learns membership). Payload (the same MLS-group/public wire
+// bytes the room broadcast carried) is buffered for the member's background
+// fetch node; empty payload = push trigger only.
+static void handle_binary_channel_direct(PerSocketData* data,
+                                          std::string_view raw, RelayState& state) {
+    if (raw.size() < 6) return;
+
+    auto room_nul = raw.find('\0', 1);
+    if (room_nul == std::string_view::npos) return;
+    std::string_view room_code = raw.substr(1, room_nul - 1);
+
+    size_t target_start = room_nul + 1;
+    if (target_start >= raw.size()) return;
+    auto target_nul = raw.find('\0', target_start);
+    if (target_nul == std::string_view::npos) return;
+    std::string_view target_peer = raw.substr(target_start, target_nul - target_start);
+
+    size_t channel_start = target_nul + 1;
+    if (channel_start >= raw.size()) return;
+    auto channel_nul = raw.find('\0', channel_start);
+    if (channel_nul == std::string_view::npos) return;
+    std::string_view channel = raw.substr(channel_start, channel_nul - channel_start);
+
+    size_t flags_pos = channel_nul + 1;
+    if (flags_pos >= raw.size()) return;
+    bool mention = (static_cast<uint8_t>(raw[flags_pos]) & 0x01) != 0;
+
+    std::string_view payload = (flags_pos + 1 < raw.size())
+        ? raw.substr(flags_pos + 1) : std::string_view{};
+
+    std::string room_str(room_code);
+    std::string target_str(target_peer);
+
+    // Sender must actually be in the server room it claims to post to.
+    auto rit = state.ws_rooms.find(room_str);
+    if (rit == state.ws_rooms.end()) return;
+    if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return;
+
+    // Only act for FULLY offline targets — online members already got the room
+    // broadcast (and connected-but-elsewhere members recover via channel sync).
+    if (state.peer_sockets.find(target_str) != state.peer_sockets.end()) return;
+
+    if (!payload.empty()) {
+        buffer_offline_msg(target_str, room_str,
+                           build_direct_frame(room_code, data->peer_id, payload), state,
+                           /*is_image=*/false, /*is_channel=*/true);
+    }
+    try_channel_push_notify(target_str, data->peer_id, room_str,
+                            std::string(channel), mention, state);
 }
 
 static void handle_msg(PerSocketData* data, const std::string& room,
@@ -919,6 +1077,8 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
     } else if (type == "register_push_token") {
         handle_register_push_token(ws, data, j.value("token", ""),
                                    j.value("platform", ""), state);
+    } else if (type == "set_push_prefs") {
+        handle_set_push_prefs(data, j, state);
     }
 }
 
@@ -1026,7 +1186,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state) {
 
                     // Guest binary restrictions
                     if (data->is_guest) {
-                        if (opcode == 0x04 || opcode == 0x08) return; // no SendDirect for guests
+                        if (opcode == 0x04 || opcode == 0x08 || opcode == 0x09) return; // no SendDirect for guests
                         if (opcode == 0x03) {
                             auto now = std::chrono::steady_clock::now();
                             if ((now - data->minute_window_start) > std::chrono::seconds(60)) {
@@ -1059,6 +1219,11 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state) {
                             break;
                         case 0x07:
                             handle_binary_topic_msg(data, message, state);
+                            break;
+                        case 0x09:
+                            // Targeted channel message for an offline server
+                            // member — buffered + prefs-filtered channel push.
+                            handle_binary_channel_direct(data, message, state);
                             break;
                         default:
                             break;

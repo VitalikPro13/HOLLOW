@@ -244,16 +244,21 @@ Future<void> releaseNickname() =>
 Future<PushProfile?> getPushProfile({required String peerId}) =>
     RustLib.instance.api.crateApiNetworkGetPushProfile(peerId: peerId);
 
-/// Start a lightweight invisible fetch node to receive DM messages from a specific peer.
-/// Connects to relay with fetch=true (invisible), joins only the DM room for sender_peer_id,
-/// waits for messages up to timeout_secs, decrypts via Olm, and returns.
+/// Start a lightweight invisible fetch node to receive buffered messages.
+///
+/// DM wake (`server_room` = None): joins only the DM room for sender_peer_id
+/// and decrypts via Olm. Channel wake (`server_room` = Some(server_id)): joins
+/// the server room and decrypts buffered channel messages via MLS (or reads
+/// signed public-channel plaintext).
 /// Cannot run while the full node is active. Blocks the calling thread.
 Future<List<FetchedMessage>> startFetchNode({
   required String senderPeerId,
   required int timeoutSecs,
+  String? serverRoom,
 }) => RustLib.instance.api.crateApiNetworkStartFetchNode(
   senderPeerId: senderPeerId,
   timeoutSecs: timeoutSecs,
+  serverRoom: serverRoom,
 );
 
 /// Register an FCM/APNs push token with the relay for offline wake-up notifications.
@@ -263,6 +268,26 @@ Future<void> registerPushToken({
 }) => RustLib.instance.api.crateApiNetworkRegisterPushToken(
   token: token,
   platform: platform,
+);
+
+/// Register per-server/channel push notification prefs with the relay.
+/// `prefs_json` = {"<server_id>": {"level": "all|mentions|nothing",
+/// "channels": {"<channel_id>": "all|mentions|nothing"}}}. RAM-only on the
+/// relay; re-sent automatically on every reconnect. The relay filters channel
+/// pushes against these BEFORE contacting FCM/APNs (iOS alert pushes cannot be
+/// suppressed after delivery).
+Future<void> setPushPrefs({required String prefsJson}) =>
+    RustLib.instance.api.crateApiNetworkSetPushPrefs(prefsJson: prefsJson);
+
+/// Resolve server + channel names and the effective local notification level
+/// directly from SQLCipher (no running node). Returns None when the server is
+/// unknown locally or identity is locked.
+Future<PushChannelMeta?> getPushChannelMeta({
+  required String serverId,
+  required String channelId,
+}) => RustLib.instance.api.crateApiNetworkGetPushChannelMeta(
+  serverId: serverId,
+  channelId: channelId,
 );
 
 /// Send a typing indicator to peers. Ephemeral, not stored.
@@ -583,12 +608,20 @@ class FetchedMessage {
   /// a BigPicture preview. None for text-only messages.
   final String? imagePath;
 
+  /// Set for channel messages (channel wake): owning server.
+  final String? serverId;
+
+  /// Set for channel messages (channel wake): owning channel.
+  final String? channelId;
+
   const FetchedMessage({
     required this.fromPeer,
     required this.text,
     required this.timestamp,
     required this.messageId,
     this.imagePath,
+    this.serverId,
+    this.channelId,
   });
 
   @override
@@ -597,7 +630,9 @@ class FetchedMessage {
       text.hashCode ^
       timestamp.hashCode ^
       messageId.hashCode ^
-      imagePath.hashCode;
+      imagePath.hashCode ^
+      serverId.hashCode ^
+      channelId.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -608,7 +643,9 @@ class FetchedMessage {
           text == other.text &&
           timestamp == other.timestamp &&
           messageId == other.messageId &&
-          imagePath == other.imagePath;
+          imagePath == other.imagePath &&
+          serverId == other.serverId &&
+          channelId == other.channelId;
 }
 
 /// FFI-facing guest reaction.
@@ -1336,6 +1373,38 @@ class PublicChannelEntryFfi {
           channelId == other.channelId &&
           name == other.name &&
           category == other.category;
+}
+
+/// Display metadata for a channel push notification (Tier 1-style: resolved
+/// from the local DB, no node needed).
+class PushChannelMeta {
+  final String serverName;
+  final String channelName;
+
+  /// Effective LOCAL notification level for this channel ("all" / "mentions"
+  /// / "nothing") — channel override falling back to the server default.
+  /// Lets the Android background handler drop a push whose relay-side filter
+  /// was stale.
+  final String notifLevel;
+
+  const PushChannelMeta({
+    required this.serverName,
+    required this.channelName,
+    required this.notifLevel,
+  });
+
+  @override
+  int get hashCode =>
+      serverName.hashCode ^ channelName.hashCode ^ notifLevel.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PushChannelMeta &&
+          runtimeType == other.runtimeType &&
+          serverName == other.serverName &&
+          channelName == other.channelName &&
+          notifLevel == other.notifLevel;
 }
 
 /// Profile data for push notifications (Tier 1: cached profile, no node needed).

@@ -29,6 +29,9 @@ void showMobileMessageActions({
   showModalBottomSheet(
     context: context,
     backgroundColor: hollow.surface,
+    // The full emoji grid / long action lists can exceed the default sheet
+    // cap on short phones — let the sheet size itself and scroll internally.
+    isScrollControlled: true,
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
     ),
@@ -95,34 +98,45 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
     final hollow = HollowTheme.of(context);
 
     return SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(top: HollowSpacing.sm),
-            child: Container(
-              width: 32,
-              height: 4,
-              decoration: BoxDecoration(
-                color: hollow.border,
-                borderRadius: BorderRadius.circular(2),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.85,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: HollowSpacing.sm),
+              child: Container(
+                width: 32,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: hollow.border,
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
+            const SizedBox(height: HollowSpacing.sm),
 
-          AnimatedSize(
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeOutCubic,
-            child: switch (_view) {
-              _SheetView.actions => _buildActionsView(hollow),
-              _SheetView.allEmojis => _buildAllEmojisView(hollow),
-              _SheetView.deleteConfirm => _buildDeleteConfirmView(hollow),
-            },
-          ),
+            // Scrolls when the content (emoji grid, long action lists) is
+            // taller than the sheet cap on short phones.
+            Flexible(
+              child: SingleChildScrollView(
+                child: AnimatedSize(
+                  duration: const Duration(milliseconds: 200),
+                  curve: Curves.easeOutCubic,
+                  child: switch (_view) {
+                    _SheetView.actions => _buildActionsView(hollow),
+                    _SheetView.allEmojis => _buildAllEmojisView(hollow),
+                    _SheetView.deleteConfirm => _buildDeleteConfirmView(hollow),
+                  },
+                ),
+              ),
+            ),
 
-          const SizedBox(height: HollowSpacing.sm),
-        ],
+            const SizedBox(height: HollowSpacing.sm),
+          ],
+        ),
       ),
     );
   }

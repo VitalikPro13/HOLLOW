@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -25,6 +26,8 @@ class HollowTextField extends StatefulWidget {
   final double? borderRadius;
   final int? maxLength;
   final bool showCounter;
+  final TextInputType? keyboardType;
+  final List<TextInputFormatter>? inputFormatters;
 
   const HollowTextField({
     super.key,
@@ -44,6 +47,8 @@ class HollowTextField extends StatefulWidget {
     this.borderRadius,
     this.maxLength,
     this.showCounter = true,
+    this.keyboardType,
+    this.inputFormatters,
   });
 
   @override
@@ -131,6 +136,8 @@ class _HollowTextFieldState extends State<HollowTextField>
       maxLines: widget.maxLines,
       minLines: widget.minLines,
       maxLength: widget.maxLength,
+      keyboardType: widget.keyboardType,
+      inputFormatters: widget.inputFormatters,
       onSubmitted: widget.onSubmitted,
       onChanged: widget.onChanged,
       cursorColor: hollow.accent,

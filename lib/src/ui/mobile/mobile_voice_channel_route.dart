@@ -12,6 +12,8 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_avatars.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:proximity_sensor/proximity_sensor.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 class MobileVoiceChannelRoute extends ConsumerStatefulWidget {
   final String serverId;
@@ -35,11 +37,50 @@ class _MobileVoiceChannelRouteState
   Timer? _durationTimer;
   Duration _duration = Duration.zero;
   Offset _pipOffset = const Offset(12, 12);
+  StreamSubscription<int>? _proximitySub;
+  bool _wakelockOn = false;
 
   @override
   void dispose() {
     _durationTimer?.cancel();
+    _disableProximity();
+    if (_wakelockOn) {
+      unawaited(WakelockPlus.disable().catchError((_) {}));
+    }
     super.dispose();
+  }
+
+  static bool get _isMobilePlatform => Platform.isAndroid || Platform.isIOS;
+
+  /// Blank the screen when the phone is held to the ear — only while on the
+  /// earpiece with no video content on screen.
+  void _syncProximity(VoiceChannelState vcState) {
+    if (!_isMobilePlatform) return;
+    final earpieceMode = vcState.isInVoiceChannel &&
+        !vcState.isSpeakerOn &&
+        !_hasVideo(vcState);
+    if (earpieceMode && _proximitySub == null) {
+      unawaited(
+          ProximitySensor.setProximityScreenOff(true).catchError((_) => false));
+      _proximitySub = ProximitySensor.events.listen((_) {}, onError: (_) {});
+    } else if (!earpieceMode && _proximitySub != null) {
+      _disableProximity();
+    }
+  }
+
+  void _disableProximity() {
+    if (_proximitySub == null) return;
+    _proximitySub?.cancel();
+    _proximitySub = null;
+    unawaited(
+        ProximitySensor.setProximityScreenOff(false).catchError((_) => false));
+  }
+
+  /// Keep the screen awake while video/screen share is displayed.
+  void _syncWakelock(bool videoShown) {
+    if (videoShown == _wakelockOn) return;
+    _wakelockOn = videoShown;
+    unawaited(WakelockPlus.toggle(enable: videoShown).catchError((_) {}));
   }
 
   void _startTimer(DateTime joinedAt) {
@@ -113,6 +154,10 @@ class _MobileVoiceChannelRouteState
       );
     }
 
+    final hasVideo = _hasVideo(vcState);
+    _syncProximity(vcState);
+    _syncWakelock(hasVideo);
+
     return Scaffold(
       backgroundColor: hollow.background,
       body: SafeArea(
@@ -120,7 +165,7 @@ class _MobileVoiceChannelRouteState
           children: [
             _buildTopBar(hollow),
             Expanded(
-              child: _hasVideo(vcState)
+              child: hasVideo
                   ? _buildVideoView(hollow, vcState, localPeerId)
                   : _buildAudioView(hollow, vcState, localPeerId),
             ),
@@ -186,12 +231,16 @@ class _MobileVoiceChannelRouteState
 
     final speakingSet = <String>{};
     final mutedSet = <String>{};
+    final deafenedSet = <String>{};
     for (final p in participants) {
       if (vcState.isSpeaking(p)) speakingSet.add(p);
       if (p == localPeerId) {
         if (vcState.isMuted) mutedSet.add(p);
+        if (vcState.isDeafened) deafenedSet.add(p);
       } else {
-        if (vcState.getPeerAudioState(p).isMuted) mutedSet.add(p);
+        final audio = vcState.getPeerAudioState(p);
+        if (audio.isMuted) mutedSet.add(p);
+        if (audio.isDeafened) deafenedSet.add(p);
       }
     }
 
@@ -200,6 +249,7 @@ class _MobileVoiceChannelRouteState
         participants: participants,
         speakingSet: speakingSet,
         mutedSet: mutedSet,
+        deafenedSet: deafenedSet,
       ),
     );
   }
@@ -216,11 +266,15 @@ class _MobileVoiceChannelRouteState
         return Stack(
           children: [
             Positioned.fill(
-              child: RepaintBoundary(
-                child: RTCVideoView(
-                  renderer,
-                  objectFit:
-                      RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+              // Pinch-zoom + pan for reading a desktop screen on a phone.
+              child: InteractiveViewer(
+                maxScale: 6,
+                child: RepaintBoundary(
+                  child: RTCVideoView(
+                    renderer,
+                    objectFit:
+                        RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                  ),
                 ),
               ),
             ),
@@ -328,9 +382,10 @@ class _MobileVoiceChannelRouteState
       child: GestureDetector(
         onPanUpdate: (details) {
           setState(() {
+            final maxDy = MediaQuery.sizeOf(context).height - 260.0;
             _pipOffset = Offset(
               (_pipOffset.dx - details.delta.dx).clamp(0.0, screenWidth - 110),
-              (_pipOffset.dy - details.delta.dy).clamp(0.0, 400.0),
+              (_pipOffset.dy - details.delta.dy).clamp(0.0, maxDy),
             );
           });
         },
@@ -364,10 +419,14 @@ class _MobileVoiceChannelRouteState
   }
 
   Widget _buildControls(HollowTheme hollow, VoiceChannelState vcState) {
-    const buttonSize = 56.0;
-    const iconSize = 26.0;
     final vcNotifier = ref.read(voiceChannelProvider.notifier);
     final isMobile = Platform.isAndroid || Platform.isIOS;
+    // 6 buttons (speaker + flip camera visible) overflow narrow phones at
+    // 56px — shrink when crowded.
+    final buttonCount =
+        4 + (isMobile ? 1 : 0) + (isMobile && vcState.isCameraOn ? 1 : 0);
+    final buttonSize = buttonCount >= 6 ? 46.0 : 56.0;
+    final iconSize = buttonCount >= 6 ? 21.0 : 26.0;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
@@ -396,6 +455,19 @@ class _MobileVoiceChannelRouteState
                 : hollow.elevated,
             onTap: () => vcNotifier.toggleDeafen(),
           ),
+          // Speakerphone (mobile only)
+          if (isMobile)
+            MobileControlButton(
+              icon: LucideIcons.speaker,
+              iconSize: iconSize,
+              size: buttonSize,
+              color:
+                  vcState.isSpeakerOn ? hollow.accent : hollow.textPrimary,
+              backgroundColor: vcState.isSpeakerOn
+                  ? hollow.accent.withValues(alpha: 0.15)
+                  : hollow.elevated,
+              onTap: () => vcNotifier.toggleSpeaker(),
+            ),
           // Camera
           MobileControlButton(
             icon: vcState.isCameraOn

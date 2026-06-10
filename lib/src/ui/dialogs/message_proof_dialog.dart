@@ -278,6 +278,12 @@ class _MessageProofDialogContentState
     final hasSig = proof.signature != null && proof.publicKey != null;
     final timestamp = DateTime.fromMillisecondsSinceEpoch(proof.timestampMs);
     final fingerprint = proof.publicKeyFingerprint;
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final isCompact = screenWidth < 600;
+    final outerPadding = isCompact ? HollowSpacing.md : HollowSpacing.xl;
+    final minWidth = isCompact
+        ? (screenWidth - outerPadding * 2).clamp(0.0, 520.0)
+        : 300.0;
 
     return PopScope(
       canPop: false,
@@ -286,13 +292,14 @@ class _MessageProofDialogContentState
       },
       child: Center(
       child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
+        padding: EdgeInsets.all(outerPadding),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 520, minWidth: 300),
+          constraints: BoxConstraints(maxWidth: 520, minWidth: minWidth),
           child: Material(
             color: Colors.transparent,
             child: Container(
-              padding: const EdgeInsets.all(HollowSpacing.xl),
+              padding: EdgeInsets.all(
+                  isCompact ? HollowSpacing.lg : HollowSpacing.xl),
               decoration: BoxDecoration(
                 color: hollow.elevated.withValues(alpha: 0.92),
                 borderRadius: BorderRadius.circular(hollow.radiusLg),
@@ -351,90 +358,150 @@ class _MessageProofDialogContentState
                   )),
                   const SizedBox(height: HollowSpacing.lg),
 
-                  // Message preview
-                  _stagger(1, child: _MessagePreview(hollow: hollow, proof: proof)),
-                  const SizedBox(height: HollowSpacing.lg),
+                  // Preview + info rows scroll when the screen is short.
+                  Flexible(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Message preview
+                          _stagger(1,
+                              child: _MessagePreview(
+                                  hollow: hollow, proof: proof)),
+                          const SizedBox(height: HollowSpacing.lg),
 
-                  // Info rows
-                  _stagger(2, child: _InfoRow(
-                    hollow: hollow,
-                    label: 'Sender Peer ID',
-                    value: proof.senderPeerId,
-                    mono: true,
-                    copyable: true,
-                  )),
-                  const SizedBox(height: HollowSpacing.sm),
-                  _stagger(3, child: _InfoRow(
-                    hollow: hollow,
-                    label: 'Timestamp',
-                    value:
-                        '${timestamp.toUtc().toIso8601String()} (${proof.timestampMs})',
-                  )),
-                  if (proof.messageId != null) ...[
-                    const SizedBox(height: HollowSpacing.sm),
-                    _stagger(4, child: _InfoRow(
-                      hollow: hollow,
-                      label: 'Message ID',
-                      value: proof.messageId!,
-                      mono: true,
-                      copyable: true,
-                    )),
-                  ],
-                  if (fingerprint != null) ...[
-                    const SizedBox(height: HollowSpacing.sm),
-                    _stagger(5, child: _InfoRow(
-                      hollow: hollow,
-                      label: 'Public Key Fingerprint',
-                      value: fingerprint,
-                      mono: true,
-                      copyable: true,
-                    )),
-                  ],
-                  if (hasSig) ...[
-                    const SizedBox(height: HollowSpacing.sm),
-                    _stagger(5, child: _InfoRow(
-                      hollow: hollow,
-                      label: 'Ed25519 Signature',
-                      value: proof.signature!,
-                      mono: true,
-                      copyable: true,
-                      truncate: true,
-                    )),
-                  ],
+                          // Info rows
+                          _stagger(2, child: _InfoRow(
+                            hollow: hollow,
+                            label: 'Sender Peer ID',
+                            value: proof.senderPeerId,
+                            mono: true,
+                            copyable: true,
+                          )),
+                          const SizedBox(height: HollowSpacing.sm),
+                          _stagger(3, child: _InfoRow(
+                            hollow: hollow,
+                            label: 'Timestamp',
+                            value:
+                                '${timestamp.toUtc().toIso8601String()} (${proof.timestampMs})',
+                          )),
+                          if (proof.messageId != null) ...[
+                            const SizedBox(height: HollowSpacing.sm),
+                            _stagger(4, child: _InfoRow(
+                              hollow: hollow,
+                              label: 'Message ID',
+                              value: proof.messageId!,
+                              mono: true,
+                              copyable: true,
+                            )),
+                          ],
+                          if (fingerprint != null) ...[
+                            const SizedBox(height: HollowSpacing.sm),
+                            _stagger(5, child: _InfoRow(
+                              hollow: hollow,
+                              label: 'Public Key Fingerprint',
+                              value: fingerprint,
+                              mono: true,
+                              copyable: true,
+                            )),
+                          ],
+                          if (hasSig) ...[
+                            const SizedBox(height: HollowSpacing.sm),
+                            _stagger(5, child: _InfoRow(
+                              hollow: hollow,
+                              label: 'Ed25519 Signature',
+                              value: proof.signature!,
+                              mono: true,
+                              copyable: true,
+                              truncate: true,
+                            )),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
                   const SizedBox(height: HollowSpacing.xl),
 
-                  // Actions
-                  _stagger(6, child: Row(
-                    children: [
-                      if (hasSig)
-                        HollowButton.ghost(
-                          onPressed: () {
-                            Clipboard.setData(
-                                ClipboardData(text: _proofJsonString()));
-                            HollowToast.show(
-                              context,
-                              'Proof copied to clipboard',
-                              type: HollowToastType.success,
-                            );
-                          },
-                          icon: const Icon(LucideIcons.copy, size: 14),
-                          child: const Text('Copy Proof'),
-                        ),
-                      const Spacer(),
-                      if (hasSig) ...[
-                        HollowButton.ghost(
-                          onPressed: () => _exportProofFile(context),
-                          icon: const Icon(LucideIcons.download, size: 14),
-                          child: const Text('Export Proof'),
-                        ),
-                        const SizedBox(width: HollowSpacing.sm),
-                      ],
-                      HollowButton.filled(
-                        onPressed: _closeDialog,
-                        child: const Text('Close'),
-                      ),
-                    ],
-                  )),
+                  // Actions — stacked full-width on phones, row on desktop.
+                  _stagger(6, child: isCompact
+                      ? Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (hasSig) ...[
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: HollowButton.ghost(
+                                      onPressed: () {
+                                        Clipboard.setData(ClipboardData(
+                                            text: _proofJsonString()));
+                                        HollowToast.show(
+                                          context,
+                                          'Proof copied to clipboard',
+                                          type: HollowToastType.success,
+                                        );
+                                      },
+                                      expand: true,
+                                      icon: const Icon(LucideIcons.copy,
+                                          size: 14),
+                                      child: const Text('Copy'),
+                                    ),
+                                  ),
+                                  const SizedBox(width: HollowSpacing.sm),
+                                  Expanded(
+                                    child: HollowButton.ghost(
+                                      onPressed: () =>
+                                          _exportProofFile(context),
+                                      expand: true,
+                                      icon: const Icon(LucideIcons.download,
+                                          size: 14),
+                                      child: const Text('Export'),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: HollowSpacing.sm),
+                            ],
+                            HollowButton.filled(
+                              onPressed: _closeDialog,
+                              expand: true,
+                              child: const Text('Close'),
+                            ),
+                          ],
+                        )
+                      : Row(
+                          children: [
+                            if (hasSig)
+                              HollowButton.ghost(
+                                onPressed: () {
+                                  Clipboard.setData(ClipboardData(
+                                      text: _proofJsonString()));
+                                  HollowToast.show(
+                                    context,
+                                    'Proof copied to clipboard',
+                                    type: HollowToastType.success,
+                                  );
+                                },
+                                icon: const Icon(LucideIcons.copy, size: 14),
+                                child: const Text('Copy Proof'),
+                              ),
+                            const Spacer(),
+                            if (hasSig) ...[
+                              HollowButton.ghost(
+                                onPressed: () => _exportProofFile(context),
+                                icon: const Icon(LucideIcons.download,
+                                    size: 14),
+                                child: const Text('Export Proof'),
+                              ),
+                              const SizedBox(width: HollowSpacing.sm),
+                            ],
+                            HollowButton.filled(
+                              onPressed: _closeDialog,
+                              child: const Text('Close'),
+                            ),
+                          ],
+                        )),
                 ],
               ),
             ),

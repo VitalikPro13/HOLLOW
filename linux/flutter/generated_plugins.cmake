@@ -5,6 +5,7 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_linux
   desktop_drop
+  flutter_secure_storage_linux
   flutter_webrtc
   fvp
   irondash_engine_context

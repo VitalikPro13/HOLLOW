@@ -1,4 +1,9 @@
+import 'dart:convert';
+import 'dart:io' show Platform;
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// Notification level for a server or channel.
@@ -73,6 +78,40 @@ class NotificationSettingsNotifier
       channelOverrides: channelLevels,
       dmEnabled: dmEnabled,
     );
+    _syncPushPrefsToRelay();
+  }
+
+  /// Register the current server/channel levels with the relay as channel-push
+  /// filters. The relay checks these BEFORE firing a channel push — required on
+  /// iOS, where an alert push can't be suppressed after delivery. Mobile only:
+  /// pushes go to the device that registered an FCM/APNs token, and a desktop
+  /// sync would overwrite the phone's filters with desktop-local settings.
+  /// Fire-and-forget: the node caches the prefs and re-sends on every
+  /// reconnect; if the node isn't running yet, the next loadAll() retries.
+  void _syncPushPrefsToRelay() {
+    if (kIsWeb || (!Platform.isAndroid && !Platform.isIOS)) return;
+    final prefs = <String, Map<String, dynamic>>{};
+    for (final entry in state.serverLevels.entries) {
+      prefs[entry.key] = {
+        'level': entry.value.name,
+        'channels': <String, String>{},
+      };
+    }
+    for (final entry in state.channelOverrides.entries) {
+      if (entry.value == ChannelNotificationLevel.inherit) continue;
+      final sep = entry.key.indexOf(':');
+      if (sep <= 0) continue;
+      final sid = entry.key.substring(0, sep);
+      final cid = entry.key.substring(sep + 1);
+      final server = prefs.putIfAbsent(
+          sid, () => {'level': 'all', 'channels': <String, String>{}});
+      (server['channels'] as Map<String, String>)[cid] = entry.value.name;
+    }
+    try {
+      network_api.setPushPrefs(prefsJson: jsonEncode(prefs));
+    } catch (_) {
+      // Node not running yet — prefs re-sync on the next loadAll/change.
+    }
   }
 
   /// Get the effective notification level for a server.
@@ -90,6 +129,7 @@ class NotificationSettingsNotifier
     final updated = Map<String, NotificationLevel>.from(state.serverLevels);
     updated[serverId] = level;
     state = state.copyWith(serverLevels: updated);
+    _syncPushPrefsToRelay();
   }
 
   /// Get the effective notification level for a channel.
@@ -129,6 +169,7 @@ class NotificationSettingsNotifier
       updated['$serverId:$channelId'] = level;
     }
     state = state.copyWith(channelOverrides: updated);
+    _syncPushPrefsToRelay();
   }
 
   /// Whether DM notifications are enabled for a peer.

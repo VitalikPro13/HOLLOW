@@ -106,6 +106,15 @@ final channelListProvider =
     NotifierProvider<ChannelListNotifier, Map<String, ChannelInfo>>(
         ChannelListNotifier.new);
 
+/// Channels for a specific server, read straight from the local DB.
+/// Unlike [channelListProvider] (which tracks the *selected* server), this
+/// works for any server — e.g. server settings opened from the chats-tab
+/// long-press sheet where no server is selected.
+final serverChannelsProvider = FutureProvider.autoDispose
+    .family<Map<String, ChannelInfo>, String>((ref, serverId) {
+  return ChannelListNotifier.fetchChannels(serverId);
+});
+
 /// Channels filtered by the user's visibility permissions.
 /// Hides channels the user's role can't see based on the channel's visibility mode.
 final visibleChannelsProvider = Provider<Map<String, ChannelInfo>>((ref) {
