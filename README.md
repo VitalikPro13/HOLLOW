@@ -166,7 +166,7 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup inst
 
 ## License
 
-Copyright (C) 2025-2026 Vitalii Rovinskyi (AnonListen)
+Copyright (C) 2025-2026 Vitalii Rovinskyi <vitaliy2007rova@gmail.com>
 
 The Hollow client and core library are licensed under the [GNU Affero General Public License v3.0](LICENSE). The relay server ([relay-uws/](relay-uws/)) is licensed under the [MIT License](relay-uws/LICENSE).
 
