@@ -2106,9 +2106,12 @@ pub(crate) async fn handle_envelope_crdt_op(
                 sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
             }
             CrdtPayload::MemberRemoved { peer_id } => {
+                // Self-removal (voluntary leave) is always allowed; kicking
+                // someone ELSE needs moderator+ and outranking.
                 let target_role = state.get_role(peer_id);
-                (sender_perms & Permission::KICK_MEMBERS) != 0
-                    && sender_role.outranks(&target_role)
+                peer_id == &op.author
+                    || ((sender_perms & Permission::KICK_MEMBERS) != 0
+                        && sender_role.outranks(&target_role))
             }
             CrdtPayload::MemberAdded { .. } => {
                 state.members.contains_key(&op.author)
@@ -2360,7 +2363,15 @@ pub(crate) async fn handle_envelope_sync_resp(
 ) {
     if let Some(state) = server_states.get_mut(&sid) {
         if let Ok(incoming_ops) = serde_json::from_str::<Vec<crate::crdt::operations::CrdtOp>>(&ops_json) {
-            if let Ok(applied) = crate::crdt::sync::merge_ops(state, incoming_ops) {
+            // Persist synced ops — op_log is not serialized in the state
+            // JSON, so ops merged in RAM are lost on restart without this
+            // (a member then serves a near-empty op log to future joiners).
+            for op in &incoming_ops {
+                if op.server_id == sid {
+                    crdt_store.insert_op(op.clone());
+                }
+            }
+            if let Ok(applied) = crate::crdt::sync::merge_ops(state, &incoming_ops) {
                 if applied > 0 {
                     if let Ok(json) = serialize_state_lean(state) {
                         crdt_store.save_state(sid.clone(), json);

@@ -240,9 +240,13 @@ Audio quality: `opusBitrate` (default 32000), `opusStereo` (default false). Set 
 
 ### Renegotiation (Mid-Call Media Changes)
 
-`VoiceService.createRenegotiationOffer()`: Creates offer on existing PC, returns SDP. Used when toggling video mid-call.
+`VoiceService.createRenegotiationOffer()`: Creates offer on existing PC, returns SDP. Used when toggling video mid-call. Self-heals first: if `signalingState` is have-remote-offer/have-remote-pranswer (a previously failed inbound renegotiation), rolls the stale remote offer back to stable before `createOffer` (otherwise createOffer errors with "Error (null)" forever).
 
-`VoiceService.handleRenegotiationOffer(sdp)`: Sets remote description, creates answer. Schedules `_checkRemoteVideoTrack()` after 150ms delay.
+`VoiceService.handleRenegotiationOffer(sdp)`: Sets remote description, creates answer. Schedules `_checkRemoteVideoTrack()` after 150ms delay. **On ANY failure, rolls the PC back to stable** (setLocalDescription/setRemoteDescription with type `'rollback'`, best-effort both) then rethrows — a poisoned offer must never wedge the call in have-remote-offer (which kills video in BOTH directions for the rest of the call).
+
+**Camera codec constraint — `_constrainCameraCodecs(trackId)` (CRITICAL, all platforms):** `setCodecPreferences` on the camera sender's transceiver keeping ONLY VP8 + rtx/red/ulpfec. H.265/AV1 payload types kill the iOS answerer outright; even H264/VP9 entries make iOS's FIRST call of a session fail applying its own answer while VideoToolbox is cold ("Failed to set local video description recv parameters" → first call black, later calls fine). VP8/libvpx is software everywhere and is what negotiation picked in every working session. Applied in `toggleVideo` enable, `_addLocalVideoTracks` (initial video call, awaited before createOffer), and `voice_channel_service._preferVp8ForVideoTrackOnPc` (same constraint for VC cameras). Screen share (separate PC) deliberately NOT constrained.
+
+**Diagnostics:** `_probeVideoStats(label)` / `_scheduleVideoStatsProbes(label)` — `[HOLLOW-VIDEO-STATS]` inbound/outbound video RTP stats (frames encoded/sent/received/decoded, codec, size) probed at 2/6/12s after video enable (`'send'`) and after a remote video track binds (`'recv'`). `_handleRemoteVideoTrack` also re-asserts `renderer.srcObject = stream` at +400ms/+1200ms (guarded by renderer/stream still current) and logs `renderer.value` (width/height) — distinguishes "no frames arriving" (value stays 0x0) from binding/UI failures.
 
 `_checkRemoteVideoTrack()`: Safety net for when `onTrack` does not fire after renegotiation. Walks PC receivers looking for a video track. If `_remoteRenderer` is already non-null, returns immediately (trusts that onTrack built it correctly -- running safety net here would pick up stale inactive transceivers from previous toggles). Creates synthetic stream, builds renderer, commits new state BEFORE disposing old state (so dispose failure doesn't trash working renderer). Notifies UI via `onRemoteVideoTrack` callback.
 

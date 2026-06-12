@@ -57,11 +57,16 @@ pub fn compute_delta<'a>(our_ops: &'a [CrdtOp], their_vector: &StateVector) -> V
 
 /// Apply incoming ops to a server state. Skips duplicates (idempotent).
 /// Returns the number of new ops actually applied.
-pub fn merge_ops(state: &mut ServerState, incoming_ops: Vec<CrdtOp>) -> Result<usize, String> {
+///
+/// An op that fails to apply (e.g. wrong server_id) is skipped rather than
+/// aborting the merge — one foreign op must not block the rest of a sync.
+pub fn merge_ops(state: &mut ServerState, incoming_ops: &[CrdtOp]) -> Result<usize, String> {
     let mut applied = 0;
-    for op in &incoming_ops {
+    for op in incoming_ops {
         let was_len = state.op_log.len();
-        state.apply_op(op)?;
+        if state.apply_op(op).is_err() {
+            continue;
+        }
         if state.op_log.len() > was_len {
             applied += 1;
         }
@@ -162,13 +167,13 @@ mod tests {
         // Sync: A → B
         let sv_b = StateVector::from_server_state(&state_b);
         let delta_a_to_b = compute_delta(&state_a.op_log, &sv_b);
-        let applied_b = merge_ops(&mut state_b, delta_a_to_b.into_iter().cloned().collect()).unwrap();
+        let applied_b = merge_ops(&mut state_b, &delta_a_to_b.into_iter().cloned().collect::<Vec<_>>()).unwrap();
         assert_eq!(applied_b, 1);
 
         // Sync: B → A
         let sv_a = StateVector::from_server_state(&state_a);
         let delta_b_to_a = compute_delta(&state_b.op_log, &sv_a);
-        let applied_a = merge_ops(&mut state_a, delta_b_to_a.into_iter().cloned().collect()).unwrap();
+        let applied_a = merge_ops(&mut state_a, &delta_b_to_a.into_iter().cloned().collect::<Vec<_>>()).unwrap();
         assert_eq!(applied_a, 1);
 
         // Both have the same state
@@ -192,7 +197,7 @@ mod tests {
         state.apply_op(&op).unwrap();
 
         // Try to merge the same op again
-        let applied = merge_ops(&mut state, vec![op]).unwrap();
+        let applied = merge_ops(&mut state, &[op]).unwrap();
         assert_eq!(applied, 0);
     }
 }

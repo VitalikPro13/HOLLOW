@@ -479,7 +479,7 @@ Flow:
 | `ChannelAdded`, `ChannelRemoved`, `ChannelRenamed`, `ChannelLayoutUpdated` | `MANAGE_CHANNELS` |
 | `RoleChanged { peer_id, role }` | `state.can_change_role(&op.author, peer_id, role)` |
 | `ServerRenamed`, `ServerSettingChanged` | Owner or Admin |
-| `MemberRemoved { peer_id }` | `KICK_MEMBERS` + must outrank target |
+| `MemberRemoved { peer_id }` | Self-removal (`peer_id == op.author`, voluntary leave) always allowed; otherwise `KICK_MEMBERS` + must outrank target |
 | `MemberAdded` | Must be a current member |
 | `NicknameChanged { peer_id }` | Self or Owner/Admin |
 | `TwitchUsernameChanged { peer_id }` | Self or Owner/Admin |
@@ -564,9 +564,10 @@ Flow:
 
 Flow:
 1. Deserialize `Vec<CrdtOp>` from `ops_json`
-2. Merge via `crate::crdt::sync::merge_ops(state, incoming_ops)` — returns count of newly applied ops
-3. If any applied: persist state to SQLCipher
-4. Emit `NetworkEvent::SyncCompleted { server_id, ops_applied }`
+2. **Persist every incoming op with matching `server_id` via `crdt_store.insert_op()`** (INSERT OR IGNORE, idempotent). CRITICAL: `op_log` is `#[serde(skip_serializing)]` — the state JSON alone loses history on restart; without per-op persistence a member serves near-empty op logs to future joiners. ALL THREE sync-merge sites do this (this MLS path, plus the plaintext `SyncResponse` and Olm `SyncResp` handlers in swarm.rs).
+3. Merge via `crate::crdt::sync::merge_ops(state, &incoming_ops)` — takes a slice; SKIPS ops that fail `apply_op` (one foreign op must not abort the merge); returns count of newly applied ops
+4. If any applied: persist state to SQLCipher
+5. Emit `NetworkEvent::SyncCompleted { server_id, ops_applied }`
 
 ## handle_envelope_channel_sync_req()
 

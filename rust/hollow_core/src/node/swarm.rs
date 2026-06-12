@@ -1826,12 +1826,29 @@ async fn run_event_loop(
                         });
 
                         // Only emit disconnect if peer is no longer reachable via any WS room.
-                        let still_ws = ws_room_peers.values().any(|ps| ps.contains(&peer_id));
-                        if !still_ws {
+                        let still_rooms: Vec<String> = ws_room_peers.iter()
+                            .filter(|(_, ps)| ps.contains(&peer_id))
+                            .map(|(r, _)| r.clone())
+                            .collect();
+                        if still_rooms.is_empty() {
                             synced_peers.remove(&peer_id);
                             let _ = event_tx.send(NetworkEvent::PeerDisconnected {
                                 peer_id: peer_id.clone(),
                             }).await;
+                        } else {
+                            // The peer may be genuinely in those rooms — or they
+                            // may be STALE entries from a previous connection of
+                            // theirs (the relay never sends PeerLeft for rooms a
+                            // dead connection abandoned earlier). Re-join those
+                            // rooms: the relay answers with a fresh RoomMembers
+                            // snapshot, and the RoomMembers handler purges the
+                            // peer + emits the disconnect if they're truly gone.
+                            hollow_log!("[HOLLOW-WS] Peer {peer_id} still listed in {} room(s) {:?} — refreshing membership", still_rooms.len(), still_rooms);
+                            for r in still_rooms {
+                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                                    room_code: r,
+                                });
+                            }
                         }
                     }
                     WsEvent::RoomMembers { room, peers } => {
@@ -1841,7 +1858,26 @@ async fn run_event_loop(
                             .filter(|p| *p != &local_peer)
                             .cloned()
                             .collect();
+                        // RoomMembers is the relay's AUTHORITATIVE snapshot for
+                        // this room — peers in our old set but missing from it
+                        // are stale entries from a previous connection of
+                        // theirs (the relay only broadcasts PeerLeft for rooms
+                        // a connection is CURRENTLY in, so entries survive a
+                        // peer's reconnect cycle and pin them "online" forever).
+                        let vanished: Vec<String> = ws_room_peers.get(&room)
+                            .map(|old| old.difference(&room_set).cloned().collect())
+                            .unwrap_or_default();
                         ws_room_peers.insert(room.clone(), room_set);
+                        for gone in vanished {
+                            let still_ws = ws_room_peers.values().any(|ps| ps.contains(&gone));
+                            if !still_ws {
+                                hollow_log!("[HOLLOW-WS] Stale peer {gone} purged via RoomMembers refresh of {room} — emitting disconnect");
+                                synced_peers.remove(&gone);
+                                let _ = event_tx.send(NetworkEvent::PeerDisconnected {
+                                    peer_id: gone,
+                                }).await;
+                            }
+                        }
 
                         // -- Gossip overlay: initialize or update for this server room --
                         // Check if this room corresponds to a server with 6+ members.
@@ -4911,7 +4947,16 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::SyncResp { sid, ops_json, .. }) => {
                     if let Some(state) = server_states.get_mut(&sid) {
                         if let Ok(incoming_ops) = serde_json::from_str::<Vec<crate::crdt::operations::CrdtOp>>(&ops_json) {
-                            if let Ok(applied) = crate::crdt::sync::merge_ops(state, incoming_ops) {
+                            // Persist synced ops (op_log is RAM-only — see the
+                            // plaintext SyncResponse handler for rationale).
+                            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                                for op in &incoming_ops {
+                                    if op.server_id == sid {
+                                        let _ = store.insert_crdt_op(op);
+                                    }
+                                }
+                            }
+                            if let Ok(applied) = crate::crdt::sync::merge_ops(state, &incoming_ops) {
                                 if applied > 0 {
                                     if let Ok(json) = serde_json::to_string(&*state) {
                                         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -5155,6 +5200,39 @@ async fn handle_incoming_request(
             }
         }
 
+        HavenMessage::ServerStateSnapshot { server_id, state_json } => {
+            // SECURITY: only honored while a join WE initiated is pending —
+            // an established member must never let another peer overwrite
+            // its server state wholesale.
+            if !pending_server_joins.contains_key(&server_id) {
+                hollow_log!("[HOLLOW-CRDT] Ignoring ServerStateSnapshot for {server_id} (no pending join)");
+                return;
+            }
+            match serde_json::from_str::<ServerState>(&state_json) {
+                Ok(mut snap) => {
+                    if snap.server_id != server_id {
+                        hollow_log!("[HOLLOW-SECURITY] REJECTED ServerStateSnapshot from {peer_str} — server_id mismatch");
+                        return;
+                    }
+                    snap.set_hlc(Hlc::new(local_peer_str.to_string()));
+                    hollow_log!("[HOLLOW-CRDT] Adopted state snapshot for {server_id} from {peer_str} ({} channels, {} members, {} layout items)",
+                        snap.channels.len(), snap.members.len(), snap.channel_layout.len());
+                    // Persist now — the SyncResponse that follows re-persists
+                    // after merging ops, but a crash between the two must not
+                    // strand a half-joined server.
+                    if let Ok(json) = serde_json::to_string(&snap) {
+                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                            let _ = store.save_server_state(&server_id, &json);
+                        }
+                    }
+                    server_states.insert(server_id, snap);
+                }
+                Err(e) => {
+                    hollow_log!("[HOLLOW-CRDT] Invalid ServerStateSnapshot for {server_id}: {e}");
+                }
+            }
+        }
+
         HavenMessage::SyncResponse { server_id, ops_json } => {
             hollow_log!("[HOLLOW-CRDT] SyncResponse from {peer_str} for server {server_id}");
             
@@ -5170,13 +5248,44 @@ async fn handle_incoming_request(
 
             if let Ok(incoming_ops) = serde_json::from_str::<Vec<crate::crdt::operations::CrdtOp>>(&ops_json) {
                 let state = server_states.entry(server_id.clone()).or_insert_with(|| {
+                    // Skeleton for a pending join. The responder (peer_str) is
+                    // just our sync source — when the owner is offline this is
+                    // the MLS coordinator, a plain Member. Strip the creator
+                    // seeding (member entry + Owner role) and zero the name
+                    // register's HLC so the real name/owner always win the
+                    // merge via the ServerCreated/ServerRenamed ops.
                     let mut s = ServerState::new(server_id.clone(), "".into(), peer_str.to_string());
+                    s.members.remove(peer_str);
+                    s.roles.remove(peer_str);
+                    s.name = crate::crdt::admin_lww::AdminLwwReg::new(
+                        String::new(),
+                        crate::crdt::hlc::HlcTimestamp::zero(peer_str),
+                        0,
+                    );
                     s.set_hlc(Hlc::new(local_peer_str.to_string()));
                     s
                 });
 
-                match crdt_sync::merge_ops(state, incoming_ops) {
-                    Ok(applied) if applied > 0 => {
+                // Persist every synced op into the crdt_ops table (INSERT OR
+                // IGNORE — idempotent). op_log is NOT serialized in the state
+                // JSON, so without this a member that joined via sync holds
+                // the server's history in RAM only and serves near-empty op
+                // logs to future joiners after a restart (missing server
+                // name/avatar/nicknames when the owner is offline).
+                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    for op in &incoming_ops {
+                        if op.server_id == server_id {
+                            let _ = store.insert_crdt_op(op);
+                        }
+                    }
+                }
+
+                match crdt_sync::merge_ops(state, &incoming_ops) {
+                    // Run even when 0 ops applied if a join is pending — the
+                    // joiner may have adopted a ServerStateSnapshot already
+                    // (responder's op log can be empty/compacted), and the
+                    // join must still complete.
+                    Ok(applied) if applied > 0 || pending_server_joins.contains_key(&server_id) => {
                         hollow_log!("[HOLLOW-CRDT] Applied {applied} ops for server {server_id}");
 
                         // Persist
@@ -5211,6 +5320,35 @@ async fn handle_incoming_request(
                                 server_id: server_id.clone(),
                                 name: server_name,
                             }).await;
+
+                            // Backfill profiles of OFFLINE members from the
+                            // responder's cache (display name + avatar for
+                            // chat rendering). Online members are covered by
+                            // the normal per-peer ProfileRequest on sync, but
+                            // during a pending join this server wasn't in
+                            // server_states yet, so the proxy-profile pass in
+                            // the RoomMembers handler skipped it entirely.
+                            {
+                                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                                    let mut proxy_count = 0u32;
+                                    for member_id in state.members.keys() {
+                                        if proxy_count >= 10 { break; }
+                                        if member_id == local_peer_str || member_id == peer_str { continue; }
+                                        let is_online = ws_room_peers.values()
+                                            .any(|peers| peers.contains(member_id.as_str()));
+                                        if is_online { continue; }
+                                        if let Ok(Some(_)) = store.load_profile_light(member_id) { continue; }
+                                        hollow_log!("[HOLLOW-PROFILE] Post-join proxy profile request for {member_id} via {peer_str}");
+                                        send_message_to_peer(
+                                            ws_cmd_tx, ws_room_peers,
+                                            peer_str, HavenMessage::ProfileRequestFor {
+                                                target_peer_id: member_id.clone(),
+                                            },
+                                        );
+                                        proxy_count += 1;
+                                    }
+                                }
+                            }
 
                             // Auto-pledge min_pledge_mb for the newly joined server
                             {
@@ -5369,27 +5507,29 @@ async fn handle_incoming_request(
                         }
                         // Only admins+ can change roles
                         CrdtPayload::RoleChanged { peer_id, role, .. } => {
-                            state.can_change_role(&peer_str, peer_id, role)
+                            state.can_change_role(&op.author, peer_id, role)
                         }
                         // Only admins+ can change server settings/rename
                         CrdtPayload::ServerRenamed { .. }
                         | CrdtPayload::ServerSettingChanged { .. } => {
                             sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
                         }
-                        // Only moderators+ can kick members
+                        // Self-removal (voluntary leave) is always allowed;
+                        // kicking someone ELSE needs moderator+ and outranking.
                         CrdtPayload::MemberRemoved { peer_id } => {
                             let target_role = state.get_role(peer_id);
-                            (sender_perms & Permission::KICK_MEMBERS) != 0
-                                && sender_role.outranks(&target_role)
+                            peer_id == &op.author
+                                || ((sender_perms & Permission::KICK_MEMBERS) != 0
+                                    && sender_role.outranks(&target_role))
                         }
                         // Members can add other members (via invite), change own nickname,
                         // pin/unpin messages (if they have MANAGE_CHANNELS), create servers
                         CrdtPayload::MemberAdded { .. } => {
-                            state.members.contains_key(peer_str)
+                            state.members.contains_key(&op.author)
                         }
                         CrdtPayload::NicknameChanged { peer_id, .. } => {
                             // Members can only change their own nickname
-                            peer_id == &peer_str || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
+                            peer_id == &op.author || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
                         }
                         CrdtPayload::MessagePinned { .. }
                         | CrdtPayload::MessageUnpinned { .. } => {
@@ -5397,10 +5537,10 @@ async fn handle_incoming_request(
                         }
                         CrdtPayload::StoragePledgeChanged { peer_id, .. } => {
                             // Members can change own pledge, admins can change anyone's
-                            peer_id == &peer_str || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
+                            peer_id == &op.author || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
                         }
                         CrdtPayload::TwitchUsernameChanged { peer_id, .. } => {
-                            peer_id == &peer_str || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
+                            peer_id == &op.author || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
                         }
                         CrdtPayload::RolePermissionsChanged { role, .. } => {
                             let target = MemberRole::from_str(role);
@@ -5427,7 +5567,7 @@ async fn handle_incoming_request(
                         }
                         CrdtPayload::LabelAssigned { peer_id, .. }
                         | CrdtPayload::LabelUnassigned { peer_id, .. } => {
-                            peer_id == &peer_str || (sender_perms & Permission::MANAGE_ROLES) != 0
+                            peer_id == &op.author || (sender_perms & Permission::MANAGE_ROLES) != 0
                         }
                         CrdtPayload::ServerCreated { .. } => true,
                     };
@@ -5758,10 +5898,25 @@ async fn handle_incoming_request(
                     }
                 }
 
+                // Send a full STATE snapshot first — op logs can be incomplete
+                // (pre-persistence history loss, 1000-op compaction), so the
+                // joiner must not depend on op replay alone to reconstruct
+                // channels/layout/name. WS delivery is FIFO, so the snapshot
+                // lands before the SyncResponse that completes the join.
+                if let Ok(state_json) = serde_json::to_string(&state) {
+                    send_message_to_peer(
+                        ws_cmd_tx, ws_room_peers,
+                        peer_str, HavenMessage::ServerStateSnapshot {
+                            server_id: server_id.clone(),
+                            state_json,
+                        },
+                    );
+                }
+
                 // Send full server state to the joiner (all ops so they can reconstruct)
                 let all_ops: Vec<&crate::crdt::operations::CrdtOp> = state.op_log.iter().collect();
                 if let Ok(ops_json) = serde_json::to_string(&all_ops) {
-                    hollow_log!("[HOLLOW-CRDT] Sending {} ops to joiner {peer_str}", all_ops.len());
+                    hollow_log!("[HOLLOW-CRDT] Sending snapshot + {} ops to joiner {peer_str}", all_ops.len());
                     send_message_to_peer(
                         ws_cmd_tx, ws_room_peers,
                         peer_str, HavenMessage::SyncResponse {

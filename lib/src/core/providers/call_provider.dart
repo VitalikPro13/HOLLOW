@@ -64,6 +64,12 @@ class CallState {
   /// Quality label for the remote peer's screen share. Null when they're not sharing.
   final String? remoteScreenShareLabel;
 
+  /// Bumped whenever a remote video renderer becomes ready. The renderer
+  /// itself lives outside this state (on VoiceService), so without this the
+  /// UI never rebuilds when the track arrives AFTER the video_state signal —
+  /// the remote camera stays invisible until some unrelated state change.
+  final int remoteVideoTrackSeq;
+
   const CallState({
     this.status = CallStatus.idle,
     this.peerId,
@@ -85,6 +91,7 @@ class CallState {
     this.remoteDeafened = false,
     this.screenShareLabel,
     this.remoteScreenShareLabel,
+    this.remoteVideoTrackSeq = 0,
   });
 
   CallState copyWith({
@@ -110,6 +117,7 @@ class CallState {
     bool clearScreenShareLabel = false,
     String? remoteScreenShareLabel,
     bool clearRemoteScreenShareLabel = false,
+    int? remoteVideoTrackSeq,
   }) =>
       CallState(
         status: status ?? this.status,
@@ -136,6 +144,7 @@ class CallState {
         remoteScreenShareLabel: clearRemoteScreenShareLabel
             ? null
             : (remoteScreenShareLabel ?? this.remoteScreenShareLabel),
+        remoteVideoTrackSeq: remoteVideoTrackSeq ?? this.remoteVideoTrackSeq,
       );
 
   static const idle = CallState();
@@ -289,7 +298,8 @@ class CallNotifier extends Notifier<CallState> {
     };
 
     _voiceService!.onRemoteVideoTrack = (peerId) {
-      debugPrint('[HOLLOW-CALL] Remote video track/renderer ready for $peerId');
+      _callLog('[HOLLOW-CALL] Remote video track/renderer ready for $peerId '
+          '(status=${state.status}, remoteVideoEnabled=${state.remoteVideoEnabled})');
       // Renderer is now available for when the remote peer explicitly
       // enables their camera via the video_state signal. Don't set
       // remoteVideoEnabled here — on mobile, SDP negotiation can create
@@ -297,6 +307,16 @@ class CallNotifier extends Notifier<CallState> {
       // for audio-only calls (stale transceiver from safety net). The
       // explicit video_state signal in _handleVideoState is the only
       // source of truth for remote camera state.
+      //
+      // DO bump the seq so the UI rebuilds: when video_state lands BEFORE
+      // the track (common — the plaintext signal beats the SDP handshake),
+      // the screen has already rebuilt with a null renderer and nothing
+      // else re-triggers it; the remote camera stays invisible until the
+      // peer toggles again.
+      if (state.status != CallStatus.idle) {
+        state = state.copyWith(
+            remoteVideoTrackSeq: state.remoteVideoTrackSeq + 1);
+      }
     };
 
     // Update mic gain mid-call when user adjusts the slider.
@@ -915,7 +935,15 @@ class CallNotifier extends Notifier<CallState> {
 
     if (state.callId != callId) return;
 
-    if (state.status == CallStatus.active && _service.hasActiveCall) {
+    // Route by call identity, NOT by status: `active` is only set in
+    // onConnected (ICE/DTLS complete), which lags seconds behind the SDP
+    // answer. A renegotiation offer arriving in that window (the staggered
+    // camera auto-enable lands right in it) used to fall into the
+    // initial-setup branch below and was silently consumed — never answered,
+    // never retried → the first camera enable showed nothing until the
+    // peer toggled again. If we already have a PC for this call, ANY
+    // further offer is a renegotiation.
+    if (_service.hasActiveCall) {
       // SECURITY (Phase 6.25): Prevent concurrent renegotiations — but queue
       // the offer instead of dropping it (a dropped offer is never retried by
       // the sender → its new track is never announced → one-way video).
@@ -950,7 +978,9 @@ class CallNotifier extends Notifier<CallState> {
         _callLog('[HOLLOW-CALL] Scheduling renegotiation offer retry '
             '(attempt $_renegOfferAttempts)');
         Future.delayed(const Duration(milliseconds: 1200), () {
-          if (state.status == CallStatus.active && state.peerId == peerId) {
+          // hasActiveCall, not status==active — the call may still be in
+          // the connecting window (same reason as the routing gate above).
+          if (_service.hasActiveCall && state.peerId == peerId) {
             _handleSdpOffer(peerId, payload);
           }
         });
@@ -1010,7 +1040,7 @@ class CallNotifier extends Notifier<CallState> {
     if (_renegotiationInProgress) return; // drained at next settle point
     _queuedRenegOfferPeer = null;
     _queuedRenegOfferPayload = null;
-    if (state.status == CallStatus.active && state.peerId == peer) {
+    if (_service.hasActiveCall && state.peerId == peer) {
       _callLog('[HOLLOW-CALL] Processing queued renegotiation offer');
       unawaited(_handleSdpOffer(peer, payload));
     }
@@ -1034,11 +1064,35 @@ class CallNotifier extends Notifier<CallState> {
     final callId = json['call_id'] as String;
     final enabled = json['enabled'] as bool;
 
-    if (state.callId != callId) return;
+    if (state.callId != callId) {
+      _callLog('[HOLLOW-CALL] video_state DROPPED: callId mismatch '
+          '(ours=${state.callId} theirs=$callId)');
+      return;
+    }
 
-    debugPrint(
-        '[HOLLOW-CALL] Remote video state: enabled=$enabled from $peerId');
+    _callLog('[HOLLOW-CALL] Remote video state applied: enabled=$enabled '
+        '(status=${state.status})');
     state = state.copyWith(remoteVideoEnabled: enabled);
+
+    if (enabled) {
+      // Re-poke the UI after the SDP round-trip typically lands. The remote
+      // renderer lives OUTSIDE provider state, so if its ready-callback ever
+      // fails to produce a rebuild (one missed frame of state change), the
+      // camera stays invisible until the peer re-toggles. Three cheap
+      // scheduled bumps make the first enable deterministic.
+      for (final d in const [
+        Duration(milliseconds: 400),
+        Duration(milliseconds: 1200),
+        Duration(milliseconds: 2500),
+      ]) {
+        Future.delayed(d, () {
+          if (state.remoteVideoEnabled && state.status != CallStatus.idle) {
+            state = state.copyWith(
+                remoteVideoTrackSeq: state.remoteVideoTrackSeq + 1);
+          }
+        });
+      }
+    }
   }
 
   void _handleAudioState(String peerId, String payload) {

@@ -251,6 +251,7 @@ Manages 1:1 DM calls (audio and video) with a single remote peer. Uses `VoiceSer
 | `startedAt` | `DateTime?` | `null` | When call became active (for duration display). |
 | `isVideoEnabled` | `bool` | `false` | Local camera on. |
 | `remoteVideoEnabled` | `bool` | `false` | Remote peer's camera on. Set ONLY by `_handleVideoState`, never by `onRemoteVideoTrack`. |
+| `remoteVideoTrackSeq` | `int` | `0` | Bumped when a remote video renderer becomes ready (and by `_handleVideoState`'s timed re-pokes). The renderer lives OUTSIDE this state on VoiceService — without the bump the UI never rebuilds when the track arrives after the `video_state` signal and the remote camera stays invisible. |
 | `isVideoCall` | `bool` | `false` | Whether this was initiated as a video call. |
 | `isLocalSpeaking` | `bool` | `false` | Local mic VAD — updated every 200ms from `VoiceService`. |
 | `isRemoteSpeaking` | `bool` | `false` | Remote peer VAD — updated every 200ms from `VoiceService`. |
@@ -376,15 +377,15 @@ Master dispatcher `handleCallSignal(peerId, signalType, payload)` routes by `sig
 - Sends `sdp_offer`.
 
 **`_handleSdpOffer(peerId, payload)`**
-Two paths:
-1. **Active call renegotiation:** Guarded by `_renegotiationInProgress`. Calls `_service.handleRenegotiationOffer(sdp)`, sends `sdp_answer`.
+Two paths, routed by **call identity, NOT status**: `if (_service.hasActiveCall)` (a PC exists for this call) → renegotiation; only otherwise → initial setup. CRITICAL: `status == active` lags ICE/DTLS by seconds; an offer arriving in that connecting window (the staggered camera auto-enable lands right in it) used to fall into the initial-setup branch and was silently consumed — never answered, never retried (the "first camera enable invisible" bug). The 1200ms glare retry and `_drainQueuedRenegOffer` also gate on `hasActiveCall`, not status.
+1. **Renegotiation:** Guarded by `_renegotiationInProgress` (queue while busy). Calls `_service.handleRenegotiationOffer(sdp)`, sends `sdp_answer`.
 2. **Initial setup:** Awaits device preferences, calls `_service.handleOffer()` (audio-only), enables SFrame E2EE, sends `sdp_answer`.
 
 **`_handleSdpAnswer(peerId, payload)`** -- forwards to `_service.handleAnswer(sdp)`.
 
 **`_handleIce(peerId, payload)`** -- forwards to `_service.handleIceCandidate()`.
 
-**`_handleVideoState(peerId, payload)`** -- updates `remoteVideoEnabled`.
+**`_handleVideoState(peerId, payload)`** -- updates `remoteVideoEnabled` (logs via `_callLog`, including dropped callId mismatches). On enable, schedules seq re-pokes at +400ms/+1.2s/+2.5s (bumps `remoteVideoTrackSeq`) so the UI re-evaluates after the SDP round-trip even if no other state change fires.
 
 **`_handleScreenState(peerId, payload)`** -- updates `remoteScreenSharing` and `remoteScreenShareLabel`. On disable, closes incoming screen share service.
 

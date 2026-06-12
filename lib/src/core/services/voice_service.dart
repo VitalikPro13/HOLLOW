@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -124,7 +123,7 @@ class VoiceService {
     _addLocalAudioTracks();
 
     if (withVideo && _localVideoStream != null) {
-      _addLocalVideoTracks();
+      await _addLocalVideoTracks();
       _isVideoEnabled = true;
       await _initLocalRenderer();
     }
@@ -169,7 +168,7 @@ class VoiceService {
     _addLocalAudioTracks();
 
     if (withVideo && _localVideoStream != null) {
-      _addLocalVideoTracks();
+      await _addLocalVideoTracks();
       _isVideoEnabled = true;
       await _initLocalRenderer();
     }
@@ -196,6 +195,25 @@ class VoiceService {
       return null;
     }
 
+    // Defensive: a previously failed inbound renegotiation can leave the PC
+    // in have-remote-offer, where createOffer errors out ("Error (null)")
+    // forever. Roll the stale remote offer back to stable first.
+    final ss = _pc!.signalingState;
+    if (ss == RTCSignalingState.RTCSignalingStateHaveRemoteOffer ||
+        ss == RTCSignalingState.RTCSignalingStateHaveRemotePrAnswer) {
+      _log('[HOLLOW-VOICE] createRenegotiationOffer: signaling state $ss — '
+          'rolling back stale remote offer');
+      try {
+        await _pc!.setRemoteDescription(RTCSessionDescription('', 'rollback'));
+      } catch (_) {
+        try {
+          await _pc!.setLocalDescription(RTCSessionDescription('', 'rollback'));
+        } catch (e) {
+          _log('[HOLLOW-VOICE] Rollback before offer failed: $e');
+        }
+      }
+    }
+
     final offer = await _pc!.createOffer();
     await _pc!.setLocalDescription(offer);
 
@@ -214,22 +232,44 @@ class VoiceService {
 
     _dumpSdp('RENEG-OFFER-IN', sdp);
 
-    await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
-    _remoteDescriptionSet = true;
+    try {
+      await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+      _remoteDescriptionSet = true;
 
-    final answer = await _pc!.createAnswer();
-    await _pc!.setLocalDescription(answer);
+      final answer = await _pc!.createAnswer();
+      await _pc!.setLocalDescription(answer);
 
-    _log('[HOLLOW-VOICE] Renegotiation answer created, SDP length=${answer.sdp?.length}');
-    _dumpSdp('RENEG-ANSWER-OUT', answer.sdp!);
+      _log('[HOLLOW-VOICE] Renegotiation answer created, SDP length=${answer.sdp?.length}');
+      _dumpSdp('RENEG-ANSWER-OUT', answer.sdp!);
 
-    // Defer the safety net by a frame so onTrack has a chance to fire and
-    // build the renderer. With H4 it should always fire — the safety net
-    // only does work if the renderer is still null after the delay (and
-    // even then, _checkRemoteVideoTrack is a no-op when a renderer exists).
-    Future.delayed(const Duration(milliseconds: 150), _checkRemoteVideoTrack);
+      // Defer the safety net by a frame so onTrack has a chance to fire and
+      // build the renderer. With H4 it should always fire — the safety net
+      // only does work if the renderer is still null after the delay (and
+      // even then, _checkRemoteVideoTrack is a no-op when a renderer exists).
+      Future.delayed(const Duration(milliseconds: 150), _checkRemoteVideoTrack);
 
-    return answer.sdp!;
+      return answer.sdp!;
+    } catch (e) {
+      // A failed renegotiation must NOT leave the PC stuck in
+      // have-remote-offer — createOffer then errors out forever and this
+      // call can never add video in EITHER direction again (seen when the
+      // offer carries H.265/AV1 payload types the local decoder factory
+      // can't apply). Roll back to stable, then rethrow so the caller's
+      // queue/retry logic still observes the failure.
+      _log('[HOLLOW-VOICE] Renegotiation answer failed: $e — rolling back to stable');
+      try {
+        await _pc!.setLocalDescription(RTCSessionDescription('', 'rollback'));
+        _log('[HOLLOW-VOICE] Rollback via setLocalDescription succeeded');
+      } catch (_) {
+        try {
+          await _pc!.setRemoteDescription(RTCSessionDescription('', 'rollback'));
+          _log('[HOLLOW-VOICE] Rollback via setRemoteDescription succeeded');
+        } catch (e2) {
+          _log('[HOLLOW-VOICE] Rollback failed (PC may stay wedged): $e2');
+        }
+      }
+      rethrow;
+    }
   }
 
   /// Safety net for when [pc.onTrack] doesn't fire after a renegotiation.
@@ -496,16 +536,18 @@ class VoiceService {
         await _pc!.addTrack(videoTrack, _localVideoStream!);
         _log('[HOLLOW-VOICE] toggleVideo: added new video track via addTrack');
 
-        // On macOS prefer VP8 — Apple's H.264 hardware encoder emits a
-        // profile that Windows libwebrtc software-decodes to a black image.
-        // Mirrors the screen-share codec workaround.
-        if (Platform.isMacOS && videoTrack.id != null) {
-          await _preferVp8ForTrack(videoTrack.id!);
+        // All platforms: constrain the offer to universal codecs (VP8 first).
+        // Desktop builds otherwise advertise H.265/AV1 payload types that
+        // break the iOS answerer; macOS additionally needs VP8-first because
+        // its H.264 hw profile doesn't decode on Windows libwebrtc.
+        if (videoTrack.id != null) {
+          await _constrainCameraCodecs(videoTrack.id!);
         }
 
         _isVideoEnabled = true;
         await _initLocalRenderer();
         _log('[HOLLOW-VOICE] Video enabled, camera active');
+        _scheduleVideoStatsProbes('send');
       } catch (e) {
         _log('[HOLLOW-VOICE] Failed to capture camera: $e');
         return false;
@@ -940,11 +982,15 @@ class VoiceService {
   }
 
   /// Add pre-captured video tracks to the peer connection. Called immediately
-  /// after _initPeerConnection + _addLocalAudioTracks.
-  void _addLocalVideoTracks() {
+  /// after _initPeerConnection + _addLocalAudioTracks, BEFORE the offer is
+  /// created so the codec constraint shapes the initial m-line too.
+  Future<void> _addLocalVideoTracks() async {
     if (_localVideoStream == null || _pc == null) return;
     for (final track in _localVideoStream!.getVideoTracks()) {
-      _pc!.addTrack(track, _localVideoStream!);
+      await _pc!.addTrack(track, _localVideoStream!);
+      if (track.id != null) {
+        await _constrainCameraCodecs(track.id!);
+      }
     }
     _log('[HOLLOW-VOICE] Added video track via addTrack');
   }
@@ -1019,6 +1065,33 @@ class VoiceService {
       // notify the UI.
       await Future.delayed(const Duration(milliseconds: 100));
       onRemoteVideoTrack?.call(peerId);
+      _scheduleVideoStatsProbes('recv');
+
+      // Re-assert the native track binding: on iOS the first srcObject bind
+      // can race the native stream's track-list population — Dart-side
+      // srcObject is set and frames decode, but videoRendererSetSrcObject
+      // found videoTracks empty and the renderer silently stays trackless
+      // (black) until a NEW renderer binds on the next toggle. Re-setting
+      // srcObject re-runs the native lookup; it's idempotent when the first
+      // bind worked. renderer.value tells us whether frames ever reached the
+      // texture (width/height stay 0 + renderVideo=false when they didn't).
+      for (final d in const [
+        Duration(milliseconds: 400),
+        Duration(milliseconds: 1200),
+      ]) {
+        Future.delayed(d, () {
+          if (_remoteRenderer != newRenderer || _remoteStream != newStream) {
+            return; // superseded by a newer track
+          }
+          _log('[HOLLOW-VOICE] Remote renderer value before re-assert: '
+              '${newRenderer.value}');
+          try {
+            newRenderer.srcObject = newStream;
+          } catch (e) {
+            _log('[HOLLOW-VOICE] Renderer binding re-assert failed: $e');
+          }
+        });
+      }
     } catch (e) {
       _log('[HOLLOW-VOICE] ERROR handling remote video track: $e');
       // Don't trash existing state on error — the previous renderer may
@@ -1112,6 +1185,68 @@ class VoiceService {
     return result.join('\r\n');
   }
 
+  /// Dump video RTP stats — diagnostics for the remote-camera black screen
+  /// (desktop → iOS). The sender's outbound probe shows whether frames are
+  /// being encoded/sent at all; the receiver's inbound probe shows whether
+  /// they arrive and decode. Both land in hollow_debug.log.
+  Future<void> _probeVideoStats(String label) async {
+    final pc = _pc;
+    if (pc == null) return;
+    try {
+      final reports = await pc.getStats();
+      for (final r in reports) {
+        final v = r.values;
+        if (r.type == 'codec') {
+          final mime = (v['mimeType'] ?? '').toString().toLowerCase();
+          if (!mime.startsWith('video')) continue;
+          _log('[HOLLOW-VIDEO-STATS] $label codec id=${r.id}: '
+              '${v['mimeType']} payloadType=${v['payloadType']} '
+              'fmtp=${v['sdpFmtpLine']}');
+        } else if (r.type == 'inbound-rtp' || r.type == 'outbound-rtp') {
+          final kind = (v['kind'] ?? v['mediaType'] ?? '').toString();
+          if (kind != 'video') continue;
+          if (r.type == 'inbound-rtp') {
+            _log('[HOLLOW-VIDEO-STATS] $label inbound: '
+                'bytes=${v['bytesReceived']} packets=${v['packetsReceived']} '
+                'framesReceived=${v['framesReceived']} '
+                'framesDecoded=${v['framesDecoded']} '
+                'framesDropped=${v['framesDropped']} '
+                'keyFramesDecoded=${v['keyFramesDecoded']} '
+                'pli=${v['pliCount']} nack=${v['nackCount']} '
+                'size=${v['frameWidth']}x${v['frameHeight']} '
+                'decoder=${v['decoderImplementation']} '
+                'codecId=${v['codecId']}');
+          } else {
+            _log('[HOLLOW-VIDEO-STATS] $label outbound: '
+                'bytes=${v['bytesSent']} packets=${v['packetsSent']} '
+                'framesEncoded=${v['framesEncoded']} '
+                'framesSent=${v['framesSent']} '
+                'keyFramesEncoded=${v['keyFramesEncoded']} '
+                'size=${v['frameWidth']}x${v['frameHeight']} '
+                'encoder=${v['encoderImplementation']} '
+                'qualityLimitation=${v['qualityLimitationReason']} '
+                'codecId=${v['codecId']}');
+          }
+        }
+      }
+    } catch (e) {
+      _log('[HOLLOW-VIDEO-STATS] $label probe failed: $e');
+    }
+  }
+
+  /// Probe a few times after a video track appears so the log shows whether
+  /// counters actually advance (one snapshot can't distinguish "never
+  /// started" from "stalled").
+  void _scheduleVideoStatsProbes(String label) {
+    for (final delay in const [
+      Duration(seconds: 2),
+      Duration(seconds: 6),
+      Duration(seconds: 12),
+    ]) {
+      Future.delayed(delay, () => _probeVideoStats(label));
+    }
+  }
+
   void _dumpSdp(String label, String sdp) {
     _log('[HOLLOW-SDP-DUMP] === $label (${sdp.length} bytes) ===');
     for (final line in sdp.split('\r\n')) {
@@ -1129,31 +1264,39 @@ class VoiceService {
     _log('[HOLLOW-SDP-DUMP] === END $label ===');
   }
 
-  /// Reorder the transceiver carrying [trackId] to advertise VP8 first.
-  /// Workaround for Apple's H.264 hardware profile not decoding on Windows
-  /// libwebrtc — VP8 has no profile axis and is universally supported.
-  Future<void> _preferVp8ForTrack(String trackId) async {
+  /// Constrain the transceiver carrying [trackId] to VP8 only (plus
+  /// rtx/red/ulpfec infrastructure). VP8 is software (libvpx) on every
+  /// platform and is what negotiation picks anyway. Anything stronger in
+  /// the offer only exists to break receivers: H.265/AV1 payload types kill
+  /// the iOS answerer outright, and even H264/VP9 entries make iOS's FIRST
+  /// call fail applying its own answer ("Failed to set local video
+  /// description recv parameters") while its hardware codec path is still
+  /// cold — first call black, all later calls fine. Also covers the older
+  /// macOS issue (Apple H.264 hw profile not decoding on Windows).
+  Future<void> _constrainCameraCodecs(String trackId) async {
     if (_pc == null) return;
     try {
       final caps = await getRtpSenderCapabilities('video');
       final all = caps.codecs ?? const <RTCRtpCodecCapability>[];
-      final vp8 =
-          all.where((c) => c.mimeType.toLowerCase().endsWith('vp8')).toList();
-      if (vp8.isEmpty) return;
+      bool mimeIs(RTCRtpCodecCapability c, String name) =>
+          c.mimeType.toLowerCase() == 'video/$name';
+      final safe = [
+        ...all.where((c) => mimeIs(c, 'vp8')),
+        ...all.where(
+            (c) => mimeIs(c, 'rtx') || mimeIs(c, 'red') || mimeIs(c, 'ulpfec')),
+      ];
+      if (safe.isEmpty) return;
       final transceivers = await _pc!.getTransceivers();
       for (final t in transceivers) {
         if (t.sender.track?.id == trackId) {
-          final ordered = [
-            ...vp8,
-            ...all.where((c) => !c.mimeType.toLowerCase().endsWith('vp8')),
-          ];
-          await t.setCodecPreferences(ordered);
-          _log('[HOLLOW-VOICE] Forced VP8 codec preference for track $trackId');
+          await t.setCodecPreferences(safe);
+          _log('[HOLLOW-VOICE] Constrained camera codecs for track $trackId '
+              '(${safe.length}/${all.length} kept)');
           return;
         }
       }
     } catch (e) {
-      _log('[HOLLOW-VOICE] _preferVp8ForTrack failed: $e');
+      _log('[HOLLOW-VOICE] _constrainCameraCodecs failed: $e');
     }
   }
 }

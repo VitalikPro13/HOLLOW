@@ -549,6 +549,18 @@ pub(crate) enum HavenMessage {
         ops_json: String,
     },
 
+    /// Full server state snapshot, sent alongside the op log when serving a
+    /// ServerJoinRequest. Op logs can be incomplete (pre-persistence history
+    /// loss, 1000-op compaction), so a joiner reconstructing purely from op
+    /// replay can miss channels/layout/name. The responder's STATE is
+    /// authoritative — the joiner adopts it as the base, then merges ops on
+    /// top. Only honored while a join for this server is pending.
+    #[serde(rename = "srv_snapshot")]
+    ServerStateSnapshot {
+        server_id: String,
+        state_json: String,
+    },
+
     #[serde(rename = "crdt_op")]
     CrdtOpBroadcast {
         server_id: String,

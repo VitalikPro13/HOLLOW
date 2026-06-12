@@ -226,13 +226,15 @@ Critical path — triggers most of the sync machinery:
 4. Triggers event-driven vault rebalance.
 5. Updates gossip overlay (removes peer, picks replacement neighbor).
 6. If peer no longer reachable via ANY room: removes from `synced_peers`, emits PeerDisconnected.
+7. **If the peer IS still listed in other rooms: re-joins those rooms** (`WsCommand::JoinRoom`) to refresh their membership snapshots — those entries may be STALE leftovers from the peer's earlier connection (the relay only sends PeerLeft for rooms a connection is currently in), and stale entries used to pin a quit peer "online" forever.
 
 ### WsEvent::RoomMembers { room, peers }
-Fires when we join a room — provides the full member list. Similar to PeerJoined but for all members at once:
-1. Replaces `ws_room_peers[room]` with the new set.
-2. Initializes/updates gossip overlay if server has 6+ members.
-3. On first RoomMembers event: broadcasts profile to all peers.
-4. For each peer: same sync logic as PeerJoined (CRDT sync, channel sync registration, Olm session establishment, DM sync).
+Fires when we join a room — provides the full member list. This is the relay's AUTHORITATIVE snapshot for the room. Similar to PeerJoined but for all members at once:
+1. **Diffs the old room set against the new one** — peers that vanished are stale entries from a previous connection of theirs; for each, re-runs the global reachability check and emits `PeerDisconnected` (+ `synced_peers.remove`) if they're gone from every room. (Self-healing presence — generalizes what mobile resume rejoin did accidentally.)
+2. Replaces `ws_room_peers[room]` with the new set.
+3. Initializes/updates gossip overlay if server has 6+ members.
+4. On first RoomMembers event: broadcasts profile to all peers.
+5. For each peer: same sync logic as PeerJoined (CRDT sync, channel sync registration, Olm session establishment, DM sync).
 
 ### WsEvent::Message / DirectMessage { room, from, data }
 The main incoming message path:
@@ -262,11 +264,12 @@ These are handled directly in `handle_incoming_request()`:
 
 **CRDT sync (plaintext):**
 - `SyncRequest` — computes delta from op_log, responds with `SyncResponse`.
-- `SyncResponse` — merges incoming ops into server_state, handles pending server joins.
-- `CrdtOpBroadcast` — validates permissions per-payload type, applies op, forwards to other members, emits specific NetworkEvent per payload.
+- `SyncResponse` — persists ALL incoming ops via `insert_crdt_op` (op_log is skip_serializing — without this, sync-merged history is RAM-only and lost on restart), merges via `merge_ops(&incoming_ops)`, handles pending server joins. Join completion also runs when `applied == 0` if a join is pending (a `ServerStateSnapshot` may already carry everything). The pending-join skeleton does NOT seed the responder as Owner (name reg zeroed, member/role seeds stripped — real name/owner come from `ServerCreated` in the op log). After join completes: post-join proxy-profile backfill (`ProfileRequestFor` to the responder for offline members without cached profiles, cap 10).
+- `ServerStateSnapshot` — full authoritative server state sent by the join responder BEFORE the op log (op logs compact at 1000 ops / can have pre-persistence history loss, so op replay alone can't reconstruct a server). SECURITY: only honored while `pending_server_joins` contains the server — an established member never lets a peer overwrite its state. Verifies `state.server_id` matches, re-keys the HLC, persists, inserts into `server_states`.
+- `CrdtOpBroadcast` — validates permissions per-payload type AGAINST `op.author` (never the transport sender — ops can be relayed); self-leave `MemberRemoved { peer_id == op.author }` always allowed; applies op, forwards to other members, emits specific NetworkEvent per payload.
 
 **Server join flow:**
-- `ServerJoinRequest` — ban check, Twitch verification, owner-online check, adds member via CRDT op, sends full state to joiner.
+- `ServerJoinRequest` — ban check, Twitch verification, owner-online check, adds member via CRDT op, sends `ServerStateSnapshot` then the full op log (`SyncResponse`) to the joiner (WS is FIFO, snapshot lands first).
 - `ServerJoinRejected` — removes from pending_server_joins, emits TwitchJoinRejected.
 - `ServerDeleteBroadcast` — verifies sender is Owner, removes server state.
 - `MemberKickBroadcast` — verifies sender has KICK_MEMBERS and outranks us, removes server state.

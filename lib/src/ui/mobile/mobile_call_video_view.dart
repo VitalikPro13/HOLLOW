@@ -9,6 +9,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -34,6 +35,10 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
   Offset _pipOffset = const Offset(12, 12);
   StreamSubscription<int>? _proximitySub;
   bool _wakelockOn = false;
+
+  /// Last logged video-gate tuple — log only on change (diagnostics for the
+  /// "remote camera invisible on first enable" reports).
+  String? _lastVideoGateLog;
 
   @override
   void dispose() {
@@ -277,6 +282,20 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
         call.isVideoEnabled &&
         localRenderer != null &&
         localRenderer.srcObject != null;
+
+    // Diagnostics: log the gate decision whenever it changes, so device logs
+    // show exactly why the remote camera is (in)visible.
+    final gate = 'screen=$showScreen remoteFull=$showRemoteFull '
+        'localFull=$showLocalFull pip=$showLocalPip '
+        'remoteVideoEnabled=${call.remoteVideoEnabled} '
+        'remoteRenderer=${remoteRenderer != null} '
+        'srcObject=${remoteRenderer?.srcObject != null} '
+        'rendererValue=${remoteRenderer?.value} '
+        'status=${call.status} seq=${call.remoteVideoTrackSeq}';
+    if (gate != _lastVideoGateLog) {
+      _lastVideoGateLog = gate;
+      network_api.logFromDart(message: '[HOLLOW-CALL-UI] video gate: $gate');
+    }
 
     return Stack(
       children: [

@@ -391,11 +391,11 @@ The protocol is symmetric — either peer can initiate:
 
 ### merge_ops Details
 
-**`sync.rs:merge_ops(state, incoming_ops)`** — iterates through incoming ops, calls `apply_op()` for each, and counts how many actually increased the op_log length (i.e., were new, not duplicates). Returns `Result<usize, String>`.
+**`sync.rs:merge_ops(state, incoming_ops: &[CrdtOp])`** — iterates through incoming ops, calls `apply_op()` for each, and counts how many actually increased the op_log length (i.e., were new, not duplicates). Takes a slice so callers can persist the same ops afterwards. An op that fails `apply_op` (e.g., wrong `server_id`) is SKIPPED rather than aborting the merge. Returns `Result<usize, String>`.
 
 ### Op Log Size and Sync Window
 
-The op_log is compacted to 1000 entries in `apply_op()`. This means the sync protocol can only compute deltas for the most recent 1000 operations per server. For servers that have been running longer, a full state snapshot exchange would be needed (not currently implemented as a separate mechanism — new members receive the full ServerState during initial sync via `sync_handler.rs`).
+The op_log is compacted to 1000 entries in `apply_op()`. This means the sync protocol can only compute deltas for the most recent 1000 operations per server. Because op logs can't be trusted for full reconstruction (compaction + pre-persistence history loss), the server-join flow sends a full state snapshot: `HavenMessage::ServerStateSnapshot { server_id, state_json }`, sent by the `ServerJoinRequest` responder BEFORE the op-log `SyncResponse`. The joiner adopts it only while its join is pending.
 
 ---
 
@@ -403,7 +403,7 @@ The op_log is compacted to 1000 entries in `apply_op()`. This means the sync pro
 
 There is no separate `store.rs` module. Op persistence and compaction are handled inline within `server_state.rs:apply_op()`:
 
-**Storage:** The `op_log: Vec<CrdtOp>` is a field on ServerState. The entire ServerState (including op_log) is serialized as JSON and stored in SQLCipher. The HLC field is `#[serde(skip)]` and must be restored via `set_hlc()` after deserialization.
+**Storage:** The `op_log: Vec<CrdtOp>` field is `#[serde(default, skip_serializing)]` — it is NOT in the persisted state JSON. Ops persist ONLY via the `crdt_ops` SQLCipher table (`insert_crdt_op`, INSERT OR IGNORE keyed by server_id+hlc+author) and are restored at startup via `restore_op_log()`. CRITICAL: every code path that applies RECEIVED ops must also insert them (all three sync-merge sites do); saving the state JSON alone silently loses history on restart. The HLC field is `#[serde(skip)]` and must be restored via `set_hlc()` after deserialization.
 
 **In-memory compaction:** `MAX_OP_LOG = 1000`. After every successful apply, if the op_log exceeds 1000 entries, the oldest entries are drained: `op_log.drain(..excess)`. This prevents unbounded memory growth.
 

@@ -337,8 +337,13 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
           itemCount: items.length,
           itemBuilder: (context, index) {
             final item = items[index];
+            // Keyed by item identity: this list mixes DMs and servers and
+            // reorders constantly — without keys, Flutter re-parents row
+            // State across DIFFERENT conversations when positions shift
+            // (a joined server then shows another server's channel list).
             if (item.type == _ItemType.dm) {
               return _DmRow(
+                key: ValueKey('dm-${item.id}'),
                 peerId: item.id,
                 name: item.name,
                 lastMessage: item.lastMessage,
@@ -349,6 +354,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
               );
             } else {
               return _ServerRow(
+                key: ValueKey('srv-${item.id}'),
                 serverId: item.id,
                 name: item.name,
                 unreadCount: item.unreadCount,
@@ -494,6 +500,7 @@ class _DmRow extends ConsumerWidget {
   final VoidCallback? onLongPress;
 
   const _DmRow({
+    super.key,
     required this.peerId,
     required this.name,
     required this.lastMessage,
@@ -734,6 +741,7 @@ class _ServerRow extends ConsumerWidget {
   final void Function(ChannelInfo) onChannelTap;
 
   const _ServerRow({
+    super.key,
     required this.serverId,
     required this.name,
     required this.unreadCount,
@@ -885,6 +893,21 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
   void initState() {
     super.initState();
     _loadChannels();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ChannelList oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // If this State gets reused for a DIFFERENT server, the cached display
+    // items belong to the old one — reset and reload.
+    if (oldWidget.serverId != widget.serverId) {
+      setState(() {
+        _displayItems = [];
+        _collapsedCategories.clear();
+        _loading = true;
+      });
+      _loadChannels();
+    }
   }
 
   Future<void> _loadChannels() async {
