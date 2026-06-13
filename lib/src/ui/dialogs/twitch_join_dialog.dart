@@ -49,6 +49,49 @@ void showTwitchJoinDialog(
   );
 }
 
+/// Generic "you can't join this server" dialog with a specific reason.
+/// Used for private servers and member-cap rejections so the user gets a clear
+/// explanation instead of a vague failure (which reads like a network problem).
+void showJoinRejectedDialog(
+  BuildContext context, {
+  required String title,
+  required String message,
+}) {
+  showHollowDialog(
+    context: context,
+    builder: (ctx) {
+      final hollow = HollowTheme.of(ctx);
+      return HollowDialog(
+        title: title,
+        content: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(LucideIcons.lock, size: 20, color: hollow.warning),
+            const SizedBox(width: HollowSpacing.md),
+            Expanded(
+              child: Text(
+                message,
+                style: HollowTypography.body.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 13,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          HollowButton.filled(
+            onPressed: () => Navigator.of(ctx).pop(),
+            compact: true,
+            child: const Text('OK'),
+          ),
+        ],
+      );
+    },
+  );
+}
+
 enum _JoinStep { requirements, connect, verifying, success, failed }
 
 class _TwitchJoinDialog extends StatefulWidget {

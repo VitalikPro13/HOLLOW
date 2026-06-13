@@ -306,17 +306,21 @@ Clear (X button): Sets ringtone path to null.
 
 `ConsumerStatefulWidget`. A `HollowDialog` with title "Trim Ringtone" for selecting a clip range within an audio file. Used by both desktop (System tab) and mobile (Settings > System > Ringtone > Trim button).
 
+**Redesigned (2026-06)** to fix two issues: action buttons clipped off-screen on small iPhones, and imprecise trimming on long tracks (a single full-track RangeSlider gave ~0.75s/pixel on a 5-min file). The clipping fix is partly in `HollowDialog` itself (it now caps `maxHeight` to the screen so the Flexible scroll region clamps and the sticky action bar stays visible — benefits every dialog).
+
 ### State:
-- `_player` (AudioPlayer?), `_totalDuration` (double, seconds, default 60), `_start` / `_end` (double, seconds), `_currentPos` (double), `_isPlaying` (bool), `_loaded` (bool), `_posSub` (StreamSubscription?)
+- `_player` (AudioPlayer?), `_totalDuration` (double, seconds, default 60), `_start` / `_end` (double, seconds), `_currentPos` (double), `_isPlaying` (bool), `_loaded` (bool), `_posSub` (StreamSubscription?), `_bars` (List<double> — deterministic pseudo-waveform seeded from the file path hash; no PCM decode, just visual context for the selection window).
 
 ### Initialization (`_loadDuration()`)
-Reads saved `ringtoneStartProvider` and `ringtoneEndProvider` values. Uses cached duration from `ringtoneDurationProvider`. Clamps end to total duration, ensures start < end.
+Reads saved `ringtoneStartProvider` and `ringtoneEndProvider` values. Uses cached duration from `ringtoneDurationProvider`. Clamps end to total duration, ensures start < end, enforces the 30s max clip (`_kMaxClip`).
 
 ### UI Layout
-- **File info**: File name + total duration formatted as mm:ss.
-- **Range slider**: `RangeSlider` with `RangeValues(_start, _end)`, range 0 to `_totalDuration`. Enforces max 30s clip by clamping whichever thumb moved farther. Accent-colored active track, 7px round range thumb.
-- **Time labels**: Start time (left), clip duration with "s clip" suffix (center, accent colored), end time (right). All use tabular figures.
+- **File info**: File name + total duration formatted as mm:ss.x.
+- **`_WaveformSelector`**: a scrubbable waveform strip (64 bars via `_WaveformPainter`) with two draggable handles for start/end and a draggable middle to pan the whole window. Bars inside the selection are accent-colored, outside are border-colored; a playhead line shows during preview. Replaces the old single full-track `RangeSlider`.
+- **Numeric start/end with ±nudge** (`_NudgeField`): start (left) and end (right) shown as mm:ss.x with − / + buttons (0.5s steps) flanking each — frame-accurate adjustment, reliable on tiny screens. Clip duration shown center (accent).
+- **Move-window row** (`_StepButton`): ±1s / ±5s chevrons to shift the whole selection window, preserving its length (handy on long tracks).
 - **Playback progress** (only during playback): `LinearProgressIndicator` showing position within the selected clip range.
+- Helpers `_setStart`/`_setEnd`/`_nudgeWindow` keep `start < end` and clip ≤ `_kMaxClip` (30s).
 
 ### Playback
 `_startPreview()`: Creates AudioPlayer, sets volume from `ringtoneVolumeProvider`, plays file, seeks to `_start`. Listens to `onPositionChanged` — updates `_currentPos`, loops back to start if position exceeds `_end`.
@@ -324,9 +328,10 @@ Reads saved `ringtoneStartProvider` and `ringtoneEndProvider` values. Uses cache
 `_stopPreview()`: Cancels subscription, stops and disposes player.
 
 ### Actions
-- **Preview/Stop** (ghost button): Play/square icon, starts or stops preview.
-- **Cancel** (ghost button): Closes dialog without saving.
-- **Save** (filled button): Writes `_start` and `_end` to `ringtoneStartProvider` and `ringtoneEndProvider`, stops preview, closes dialog.
+Laid out as a single full-width `Row` (so Preview sits on the LEFT, Cancel/Save on the right — a bare `HollowDialog` actions Wrap right-aligns everything):
+- **Preview/Stop** (ghost button, left): Play/square icon, starts or stops preview.
+- **Cancel** (ghost button, right): Closes dialog without saving.
+- **Save** (filled button, right): Writes `_start` and `_end` to `ringtoneStartProvider` and `ringtoneEndProvider`, stops preview, closes dialog.
 
 ---
 

@@ -15,6 +15,7 @@ import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/link_preview_card.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/chat/message_text_parser.dart';
+import 'package:hollow/src/ui/chat/profile_tap.dart';
 import 'package:hollow/src/ui/chat/reaction_bar.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 
@@ -230,7 +231,10 @@ class MessageBubble extends ConsumerWidget {
             children: [
               Padding(
                 padding: const EdgeInsets.only(top: 5),
-                child: HollowAvatar(peerId: senderId, size: avatarSize),
+                child: ProfileTapTarget(
+                  peerId: senderId,
+                  child: HollowAvatar(peerId: senderId, size: avatarSize),
+                ),
               ),
               const SizedBox(width: avatarGap),
               Expanded(
@@ -239,14 +243,17 @@ class MessageBubble extends ConsumerWidget {
                   children: [
                     Row(
                       children: [
-                        Text(
-                          senderName,
-                          style: HollowTypography.body.copyWith(
-                            color: isMe
-                                ? hollow.accent
-                                : nameColorFromId(senderId),
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13,
+                        ProfileTapTarget(
+                          peerId: senderId,
+                          child: Text(
+                            senderName,
+                            style: HollowTypography.body.copyWith(
+                              color: isMe
+                                  ? hollow.accent
+                                  : nameColorFromId(senderId),
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13,
+                            ),
                           ),
                         ),
                         const SizedBox(width: HollowSpacing.sm),

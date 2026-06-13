@@ -438,12 +438,15 @@ The entire body is wrapped in `try-catch` to prevent unhandled exceptions from k
 
 #### Twitch Events
 
-**`NetworkEvent_TwitchJoinRejected`** (serverId, reason)
+**`NetworkEvent_TwitchJoinRejected`** (serverId, reason) — the generic join-rejection channel (name is historical; carries all rejection reasons, not just Twitch).
 - Parses the reason string to determine sub-type:
   - `'twitch_required:{channel_id}:{channel_name}:{server_name}:{min_follow_days}:{require_sub}'` -- Opens `showTwitchJoinDialog()` with parsed parameters. If dialog is already open (retry failed), routes via `handleTwitchJoinResult()`.
   - `'twitch_failed:{channel_name}:{server_name}:{human_reason}'` -- Opens dialog with failure reason or toast.
   - `'twitch_owner_offline:{server_name}'` -- Shows toast about owner being offline for verification.
+  - `'server_private:{server_name}'` -- Opens `showJoinRejectedDialog()` (in `twitch_join_dialog.dart`): title "Server is private", message "{name} is private and doesn't accept new members." (No "invite-only"/"ask an admin to add you" — there's no add-peer feature.)
+  - `'server_full:{server_name}:{max}'` -- `showJoinRejectedDialog()`: title "Server is full", message "{name} has reached its member limit (N members)."
   - Default: shows generic toast or routes to existing dialog.
+- The Rust dispatch only emits this event for the FIRST rejection of an in-flight join (gated on `pending_server_joins.remove().is_some()`), so the joiner sees one popup even though every online member sends its own rejection. See `rust_swarm_event_loop.md`.
 
 ### Helper Methods
 

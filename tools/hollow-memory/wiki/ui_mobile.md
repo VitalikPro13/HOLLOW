@@ -146,7 +146,7 @@ Scaffold
 │       ├── StagedHollowLinkCard / StagedLinkPreviewCard (link preview)
 │       ├── _StagedFilePreview (if file staged)
 │       ├── Post permission gate (channel only — replaces input bar when canPostInChannelProvider is false)
-│       └── VoiceRecorderBar (if _isRecordingVoice) OR _MobileInputBar (paperclip + text + emoji + mic + send)
+│       └── VoiceRecorderBar (if _isRecordingVoice) OR _MobileInputBar (paperclip + image/gallery + text + emoji + mic + send)
 ```
 
 ### Message Rendering
@@ -168,6 +168,7 @@ Wraps each message bubble. Provides:
 - `_saveFile(FileAttachment)` — reads bytes, passes to `FilePicker.platform.saveFile(bytes:)`. Android requires `bytes:` param (crashes without it). Converts WebP→PNG if needed via `network_api.convertImageFormat()`.
 - `_requestFileFromPeer(FileAttachment, senderId)` — requests file via P2P when not on disk.
 - `_handleSend()` — if `_stagedFilePath` is set, sends as file attachment via `network_api.sendFile()`, otherwise sends text.
+- `_pickFile({bool imagesOnly = false})` — `FilePicker.platform.pickFiles(type: imagesOnly ? FileType.image : FileType.any)` → `network_api.sendFile`. The composer has TWO attach buttons: the paperclip (`onPickFile` → any file) and an image/gallery button to its RIGHT (`onPickImage` → `_pickFile(imagesOnly: true)`).
 
 ### Pin Messages (Channel Only)
 - `pinnedProvider` loaded after channel history loads in `initState` `.then()` callback
@@ -382,6 +383,7 @@ Sections in order:
 - **Biometric row** (mobile + lock enabled + `canUseBiometrics()`): Switch (`activeThumbColor`). ON → needs the secret (`sessionSecret` or re-ask) → one live `promptBiometric()` check → `enableBiometric(secret)` stores it in flutter_secure_storage. See `lib/src/core/services/app_lock_service.dart`. (`canUseBiometrics()` requires `getAvailableBiometrics().isNotEmpty` — some Pixels report Face Unlock as class-2/weak and return empty even with enrolled biometrics; relax that check if the Switch never appears.)
 - Device Protection: enable/disable OS keychain (Windows/macOS only)
 - Recovery Phrase button (loads from identity or storage API)
+- **Account Backup** section (`_BackupExportButton`): exports a passphrase-encrypted `.hollow` file. Toggles for "Include downloaded files" / "Include vault shards". Since Rust `exportBackup` writes to a path it owns, mobile exports to a temp file under `hollowDataDir`, reads the bytes, hands them to `FilePicker.saveFile(bytes:)` (required on Android/iOS), then deletes the temp file. Passphrase via `_askBackupPassphrase` (HollowDialog with confirm field). IMPORT is NOT here — it lives in the first-launch welcome dialog (`welcome_dialog.dart`), since `importBackup` overwrites the data dir and must run before the node starts; that picker uses `FileType.any` on mobile (`.hollow` isn't a recognized iOS/Android UTI, so `FileType.custom` hides it).
 - Unlock-at-launch flow lives in `hollow_shell.dart _showPasswordUnlockDialog`: biometric prompt FIRST, then PIN/password dialog (fingerprint retry button); all unlock/recovery dialogs use `(screenWidth - padding).clamp(0, maxW)` widths.
 - **Unlocking… spinner** (`_UnlockingOverlay`, flag-driven `Stack` over the shell — NOT a dialog, so nothing races it dismissed): the post-unlock Argon2id derivation (~1.5-3s) + the local DB load can't begin until unlock finishes (the SQLCipher passphrase is derived from the just-unlocked identity — local-first render can't help). `_unlocking` is set the instant a secret is in hand (both `tryBiometric` and the password-entry path) and cleared after `profileProvider`/`friendsProvider` load in `_bootstrap` (conversation list renderable). Only shows when an App Lock is active; wrong-secret + identity-error paths clear it. See `feedback_app_lock_unlock_ux` memory.
 
@@ -822,7 +824,7 @@ List of channels with current level badge. Tap → bottom sheet with 4 options: 
 Container with status dot (green if fetchCount > 0), relay domain, online users count, RAM usage bar (`_StatBar`), bandwidth bar. Watches `relayStatsProvider` (7s polling).
 
 ### News Section
-Latest 3 posts from `newsProvider`. Cards with title + date + body (4 lines max). Tap opens `showHollowDialog` with full scrollable body, title, date, and X close button.
+Latest 3 posts from `newsProvider`. Cards show title + date + a 4-line plain-text teaser (`_plainTeaser()` strips markdown markers so `**`/`#`/`[]()` don't show raw). Tap opens `showHollowDialog` with the full body rendered as real markdown via `MarkdownBody` (same `flutter_markdown_plus` + stylesheet as the desktop `home_dashboard` news, with `onTapLink` → external browser), title, date, and X close button. Previously the expanded body was plain `Text(post.body)` — markdown rendering was added to match desktop.
 
 ### Contact Section
 `HollowButton.ghost` with icons: email (copies to clipboard), website (opens external browser), GitHub (opens `github.com/VitalikPro13/HOLLOW` externally). Uses `BrandIcons.github` for GitHub icon.

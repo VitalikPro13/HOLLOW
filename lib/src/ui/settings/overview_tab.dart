@@ -52,6 +52,10 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
   bool _twitchOwnerVerify = false;
   bool _savingTwitch = false;
 
+  bool _isPrivate = false;
+  late final TextEditingController _maxMembersController;
+  bool _savingAccess = false;
+
   @override
   void initState() {
     super.initState();
@@ -61,9 +65,77 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     _twitchChannelController = TextEditingController();
     _twitchChannelIdController = TextEditingController();
     _twitchMinDaysController = TextEditingController(text: '0');
+    _maxMembersController = TextEditingController();
     _loadDescription();
     _loadNickname();
     _loadTwitchSettings();
+    _loadAccessSettings();
+  }
+
+  Future<void> _loadAccessSettings() async {
+    try {
+      final sid = widget.server.serverId;
+      final isPrivate =
+          await crdt_api.getServerSetting(serverId: sid, key: 'is_private');
+      final maxMembers =
+          await crdt_api.getServerSetting(serverId: sid, key: 'max_members');
+      if (mounted) {
+        setState(() {
+          _isPrivate = isPrivate == 'true';
+          // 0 / empty = unlimited; leave the field blank in that case.
+          _maxMembersController.text =
+              (maxMembers.isEmpty || maxMembers == '0') ? '' : maxMembers;
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _saveAccessSettings() async {
+    setState(() => _savingAccess = true);
+    try {
+      final sid = widget.server.serverId;
+      // Empty or non-positive = unlimited, stored as "0".
+      final raw = _maxMembersController.text.trim();
+      final parsed = int.tryParse(raw) ?? 0;
+
+      // A finite cap can't be set below the current member count (you can't
+      // retroactively evict people). Check the live count, not the possibly
+      // stale memberCount on the passed-in ServerInfo.
+      if (parsed > 0) {
+        final members = await crdt_api.getServerMembers(serverId: sid);
+        final current = members.length;
+        if (parsed < current) {
+          if (mounted) {
+            HollowToast.show(
+              context,
+              'Max can\'t be below the current member count ($current).',
+              type: HollowToastType.error,
+            );
+            setState(() => _savingAccess = false);
+          }
+          return;
+        }
+      }
+
+      final maxValue = parsed > 0 ? parsed.toString() : '0';
+      await crdt_api.updateServerSetting(
+          serverId: sid, key: 'is_private', value: _isPrivate ? 'true' : 'false');
+      await crdt_api.updateServerSetting(
+          serverId: sid, key: 'max_members', value: maxValue);
+      if (mounted) {
+        // Normalize the field to the saved value.
+        _maxMembersController.text = maxValue == '0' ? '' : maxValue;
+        HollowToast.show(context, 'Access settings saved',
+            type: HollowToastType.success);
+      }
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(context, 'Failed to save: $e',
+            type: HollowToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _savingAccess = false);
+    }
   }
 
   Future<void> _loadDescription() async {
@@ -108,6 +180,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     _twitchChannelController.dispose();
     _twitchChannelIdController.dispose();
     _twitchMinDaysController.dispose();
+    _maxMembersController.dispose();
     super.dispose();
   }
 
@@ -427,6 +500,77 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               onPressed: _saving ? null : _saveDescription,
               compact: true,
               child: const Text('Save Description'),
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.xl),
+          Divider(color: hollow.border),
+          const SizedBox(height: HollowSpacing.xl),
+
+          // ── Access (private + member cap) ──
+          Text(
+            'ACCESS',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.2,
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Private server',
+                        style: HollowTypography.body
+                            .copyWith(color: hollow.textPrimary)),
+                    const SizedBox(height: 2),
+                    Text(
+                      'New members can\'t join via the link.',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary, fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.md),
+              HollowToggle(
+                value: _isPrivate,
+                onChanged: (v) => setState(() => _isPrivate = v),
+              ),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          Text(
+            'Max members',
+            style:
+                HollowTypography.label.copyWith(color: hollow.textSecondary),
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          HollowTextField(
+            controller: _maxMembersController,
+            hintText: 'Unlimited',
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            isDense: true,
+            onSubmitted: (_) => _saveAccessSettings(),
+          ),
+          const SizedBox(height: HollowSpacing.xs),
+          Text(
+            'Leave blank for no limit. Existing members are never removed.',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary, fontSize: 11,
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.lg),
+          Align(
+            alignment: Alignment.centerRight,
+            child: HollowButton.filled(
+              onPressed: _savingAccess ? null : _saveAccessSettings,
+              compact: true,
+              child: const Text('Save Access Settings'),
             ),
           ),
           const SizedBox(height: HollowSpacing.xl),

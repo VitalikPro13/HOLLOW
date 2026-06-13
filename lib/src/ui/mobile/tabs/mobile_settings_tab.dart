@@ -2058,6 +2058,24 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         const SizedBox(height: HollowSpacing.sm),
         _RecoveryPhraseButton(),
 
+        // Account backup — export the encrypted .hollow file (identity + DB).
+        // Import lives in the first-launch welcome dialog (it must run before
+        // the node starts, since it overwrites the data directory).
+        const SizedBox(height: HollowSpacing.xl),
+        _SectionLabel(label: 'Account Backup'),
+        const SizedBox(height: HollowSpacing.sm),
+        Text(
+          'Export an encrypted backup of your identity and messages. '
+          'To restore it, reinstall and choose "Restore from backup" on '
+          'the welcome screen.',
+          style: HollowTypography.body.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 12,
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        const _BackupExportButton(),
+
         // iOS push diagnostics — exports the NSE memory footprint + push logs so
         // we can validate the Notification Service Extension fits its memory cap.
         if (Platform.isIOS) ...[
@@ -2400,6 +2418,193 @@ class _RecoveryPhraseButton extends ConsumerWidget {
   }
 }
 
+/// Exports a passphrase-encrypted `.hollow` account backup.
+///
+/// The Rust `exportBackup` writes to a path it owns, so on mobile we export to
+/// a temp file inside the app data dir, read the bytes, hand them to the system
+/// file picker (`saveFile(bytes:)` — required on Android/iOS), then delete the
+/// temp file. Import is handled by the first-launch welcome dialog.
+class _BackupExportButton extends ConsumerStatefulWidget {
+  const _BackupExportButton();
+
+  @override
+  ConsumerState<_BackupExportButton> createState() =>
+      _BackupExportButtonState();
+}
+
+class _BackupExportButtonState extends ConsumerState<_BackupExportButton> {
+  bool _busy = false;
+  bool _includeFiles = false;
+  bool _includeVault = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _ToggleRow(
+          label: 'Include downloaded files',
+          value: _includeFiles,
+          onChanged: _busy ? null : (v) => setState(() => _includeFiles = v),
+        ),
+        _ToggleRow(
+          label: 'Include vault shards',
+          value: _includeVault,
+          onChanged: _busy ? null : (v) => setState(() => _includeVault = v),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        HollowButton.outline(
+          onPressed: _busy ? null : _export,
+          expand: true,
+          icon: _busy
+              ? SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2, color: hollow.accent),
+                )
+              : const Icon(LucideIcons.download, size: 16),
+          child: Text(_busy ? 'Exporting…' : 'Export Backup'),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _export() async {
+    final passphrase =
+        await _askBackupPassphrase(context, 'Set Backup Passphrase');
+    if (passphrase == null || !mounted) return;
+
+    setState(() => _busy = true);
+    final tmpPath =
+        '$hollowDataDir/hollow-backup-export.hollow';
+    try {
+      await storage_api.exportBackup(
+        outputPath: tmpPath,
+        includeVault: _includeVault,
+        includeFiles: _includeFiles,
+        passphrase: passphrase,
+      );
+      final bytes = await File(tmpPath).readAsBytes();
+      final savePath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save Backup',
+        fileName: 'hollow-backup.hollow',
+        bytes: bytes,
+      );
+      // Clean up the temp file regardless of whether the user saved.
+      try {
+        await File(tmpPath).delete();
+      } catch (_) {}
+      if (!mounted) return;
+      if (savePath == null) return; // user cancelled the save sheet
+      final mb = (bytes.length / (1024 * 1024)).toStringAsFixed(1);
+      HollowToast.show(context, 'Backup exported ($mb MB)',
+          type: HollowToastType.success);
+    } catch (e) {
+      try {
+        await File(tmpPath).delete();
+      } catch (_) {}
+      if (mounted) {
+        HollowToast.show(context, 'Export failed: $e',
+            type: HollowToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+}
+
+/// Simple label + Switch row used by the backup export options.
+class _ToggleRow extends StatelessWidget {
+  final String label;
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+
+  const _ToggleRow({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Row(
+      children: [
+        Expanded(
+          child: Text(label, style: HollowTypography.body.copyWith(
+            color: hollow.textPrimary, fontSize: 13,
+          )),
+        ),
+        Switch(
+          value: value,
+          onChanged: onChanged,
+          activeTrackColor: hollow.accent,
+          activeColor: Colors.white,
+          inactiveTrackColor: hollow.border,
+        ),
+      ],
+    );
+  }
+}
+
+/// Compact passphrase prompt with confirmation, keyboard-aware via
+/// showHollowDialog (which strips/pads viewInsets globally).
+Future<String?> _askBackupPassphrase(
+    BuildContext context, String title) async {
+  final controller = TextEditingController();
+  final confirmController = TextEditingController();
+  return showHollowDialog<String>(
+    context: context,
+    builder: (ctx) {
+      return HollowDialog(
+        title: title,
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            HollowTextField(
+              controller: controller,
+              obscureText: true,
+              autofocus: true,
+              hintText: 'Enter passphrase',
+            ),
+            const SizedBox(height: HollowSpacing.sm),
+            HollowTextField(
+              controller: confirmController,
+              obscureText: true,
+              hintText: 'Confirm passphrase',
+            ),
+          ],
+        ),
+        actions: [
+          HollowButton.ghost(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            compact: true,
+            child: const Text('Cancel'),
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+          HollowButton.filled(
+            onPressed: () {
+              final pass = controller.text.trim();
+              if (pass.isEmpty) return;
+              if (pass != confirmController.text.trim()) {
+                HollowToast.show(ctx, 'Passphrases don\'t match',
+                    type: HollowToastType.error);
+                return;
+              }
+              Navigator.of(ctx).pop(pass);
+            },
+            compact: true,
+            child: const Text('Encrypt'),
+          ),
+        ],
+      );
+    },
+  );
+}
+
 /// iOS-only: bundle the Notification Service Extension's footprint/metrics log
 /// (written into the App Group) + the app's push_debug.log into one text file and
 /// save it via the file picker, so it can be shared back for diagnosis. There's
@@ -2633,7 +2838,7 @@ class _AboutTab extends ConsumerWidget {
                       ],
                     ),
                     const SizedBox(height: HollowSpacing.xs),
-                    Text(post.body,
+                    Text(_plainTeaser(post.body),
                         style: HollowTypography.body.copyWith(
                           color: hollow.textSecondary, fontSize: 12),
                         maxLines: 4, overflow: TextOverflow.ellipsis),
@@ -2948,10 +3153,55 @@ class _AboutTab extends ConsumerWidget {
                   const SizedBox(height: HollowSpacing.md),
                   Flexible(
                     child: SingleChildScrollView(
-                      child: Text(post.body,
-                          style: HollowTypography.body.copyWith(
+                      child: MarkdownBody(
+                        data: post.body,
+                        shrinkWrap: true,
+                        selectable: true,
+                        onTapLink: (text, href, title) {
+                          if (href != null) {
+                            launchUrl(Uri.parse(href),
+                                mode: LaunchMode.externalApplication);
+                          }
+                        },
+                        styleSheet: MarkdownStyleSheet(
+                          p: HollowTypography.body.copyWith(
                             color: hollow.textSecondary,
-                            fontSize: 13, height: 1.5)),
+                            fontSize: 13,
+                            height: 1.5,
+                          ),
+                          h2: HollowTypography.heading.copyWith(
+                            color: hollow.textPrimary,
+                            fontSize: 15,
+                          ),
+                          h3: HollowTypography.heading.copyWith(
+                            color: hollow.textPrimary,
+                            fontSize: 14,
+                          ),
+                          listBullet: HollowTypography.body.copyWith(
+                            color: hollow.textSecondary,
+                            fontSize: 13,
+                          ),
+                          strong: HollowTypography.body.copyWith(
+                            color: hollow.textPrimary,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 13,
+                          ),
+                          a: HollowTypography.body.copyWith(
+                            color: hollow.accent,
+                            fontSize: 13,
+                            decoration: TextDecoration.underline,
+                            decorationColor: hollow.accent,
+                          ),
+                          blockSpacing: 8,
+                          horizontalRuleDecoration: BoxDecoration(
+                            border: Border(
+                              top: BorderSide(
+                                color: hollow.border.withValues(alpha: 0.5),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ],
@@ -2961,6 +3211,19 @@ class _AboutTab extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  /// Strip common markdown markers so the 4-line card teaser reads cleanly
+  /// (the full post renders as real markdown in the expanded dialog).
+  String _plainTeaser(String body) {
+    return body
+        .replaceAll(RegExp(r'^#{1,6}\s+', multiLine: true), '')
+        .replaceAll(RegExp(r'\*\*(.+?)\*\*'), r'$1')
+        .replaceAll(RegExp(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)'), r'$1')
+        .replaceAll(RegExp(r'`(.+?)`'), r'$1')
+        .replaceAll(RegExp(r'^\s*[-*]\s+', multiLine: true), '• ')
+        .replaceAll(RegExp(r'\[(.+?)\]\((.+?)\)'), r'$1')
+        .trim();
   }
 }
 

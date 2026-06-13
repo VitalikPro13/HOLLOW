@@ -269,8 +269,8 @@ These are handled directly in `handle_incoming_request()`:
 - `CrdtOpBroadcast` — validates permissions per-payload type AGAINST `op.author` (never the transport sender — ops can be relayed); self-leave `MemberRemoved { peer_id == op.author }` always allowed; applies op, forwards to other members, emits specific NetworkEvent per payload.
 
 **Server join flow:**
-- `ServerJoinRequest` — ban check, Twitch verification, owner-online check, adds member via CRDT op, sends `ServerStateSnapshot` then the full op log (`SyncResponse`) to the joiner (WS is FIFO, snapshot lands first).
-- `ServerJoinRejected` — removes from pending_server_joins, emits TwitchJoinRejected.
+- `ServerJoinRequest` — gate chain (each early-`return`s with a prefixed `ServerJoinRejected` reason on failure): ban check → Twitch verification → owner-online check → then INSIDE the `if !already_member` block: **private gate** (`state.is_private()` → reject `server_private:{name}`) and **member-cap gate** (`state.max_members()` set and `members_list().len() >= max` → reject `server_full:{name}:{max}`). Existing members re-joining short-circuit before these gates so they're never blocked. On success: adds member via CRDT op, sends `ServerStateSnapshot` then the full op log (`SyncResponse`) to the joiner (WS is FIFO, snapshot lands first). The private/cap settings reuse the `settings` map + `ServerSettingChanged` op — no new CRDT variant, no codegen.
+- `ServerJoinRejected` — dedups the rejection popup: a join request reaches EVERY online member, so each sends its own rejection. Only emits `TwitchJoinRejected` (the generic join-rejection event) when `pending_server_joins.remove(&server_id).is_some()` — i.e. the first rejection for an in-flight join. Subsequent rejections find the key already gone and are no-ops. Mirrors the successful-join path's `remove().is_some()` guard.
 - `ServerDeleteBroadcast` — verifies sender is Owner, removes server state.
 - `MemberKickBroadcast` — verifies sender has KICK_MEMBERS and outranks us, removes server state.
 

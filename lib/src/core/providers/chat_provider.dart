@@ -6,6 +6,7 @@ import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
+import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
@@ -46,6 +47,12 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
     );
 
     _addMessage(peerId, msg);
+
+    // Being the last to speak clears our own unread state for this DM.
+    // Without this, `seen:dm:{peer}` stays pinned before our latest activity,
+    // so after a restart `recomputeDmUnread` could light the unread pill on a
+    // conversation where OUR message is the newest (the self-message pill bug).
+    ref.read(unreadProvider.notifier).markDmSeen(peerId, messageId);
   }
 
   /// Receive a message from a peer (from network events).
@@ -359,6 +366,17 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
       final updated = Map.of(state);
       updated[peerId] = merged;
       state = updated;
+
+      // Self-heal the unread pill: if the newest message in this DM is our own,
+      // there's nothing for US to read — advance the seen-pointer to it. This
+      // also repairs stale `seen:dm:{peer}` state left by older builds that
+      // didn't mark-seen on send (the self-message pill bug).
+      if (merged.isNotEmpty) {
+        final newest = merged.last;
+        if (newest.isMe && newest.messageId != null) {
+          ref.read(unreadProvider.notifier).markDmSeen(peerId, newest.messageId);
+        }
+      }
     } catch (e) {
       debugPrint('[HOLLOW] Failed to load history for $peerId: $e');
     }

@@ -1,4 +1,6 @@
-﻿import 'package:file_picker/file_picker.dart';
+﻿import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -79,10 +81,13 @@ class _WelcomeContentState extends State<_WelcomeContent> {
   }
 
   Future<void> _onRestoreFromBackup() async {
+    // iOS/Android don't recognize the custom `.hollow` extension as a UTI/MIME,
+    // so a `FileType.custom` filter hides the backup file. Use `any` on mobile.
+    final isMobile = Platform.isAndroid || Platform.isIOS;
     final result = await FilePicker.platform.pickFiles(
       dialogTitle: 'Select Backup File',
-      type: FileType.custom,
-      allowedExtensions: ['hollow'],
+      type: isMobile ? FileType.any : FileType.custom,
+      allowedExtensions: isMobile ? null : ['hollow'],
     );
     if (result == null || result.files.isEmpty || !mounted) return;
     final path = result.files.single.path;

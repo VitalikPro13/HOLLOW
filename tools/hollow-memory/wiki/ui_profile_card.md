@@ -26,10 +26,11 @@ The `OverlayEntry` captures a `late final` reference to itself. The `onDismiss` 
 
 ## Trigger Sources
 
-The profile card is shown from three locations:
+The profile card is shown from these locations:
 1. **`_ServerMemberTile` (member_panel.dart):** On tap. Anchor is `Offset(pos.dx - 290, pos.dy - 100)` — positions card ~290px to the left and ~100px above the tap point. Passes `nickname`, `role`, `twitchUsername`, `labels`.
 2. **`_MemberTile` (member_panel.dart):** On tap. Same anchor offset. No server-specific fields passed.
 3. **`UserBar` (user_bar.dart):** On tap of the user identity area. Anchor is `Offset(pos.dx, pos.dy - 8)` with `anchorBottom: true` — card bottom aligns just above the user bar.
+4. **Chat message sender name/avatar (`profile_tap.dart`):** `ProfileTapTarget` wraps the sender avatar + name in DM (`message_bubble.dart`) and channel (`channel_message_bubble.dart`) bubbles. `showChatProfile()` branches by platform: mobile → `showMobileProfileSheet` (bottom sheet — SelectionArea-safe), desktop → `showProfileCardPopup` anchored at `Offset(pos.dx, pos.dy + 24)` (just below the tapped element). Chat is inside `SelectionArea`, so the tap target is a full `GestureDetector + MouseRegion` widget (the proven URL/reply-tap pattern), never a raw `OverlayEntry`.
 
 ## _ProfileCardOverlay — Overlay Container
 
@@ -62,7 +63,7 @@ Card width is fixed at 280px.
 - `left = anchor.dx`, clamped to `[8, screenWidth - cardWidth - 8]` to prevent overflow off either screen edge.
 
 ### Vertical Positioning
-- **`anchorBottom == false` (default):** `top = anchor.dy`, clamped to minimum 8px from top edge. Card grows downward.
+- **`anchorBottom == false` (default):** opens downward (`top = anchor.dy`, clamped ≥ 8). **Auto-flip:** if `anchor.dy + estimatedCardHeight (380)` would overflow the bottom edge, the card instead opens UPWARD (`bottom = screenHeight - anchor.dy`, clamped ≥ 8). This prevents the card from running off-screen when triggered near the bottom (e.g. a chat message low in the viewport) — without it, a tap below the fold pushed the card off-screen instead of popping up higher.
 - **`anchorBottom == true`:** `bottom = screenHeight - anchor.dy`, clamped to minimum 8px from bottom edge. Card grows upward. Used by UserBar.
 
 ## Dismiss Barrier

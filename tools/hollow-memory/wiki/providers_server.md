@@ -591,6 +591,7 @@ Takes a map of `serverId -> List<channelId>` and a list of DM peer IDs. For each
 
 **`markDmSeen(peerId, latestMessageId)`**:
 - Same pattern: update `dmLastSeen`, clear `dmUnreadCounts`, persist.
+- **Called on SEND, not just on view:** `chatProvider.sendMessage` calls `markDmSeen(peerId, messageId)` after adding the sent message. Without this, the `seen:dm:{peer}` pointer never advanced when the local user was the last to speak, so after a restart `recomputeDmUnread` could re-light the unread pill on a conversation where the user's OWN message is the newest (the "self-message unread pill" bug). The Rust counts already filter `is_mine = 0`, so the only missing piece was advancing the seen-pointer on send. `chatProvider.loadHistory` additionally self-heals stale pointers from older builds: if the newest loaded message `isMe`, it calls `markDmSeen` on open. NOT a read-receipt feature.
 
 ### Query Methods (synchronous, read current state)
 

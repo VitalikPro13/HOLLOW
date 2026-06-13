@@ -5825,6 +5825,37 @@ async fn handle_incoming_request(
                 let already_member = state.members_list().iter().any(|m| m.peer_id == peer_str);
 
                 if !already_member {
+                    // Private-server gate: an invite-only server rejects all new
+                    // joiners (existing members re-joining are never blocked, since
+                    // they short-circuit above). Mirrors the Twitch gate.
+                    if state.is_private() {
+                        hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: server {server_id} is private");
+                        send_message_to_peer(
+                            ws_cmd_tx, ws_room_peers,
+                            peer_str, HavenMessage::ServerJoinRejected {
+                                server_id,
+                                reason: format!("server_private:{}", state.name()),
+                            },
+                        );
+                        return;
+                    }
+
+                    // Member-cap gate: reject if the server is at its configured
+                    // max member count. None = unlimited.
+                    if let Some(max) = state.max_members() {
+                        if state.members_list().len() as u32 >= max {
+                            hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: server {server_id} is full ({max} max)");
+                            send_message_to_peer(
+                                ws_cmd_tx, ws_room_peers,
+                                peer_str, HavenMessage::ServerJoinRejected {
+                                    server_id,
+                                    reason: format!("server_full:{}:{}", state.name(), max),
+                                },
+                            );
+                            return;
+                        }
+                    }
+
                     // Add the new member via CRDT op
                     let display_name = format!("{}...{}", &peer_str[..4.min(peer_str.len())], &peer_str[peer_str.len().saturating_sub(4)..]);
                     let op = state.create_op(CrdtPayload::MemberAdded {
@@ -5943,11 +5974,17 @@ async fn handle_incoming_request(
 
         HavenMessage::ServerJoinRejected { server_id, reason } => {
             hollow_log!("[HOLLOW-CRDT] Join rejected for {server_id}: {reason}");
-            pending_server_joins.remove(&server_id);
-            let _ = event_tx.send(NetworkEvent::TwitchJoinRejected {
-                server_id,
-                reason,
-            }).await;
+            // A join request reaches every online member, so each one may send
+            // its own rejection. Only surface the FIRST for an in-flight join —
+            // remove() returns Some only if the join was still pending, which
+            // dedups the rejection popup (otherwise the joiner sees N popups).
+            let was_pending = pending_server_joins.remove(&server_id).is_some();
+            if was_pending {
+                let _ = event_tx.send(NetworkEvent::TwitchJoinRejected {
+                    server_id,
+                    reason,
+                }).await;
+            }
         }
 
         HavenMessage::ServerDeleteBroadcast { server_id } => {

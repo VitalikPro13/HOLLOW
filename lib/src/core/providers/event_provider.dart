@@ -51,7 +51,7 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
-import 'package:hollow/src/ui/dialogs/twitch_join_dialog.dart' show showTwitchJoinDialog, handleTwitchJoinResult;
+import 'package:hollow/src/ui/dialogs/twitch_join_dialog.dart' show showTwitchJoinDialog, handleTwitchJoinResult, showJoinRejectedDialog;
 
 /// Listens to the Rust event stream and dispatches events
 /// to the appropriate providers.
@@ -1150,6 +1150,36 @@ class EventStreamNotifier extends Notifier<bool> {
           final handled = handleTwitchJoinResult(success: false, error: msg);
           if (!handled) {
             HollowToast.show(ctx, msg, type: HollowToastType.error);
+          }
+        } else if (reason.startsWith('server_private:')) {
+          // Format: "server_private:{server_name}"
+          final serverName = reason.substring('server_private:'.length);
+          final handled = handleTwitchJoinResult(
+              success: false, error: 'This server is private.');
+          if (!handled) {
+            showJoinRejectedDialog(
+              ctx,
+              title: 'Server is private',
+              message:
+                  '${serverName.isEmpty ? 'This server' : '“$serverName”'} is '
+                  'private and doesn\'t accept new members.',
+            );
+          }
+        } else if (reason.startsWith('server_full:')) {
+          // Format: "server_full:{server_name}:{max}"
+          final parts = reason.split(':');
+          final serverName = parts.length > 1 ? parts[1] : '';
+          final max = parts.length > 2 ? parts[2] : '';
+          final handled = handleTwitchJoinResult(
+              success: false, error: 'This server is full.');
+          if (!handled) {
+            showJoinRejectedDialog(
+              ctx,
+              title: 'Server is full',
+              message:
+                  '${serverName.isEmpty ? 'This server' : '“$serverName”'} has '
+                  'reached its member limit${max.isEmpty ? '' : ' ($max members)'}.',
+            );
           }
         } else {
           final handled = handleTwitchJoinResult(success: false, error: reason);

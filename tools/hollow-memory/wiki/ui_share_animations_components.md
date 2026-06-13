@@ -567,11 +567,13 @@ Top-level function wrapping `showGeneralDialog`. Returns `Future<T?>`.
 
 **Parameters:** `title` (String), `content` (Widget), `actions` (List<Widget>).
 
-**Layout:** `Center` > `Padding(xl)` > `ConstrainedBox(maxWidth: 600, minWidth: 300)` > `Material(transparent)` > `Container`.
+**Layout:** `Center` > `Padding(xl)` > `ConstrainedBox(maxWidth: 600, minWidth: 300 [or screenWidth-padding on phones], maxHeight: screenHeight - xl*2)` > `Material(transparent)` > `Container`.
+
+**maxHeight (important):** the `ConstrainedBox` caps height to the screen (minus outer padding) so the `Flexible(SingleChildScrollView(content))` actually clamps — `Center` is unbounded vertically, so without this a tall dialog grows past the screen and pushes the sticky action bar off the bottom (this is why the ringtone Trim dialog's buttons "didn't render" on small iPhones). `showHollowDialog` pads/strips `viewInsets` at the pageBuilder level, so `MediaQuery.sizeOf(context).height` here is the usable height. Benefits every dialog.
 
 **Decoration:** `hollow.elevated` at 92% alpha, `radiusLg` corners, accent border at 15%, shadow (20% black, 24px blur).
 
-**Content layout:** Column with title (if non-empty) + `HollowSpacing.lg` + content + `HollowSpacing.xl` + right-aligned action Row (if actions non-empty).
+**Content layout:** Column(mainAxisSize.min) with title (if non-empty) + `HollowSpacing.lg` + `Flexible(SingleChildScrollView(content))` + `HollowSpacing.xl` + right-aligned action `Wrap` (OUTSIDE the scroll view, so it's a sticky footer). To split actions left/right (e.g. ringtone Preview-left, Cancel/Save-right), pass a single full-width `Row` as the only action — a bare Wrap right-aligns everything.
 
 **Important:** Wraps content in `Material` so `Text` widgets have a material ancestor (avoids yellow debug underline).
 

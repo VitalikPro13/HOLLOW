@@ -357,8 +357,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     _markSeen();
   }
 
-  Future<void> _pickFile() async {
-    final result = await FilePicker.platform.pickFiles();
+  Future<void> _pickFile({bool imagesOnly = false}) async {
+    final result = await FilePicker.platform.pickFiles(
+      type: imagesOnly ? FileType.image : FileType.any,
+    );
     if (result == null || result.files.isEmpty) return;
     final file = result.files.first;
     if (file.path == null) return;
@@ -792,6 +794,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                     focusNode: _focusNode,
                     onSend: _handleSend,
                     onPickFile: _pickFile,
+                    onPickImage: () => _pickFile(imagesOnly: true),
                     onMic: _stagedFilePath != null
                         ? null
                         : () => setState(() => _isRecordingVoice = true),
@@ -1891,6 +1894,7 @@ class _MobileInputBar extends StatelessWidget {
   final FocusNode focusNode;
   final VoidCallback onSend;
   final VoidCallback onPickFile;
+  final VoidCallback onPickImage;
   final VoidCallback? onMic;
   final VoidCallback onEmoji;
   final ValueChanged<String> onChanged;
@@ -1901,6 +1905,7 @@ class _MobileInputBar extends StatelessWidget {
     required this.focusNode,
     required this.onSend,
     required this.onPickFile,
+    required this.onPickImage,
     this.onMic,
     required this.onEmoji,
     required this.onChanged,
@@ -1927,6 +1932,12 @@ class _MobileInputBar extends StatelessWidget {
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.sm),
             child: Icon(LucideIcons.paperclip, color: hollow.textSecondary, size: 22),
+          ),
+          HollowPressable(
+            onTap: onPickImage,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            padding: const EdgeInsets.all(HollowSpacing.sm),
+            child: Icon(LucideIcons.image, color: hollow.textSecondary, size: 22),
           ),
           const SizedBox(width: HollowSpacing.xs),
           Expanded(

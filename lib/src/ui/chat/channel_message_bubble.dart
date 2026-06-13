@@ -16,6 +16,7 @@ import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/link_preview_card.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/chat/message_text_parser.dart';
+import 'package:hollow/src/ui/chat/profile_tap.dart';
 import 'package:hollow/src/ui/chat/reaction_bar.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 
@@ -241,7 +242,12 @@ class ChannelMessageBubble extends ConsumerWidget {
           children: [
             Padding(
               padding: const EdgeInsets.only(top: 5),
-              child: HollowAvatar(peerId: message.senderId, size: avatarSize),
+              child: ProfileTapTarget(
+                peerId: message.senderId,
+                nickname:
+                    (senderNickname?.isNotEmpty ?? false) ? senderNickname : null,
+                child: HollowAvatar(peerId: message.senderId, size: avatarSize),
+              ),
             ),
             const SizedBox(width: avatarGap),
             Expanded(
@@ -250,14 +256,20 @@ class ChannelMessageBubble extends ConsumerWidget {
                 children: [
                   Row(
                     children: [
-                      Text(
-                        senderName,
-                        style: HollowTypography.body.copyWith(
-                          color: isMe
-                              ? hollow.accent
-                              : nameColorFromId(message.senderId),
-                          fontWeight: FontWeight.w600,
-                          fontSize: 13,
+                      ProfileTapTarget(
+                        peerId: message.senderId,
+                        nickname: (senderNickname?.isNotEmpty ?? false)
+                            ? senderNickname
+                            : null,
+                        child: Text(
+                          senderName,
+                          style: HollowTypography.body.copyWith(
+                            color: isMe
+                                ? hollow.accent
+                                : nameColorFromId(message.senderId),
+                            fontWeight: FontWeight.w600,
+                            fontSize: 13,
+                          ),
                         ),
                       ),
                       const SizedBox(width: HollowSpacing.sm),

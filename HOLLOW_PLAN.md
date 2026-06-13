@@ -1920,20 +1920,21 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] Temporary nickname taking for accepting the friends
 - [X] Fix notification timing under rapid sends
 - [X] Jumping chat on iOS (probably keyboard bug)
+- [X] Unread notification about your own message when the other DM peer didn't read it
+- [X] Server private/public (joining limitation)
+- [X] Limit amount of people on the server (max member count limit for owners)
+- [X] Profile popup on the name/avatar click inside the chat
+- [X] Identity import/export on mobile
+- [X] Photo library button on mobile
+- [X] Proper markdown rendering of the news section text on mobile
+- [X] Fix ringtone on mobile (iOS I guess, needs checking) — redesigned the ringtone TRIM dialog (the actual issue): sticky action bar + dialog maxHeight (fixes buttons clipped on small iOS screens) + scrubbable waveform selector with numeric ±nudge for long-track precision
 - [ ] Annotation on someone else's screen
-- [ ] Unread notification about your own message when the other DM peer didn't read it
-- [ ] Server private/public (joining limitation)
-- [ ] Limit amount of people on the server (max member count limit for owners)
-- [ ] Profile popup on the name/avatar click inside the chat
-- [ ] Identity import/export on mobile
-- [ ] Photo library button on mobile
-- [ ] Proper markdown rendering of the news section text on mobile
-- [ ] Fix ringtone on mobile (iOS I guess, needs checking)
 - [ ] Calls are too quiet. They need proper normalization and testing. Maybe echo cancellation or noise suppression are the main suspects here
 - [ ] Hollow Share warnings about STUN-only
 - [ ] Camera front/back switching + double-side at the same time on mobile
 - [ ] When another peer is trying to call a friend who's in an active call, it simply starts and immediatly finishes. Needs polishing
 - [ ] Pill switching for mobile between screen and camera during calls
+- [ ] Image/file loading for the mobile (replicate the instant appearing; though, I feel like that it's a phone limitation)
 
 - [ ] **Share system for DMs (large file support).** Currently DMs cap at 34 MB (hard reject). Extend the hidden Share system to work in DMs so large files can be sent P2P with chunking, resume, and sequential download. Needs: DM-context share creation (`serverId=null`, `contextType="dm"`), auto-download on receiver side, vault_cache routing, no seeding after completion (1:1 only). Until then, 34 MB hard cap on DM files.
 - [ ] Screen share gossip relay for voice channels — current limit is 5 outgoing viewers (direct P2P). Need gossip-style forwarding or lightweight SFU relay so larger voice channels can all watch a screen share without creating N peer connections per viewer

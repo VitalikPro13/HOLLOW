@@ -176,7 +176,11 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
       left = screenSize.width - cardWidth - 8;
     }
 
-    // Vertical positioning
+    // Vertical positioning. The card height is variable; estimate a generous
+    // max so we can keep it on-screen. When opening downward would push the
+    // card off the bottom, flip it to open UPWARD from the anchor instead
+    // (and clamp to the top edge if even that doesn't fit).
+    const estimatedCardHeight = 380.0;
     double? top;
     double? bottom;
     if (widget.anchorBottom) {
@@ -184,8 +188,15 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
       bottom = screenSize.height - widget.anchor.dy;
       if (bottom < 8) bottom = 8;
     } else {
-      top = widget.anchor.dy;
-      if (top < 8) top = 8;
+      final wouldOverflowBottom =
+          widget.anchor.dy + estimatedCardHeight > screenSize.height - 8;
+      if (wouldOverflowBottom) {
+        // Open upward: card's bottom sits at the anchor.
+        bottom = (screenSize.height - widget.anchor.dy).clamp(8.0, double.infinity);
+      } else {
+        top = widget.anchor.dy;
+        if (top < 8) top = 8;
+      }
     }
 
     return Stack(

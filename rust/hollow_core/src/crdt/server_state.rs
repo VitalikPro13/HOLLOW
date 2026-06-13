@@ -622,6 +622,24 @@ impl ServerState {
             .unwrap_or(512)
     }
 
+    /// Whether the server is private (invite-only). Defaults to public.
+    /// Stored in `settings["is_private"]` as "true"/"false".
+    pub fn is_private(&self) -> bool {
+        self.settings
+            .get("is_private")
+            .map(|reg| reg.read() == "true")
+            .unwrap_or(false)
+    }
+
+    /// Owner-configured max member count. `None` = unlimited (default).
+    /// Stored in `settings["max_members"]`; 0 or unparseable = unlimited.
+    pub fn max_members(&self) -> Option<u32> {
+        self.settings
+            .get("max_members")
+            .and_then(|reg| reg.read().parse::<u32>().ok())
+            .filter(|&n| n > 0)
+    }
+
     /// Look up author's priority from their role in this server.
     fn author_priority(&self, author: &str) -> u8 {
         self.roles

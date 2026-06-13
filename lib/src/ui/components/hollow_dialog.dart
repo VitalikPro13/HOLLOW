@@ -99,13 +99,20 @@ class HollowDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final radius = BorderRadius.circular(hollow.radiusLg);
-    final screenWidth = MediaQuery.sizeOf(context).width;
+    final screenSize = MediaQuery.sizeOf(context);
+    final screenWidth = screenSize.width;
     final isCompact = screenWidth < 600;
     // Phones: span the available width (minus outer padding) so dialogs feel
     // native. Desktop: shrink-wrap between 300 and 600 as before.
     final minWidth = isCompact
         ? (screenWidth - HollowSpacing.xl * 2).clamp(0.0, 600.0)
         : 300.0;
+    // Cap the dialog height to the available screen (minus outer padding) so
+    // the Flexible scroll region actually clamps and the sticky action bar
+    // never gets pushed off-screen on short displays (e.g. small iPhones with
+    // the keyboard up). Without this the Column grows unbounded.
+    final maxHeight =
+        (screenSize.height - HollowSpacing.xl * 2).clamp(0.0, double.infinity);
 
     return Center(
       child: Padding(
@@ -114,6 +121,7 @@ class HollowDialog extends StatelessWidget {
           constraints: BoxConstraints(
             maxWidth: 600,
             minWidth: minWidth,
+            maxHeight: maxHeight,
           ),
           child: Material(
             color: Colors.transparent,

@@ -57,6 +57,7 @@ Source: `lib/src/ui/settings/overview_tab.dart` (763 lines). `ConsumerStatefulWi
 - `_twitchChannelController` -- Twitch channel display name
 - `_twitchChannelIdController` -- numeric Twitch user ID
 - `_twitchMinDaysController` -- minimum follow days, initialized to `'0'`
+- `_maxMembersController` -- max member cap (digits-only via `FilteringTextInputFormatter.digitsOnly`; blank = unlimited)
 
 **Boolean state flags:**
 - `_saving` -- disables Save buttons during name/description save
@@ -65,11 +66,14 @@ Source: `lib/src/ui/settings/overview_tab.dart` (763 lines). `ConsumerStatefulWi
 - `_twitchRequireSub` -- require subscription (not just follow)
 - `_twitchOwnerVerify` -- owner-online verification mode
 - `_savingTwitch` -- disables Twitch save button during save
+- `_isPrivate` -- private (invite-only) server toggle
+- `_savingAccess` -- disables the Access save button during save
 
 **Initialization (`initState`):**
 - `_loadDescription()` -- calls `crdt_api.getServerSetting(serverId, 'description')`, populates controller
 - `_loadNickname()` -- gets `identityProvider.peerId`, calls `crdt_api.getServerMembers(serverId)`, finds local user's nickname
 - `_loadTwitchSettings()` -- reads 6 server settings keys: `twitch_verification_enabled`, `twitch_channel_name`, `twitch_channel_id`, `twitch_min_follow_days`, `twitch_require_sub`, `twitch_owner_verify`
+- `_loadAccessSettings()` -- reads `is_private` and `max_members` settings keys (0/empty = blank field = unlimited)
 
 **`didUpdateWidget`:** If server name changed externally, updates `_nameController.text`.
 
@@ -96,6 +100,13 @@ Entire section wrapped in `if (widget.canManageServer)`. Contains:
 - `HollowTextField` with `_descController`, hint "What is this server about?", `maxLines: 3`, `maxLength: 256`
 - "Save Description" `HollowButton.filled` aligned right, disabled while `_saving`
 - `_saveDescription()`: calls `crdt_api.updateServerSetting(serverId, 'description', desc)`
+
+**Access (private + member cap):**
+- Section header "ACCESS".
+- **Private server** toggle (`HollowToggle`, `_isPrivate`) with subtitle "New members can't join via the link." When ON, the join handler rejects all new joiners.
+- **Max members** field (`HollowTextField`, `_maxMembersController`, digits-only, hint "Unlimited") + helper "Leave blank for no limit. Existing members are never removed."
+- ONE section-level **"Save Access Settings"** `HollowButton.filled` placed BELOW both controls (right-aligned, like "Save Twitch Settings") — NOT an inline save next to the input (that wrongly reads as "save this field").
+- `_saveAccessSettings()`: parses the field (0/empty = unlimited, stored as "0"). For a finite cap, fetches the LIVE member count via `crdt_api.getServerMembers().length` (not the possibly-stale `ServerInfo.memberCount`) and rejects with a toast if the cap is below the current count. Writes `is_private` and `max_members` via `crdt_api.updateServerSetting` (reuses `ServerSettingChanged` — no new CRDT op). Enforcement is on the Rust join handler; see `rust_sync_handler.md` / `swarm.rs ServerJoinRequest`.
 
 **Server Template:**
 - Section header "SERVER TEMPLATE" with description text
