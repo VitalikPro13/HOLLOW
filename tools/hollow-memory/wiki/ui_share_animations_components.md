@@ -20,7 +20,11 @@ Top-level Share tab view. `ConsumerStatefulWidget` that displays the full share 
 
 ### Layout
 
-Container with `hollow.background` color, Column with header + Expanded content area.
+Container with `hollow.background` color, Column with header + STUN-only warning strip + Expanded content area.
+
+### STUN-only warning strip (`_buildStunWarning`)
+
+Yellow advisory strip rendered directly below `_buildHeader`. Styled to match the imported-archive verification banner: `Colors.amber.shade700` text/icon, `color.withValues(alpha: 0.08)` background, bottom border `hollow.border.withValues(alpha: 0.3)`, `LucideIcons.alertTriangle` (size 14) + caption text (fontSize 11). Static advisory (always shown): Share transfers are direct P2P/STUN-only with no relay fallback, so they may fail behind strict/symmetric NATs. No state — purely informational.
 
 ### Header (`_buildHeader`)
 
@@ -611,9 +615,11 @@ Static class + `_HollowToastWidget` `StatefulWidget`.
 
 ### HollowToast (static API)
 
-- `show(context, message, {type, duration})` — shows a toast. Default duration 3 seconds.
+- `show(context, message, {type, duration, overlayState})` — shows a toast. Default duration 3 seconds.
 - `_dismiss()` — removes current entry immediately.
 - Only one toast visible at a time (`_currentEntry` static field). New toast replaces existing.
+
+**`overlayState` param (toasting from non-widget code):** When called from a provider/notifier with no `BuildContext`, pass `overlayState` to insert into a specific Overlay directly and skip the `Overlay.of(context)` ancestor lookup. Required because `Overlay.of(hollowNavigatorKey.currentContext)` throws "No Overlay widget found" — the Navigator's own context has no Overlay *ancestor* (the Overlay is the Navigator's child). Pattern: `final o = hollowNavigatorKey.currentState?.overlay; if (o != null) HollowToast.show(o.context, msg, overlayState: o);`. When omitted, the Overlay is resolved from `context` as before (the existing widget-context callers are unaffected). Used by `CallProvider._handleBusy` for the "peer is busy" toast.
 
 ### Toast Types (`HollowToastType`)
 

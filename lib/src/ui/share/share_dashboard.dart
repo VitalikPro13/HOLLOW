@@ -45,6 +45,7 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
       child: Column(
         children: [
           _buildHeader(hollow, userShares.length, serverFileShares.length),
+          _buildStunWarning(hollow),
           Expanded(
             child: _subTab == _ShareSubTab.myShares
                 ? _buildMyShares(userShares, hollow)
@@ -95,6 +96,43 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
               child: const Text('Paste Link'),
             ),
           ],
+        ],
+      ),
+    );
+  }
+
+  /// Yellow advisory strip below the header: Share transfers are STUN-only
+  /// (direct P2P, no TURN relay fallback), so a transfer can fail behind
+  /// strict/symmetric NATs. Mirrors the archive verification banner styling.
+  Widget _buildStunWarning(HollowTheme hollow) {
+    final color = Colors.amber.shade700;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.lg,
+        vertical: 10,
+      ),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        border: Border(
+          bottom: BorderSide(color: hollow.border.withValues(alpha: 0.3)),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(LucideIcons.alertTriangle, size: 14, color: color),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Text(
+              'Share transfers are direct peer-to-peer (STUN-only, no relay '
+              'fallback). Transfers may fail behind strict or symmetric NATs '
+              'if a direct connection can\'t be established.',
+              style: HollowTypography.caption.copyWith(
+                color: color,
+                fontSize: 11,
+              ),
+            ),
+          ),
         ],
       ),
     );

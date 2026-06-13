@@ -6,10 +6,12 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -17,6 +19,8 @@ import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/services/screen_audio_renderer.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/voice_service.dart';
+import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 
 import '../../rust/api/network.dart' as network_api;
 
@@ -925,7 +929,44 @@ class CallNotifier extends Notifier<CallState> {
   Future<void> _handleBusy(String peerId, String callId) async {
     if (state.callId != callId) return;
     debugPrint('[HOLLOW-CALL] Peer $peerId is busy');
+    // Tear the call down FIRST. The toast below must never be able to block
+    // this — a thrown toast used to abort _handleBusy before cleanup, leaving
+    // the "Calling..." sheet stuck on screen.
+    final busyPeer = peerId;
     await _cleanup();
+    _showBusyToast(busyPeer);
+  }
+
+  /// Toast the caller that the peer they dialed is already in another call.
+  /// Best-effort + fully guarded: the notifier has no BuildContext of its own,
+  /// so we reach for the global navigator's Overlay context. Wrapped in a
+  /// try/catch + post-frame so an Overlay-lookup failure can never crash the
+  /// call teardown.
+  void _showBusyToast(String peerId) {
+    final profile = ref.read(profileProvider)[peerId];
+    final name = displayNameForPeer(profile, peerId);
+    final msg = '$name is in a call, try again later';
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      try {
+        final overlay = hollowNavigatorKey.currentState?.overlay;
+        if (overlay == null) {
+          debugPrint('[HOLLOW-CALL] busy toast: no overlay');
+          return;
+        }
+        // Insert directly into the root navigator's Overlay — passing
+        // overlayState avoids the Overlay.of() ancestor lookup that fails
+        // from a navigator-key context. The positional context is unused
+        // when overlayState is set.
+        HollowToast.show(
+          overlay.context,
+          msg,
+          type: HollowToastType.info,
+          overlayState: overlay,
+        );
+      } catch (e) {
+        debugPrint('[HOLLOW-CALL] busy toast failed: $e');
+      }
+    });
   }
 
   Future<void> _handleSdpOffer(String peerId, String payload) async {

@@ -18,16 +18,25 @@ class HollowToast {
   static OverlayEntry? _currentEntry;
 
   /// Show a toast at the bottom of the screen.
+  ///
+  /// Pass [overlayState] to insert into a specific Overlay directly (e.g. the
+  /// root navigator's Overlay obtained from a GlobalKey). This is required when
+  /// calling from non-widget code (providers/notifiers) where the only handle
+  /// is the Navigator key — `Overlay.of(navKey.currentContext)` throws because
+  /// the Navigator's own context has no Overlay ancestor (the Overlay is its
+  /// child). When [overlayState] is omitted, the Overlay is resolved from
+  /// [context] as before.
   static void show(
     BuildContext context,
     String message, {
     HollowToastType type = HollowToastType.info,
     Duration duration = const Duration(seconds: 3),
+    OverlayState? overlayState,
   }) {
     // Dismiss any existing toast immediately.
     _dismiss();
 
-    final overlay = Overlay.of(context);
+    final overlay = overlayState ?? Overlay.of(context);
     late final OverlayEntry entry;
     late final AnimationController controller;
 

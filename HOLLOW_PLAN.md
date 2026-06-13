@@ -1928,11 +1928,11 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] Photo library button on mobile
 - [X] Proper markdown rendering of the news section text on mobile
 - [X] Fix ringtone on mobile (iOS I guess, needs checking) — redesigned the ringtone TRIM dialog (the actual issue): sticky action bar + dialog maxHeight (fixes buttons clipped on small iOS screens) + scrubbable waveform selector with numeric ±nudge for long-track precision
+- [X] Hollow Share warnings about STUN-only — yellow advisory strip below the Share dashboard header (matches the imported-archive verification banner styling) explaining transfers are direct P2P/STUN-only with no relay fallback
+- [X] When another peer is trying to call a friend who's in an active call, it simply starts and immediatly finishes. Needs polishing — the callee already auto-rejected with a `busy` signal; the caller's `_handleBusy` just did it silently. Now toasts "<name> is in a call, try again later" on the caller. Two bugs found en route: a thrown toast aborted `_handleBusy` before `_cleanup()` (left the "Calling…" sheet stuck) → cleanup now runs first + toast is post-frame/try-caught; and `Overlay.of(navKey.currentContext)` throws "No Overlay widget found" (Navigator's own context has no Overlay ancestor) → `HollowToast.show` gained an `overlayState` param to insert into the root navigator's Overlay directly
 - [ ] Annotation on someone else's screen
 - [ ] Calls are too quiet. They need proper normalization and testing. Maybe echo cancellation or noise suppression are the main suspects here
-- [ ] Hollow Share warnings about STUN-only
 - [ ] Camera front/back switching + double-side at the same time on mobile
-- [ ] When another peer is trying to call a friend who's in an active call, it simply starts and immediatly finishes. Needs polishing
 - [ ] Pill switching for mobile between screen and camera during calls
 - [ ] Image/file loading for the mobile (replicate the instant appearing; though, I feel like that it's a phone limitation)
 
