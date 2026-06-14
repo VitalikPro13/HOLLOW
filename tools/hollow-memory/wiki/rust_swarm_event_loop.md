@@ -6,15 +6,16 @@ Source: `rust/hollow_core/src/node/swarm.rs`
 
 ## Entry Point: spawn_node()
 
-`swarm.rs:spawn_node()` is the only public function (re-exported via `mod.rs`). It receives identity, crypto managers, and channel endpoints from the FFI layer, spawns background tasks, and returns the local peer ID + a `JoinHandle`.
+`swarm.rs:spawn_node(native_keypair, device_keypair, …)` is the only public function (re-exported via `mod.rs`). It receives the MASTER + DEVICE identities, crypto managers, and channel endpoints from the FFI layer, spawns background tasks, and returns the MASTER peer ID + a `JoinHandle`.
+
+**Multi-device key routing (Phase 6, locked):** the **device** keypair drives the WS relay auth + the signaling register ONLY (distinct relay socket per physical device); the **master** keypair (`native_keypair`) drives everything else — the event loop's `local_peer_str`, MLS/server membership, message-content signing, and the DB passphrase. Rooms are master-derived (`inbox:{master}`, `dm_room_code`→master, `server_id`), so a device authenticates as itself yet sits in its identity's rooms. On a pre-multi-device install device==master (migration keystone) so it's behavior-neutral. See `rust_storage_db.md` "Multi-Device Foundation" + `node/resolver.rs` header.
 
 **Initialization sequence:**
-1. Clone `NativeKeypair` for signaling and event loop use.
-2. Extract `peer_id_str` from the keypair (Ed25519 public key).
-3. Spawn the signaling background task via `signaling::spawn_signaling_task()` — returns `(sig_cmd_tx, sig_event_rx)`.
-4. Create the WS relay client via `ws_client::spawn_ws_client()` — connects to `wss://relay.anonlisten.com/ws`, returns `(ws_cmd_tx, ws_event_rx)`.
-5. Spawn the main event loop as a Tokio task via `tokio::spawn(run_event_loop(...))`.
-6. Return `(peer_id_str, handle)`.
+1. Clone the MASTER keypair for the event loop; derive `master_peer_id` + `device_peer_id`.
+2. Spawn the signaling background task via `signaling::spawn_signaling_task(device_keypair, device_peer_id, …)` (DEVICE-keyed register).
+3. Create the WS relay client via `ws_client::spawn_ws_client(…, device_peer_id, device_proto, …)` — DEVICE-keyed auth; connects to `wss://relay.anonlisten.com/ws`.
+4. Spawn the main event loop as a Tokio task via `tokio::spawn(run_event_loop(…, master_peer_id, device_peer_id, …))`.
+5. Return `(master_peer_id, handle)` — the app's "my peer id" is the master.
 
 Parameters received:
 - `NativeKeypair` — Ed25519 identity for signing.
@@ -479,7 +480,7 @@ The architecture follows a strict delegation pattern:
 
 ## Helper Functions (in swarm.rs)
 
-- `dm_room_code(a, b)` — deterministic DM room code from two peer IDs (lexicographic ordering).
+- `dm_room_code(a, b)` — deterministic DM room code from two peer IDs (lexicographic ordering). **Multi-device:** resolves BOTH ends to their master identity first (`resolver::resolve`), so every device of two people shares ONE DM room; unknown peers resolve to themselves so single-device codes are unchanged.
 - `SyncCoordinator` — struct for multi-peer fan-out sync coordination with 500ms collection window.
 
 All other helper functions have been extracted to their respective modules (see comments at line ~2563):

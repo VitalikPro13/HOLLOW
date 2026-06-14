@@ -25,9 +25,18 @@ pub(crate) const VC_SIGNAL_RATE_REFILL: u32 = 10;
 /// Compute a deterministic DM room code for two peers.
 /// Both peers compute the same code so signaling can match them.
 /// Uses SHA-256 truncated to 32 hex chars for collision resistance.
+///
+/// Multi-device (Phase 6): both arguments are resolved to their MASTER identity
+/// first, so EVERY device of one person and EVERY device of the other land in
+/// the SAME DM room regardless of which device peer_id is passed. Pre-multi-device
+/// (and for any peer whose device list we haven't ingested) the resolver returns
+/// the input unchanged, so this is byte-for-byte the old behavior — the known-good
+/// room codes are preserved for single-device installs.
 pub(crate) fn dm_room_code(peer_a: &str, peer_b: &str) -> String {
     use sha2::{Sha256, Digest};
-    let mut sorted = [peer_a, peer_b];
+    let master_a = super::resolver::resolve(peer_a);
+    let master_b = super::resolver::resolve(peer_b);
+    let mut sorted = [master_a.as_str(), master_b.as_str()];
     sorted.sort();
     let combined = format!("dm-{}-{}", sorted[0], sorted[1]);
     let hash = Sha256::digest(combined.as_bytes());

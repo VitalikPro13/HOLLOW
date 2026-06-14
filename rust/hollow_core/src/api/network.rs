@@ -1120,7 +1120,7 @@ pub fn start_node() -> Result<String, String> {
 
     let cmd_tx_clone = cmd_tx.clone();
     let (peer_id_str, handle) = rt
-        .block_on(node::spawn_node(id.keypair, event_tx, cmd_rx, cmd_tx_clone, olm, crypto_store, crdt_store, license_key, initial_invisible, relay_domain))
+        .block_on(node::spawn_node(id.keypair, id.device_keypair, event_tx, cmd_rx, cmd_tx_clone, olm, crypto_store, crdt_store, license_key, initial_invisible, relay_domain))
         .map_err(|e| format!("Failed to start node: {e}"))?;
 
     // Store event receiver separately so watch_network_events() can take it.
@@ -1203,6 +1203,39 @@ pub fn get_local_public_key() -> Result<String, String> {
     let identity = crate::identity::load_or_create_identity()?;
     let proto = identity.keypair.public_key_protobuf();
     Ok(base64::engine::general_purpose::STANDARD.encode(&proto))
+}
+
+/// A learned device → master identity link (multi-device, Phase 6).
+pub struct DeviceLink {
+    /// A device's transport peer_id (`12D3KooW…`).
+    pub device_peer_id: String,
+    /// The master identity peer_id it belongs to.
+    pub master_peer_id: String,
+}
+
+/// Resolve a (possibly per-device) peer_id to its MASTER identity peer_id.
+///
+/// Dart calls this to collapse a friend's multiple device peer_ids into one
+/// person for display/attribution. Unknown peers (single-device installs, or a
+/// peer whose signed device list we haven't ingested yet) resolve to themselves,
+/// so this is safe to call on any id. Reads the running node's in-memory resolver
+/// — no DB hit.
+#[frb]
+pub fn identity_for(peer_id: String) -> String {
+    crate::node::resolver::resolve(&peer_id)
+}
+
+/// Snapshot every known (device → master) link for the Dart attribution layer.
+///
+/// Dart builds a `device_link_provider` from this and refreshes it whenever a
+/// `DeviceListUpdated` event fires. A single-device install returns only
+/// self-mappings (or an empty list), so the provider is a no-op there.
+#[frb]
+pub fn get_device_links() -> Vec<DeviceLink> {
+    crate::node::resolver::all_links()
+        .into_iter()
+        .map(|(device_peer_id, master_peer_id)| DeviceLink { device_peer_id, master_peer_id })
+        .collect()
 }
 
 /// Verify an Ed25519 message signature against a canonical payload.

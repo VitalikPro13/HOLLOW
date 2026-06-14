@@ -47,6 +47,24 @@ Future<String?> getOlmFingerprint() =>
 Future<String> getLocalPublicKey() =>
     RustLib.instance.api.crateApiNetworkGetLocalPublicKey();
 
+/// Resolve a (possibly per-device) peer_id to its MASTER identity peer_id.
+///
+/// Dart calls this to collapse a friend's multiple device peer_ids into one
+/// person for display/attribution. Unknown peers (single-device installs, or a
+/// peer whose signed device list we haven't ingested yet) resolve to themselves,
+/// so this is safe to call on any id. Reads the running node's in-memory resolver
+/// — no DB hit.
+Future<String> identityFor({required String peerId}) =>
+    RustLib.instance.api.crateApiNetworkIdentityFor(peerId: peerId);
+
+/// Snapshot every known (device → master) link for the Dart attribution layer.
+///
+/// Dart builds a `device_link_provider` from this and refreshes it whenever a
+/// `DeviceListUpdated` event fires. A single-device install returns only
+/// self-mappings (or an empty list), so the provider is a no-op there.
+Future<List<DeviceLink>> getDeviceLinks() =>
+    RustLib.instance.api.crateApiNetworkGetDeviceLinks();
+
 /// Verify an Ed25519 message signature against a canonical payload.
 ///
 /// Used by the Message Proof dialog ("The RAT Files") to show real-time
@@ -577,6 +595,28 @@ Future<void> webrtcBroadcastReceived({
   shardIndex: shardIndex,
 );
 
+/// A learned device → master identity link (multi-device, Phase 6).
+class DeviceLink {
+  /// A device's transport peer_id (`12D3KooW…`).
+  final String devicePeerId;
+
+  /// The master identity peer_id it belongs to.
+  final String masterPeerId;
+
+  const DeviceLink({required this.devicePeerId, required this.masterPeerId});
+
+  @override
+  int get hashCode => devicePeerId.hashCode ^ masterPeerId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DeviceLink &&
+          runtimeType == other.runtimeType &&
+          devicePeerId == other.devicePeerId &&
+          masterPeerId == other.masterPeerId;
+}
+
 /// A discovered peer on the local network.
 class DiscoveredPeer {
   final String peerId;
@@ -930,6 +970,10 @@ sealed class NetworkEvent with _$NetworkEvent {
   }) = NetworkEvent_DmSyncCompleted;
   const factory NetworkEvent.profileUpdated({required String peerId}) =
       NetworkEvent_ProfileUpdated;
+
+  /// A device list was ingested for `master_peer_id` (multi-device, Phase 6).
+  const factory NetworkEvent.deviceListUpdated({required String masterPeerId}) =
+      NetworkEvent_DeviceListUpdated;
   const factory NetworkEvent.channelMessageEdited({
     required String serverId,
     required String channelId,

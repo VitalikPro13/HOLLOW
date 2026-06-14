@@ -23,7 +23,7 @@ pub(crate) async fn handle_send_friend_request(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    if peer_id_str == local_peer_str {
+    if super::resolver::same_identity(&peer_id_str, local_peer_str) {
         hollow_log!("[HOLLOW-FRIENDS] Rejected self-friend request");
         let _ = event_tx.send(NetworkEvent::Error {
             message: "Cannot send a friend request to yourself".into(),
@@ -285,6 +285,8 @@ pub(crate) async fn handle_update_profile(
     server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
     crypto_store: &crate::crypto::CryptoStore,
     local_peer_str: &str,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
     display_name: String,
     status: String,
     about_me: String,
@@ -324,6 +326,12 @@ pub(crate) async fn handle_update_profile(
         }
     }
 
+    // Build our master-signed device list so friends learn (tamper-proof) which
+    // device peer_ids resolve to us (multi-device, Phase 6).
+    let device_list = super::crypto_handler::build_local_device_list(
+        master_keypair, device_peer_id, db_path, db_passphrase,
+    );
+
     // Broadcast profile via MLS to each server room, plus plaintext to remaining peers.
     let envelope = MessageEnvelope::ProfileUpdate {
         display_name: display_name.clone(),
@@ -334,8 +342,7 @@ pub(crate) async fn handle_update_profile(
         banner_b64: banner_b64.clone(),
         is_invisible,
         twitch_username: twitch_username.clone(),
-        // Populated below (after we build the local signed device list).
-        device_list: None,
+        device_list: device_list.clone(),
     };
     let mut mls_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Send via MLS to each server we're in.
@@ -362,8 +369,7 @@ pub(crate) async fn handle_update_profile(
         banner_b64: banner_b64.clone(),
         is_invisible,
         twitch_username: twitch_username.clone(),
-        // Populated below (after we build the local signed device list).
-        device_list: None,
+        device_list,
     };
     hollow_log!("[HOLLOW-SWARM] Broadcasting profile update");
     {
@@ -396,6 +402,8 @@ pub(crate) fn send_own_profile_to_peer(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     local_peer_str: &str,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
     target_peer: &str,
     is_invisible: bool,
     db_path: &str,
@@ -411,6 +419,9 @@ pub(crate) fn send_own_profile_to_peer(
                 .as_ref()
                 .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
                 .unwrap_or_default();
+            let device_list = super::crypto_handler::build_local_device_list(
+                master_keypair, device_peer_id, db_path, db_passphrase,
+            );
             let msg = HavenMessage::ProfileUpdate {
                 display_name: profile.display_name,
                 status: profile.status,
@@ -420,8 +431,7 @@ pub(crate) fn send_own_profile_to_peer(
                 banner_b64,
                 is_invisible,
                 twitch_username: profile.twitch_username,
-                // Populated by the publish path (Task #6).
-                device_list: None,
+                device_list,
             };
             send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, msg);
         }
@@ -446,6 +456,7 @@ pub(crate) async fn handle_envelope_typing(
 pub(crate) async fn handle_envelope_profile_update(
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_states: &mut HashMap<String, ServerState>,
+    local_master_peer_id: &str,
     sender_peer_id: String,
     display_name: String,
     status: String,
@@ -454,9 +465,16 @@ pub(crate) async fn handle_envelope_profile_update(
     avatar_b64: String,
     banner_b64: String,
     twitch_username: String,
+    device_list: Option<SignedDeviceList>,
     db_path: &str,
     db_passphrase: &str,
 ) {
+    // Multi-device: ingest the sender's signed device list (verify + monotonic +
+    // persist + resolver update + DeviceListUpdated). No-op for old clients.
+    super::crypto_handler::ingest_device_list(
+        event_tx, local_master_peer_id, device_list, db_path, db_passphrase,
+    ).await;
+
     // Decode avatar/banner base64 (same logic as HavenMessage::ProfileUpdate handler).
     let avatar_bytes: Option<Vec<u8>> = if avatar_b64.is_empty() {
         None

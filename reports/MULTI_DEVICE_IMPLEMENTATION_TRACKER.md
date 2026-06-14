@@ -115,9 +115,12 @@ background-load on an existing install seed the device key from the master (migr
 Ordered so each step is independently testable and delivers value before the next. **Do not start a step
 until the prior one is verified working on real devices.** Plan mode + live test between every step.
 
-### Step 1 — Device identity foundation  ◐ in progress
+### Step 1 — Device identity foundation  ✅ code-complete (pending real-device test)
 *Goal: each install has a distinct per-device peer_id, plus a master-signed device list. Fixes self-request
 and mutual crypto-corruption for good. No fan-out yet.*
+*All sub-tasks (foundation + publish/ingest + key routing + resolver wiring + Dart) landed. 315 Rust lib
+tests + 16 Flutter widget tests pass. Behavior-neutral for single-device installs (migration keystone keeps
+device==master). Awaiting the two-device live test below before declaring Step 1 done.*
 *Full plan: `~/.claude/plans/steady-sleeping-sun.md`. Detailed sub-tasks tracked in the session task list.*
 
 - [x] Decide §3 (key derivation + id format) — LOCKED: Option A (random per-device key) + reuse existing
@@ -137,11 +140,24 @@ and mutual crypto-corruption for good. No fan-out yet.*
       version-gated upsert + reverse-index rebuild, `get_all_device_links`).
 - [x] Resolver `node/resolver.rs`: `resolve(peer_id)→master` (unknown→self), `same_identity`, `update`/
       `update_many`/`seed_self`/`warm_from_links`. 5 tests. Process-global, lock-poison-safe.
-- [ ] Master identity pubkey retained as the cross-device link (the "who you are") — exposed via device list.
-- [ ] Publish (attach to both ProfileUpdate variants) + ingest (verify + persist + resolver update). [#6]
-- [ ] Key routing: device key → WS auth/signaling/local_peer; master key → message signing/device-list sig.
-- [ ] Wire resolver into ALL self/attribution sites (dm_room_code ×8, self-checks, is_mine, verify-sig R1).
-- [ ] Dart attribution via `identityFor()` + `device_link_provider`.
+- [x] Master identity pubkey retained as the cross-device link (the "who you are") — exposed via device list.
+- [x] Publish (attach to both ProfileUpdate variants + `send_own_profile_to_peer`) + ingest (verify + monotonic
+      version + persist + resolver update + `DeviceListUpdated`). [#6] — `crypto_handler::{build_local_device_list,
+      ingest_device_list}`, `storage::load_device_list`, threaded via `handle_update_profile`/`handle_envelope_profile_update`/
+      bare `ProfileUpdate` handler. Self-list persisted version-monotonically; own master never overwritten by a peer.
+- [x] Key routing: **device key → WS auth + signaling register ONLY**; `local_peer_str`/`bundle_keypair`/MLS/
+      signing/DB stay MASTER. [#7] — `spawn_node(native_keypair, device_keypair, …)`, rooms are master-derived so a
+      device authenticates as itself yet sits in its identity's rooms. `peer_is_reachable` made resolver-aware (a master
+      is reachable if any of its devices is in a room). Single-device fully preserved (keystone device==master).
+      *DM/server-member SENDS to a true 2nd device need Olm fan-out (Step 3) — single-device + fresh-device-talking-to-
+      single-device friends already work.*
+- [x] Wire resolver into self/attribution sites. [#8] — `dm_room_code` resolves BOTH ends to masters (covers all 8
+      call sites at once); DM receive attributes to sender's master (`convo_peer`) for thread key + DB key + sig context;
+      `is_mine` ×3 via `same_identity`; friend-request self-guards (send + receive) via `same_identity`; DM
+      edit/delete/reaction convo-key + reactor resolved to master. Bulk `member == local_peer` self-skips need NO change
+      (both masters — see resolver header architecture note).
+- [x] Dart attribution. [#9] — FFI `identity_for(peer_id)` + `get_device_links()` (+ `DeviceLink` struct);
+      `device_link_provider` mirrors the resolver, warmed on node start + refreshed on `DeviceListUpdated`. Codegen run.
 - [ ] **Test (Vitalik, main + VM):** same mnemonic on two devices → *distinct* peer_ids, both connect to
       the relay simultaneously without overwriting; no "self friend request"; no crypto corruption; existing
       single-device install unchanged (migration keystone: device_peer_id == legacy peer_id).

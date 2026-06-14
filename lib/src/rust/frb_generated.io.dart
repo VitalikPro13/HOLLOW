@@ -114,6 +114,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ChannelFfi dco_decode_channel_ffi(dynamic raw);
 
   @protected
+  DeviceLink dco_decode_device_link(dynamic raw);
+
+  @protected
   DiscoveredPeer dco_decode_discovered_peer(dynamic raw);
 
   @protected
@@ -182,6 +185,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ChannelFfi> dco_decode_list_channel_ffi(dynamic raw);
+
+  @protected
+  List<DeviceLink> dco_decode_list_device_link(dynamic raw);
 
   @protected
   List<FetchedMessage> dco_decode_list_fetched_message(dynamic raw);
@@ -488,6 +494,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ChannelFfi sse_decode_channel_ffi(SseDeserializer deserializer);
 
   @protected
+  DeviceLink sse_decode_device_link(SseDeserializer deserializer);
+
+  @protected
   DiscoveredPeer sse_decode_discovered_peer(SseDeserializer deserializer);
 
   @protected
@@ -570,6 +579,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ChannelFfi> sse_decode_list_channel_ffi(SseDeserializer deserializer);
+
+  @protected
+  List<DeviceLink> sse_decode_list_device_link(SseDeserializer deserializer);
 
   @protected
   List<FetchedMessage> sse_decode_list_fetched_message(
@@ -961,6 +973,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_channel_ffi(ChannelFfi self, SseSerializer serializer);
 
   @protected
+  void sse_encode_device_link(DeviceLink self, SseSerializer serializer);
+
+  @protected
   void sse_encode_discovered_peer(
     DiscoveredPeer self,
     SseSerializer serializer,
@@ -1068,6 +1083,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_channel_ffi(
     List<ChannelFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_device_link(
+    List<DeviceLink> self,
     SseSerializer serializer,
   );
 

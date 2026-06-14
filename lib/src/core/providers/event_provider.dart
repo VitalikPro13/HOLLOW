@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 
@@ -106,6 +107,9 @@ class EventStreamNotifier extends Notifier<bool> {
       },
     );
     state = true;
+    // Warm the device→identity map from the node's resolver (persisted links +
+    // our own devices) so attribution is correct before the first profile sync.
+    ref.read(deviceLinkProvider.notifier).refresh();
   }
 
   void stop() {
@@ -543,6 +547,12 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(avatarProvider.notifier).invalidate(peerId);
         ref.invalidate(bannerProvider(peerId));
         _refreshPushHints();
+
+      case NetworkEvent_DeviceListUpdated(:final masterPeerId):
+        // A friend's signed device list was ingested — refresh the Dart
+        // device→identity map so attribution/presence collapse picks it up.
+        debugPrint('[HOLLOW] Device list updated: $masterPeerId');
+        ref.read(deviceLinkProvider.notifier).refresh();
 
       case NetworkEvent_ChannelMessageEdited(
             :final serverId, :final channelId, :final messageId, :final newText, :final editedAt, :final signature, :final publicKey):

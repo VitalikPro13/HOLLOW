@@ -2562,7 +2562,8 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let mut new_count = 0u32;
         for msg in &messages {
-            let is_mine = msg.s == local_peer;
+            // Multi-device: a message authored by ANY of our own devices is ours.
+            let is_mine = super::resolver::same_identity(&msg.s, local_peer);
             let already_exists = msg.mid.as_ref()
                 .map(|mid| store.channel_message_exists(mid))
                 .unwrap_or(false);
@@ -2613,7 +2614,7 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
                     &fm.fid, &fm.name, &fm.ext, &fm.mime,
                     fm.size, 0, fm.img, fm.w, fm.h,
                     fm.mid.as_deref(), "channel", &ctx_id,
-                    &fm.sender, msg.s == local_peer, fm.ts,
+                    &fm.sender, super::resolver::same_identity(&msg.s, local_peer), fm.ts,
                     fm.vthumb.as_ref(),
                 );
                 let _ = event_tx.send(NetworkEvent::FileHeaderReceived {

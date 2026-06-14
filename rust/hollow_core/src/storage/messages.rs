@@ -1996,6 +1996,27 @@ impl MessageStore {
         Ok(())
     }
 
+    /// Load the persisted `SignedDeviceList` for a master, if any. Used to read
+    /// our OWN list back (devices + version) before re-publishing, and to inspect
+    /// a peer's stored list. Returns `Ok(None)` when no row exists or the stored
+    /// JSON fails to deserialize (treated as absent, not an error).
+    pub fn load_device_list(
+        &self,
+        master_peer_id: &str,
+    ) -> Result<Option<crate::node::SignedDeviceList>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT json FROM device_lists WHERE master_peer_id = ?1")
+            .map_err(|e| format!("Failed to prepare load_device_list: {e}"))?;
+        let mut rows = stmt
+            .query_map([master_peer_id], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query load_device_list: {e}"))?;
+        match rows.next() {
+            Some(Ok(json)) => Ok(serde_json::from_str(&json).ok()),
+            _ => Ok(None),
+        }
+    }
+
     /// Load all (device_peer_id → master_peer_id) links for resolver warmup.
     pub fn get_all_device_links(&self) -> Result<Vec<(String, String)>, String> {
         let mut stmt = self

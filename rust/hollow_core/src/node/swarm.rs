@@ -50,9 +50,22 @@ use super::vault_ops;
 use super::twitch;
 use super::voice_handler;
 
-/// Build and spawn the networking layer. Returns the local peer ID and a join handle.
+/// Build and spawn the networking layer. Returns the MASTER peer ID and a join
+/// handle.
+///
+/// Multi-device key routing (Phase 6, Step 7): the **device** keypair drives the
+/// WS relay auth and the signaling register — so each physical device gets its
+/// OWN distinct relay socket and never clobbers another device of the same
+/// identity. The **master** keypair (`native_keypair`) drives EVERYTHING else
+/// (the event loop's `local_peer_str`, MLS/server membership, message-content
+/// signing, the DB passphrase). The rooms the device joins are master-derived
+/// (`inbox:{master}`, `dm_room_code` resolves to masters, `server_id`), so the
+/// device authenticates as itself yet sits in its identity's rooms. On a
+/// pre-multi-device install device==master (migration keystone) so this is
+/// behavior-neutral. See `node::resolver` header for the full rationale.
 pub(crate) async fn spawn_node(
     native_keypair: crate::identity::native_identity::NativeKeypair,
+    device_keypair: crate::identity::native_identity::NativeKeypair,
     event_tx: mpsc::Sender<NetworkEvent>,
     cmd_rx: mpsc::Receiver<NodeCommand>,
     cmd_tx: mpsc::Sender<NodeCommand>,
@@ -63,38 +76,43 @@ pub(crate) async fn spawn_node(
     initial_invisible: bool,
     relay_domain: String,
 ) -> Result<(String, tokio::task::JoinHandle<()>), String> {
-    // Clone keypair for signaling task (it needs to sign register requests).
-    let sig_keypair = native_keypair.clone();
-    // Clone keypair for use in the event loop.
+    // MASTER drives the event loop / identity; DEVICE drives transport (relay
+    // auth + signaling register) so two devices of one identity get distinct
+    // sockets.
     let bundle_keypair = native_keypair.clone();
+    let master_peer_id = native_keypair.peer_id();
+    let device_peer_id = device_keypair.peer_id();
 
-    let peer_id_str = native_keypair.peer_id();
+    // Signaling register must be signed by the DEVICE key (it authenticates the
+    // device's transport presence under the device peer_id).
+    let sig_keypair = device_keypair.clone();
 
-    // Spawn the signaling background task.
+    // Spawn the signaling background task (device-keyed).
     let signaling_url = format!("https://{relay_domain}");
     let (sig_cmd_tx, sig_event_rx) =
-        signaling::spawn_signaling_task(sig_keypair, peer_id_str.clone(), signaling_url);
+        signaling::spawn_signaling_task(sig_keypair, device_peer_id.clone(), signaling_url);
 
-    // Spawn the WebSocket relay client.
-    let ws_proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+    // Spawn the WebSocket relay client (device-keyed auth).
+    let ws_proto = device_keypair.to_protobuf_encoding().unwrap_or_default();
     let ws_pub_b64 = base64::engine::general_purpose::STANDARD.encode(
-        bundle_keypair.public_key_protobuf(),
+        device_keypair.public_key_protobuf(),
     );
     let (ws_cmd_tx, ws_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (ws_event_tx, ws_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let ws_relay_url = format!("wss://{relay_domain}/ws");
     let _ws_handle = super::ws_client::spawn_ws_client(
-        ws_relay_url, peer_id_str.clone(), ws_proto, ws_pub_b64,
+        ws_relay_url, device_peer_id.clone(), ws_proto, ws_pub_b64,
         license_key, false, ws_cmd_rx, ws_event_tx,
     );
 
     let handle = tokio::spawn(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store, sig_cmd_tx, sig_event_rx,
-        bundle_keypair, ws_cmd_tx, ws_event_rx, peer_id_str.clone(),
+        bundle_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible,
     ));
 
-    Ok((peer_id_str, handle))
+    // The app's "my peer id" (friendships, display) is the MASTER id.
+    Ok((master_peer_id, handle))
 }
 
 /// The main event loop. Runs until the task is aborted.
@@ -111,11 +129,22 @@ async fn run_event_loop(
     ws_cmd_tx: tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     mut ws_event_rx: tokio::sync::mpsc::UnboundedReceiver<super::ws_client::WsEvent>,
     local_peer_str: String,
+    device_peer_id: String,
     initial_invisible: bool,
 ) {
     // Precompute public key base64 for prekey bundle signing.
     let pub_key_proto = bundle_keypair.public_key_protobuf();
     let pub_key_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_key_proto);
+
+    // -- Multi-device identity (Phase 6) --
+    // `local_peer_str` IS the master id (the event loop runs in identity terms);
+    // `bundle_keypair` IS the master keypair (message signing, device-list sig).
+    // `device_peer_id` (passed in) is THIS device's transport peer_id — the id we
+    // authenticate to the relay with. On a pre-multi-device install they are
+    // equal (migration keystone). See `spawn_node` + `node::resolver` for the
+    // key-routing rationale.
+    let master_keypair = bundle_keypair.clone();
+    let master_peer_str = local_peer_str.clone();
 
     // Decrypt failure cooldown: track last session-kill time per peer.
     // Prevents rapid session thrashing when many in-flight chunks fail decrypt
@@ -214,6 +243,24 @@ async fn run_event_loop(
         let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
         hex::encode(&proto[..32.min(proto.len())])
     };
+
+    // -- Multi-device resolver warm-up (Phase 6) --
+    // Load persisted device links + our own device(s) into the process-global
+    // resolver BEFORE the event loop processes any incoming message — otherwise
+    // an early message from another device of a friend would misattribute
+    // (resolver hazard R4). On a pre-multi-device install this is a no-op
+    // self-mapping (device_peer_id == master).
+    {
+        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+            if let Ok(links) = store.get_all_device_links() {
+                super::resolver::warm_from_links(&links);
+            }
+            match store.load_device_list(&master_peer_str) {
+                Ok(Some(list)) => super::resolver::seed_self(&master_peer_str, &list.devices),
+                _ => super::resolver::seed_self(&master_peer_str, &[device_peer_id.clone()]),
+            }
+        }
+    }
 
     // -- CRDT state (Phase 3) --
     // Server states keyed by server_id. Reload from DB so servers survive restarts.
@@ -847,7 +894,8 @@ async fn run_event_loop(
                         social::handle_update_profile(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut mls, &server_states,
-                            &crypto_store, &local_peer_str, display_name, status, about_me,
+                            &crypto_store, &local_peer_str, &master_keypair, &device_peer_id,
+                            display_name, status, about_me,
                             avatar_bytes, banner_bytes, is_invisible, twitch_username,
                             &db_path, &db_passphrase,
                         ).await;
@@ -1576,7 +1624,7 @@ async fn run_event_loop(
                                     // Send our profile (with invisible flag) to the new peer.
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
-                                        &local_peer_str, &peer_id,
+                                        &local_peer_str, &master_keypair, &device_peer_id, &peer_id,
                                         is_invisible,
                                         &db_path, &db_passphrase,
                                     );
@@ -1913,7 +1961,7 @@ async fn run_event_loop(
                                 if pid != &local_peer {
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
-                                        &local_peer_str, pid,
+                                        &local_peer_str, &master_keypair, &device_peer_id, pid,
                                         is_invisible,
                                         &db_path, &db_passphrase,
                                     );
@@ -1945,7 +1993,7 @@ async fn run_event_loop(
                                     // Send our profile (with invisible flag) so the peer sees our display name.
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
-                                        &local_peer_str, pid_str,
+                                        &local_peer_str, &master_keypair, &device_peer_id, pid_str,
                                         is_invisible,
                                         &db_path, &db_passphrase,
                                     );
@@ -2560,6 +2608,7 @@ async fn run_event_loop(
                                         &mut olm, &crypto_store, &crdt_store, &event_tx,
                                         &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
                                         &mut server_states, &bundle_keypair,
+                                        &master_keypair, &master_peer_str, &device_peer_id,
                                         &mut pending_server_joins,
                                         &mut pending_sync_requests, &mut mls,
                                         &mut mls_bootstrap_requested,
@@ -3339,6 +3388,9 @@ async fn handle_incoming_request(
     key_bundle_sent_to: &mut std::collections::HashSet<String>,
     server_states: &mut HashMap<String, ServerState>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    master_peer_str: &str,
+    device_peer_id: &str,
     pending_server_joins: &mut HashMap<String, Option<String>>,
     pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
     mls: &mut Option<MlsManager>,
@@ -3917,24 +3969,33 @@ async fn handle_incoming_request(
                     // SECURITY: Enforce 4,000 character limit on message text.
                     let msg_text = if msg_text.len() > 4000 { msg_text[..4000].to_string() } else { msg_text };
 
-                    // Verify DM signature if present.
+                    // Multi-device: attribute the DM to the sender's MASTER identity
+                    // so messages from any of a friend's devices land in the single
+                    // DM thread (and our own other-device sends attribute to us).
+                    // Pre-multi-device this resolves to peer_str unchanged.
+                    let convo_peer = super::resolver::resolve(&peer_str);
+                    let is_own_device = super::resolver::same_identity(&peer_str, master_peer_str);
+
+                    // Verify DM signature if present. Context = OUR master identity
+                    // (the recipient the sender signed over); the signature is made by
+                    // the sender's MASTER key (verify resolves the claimed signer).
                     if sig.is_some() {
-                        let local_peer = local_peer_str.to_string();
                         let payload = message_signing_payload(
-                            "dm", &local_peer, &peer_str, ts, &msg_text,
+                            "dm", master_peer_str, &convo_peer, ts, &msg_text,
                         );
-                        if !verify_message_signature(&peer_str, sig.as_deref(), pk.as_deref(), &payload) {
-                            hollow_log!("[HOLLOW-CRYPTO] Signature verification FAILED for DM from {peer_str}");
+                        if !verify_message_signature(&convo_peer, sig.as_deref(), pk.as_deref(), &payload) {
+                            hollow_log!("[HOLLOW-CRYPTO] Signature verification FAILED for DM from {peer_str} (master {convo_peer})");
                         }
                     }
 
                     // Persist received DM using sender's timestamp (not Dart DateTime.now()).
                     // This ensures DM sync timestamps are consistent for deduplication.
+                    // `is_own` flags a message echoed from our OWN other device as ours.
                     let mut is_new = true;
                     {
                         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                             match store.insert(
-                                &peer_str, &msg_text, false, ts,
+                                &convo_peer, &msg_text, is_own_device, ts,
                                 sig.as_deref(), pk.as_deref(), mid.as_deref(),
                                 reply_to.as_deref(), file_id.as_deref(),
                             ) {
@@ -3957,7 +4018,7 @@ async fn handle_incoming_request(
                     if is_new {
                         let _ = event_tx
                             .send(NetworkEvent::MessageReceived {
-                                from_peer: peer_str.to_string(),
+                                from_peer: convo_peer.to_string(),
                                 text: msg_text,
                                 timestamp: ts,
                                 message_id: mid.unwrap_or_default(),
@@ -3972,6 +4033,9 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::DmSyncBatch { messages, has_more }) => {
                     hollow_log!("[HOLLOW-SYNC] Received {} DM sync messages from {peer_str} (has_more: {has_more:?})", messages.len());
                     let local_peer = local_peer_str.to_string();
+                    // Multi-device: the DM conversation key is the sender's MASTER id
+                    // (transport target stays raw `peer_str`). No-op on single-device.
+                    let convo_peer = super::resolver::resolve(&peer_str);
                     let mut new_count = 0u32;
 
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -4009,7 +4073,7 @@ async fn handle_incoming_request(
                             let reconciled = if !already_exists {
                                 if let Some(mid) = msg.mid.as_deref() {
                                     store.reconcile_dm_by_timestamp(
-                                        &peer_str, mid, &msg.t, msg.ts, msg.edited_at,
+                                        &convo_peer, mid, &msg.t, msg.ts, msg.edited_at,
                                         msg.sig.as_deref(), msg.pk.as_deref(),
                                     ).unwrap_or(false)
                                 } else {
@@ -4022,7 +4086,7 @@ async fn handle_incoming_request(
                                 hollow_log!("[HOLLOW-SYNC] reconciled dm mid={:?} into existing row", msg.mid);
                                 if let Some(mid) = &msg.mid {
                                     let _ = event_tx.send(NetworkEvent::DmMessageEdited {
-                                        peer_id: peer_str.to_string(),
+                                        peer_id: convo_peer.clone(),
                                         message_id: mid.clone(),
                                         new_text: msg.t.clone(),
                                         edited_at: msg.edited_at.unwrap_or(msg.ts),
@@ -4034,7 +4098,7 @@ async fn handle_incoming_request(
 
                             if !already_exists && !reconciled {
                                 match store.insert(
-                                    &peer_str, &msg.t, false, msg.ts,
+                                    &convo_peer, &msg.t, false, msg.ts,
                                     msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
                                     msg.reply_to.as_deref(), msg.file_id.as_deref(),
                                 ) {
@@ -4057,7 +4121,7 @@ async fn handle_incoming_request(
                                 );
                                 if edit_result.unwrap_or(false) {
                                     let _ = event_tx.send(NetworkEvent::DmMessageEdited {
-                                        peer_id: peer_str.to_string(),
+                                        peer_id: convo_peer.clone(),
                                         message_id: mid.clone(),
                                         new_text: msg.t.clone(),
                                         edited_at: edit_ts,
@@ -4075,7 +4139,7 @@ async fn handle_incoming_request(
                             if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
                                 if store.set_dm_message_hidden(mid, hidden_ts).is_ok() {
                                     let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
-                                        peer_id: peer_str.to_string(),
+                                        peer_id: convo_peer.clone(),
                                         message_id: mid.clone(),
                                         deleted_at: hidden_ts,
                                     }).await;
@@ -4122,7 +4186,7 @@ async fn handle_incoming_request(
                         // Pagination: if has_more, send follow-up DmSyncRequest.
                         if has_more == Some(true) {
                             let since = store
-                                .get_latest_dm_timestamp(&peer_str)
+                                .get_latest_dm_timestamp(&convo_peer)
                                 .unwrap_or(None)
                                 .unwrap_or(0);
                             hollow_log!("[HOLLOW-SYNC] Requesting next DM page from {peer_str} since {since}");
@@ -4142,7 +4206,7 @@ async fn handle_incoming_request(
                     // Only emit completion when there are no more pages.
                     if has_more != Some(true) {
                         let _ = event_tx.send(NetworkEvent::DmSyncCompleted {
-                            peer_id: peer_str.to_string(),
+                            peer_id: convo_peer.clone(),
                             new_message_count: new_count,
                         }).await;
                     }
@@ -4197,7 +4261,7 @@ async fn handle_incoming_request(
                             }).await;
                         } else {
                             let _ = event_tx.send(NetworkEvent::DmMessageEdited {
-                                peer_id: peer_str.to_string(),
+                                peer_id: super::resolver::resolve(&peer_str),
                                 message_id: mid,
                                 new_text,
                                 edited_at: ts,
@@ -4249,7 +4313,7 @@ async fn handle_incoming_request(
                         }).await;
                     } else {
                         let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
-                            peer_id: peer_str.to_string(),
+                            peer_id: super::resolver::resolve(&peer_str),
                             message_id: mid,
                             deleted_at: ts,
                         }).await;
@@ -4263,9 +4327,18 @@ async fn handle_incoming_request(
                     }
                     hollow_log!("[HOLLOW-REACTION] Received reaction {emoji} on {mid} from {peer_str}");
 
+                    // DM (sid==None): the reactor is keyed by the sender's MASTER id so
+                    // reactions from any of a friend's devices attribute to one person.
+                    // Channel context keeps the raw device id (untouched).
+                    let reactor_key = if sid.is_none() {
+                        super::resolver::resolve(&peer_str)
+                    } else {
+                        peer_str.to_string()
+                    };
+
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         let _ = store.add_reaction(
-                            &mid, &emoji, &peer_str, ts,
+                            &mid, &emoji, &reactor_key, ts,
                             sig.as_deref(), pk.as_deref(),
                         );
                     }
@@ -4281,10 +4354,10 @@ async fn handle_incoming_request(
                         }).await;
                     } else {
                         let _ = event_tx.send(NetworkEvent::DmReactionAdded {
-                            peer_id: peer_str.to_string(),
+                            peer_id: reactor_key.clone(),
                             message_id: mid,
                             emoji,
-                            reactor: peer_str.to_string(),
+                            reactor: reactor_key,
                             added_at: ts,
                         }).await;
                     }
@@ -4292,9 +4365,16 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::RemoveReaction { mid, emoji, ts, sig, pk, sid, cid }) => {
                     hollow_log!("[HOLLOW-REACTION] Received remove reaction {emoji} on {mid} from {peer_str}");
 
+                    // DM (sid==None): reactor keyed by sender's MASTER id (see AddReaction).
+                    let reactor_key = if sid.is_none() {
+                        super::resolver::resolve(&peer_str)
+                    } else {
+                        peer_str.to_string()
+                    };
+
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         let _ = store.remove_reaction(
-                            &mid, &emoji, &peer_str, ts,
+                            &mid, &emoji, &reactor_key, ts,
                             sig.as_deref(), pk.as_deref(),
                         );
                     }
@@ -4310,10 +4390,10 @@ async fn handle_incoming_request(
                         }).await;
                     } else {
                         let _ = event_tx.send(NetworkEvent::DmReactionRemoved {
-                            peer_id: peer_str.to_string(),
+                            peer_id: reactor_key.clone(),
                             message_id: mid,
                             emoji,
-                            reactor: peer_str.to_string(),
+                            reactor: reactor_key,
                             removed_at: ts,
                         }).await;
                     }
@@ -6496,7 +6576,7 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list: _incoming_device_list } => {
+                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list } => {
                                 if peer_invisible {
                                     let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
                                         peer_id: sender_peer_id.clone(),
@@ -6504,10 +6584,10 @@ async fn handle_incoming_request(
                                     }).await;
                                 }
                                 super::social::handle_envelope_profile_update(
-                                    event_tx, server_states,
+                                    event_tx, server_states, master_peer_str,
                                     sender_peer_id, display_name, status, about_me,
                                     updated_at, avatar_b64, banner_b64, twitch_username,
-                                    db_path, db_passphrase,
+                                    device_list, db_path, db_passphrase,
                                 ).await;
                             }
 
@@ -7096,7 +7176,7 @@ async fn handle_incoming_request(
             // A friend request whose sender resolves to our own identity is one of
             // our own devices (multi-device: same master identity). Never render it
             // as a stranger's request ("your own friend friend-requested you").
-            if peer_str == local_peer_str {
+            if super::resolver::same_identity(peer_str, master_peer_str) {
                 hollow_log!("[HOLLOW-FRIENDS] Ignored self friend request (own device)");
                 return;
             }
@@ -7461,7 +7541,7 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list: _incoming_device_list } => {
+        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list } => {
             // If the profile carries an invisible flag, emit PeerStatusChanged so the
             // UI treats this peer as offline from the very first event.
             if peer_invisible {
@@ -7470,6 +7550,12 @@ async fn handle_incoming_request(
                     status: "invisible".to_string(),
                 }).await;
             }
+
+            // Multi-device: ingest the sender's signed device list (verify +
+            // monotonic + persist + resolver update + DeviceListUpdated).
+            super::crypto_handler::ingest_device_list(
+                event_tx, master_peer_str, device_list, db_path, db_passphrase,
+            ).await;
 
             // SECURITY: Truncate profile fields to prevent oversized strings from malicious peers.
             // Slightly above UI limits (32/48/128) as a safety backstop.
@@ -7881,7 +7967,7 @@ async fn handle_incoming_request(
             hollow_log!("[HOLLOW-PROFILE] ProfileRequest from {peer_str} — sending our profile");
             social::send_own_profile_to_peer(
                 ws_cmd_tx, ws_room_peers,
-                local_peer_str, peer_str,
+                local_peer_str, master_keypair, device_peer_id, peer_str,
                 is_invisible,
                 db_path, db_passphrase,
             );

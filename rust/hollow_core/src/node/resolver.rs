@@ -12,6 +12,24 @@
 //! Process-global state (mirrors the existing `CACHED_PEER_ID` / `SESSION_KEY`
 //! globals) so handlers can call `resolve()` without threading a map through
 //! every function signature.
+//!
+//! ## Architecture decision (locked, Step 8) — where the device id lives
+//! The per-device key drives the identity ONLY at the WS/signaling TRANSPORT
+//! layer (relay auth → a distinct socket per device; `RoomMembers`/`PeerJoined`
+//! therefore report device peer_ids). EVERYWHERE ELSE — `local_peer_str` in the
+//! event loop, server/MLS membership, permission lookups, message-content
+//! signing, the DB passphrase — stays the MASTER id. The rooms a device joins
+//! are MASTER-derived (`inbox:{master}`, `dm_room_code` resolves both ends to
+//! masters, `server_id`), so a device authenticates as itself yet sits in its
+//! identity's rooms. Consequences:
+//!   - The dozens of `member == &local_peer { continue }` self-skips and
+//!     `has_permission(&local_peer, …)` lookups need NO resolver call — both
+//!     sides are masters.
+//!   - The resolver is needed only where a REMOTE peer's *device* id arrives and
+//!     must be mapped to its master: DM conversation keys, the friend-request
+//!     self-guard, profile/device-list ingest, and `is_mine` attribution.
+//! This is why Step 7 (key routing) is small: swap the WS/signaling keypair to
+//! the device key; leave `local_peer_str` master.
 
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
@@ -81,6 +99,16 @@ pub(crate) fn warm_from_links(pairs: &[(String, String)]) {
         for (device, master) in pairs {
             map.insert(device.clone(), master.clone());
         }
+    }
+}
+
+/// Snapshot all known (device → master) links for the FFI / Dart attribution
+/// layer. Only contains entries learned from verified device lists plus our own
+/// devices; a single-device install yields just self-mappings (or empty).
+pub(crate) fn all_links() -> Vec<(String, String)> {
+    match links().read() {
+        Ok(map) => map.iter().map(|(d, m)| (d.clone(), m.clone())).collect(),
+        Err(_) => Vec::new(),
     }
 }
 

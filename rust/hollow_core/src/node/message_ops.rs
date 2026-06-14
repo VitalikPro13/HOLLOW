@@ -667,8 +667,9 @@ pub(crate) async fn handle_edit_dm_message(
 
     // Emit event so Dart updates UI — include sig/pk so the
     // in-memory message's fields match the canonical payload.
+    // Multi-device: the DM thread key is the peer's MASTER id (no-op single-device).
     let _ = event_tx.send(NetworkEvent::DmMessageEdited {
-        peer_id: peer_id_str,
+        peer_id: super::resolver::resolve(&peer_id_str),
         message_id,
         new_text,
         edited_at: edit_timestamp,
@@ -882,8 +883,9 @@ pub(crate) async fn handle_delete_dm_message(
     }
 
     // Emit event so Dart updates UI.
+    // Multi-device: the DM thread key is the peer's MASTER id (no-op single-device).
     let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
-        peer_id: peer_id_str,
+        peer_id: super::resolver::resolve(&peer_id_str),
         message_id,
         deleted_at: delete_timestamp,
     }).await;
@@ -1037,11 +1039,15 @@ pub(crate) async fn handle_add_dm_reaction(
     let signing_payload = format!("reaction:{}:{}:{}", message_id, emoji, reaction_ts);
     let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
 
+    // Multi-device: attribute our own reaction to our MASTER id so it lands under
+    // the same identity on our other devices (no-op single-device).
+    let reactor_master = super::resolver::resolve(&local_peer);
+
     // Save to local DB.
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.add_reaction(
-                &message_id, &emoji, &local_peer, reaction_ts,
+                &message_id, &emoji, &reactor_master, reaction_ts,
                 sig.as_deref(), pk.as_deref(),
             );
         }
@@ -1069,10 +1075,10 @@ pub(crate) async fn handle_add_dm_reaction(
     }
 
     let _ = event_tx.send(NetworkEvent::DmReactionAdded {
-        peer_id: peer_id_str,
+        peer_id: super::resolver::resolve(&peer_id_str),
         message_id,
         emoji,
-        reactor: local_peer,
+        reactor: reactor_master,
         added_at: reaction_ts,
     }).await;
 }
@@ -1225,11 +1231,14 @@ pub(crate) async fn handle_remove_dm_reaction(
     let signing_payload = format!("unreaction:{}:{}:{}", message_id, emoji, remove_ts);
     let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
 
+    // Multi-device: our own reaction is keyed by our MASTER id (see AddDmReaction).
+    let reactor_master = super::resolver::resolve(&local_peer);
+
     // Remove from local DB.
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             let _ = store.remove_reaction(
-                &message_id, &emoji, &local_peer, remove_ts,
+                &message_id, &emoji, &reactor_master, remove_ts,
                 sig.as_deref(), pk.as_deref(),
             );
         }
@@ -1257,10 +1266,10 @@ pub(crate) async fn handle_remove_dm_reaction(
     }
 
     let _ = event_tx.send(NetworkEvent::DmReactionRemoved {
-        peer_id: peer_id_str,
+        peer_id: super::resolver::resolve(&peer_id_str),
         message_id,
         emoji,
-        reactor: local_peer,
+        reactor: reactor_master,
         removed_at: remove_ts,
     }).await;
 }
@@ -1296,7 +1305,8 @@ pub(crate) async fn handle_envelope_channel_message(
         &signing_payload,
     );
 
-    let is_mine = sender_peer_id == local_peer;
+    // Multi-device: a message from ANY of our own devices is ours.
+    let is_mine = super::resolver::same_identity(&sender_peer_id, local_peer);
 
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let rows = store.insert_channel_message(

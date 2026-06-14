@@ -89,6 +89,130 @@ pub(crate) fn verify_device_list(list: &SignedDeviceList) -> bool {
         .unwrap_or(false)
 }
 
+/// Build OUR OWN master-signed device list to attach to outbound profile syncs.
+///
+/// Reads the current device set + version persisted under our master peer_id and
+/// re-signs it with the master key. On a brand-new/single-device install the set
+/// is just `[device_peer_id]`; QR-linking (Step 4) adds devices and bumps the
+/// version. If we have never persisted a self list yet, this seeds version 1 with
+/// the single local device and persists it so future reads are monotonic.
+///
+/// Returns `None` only if the DB is unavailable — callers send the profile
+/// without a device list in that case (back-compat, no crash).
+pub(crate) fn build_local_device_list(
+    master: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<SignedDeviceList> {
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let master_peer_id = master.peer_id();
+
+    // Load whatever we've persisted for ourselves (devices + version). Absent =
+    // first run → seed version 1 with just this device.
+    let (devices, version) = match store.load_device_list(&master_peer_id) {
+        Ok(Some(list)) => {
+            // Ensure THIS device is in the set (migration/first-publish safety).
+            let mut devs = list.devices.clone();
+            if !devs.iter().any(|d| d == device_peer_id) {
+                devs.push(device_peer_id.to_string());
+                // Membership changed → bump version so peers accept the update.
+                (devs, list.version.saturating_add(1))
+            } else {
+                (devs, list.version.max(1))
+            }
+        }
+        _ => (vec![device_peer_id.to_string()], 1),
+    };
+
+    let signed = build_signed_device_list(master, version, devices);
+
+    // Persist our own list so device_list_version() stays monotonic across
+    // restarts and the resolver warms our own devices on next boot.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    if let Ok(json) = serde_json::to_string(&signed) {
+        let _ = store.save_device_list(
+            &signed.master_peer_id, &json, signed.version, &signed.devices, now,
+        );
+    }
+    // Keep the resolver in sync with our own devices immediately.
+    super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
+
+    Some(signed)
+}
+
+/// Ingest a device list received on a peer's profile sync.
+///
+/// Verifies the signature, enforces monotonic version (replay protection), and
+/// on success persists it + updates the resolver + emits `DeviceListUpdated`.
+/// A `None` list (old client, or a self-profile we sent) is a no-op. Our OWN
+/// master is skipped — we are the authority for our own list, a peer can't
+/// rewrite it.
+pub(crate) async fn ingest_device_list(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    local_master_peer_id: &str,
+    list: Option<SignedDeviceList>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let Some(list) = list else { return };
+    if list.master_peer_id.is_empty() || list.devices.is_empty() {
+        return;
+    }
+    // Never let a peer overwrite our own device list — we publish it ourselves.
+    if list.master_peer_id == local_master_peer_id {
+        return;
+    }
+    if !verify_device_list(&list) {
+        hollow_log!(
+            "[HOLLOW-DEVICES] Rejected device list for {}: bad signature",
+            list.master_peer_id
+        );
+        return;
+    }
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return;
+    };
+    // Replay protection: accept only a strictly newer version.
+    let current = store.device_list_version(&list.master_peer_id).unwrap_or(0);
+    if list.version <= current {
+        hollow_log!(
+            "[HOLLOW-DEVICES] Ignored stale device list for {} (v{} <= v{})",
+            list.master_peer_id, list.version, current
+        );
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let json = match serde_json::to_string(&list) {
+        Ok(j) => j,
+        Err(_) => return,
+    };
+    if let Err(e) = store.save_device_list(
+        &list.master_peer_id, &json, list.version, &list.devices, now,
+    ) {
+        hollow_log!("[HOLLOW-DEVICES] Failed to save device list: {e}");
+        return;
+    }
+    // Update the in-memory resolver so attribution/self-checks pick it up at once.
+    super::resolver::update_many(
+        &list.master_peer_id,
+        list.devices.iter().map(|s| s.as_str()),
+    );
+    hollow_log!(
+        "[HOLLOW-DEVICES] Ingested device list for {} (v{}, {} devices)",
+        list.master_peer_id, list.version, list.devices.len()
+    );
+    let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
+        master_peer_id: list.master_peer_id,
+    }).await;
+}
+
 /// Sign a message payload with the local keypair.
 /// Returns (signature_base64, public_key_base64).
 pub(crate) fn sign_message(
@@ -206,11 +330,31 @@ pub(crate) fn persist_mls_state(mls: &MlsManager, crypto_store: &crate::crypto::
 }
 
 /// Check if a peer is reachable via WS relay.
+///
+/// Multi-device (Phase 6): the relay reports DEVICE peer_ids in rooms, but the
+/// caller often asks about a MASTER id (server members, friends). A master is
+/// reachable if ANY of its devices is currently in a room. The fast path (exact
+/// membership) covers the common single-device case with no resolver cost; the
+/// slow path only runs when the exact id isn't present, and resolves room peers
+/// to compare identities. `resolve()` returns the input unchanged for unknown
+/// peers, so single-device behavior is unaffected.
 pub(crate) fn peer_is_reachable(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     peer_str: &str,
 ) -> bool {
-    ws_room_peers.values().any(|peers| peers.contains(peer_str))
+    // Fast path: the exact id is in some room.
+    if ws_room_peers.values().any(|peers| peers.contains(peer_str)) {
+        return true;
+    }
+    // Slow path: is any connected device of the SAME identity present?
+    let target_master = super::resolver::resolve(peer_str);
+    // No links for this peer (resolve == self) → fast path already settled it.
+    if target_master == peer_str {
+        return false;
+    }
+    ws_room_peers.values().any(|peers| {
+        peers.iter().any(|p| super::resolver::resolve(p) == target_master)
+    })
 }
 
 /// Deterministic MLS coordinator: lowest peer_id among online MLS group members.
