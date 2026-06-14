@@ -303,10 +303,21 @@ on-ramp to backfill.*
       `[HOLLOW-DEVICES] Ingested device list for <master> (v2, 2 devices, +2 new)`; Pixel:
       `Merged inbox sibling … → own device set now 2`, `re-announcing to N room peer(s)`. **P STAYS ONLINE
       when only VM is up** (the real proof — confirmed by Vitalik). Friend list on VM populated. Olm sessions
-      all confirmed bidirectional. KNOWN-REMAINING (next): the substitute device's PROFILE (name/avatar) — a
-      separate attribution bug (profiles saved under the sender's raw DEVICE id while the UI reads by MASTER,
-      and a profile-less device writes a blank). Fix = attribute incoming profiles to `resolve(peer_str)` +
-      sibling profile sync + don't-overwrite-populated-with-empty guard. NOT Olm, NOT Step 3.
+      all confirmed bidirectional.
+- [x] **CRITICAL FOLLOW-UP #6 — profile (name/avatar) attribution: key by MASTER, not device id. ✅
+      LIVE-VERIFIED both sides, real-time.** Same attribution shape as the device-list bug, one layer up.
+      Profiles were saved via `save_profile(&peer_str,…)` (the sender DEVICE id) while presence/UI collapse
+      the identity to its MASTER — so a friend read "P's profile" under the master while the data lived under
+      whichever device last wrote it, and a profile-less fresh device wrote a BLANK under its own device id.
+      **Fix (3 parts):** (a) `social::save_incoming_profile(sender,…)` persists under `resolver::resolve(sender)`
+      = master (used by BOTH ProfileUpdate handlers); `ProfileUpdated` event + server-member rename + Dart
+      cache invalidation all key on the master. (b) **empty-profile guard** (skip the write if incoming
+      display_name is empty AND a populated master profile already exists). (c) **sibling profile sync** in
+      the inbox-proof block (a profile-less device `ProfileRequest`s its sibling; the reply resolves to its
+      own master so it adopts the real name/avatar). Single-device unaffected (master == sender). `cargo
+      check` clean, 316 lib tests pass. **The substitute device now shows the correct name/avatar AND a
+      friend sees the right profile via either device, syncing in real time.** Remaining multi-device gap:
+      DM DELIVERY between devices = Step 3 (Olm send-side fan-out). NOT Olm sessions (all confirmed bidi).
 
 ### Step 3 — Olm sender-side fan-out  ▢ not started
 *Goal: a new DM reaches all of the recipient's devices.*

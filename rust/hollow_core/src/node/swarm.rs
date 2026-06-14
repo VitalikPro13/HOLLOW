@@ -1691,6 +1691,28 @@ async fn run_event_loop(
                                             &db_path, &db_passphrase,
                                         );
 
+                                        // SIBLING PROFILE SYNC: a freshly-imported device holds the
+                                        // master KEY but none of the master's profile CONTENT (name/
+                                        // avatar). If our OWN identity profile is empty/absent, pull it
+                                        // from the sibling — the incoming ProfileUpdate resolves to our
+                                        // master (== local_peer_str), so save_incoming_profile adopts it
+                                        // as our own. Without this the substitute device shows the
+                                        // identity online but nameless.
+                                        let need_profile = crate::storage::MessageStore::open(&db_path, &db_passphrase)
+                                            .ok()
+                                            .and_then(|s| s.load_profile(&local_peer_str).ok().flatten())
+                                            .map(|p| p.display_name.trim().is_empty())
+                                            .unwrap_or(true);
+                                        if need_profile {
+                                            hollow_log!(
+                                                "[HOLLOW-MULTIDEV] Own profile empty — requesting it from sibling {peer_id}"
+                                            );
+                                            send_message_to_peer(
+                                                &ws_cmd_tx, &ws_room_peers,
+                                                &peer_id, HavenMessage::ProfileRequest,
+                                            );
+                                        }
+
                                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                             if let Ok(friends) = store.load_friends(Some("accepted")) {
                                                 if !friends.is_empty() {
@@ -7868,30 +7890,36 @@ async fn handle_incoming_request(
 
             hollow_log!("[HOLLOW-SWARM] ProfileUpdate from {peer_str}: name={display_name}");
 
-            // Save to local DB (upsert with timestamp check — only update if newer).
-            {
-                if let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                    if let Err(e) = db.save_profile(
-                        &peer_str, &display_name, &status, &about_me, updated_at,
-                        avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
-                    ) {
-                        hollow_log!("[HOLLOW-SWARM] Failed to save peer profile: {e}");
-                    }
-                }
-            }
+            // Multi-device: persist under the sender's MASTER identity (so any
+            // device of one person updates the ONE identity profile), with the
+            // empty-profile guard (a profile-less sibling must not blank a good
+            // row). Single-device: master == sender, so this is a no-op rename.
+            let (profile_master, _saved) = social::save_incoming_profile(
+                &peer_str, &display_name, &status, &about_me, updated_at,
+                avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
+                db_path, db_passphrase,
+            );
 
-            // Update display_name in server member lists (local-only, not a CRDT op).
+            // Update display_name in server member lists (local-only, not a CRDT
+            // op). Match BOTH the raw sender device id and the resolved master, so
+            // a member listed under either key gets the rename.
             for (_, state) in server_states.iter_mut() {
-                if let Some(member) = state.members.get_mut(peer_str) {
-                    if !display_name.is_empty() {
+                if !display_name.is_empty() {
+                    if let Some(member) = state.members.get_mut(peer_str) {
                         member.display_name = display_name.clone();
                     }
+                    if profile_master != peer_str {
+                        if let Some(member) = state.members.get_mut(&profile_master) {
+                            member.display_name = display_name.clone();
+                        }
+                    }
                 }
             }
 
-            // Notify Dart to refresh UI.
+            // Notify Dart to refresh UI — key on the MASTER so the collapsed
+            // identity's avatar/name caches invalidate.
             let _ = event_tx.send(NetworkEvent::ProfileUpdated {
-                peer_id: peer_str.to_string(),
+                peer_id: profile_master,
             }).await;
         }
 

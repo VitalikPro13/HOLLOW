@@ -397,6 +397,59 @@ pub(crate) async fn handle_update_profile(
     }).await;
 }
 
+/// Persist an incoming profile under the sender's MASTER identity (multi-device).
+///
+/// Profiles must be keyed by the master, not the raw sender DEVICE id: presence
+/// and the UI collapse an identity to its master, so a profile stored under a
+/// device id would never be read for the collapsed person, and a second device
+/// would write a SEPARATE profile row. Resolving to the master means ANY device's
+/// profile update lands on the one identity profile.
+///
+/// EMPTY-PROFILE GUARD: a freshly-imported device holds the master KEY but none
+/// of the master's profile CONTENT, so it broadcasts a blank profile. If the
+/// incoming `display_name` is empty AND we already hold a populated profile for
+/// this master, SKIP the write — never let a profile-less device blank a good
+/// row. Returns the master key the profile was (or would be) stored under, plus
+/// whether a save actually happened.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn save_incoming_profile(
+    sender_peer_id: &str,
+    display_name: &str,
+    status: &str,
+    about_me: &str,
+    updated_at: i64,
+    avatar_bytes: Option<&[u8]>,
+    banner_bytes: Option<&[u8]>,
+    twitch_username: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> (String, bool) {
+    let master = super::resolver::resolve(sender_peer_id);
+    let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return (master, false);
+    };
+    // Don't blank a populated identity profile with an empty one from a
+    // profile-less sibling device.
+    if display_name.trim().is_empty() {
+        if let Ok(Some(existing)) = db.load_profile(&master) {
+            if !existing.display_name.trim().is_empty() {
+                hollow_log!(
+                    "[HOLLOW-PROFILE] Skipped empty profile from {sender_peer_id} — keeping populated profile for master {master}"
+                );
+                return (master, false);
+            }
+        }
+    }
+    if let Err(e) = db.save_profile(
+        &master, display_name, status, about_me, updated_at,
+        avatar_bytes, banner_bytes, twitch_username,
+    ) {
+        hollow_log!("[HOLLOW-PROFILE] Failed to save incoming profile for {master}: {e}");
+        return (master, false);
+    }
+    (master, true)
+}
+
 /// Send our own profile to a specific peer (used after session establishment, on PeerJoined, etc.).
 pub(crate) fn send_own_profile_to_peer(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -505,22 +558,29 @@ pub(crate) async fn handle_envelope_profile_update(
         base64::engine::general_purpose::STANDARD.decode(&banner_b64).ok()
             .filter(|b| b.len() <= 2_000_000)
     };
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        let _ = store.save_profile(
-            &sender_peer_id, &display_name, &status, &about_me, updated_at,
-            avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
-        );
-    }
+    // Multi-device: persist under the sender's MASTER (any device updates the one
+    // identity profile) + empty-profile guard. Single-device: master == sender.
+    let (profile_master, _saved) = save_incoming_profile(
+        &sender_peer_id, &display_name, &status, &about_me, updated_at,
+        avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
+        db_path, db_passphrase,
+    );
     // Update display_name in server member lists (local-only, not a CRDT op).
+    // Match both the raw sender device id and the resolved master.
     for (_, state) in server_states.iter_mut() {
-        if let Some(member) = state.members.get_mut(&sender_peer_id) {
-            if !display_name.is_empty() {
+        if !display_name.is_empty() {
+            if let Some(member) = state.members.get_mut(&sender_peer_id) {
                 member.display_name = display_name.clone();
+            }
+            if profile_master != sender_peer_id {
+                if let Some(member) = state.members.get_mut(&profile_master) {
+                    member.display_name = display_name.clone();
+                }
             }
         }
     }
     let _ = event_tx.send(NetworkEvent::ProfileUpdated {
-        peer_id: sender_peer_id,
+        peer_id: profile_master,
     }).await;
 }
 
