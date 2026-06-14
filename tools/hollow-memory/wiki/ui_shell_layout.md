@@ -267,6 +267,8 @@ Row
 
 **Server settings:** `serverSettingsOpenProvider` (StateProvider<bool>, default `false`). In non-split mode, toggles between settings panel and chat. In split mode, opens as a dialog instead.
 
+**Help panel:** `helpPanelOpenProvider` (StateProvider<bool>, default `false`, in `core/providers/help_panel_provider.dart`). Toggled by the circled-`?` (`LucideIcons.circleHelp`) button on the RIGHT side of the `FriendsBar` (symmetric with Add Friend on the left). `helpPanelOpen` is watched in `build()` and threaded into both `_buildClassicLayout`/`_buildDockLayout` as a named param; each inserts `HelpPanelSlider(visible: helpPanelOpen)` as the right-most child after the member panel. `HelpPanelSlider` (in `lib/src/ui/guides/help_panel.dart`) mirrors `_MemberPanelSlider`/`_DockSidebarSlider` (ClipRect + Align centerRight widthFactor + fade, `HollowDurations.normal`). See `wiki/ui_help.md` for the full Help resource center.
+
 ## Keyboard Shortcuts
 
 Registered globally on `HardwareKeyboard.instance` (not focus-dependent). Registered in `initState()`, removed in `dispose()`. Only processes `KeyDownEvent`.

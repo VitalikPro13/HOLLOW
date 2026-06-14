@@ -42,6 +42,7 @@ import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/ringtone_clip_editor_dialog.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:hollow/src/ui/dialogs/twitch_device_code_dialog.dart';
+import 'package:hollow/src/ui/guides/help_panel.dart';
 import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
@@ -130,6 +131,14 @@ class MobileSettingsTab extends ConsumerWidget {
         ),
         const SizedBox(height: HollowSpacing.lg),
 
+        _SettingsNavTile(
+          icon: LucideIcons.circleHelp,
+          title: 'Help',
+          subtitle: 'Guides & how-to',
+          onTap: () => _push(
+              context, 'Help', const HelpResourceCenter()),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
         _SettingsNavTile(
           icon: LucideIcons.settings,
           title: 'System',

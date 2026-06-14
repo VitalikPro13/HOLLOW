@@ -27,6 +27,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/core/providers/help_panel_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Horizontal friends bar for the Dock layout.
@@ -155,6 +156,38 @@ class FriendsBar extends ConsumerWidget {
                     },
                   ),
           ),
+
+          // Vertical divider (mirrors the left side for symmetry)
+          Container(
+            width: 1,
+            height: 24,
+            margin: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
+            color: hollow.border,
+          ),
+
+          // Help button (right side — symmetric with Add Friend on the left)
+          Builder(builder: (context) {
+            final helpOpen = ref.watch(helpPanelOpenProvider);
+            return HollowTooltip(
+              message: 'Help',
+              child: HollowPressable(
+                onTap: () => ref
+                    .read(helpPanelOpenProvider.notifier)
+                    .state = !helpOpen,
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.sm,
+                  vertical: HollowSpacing.xs,
+                ),
+                child: Icon(
+                  LucideIcons.circleHelp,
+                  size: 18,
+                  color: helpOpen ? hollow.accent : hollow.textSecondary,
+                ),
+              ),
+            );
+          }),
+          const SizedBox(width: HollowSpacing.sm),
         ],
       ),
     );

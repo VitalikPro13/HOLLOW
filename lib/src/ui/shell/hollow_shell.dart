@@ -15,6 +15,7 @@ import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/help_panel_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
@@ -72,6 +73,7 @@ import 'package:hollow/src/ui/settings/server_settings_panel.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/ui/guides/help_panel.dart';
 import 'package:hollow/src/ui/shell/bottom_bar.dart';
 import 'package:hollow/src/ui/shell/channel_sidebar.dart';
 import 'package:hollow/src/ui/shell/friends_bar.dart';
@@ -1228,6 +1230,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final lastMessages = ref.watch(lastDmMessageProvider);
 
     final memberPanelOpen = ref.watch(memberPanelProvider);
+    final helpPanelOpen = ref.watch(helpPanelOpenProvider);
 
     // Server/channel state
     final servers = ref.watch(serverListProvider);
@@ -1274,6 +1277,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
             channelLayout: channelLayout,
             settingsOpen: settingsOpen,
             memberPanelOpen: memberPanelOpen,
+            helpPanelOpen: helpPanelOpen,
           );
         } else {
           body = _buildClassicLayout(
@@ -1292,6 +1296,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
             channelLayout: channelLayout,
             settingsOpen: settingsOpen,
             memberPanelOpen: memberPanelOpen,
+            helpPanelOpen: helpPanelOpen,
           );
         }
 
@@ -1331,6 +1336,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     required String channelLayout,
     required bool settingsOpen,
     required bool memberPanelOpen,
+    required bool helpPanelOpen,
   }) {
     // Check if viewing a voice channel with active screen share (full-bleed mode).
     final vcState = ref.watch(voiceChannelProvider);
@@ -1407,6 +1413,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                     visible: selectedServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
                     serverId: selectedServerId,
                   ),
+                HelpPanelSlider(visible: helpPanelOpen),
               ],
             ),
           ),
@@ -1431,6 +1438,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     required String channelLayout,
     required bool settingsOpen,
     required bool memberPanelOpen,
+    required bool helpPanelOpen,
   }) {
     final splitState = ref.watch(splitViewProvider);
 
@@ -1607,6 +1615,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                         effectiveServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
                     serverId: effectiveServerId,
                   ),
+                HelpPanelSlider(visible: helpPanelOpen),
               ],
             )),
           ),

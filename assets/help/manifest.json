@@ -1,0 +1,505 @@
+{
+  "version": 1,
+  "title": "Hollow Help",
+  "modules": [
+    {
+      "id": "m0",
+      "title": "Welcome",
+      "subtitle": "What Hollow is, and why it's built this way",
+      "lessons": [
+        {
+          "id": "0.1",
+          "title": "What Hollow is",
+          "sections": [
+            {
+              "text": "Hollow is a chat app: direct messages, servers, voice and video calls, file sharing. The part that makes it different is what's underneath. There is no company server in the middle holding your messages or your account."
+            },
+            {
+              "text": "Instead, the people in a space host it together, and everything is end-to-end encrypted by default. That means the only infrastructure Hollow runs is a relay that passes encrypted traffic between people. It can't read any of it. It just moves sealed envelopes around."
+            },
+            {
+              "text": "This guide walks through the parts that work a little differently than what you're used to, starting with the most important one: how your account works."
+            }
+          ]
+        },
+        {
+          "id": "0.2",
+          "title": "How Hollow is different",
+          "sections": [
+            {
+              "text": "If you've used Discord or Telegram, Hollow will feel familiar to use. But three things underneath are genuinely different, and they're worth knowing up front."
+            },
+            {
+              "text": "1. No central server! Members collectively host their servers. There's no company database with your chats in it. If everyone in a space is offline, the space is asleep until someone comes back."
+            },
+            {
+              "text": "2. Your account is a recovery phrase, not an email and password! You hold it and nobody can reset it, lock you out of it, or hand it to anyone else."
+            },
+            {
+              "text": "3. Everything is encrypted by default! DMs, servers, and calls. Even the relay that connects you only ever sees encrypted noise.\n\nThe trade is straightforward: more privacy and more ownership, in exchange for understanding a couple of new ideas. The rest of this guide covers them."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "m1",
+      "title": "Your identity and your data",
+      "subtitle": "The part that makes Hollow different",
+      "lessons": [
+        {
+          "id": "1.1",
+          "title": "Your recovery phrase is your account",
+          "sections": [
+            {
+              "text": "This is the most important thing to understand about Hollow, so it goes first."
+            },
+            {
+              "text": "When you created your identity, Hollow gave you a 24-word recovery phrase, the same idea as a crypto wallet. That phrase isn't a backup or a \"forgot password\" fallback. It literally is your account and represents the uniquely generated peer ID. Your identity is an Ed25519 key (a cryptographic keypair), and those 24 words are that key written in a form you can read and store. Write them down on paper and keep them somewhere safe. Do not make a screenshot or sync it to the cloud to not impose any security risks to your identity. If you ever need to see the phrase again, it's under Settings ==> Security."
+            }
+          ]
+        },
+        {
+          "id": "1.2",
+          "title": "Backing up and protecting your identity",
+          "sections": [
+            {
+              "text": "Since your recovery phrase is your account, backing it up is important!"
+            },
+            {
+              "text": "If your 24-word phrase is secured, you should also use the .hollow export feature. It allows for exporting of your entire identity plus your data into a single `.hollow` file, and import it on a fresh install. This is the easy way to move to a new machine or keep a full snapshot. Treat that file like the phrase: anyone who has it has you. To preserve the entire account, the .hollow export is the recommended way and easily replaces the traditional \"login\" approach."
+            },
+            {
+              "text": "To stop someone who gets onto your device from opening your identity, Hollow offers at-rest protection functionality such as two locks under Settings ==> Security: a password (which you set and remember), or your operating system's keychain (Windows Credential Manager, macOS Keychain), which unlocks silently when you log in. Both are optional and off by default."
+            },
+            {
+              "text": "Whatever you choose, the rule is the same one from the last lesson: keep your phrase and always make backups. The locks protect the app on your device. The phrase is what brings your account back if the device/protection password is gone."
+            }
+          ]
+        },
+        {
+          "id": "1.3",
+          "title": "Your profile and how others see you",
+          "sections": [
+            {
+              "text": "Your profile is the public side of your identity like your display name, avatar, and banner. It's separate from your secret key, and it's the part you actually share with people."
+            },
+            {
+              "text": "You can edit it from Settings ==> Profile in the app. Set a display name so people see something friendlier than a peer ID, add an avatar, and optionally a banner (they support animation). Changes sync out to the people you talk to."
+            },
+            {
+              "text": "Keep in mind the split. Your recovery phrase is private and is your account, while your profile is public and is just how you present yourself. Changing your profile never changes your identity, and sharing your profile never exposes your key."
+            }
+          ]
+        },
+        {
+          "id": "1.4",
+          "title": "Recovery pool (optional)",
+          "sections": [
+            {
+              "text": "This one is optional and a bit advanced, so don't worry about it for everyday use. It solves a specific problem: getting files back after a server dies or disbands."
+            },
+            {
+              "text": "A server's files are stored across its members as erasure-coded shards, which means each file is split into encrypted pieces and spread around (the \"Where your files live\" lesson covers this). While the server is alive, that's fine. But if the server falls apart, no single ex-member holds enough pieces on their own to rebuild the files."
+            },
+            {
+              "text": "A recovery pool fixes that by letting the ex-members combine the shards they each still have. You start a pool for the dead server, share its invite link so other former members can join, and everyone contributes the pieces they're holding. From the combined set, the pool reconstructs as many files as it can. You don't need every piece back, just enough of them."
+            },
+			{
+              "text": "The shards stay encrypted the whole time. When you create/join a pool, the dashboard shows the progress and which files have been recovered as members join and contribute. After a successful combination, every peer gets the full set of restored files. You can find the recovery pool in Archive ==> Vault Files."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "m2",
+      "title": "Getting started",
+      "subtitle": "Finding your way around and doing the basics",
+      "lessons": [
+        {
+          "id": "2.1",
+          "title": "Finding your way around",
+          "sections": [
+            {
+              "text": "Here's a quick map of the app so the rest of these guides make sense."
+            },
+			{
+              "text": "Let's start with what you always see on the screen. The top bar is the Friends strip, which also holds this Help panel. It lists all your friends or the ones you add as favourites (see 2.2). The bottom Server strip lists your little profile preview and the Home button on the left, server icons you're part of in the center that you can group into a folder if needed, and the \"+\" button to create/join server with additional panels such as Public Channels Viewer, Share, Archive, Downloads, and Settings."
+            },
+            {
+              "text": "The Home tab consists of three columns: your full profile preview on the left, recent conversations in the center, and Network status on the right with additional information such as friends count, relay server stats, news, and the total online count of all connected peers."
+            }
+          ]
+        },
+        {
+          "id": "2.2",
+          "title": "Adding a friend",
+          "sections": [
+            {
+              "text": "Adding someone works a little differently than the apps you're used to. There's no central directory of users, so you add people directly by their address."
+            },
+            {
+              "text": "Press the Add Friend icon from the Friends strip bar on the left. It opens the Friends panel where you can manage all your contacts. You can add them as favourites, therefore replacing the strip bar with only the people you want to see. Or you can unfriend someone, if such unfortunate case is needed. Incoming/Outgoing tabs each hold the respective requests (either you send or receive)."
+            },
+            {
+              "text": "The Add Friend tab is the right place to send friend requests. Simply paste the peer ID or their temporary nickname, press Send Request button and wait until they accept it. Note: you need to be online in order for the other friend to accept your request because there is no server to hold the request for you."
+            },
+			{
+              "text": "Peer IDs are long and definitely nobody wants to write them by hand. For that, you can use the temporary nickname that allows you to grab a nickname that stores in RAM of the relay, so anybody can easily send you a friend request. If you quit the app or the relay restarts, the nickname gets released and anybody can claim it."
+            }
+          ]
+        },
+        {
+          "id": "2.3",
+          "title": "Your first server",
+          "sections": [
+            {
+              "text": "A \"server\" in Hollow is a shared space the members collectively host together."
+            },
+            {
+              "text": "Press the same \"+\" button from the bottom Server strip, think of a name and create the server. After that, you'll see your newly baked space. By defaut, a #general chat is created and you can easily manage everything from Server Settings (see 4.1). On the left side, you can see the channels list, the center is a chat itself, and the right side is a member panel. The top headers are simple: the left holds the server's name, join link/Storage Dashboard (allows to set the retention policy for messages)/Server Settings buttons; the center holds the channel data/status and useful stuff like search, toggle member panel or a Split View screen (you can be in two servers/DMs chats at the same time)."
+            },
+            {
+              "text": "Since members host everything, the server lives as long as someone is online. If everybody is offline, it simply stays shut until someone returns but it's not deleted (everybody holds the data together)."
+            }
+          ]
+        },
+        {
+          "id": "2.4",
+          "title": "Sending your first message",
+          "sections": [
+            {
+              "text": "Pick a friend or a server, then you can send the messages. The bottom strip in the chat area holds a file picker, voice message recorder, input bar and the send button. Chat itself has additional small actions when you hover over a message (long-press on mobile): copy, reactions, reply, message proof, pin, edit, delete (some might be restricted per server rules)."
+            },
+            {
+              "text": "Everything in chats is encrypted. Direct messages use Olm (the Double Ratchet protocol, Matrix implementation). Servers use MLS (RFC 9420, a modern protocol built for encrypting large groups efficiently). It's always on."
+            },
+            {
+              "text": "On top of encryption, each message is cryptographically signed with your key. That's what message proof is: a proof it really came from that person and wasn't faked or altered. It's also why a faked screenshot of someone \"saying\" something won't hold up. You can check a signature yourself using the tool under Settings ==> Security."
+            }
+          ]
+        },
+        {
+          "id": "2.5",
+          "title": "App settings",
+          "sections": [
+            {
+              "text": "These are your personal app settings, separate from any server's settings. They live in the main Settings, and they only affect your copy of the app."
+            },
+            {
+              "text": "Profile tab allows you to edit your appearance: avatar, banner, display name, status, about me, or securely connect your Twitch account that will allow an access to some servers that have a Twitch-gate enabled (useful for streamers to hold real communities that are actually following them)."
+            },
+            {
+              "text": "System tab is where you can customize the client itself: switch between light/dark modes, change the main color or set a background, disable animations, appear invisible or have the app minimized to tray on close, auto-download for file threshold, cache size limit, image quality, voice & video settings, custom ringtone and keyboard shortcuts."
+            },
+            {
+              "text": "Security tab lets you set an App Lock to protect your identity or enable the device protection (same but against someone copying your identity), security phrase, account backup and a signature verification tool."
+            },
+			{
+              "text": "Updates shows the current app version and whether there is a new update. It gets checked on every app launch, so you'll see a little update icon below the news block on Home tab."
+            },
+			{
+              "text": "About tab just shows the stuff like developer contact info, social pages and legal docs (privacy policy, terms of use and open-source licenses)."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "m3",
+      "title": "Talking to people",
+      "subtitle": "Calls, voice, screen sharing and files",
+      "lessons": [
+        {
+          "id": "3.1",
+          "title": "Voice and video calls",
+          "sections": [
+            {
+              "text": "Hollow does one-to-one calls and group voice channels, with voice, video, or both. Calls connect peer-to-peer where possible, and the media is encrypted with SFrame (RFC 9605, a modern protocol made specifically for real-time audio and video)."
+            },
+            {
+              "text": "To start a call in Direct Messages, select your friend, and if they're online, simply press the Call button from the right side of a top header. When they pick up, you can talk with each other or use additional controls: mute/deaf/camera toggles, screen share button and a recorder (records your entire screen with audio)."
+            },
+			{
+              "text": "To use Voice Channels, select a server and from the channel panel on the left, simply click on the available VC you'd like to join. The controls are almost the same as in DMs but without the recorder."
+            },
+            {
+              "text": "Because calls are end-to-end encrypted, the relay never hears any audio or sees any video content like camera and screen sharing."
+            }
+          ]
+        },
+        {
+          "id": "3.2",
+          "title": "Screen sharing",
+          "sections": [
+            {
+              "text": "You can share your screen during a call, which is useful for showing something off or getting help with a problem."
+            },
+            {
+              "text": "As said in 3.1, press the Screen Share button from the control panel of a call (right side of top header in a Direct Messages with a friend or a Voice Channel in a channel list on the left in a server). Select what you want to share (screen or a specific window), the resolution with frame rate of it, and the audio sharing."
+            },
+			      {
+              "text": "Then, click Share and you will see the preview of your own screen. The other peer will see it and hear the audio if you enabled it."
+            },
+            {
+              "text": "Like calls, the shared screen is encrypted end to end. Note: capture support varies by platforms. Currently, it's properly tested and supported on Windows and macOS. Linux is in Experimental support, so it might not work. Mobile devices don't support screen sharing yet. The same goes for screen audio sharing, so test it out and if any problems occur, simply report to the developer."
+            }
+          ]
+        },
+        {
+          "id": "3.3",
+          "title": "Sending files and images",
+          "sections": [
+            {
+              "text": "Drag a file into the chat, or use the attach button, to send it. Images show inline. Other files arrive as attachments the other person can download."
+            },
+            {
+              "text": "Files transfer peer-to-peer and encrypted, the same as your messages. The file size limit is 34 MB. Anything beyond that goes through Hollow Share and doesn't have the fallback support from the relay (see 3.4)."
+            }
+          ]
+        },
+        {
+          "id": "3.4",
+          "title": "Sharing big files with Hollow Share",
+          "sections": [
+            {
+              "text": "Files that are larger than 34 MB go through a feature called Hollow Share."
+            },
+            {
+              "text": "It works on the same principle as torrents but utilizes WebRTC protocol to protect your IP address and metadata leakages (nobody sees what and to whom you're transferring). It supports multiple connections, so more seeders can hold the file and peers can have a faster download speed."
+            },
+            {
+              "text": "Note: Share supports only direct peer-to-peer connections (STUN-only) without the relay fallback. Some users are behind strict networks (VPNs, NATs, corporate etc.) that block direct connections. That's why the relay exists in the first place because it's a public IP address that everybody can use to connect with each other. The limit is applied to not waste bandwidth and disrupt the main service. Hollow is a chat app, not a torrent."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "m4",
+      "title": "Running a server",
+      "subtitle": "Setting up and managing a server you own",
+      "lessons": [
+        {
+          "id": "4.1",
+          "title": "Server settings tour",
+          "sections": [
+            {
+              "text": "After you created a server (see 2.3), it is time to look into the settings of it. Press the gear icon from the top left header to enter the Server Settings."
+            },
+            {
+              "text": "Overview holds general information about the server such as avatar, name, description, access (making server private or limiting the N amount of members), import/export server template (server structure like channel list, roles or labels), server ID, Twitch verification (gating to, for example, only followers/subs of specific Twitch channel), and your specific server nickname."
+            },
+            {
+              "text": "Notifications is where you can change the notifications for all channels or specific ones. The Danger tab lets you leave the server (or delete it if you're the owner)."
+            },
+			{
+              "text": "For a deeper dive into the other settings, check the next lessons from this module."
+            }
+          ]
+        },
+        {
+          "id": "4.2",
+          "title": "Channels, categories and public channels",
+          "sections": [
+            {
+              "text": "Channels are the rooms inside your server, and categories are the groups you sort them into. Select the Channels tab from Server Settings."
+            },
+			{
+              "text": "Break allows you to add a simple divider between the categories and channels. Category is like a folder that can hold your channels (useful for organizing). Channel itself (either text or voice) is the heart of your server. You can create multiple channels, sort them however you like and easily change their name or delete them."
+            },
+            {
+              "text": "Public Channels is a feature that allows you to make a specific channel public. Toggle the globe icon of a channel. It automatically becomes public, and anyone can read it from just the server ID or a join link, without even creating an identity. Public channels skip the group encryption since they're meant to be public, but messages in them are still signed, so authorship is still provable."
+            },
+            {
+              "text": "If you want to change who can view or write in the channel (permissions for such), check the dropdown list when you click on either buttons on the left side from the globe public channel icon. Choose who you want to have access to viewing or writing in specific channel, and you're done."
+            }
+          ]
+        },
+        {
+          "id": "4.3",
+          "title": "Roles and permissions",
+          "sections": [
+            {
+              "text": "Roles decide what people can do in your server. Hollow keeps this simple with four power roles, plus optional cosmetic labels that are purely for show."
+            },
+            {
+              "text": "The four power roles are Owner, Admin, Moderator, and Member, in descending order of what they can do. Owner has everything. Admins can manage most of the server. Moderators handle day-to-day moderation. Members are everyone else. You can adjust exactly which permissions each role gets in the Roles tab."
+            },
+            {
+              "text": "Editing is tier-gated, which means you can only grant or change permissions at or below your own level. This stops a moderator from quietly handing themselves owner powers. Labels, by contrast, are just decorative tags (like a colored badge on someone's profile) and carry no permissions at all. Set them up from the Labels tab."
+            }
+          ]
+        },
+        {
+          "id": "4.4",
+          "title": "Members and moderation",
+          "sections": [
+            {
+              "text": "The Members tab is where you see who's in the server and take moderation actions, according to your role."
+            },
+            {
+              "text": "Depending on your permissions you can assign roles, remove (kick) someone, or ban them. These actions respect the same tier rules as permissions, so you can't act on someone above your own level. If you don't want new members or make the server private, use the Overview tab (the Access section)."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "m5",
+      "title": "Storage, vault and your data",
+      "subtitle": "Where things live, and taking your data with you",
+      "lessons": [
+        {
+          "id": "5.1",
+          "title": "Where your files live (vault and storage)",
+          "sections": [
+            {
+              "text": "Since there's no central server, your files have to live somewhere distributed. Hollow handles this in two ways, and you mostly don't have to think about it."
+            },
+            {
+              "text": "All Direct Messages and servers with fewer than 6 members use the Full Replication mode (full file copies). Servers that have 6+ members use Erasure Coding mode that splits data into pieces (shards) and spreads across members, so the file survives even if some of those members go offline. You don't need all the pieces back to rebuild a file, just enough of them."
+            },
+            {
+              "text": "The practical upshot: your shared files are spread across the people in a space rather than sitting on a company hard drive. You can see your storage situation in the Storage Dashboard of each server if you're curious about what's being kept."
+            }
+          ]
+        },
+        {
+          "id": "5.2",
+          "title": "Your archive and exporting your data",
+          "sections": [
+            {
+              "text": "Since your messages are stored in your own local encrypted database, your data is genuinely yours, and Hollow lets you take it with you."
+            },
+            {
+              "text": "The Archive lets you view and export your conversations. Select a friend you talked with and you will see the full conversation history. You can also check a specific channel of a server where you hold the data and also view it."
+            },
+            {
+              "text": "You can export each conversation into '.hollow-archive' file and use Imported Archives tab to load such archive. It's useful if you want somebody to look at it, maybe gather evidence with signatures etc."
+            }
+          ]
+        },
+        {
+          "id": "5.3",
+          "title": "Notifications and push",
+          "sections": [
+            {
+              "text": "Hollow can notify you about direct messages and channel activity, and you can tune what you get notified about in the notification settings, per server and per channel."
+            },
+            {
+              "text": "On mobile, push notifications wake your phone for new messages even when the app is closed. The push itself carries no message content. It's just a nudge that tells your phone to wake up and fetch the real (encrypted) message itself. Apple and Google never see what was said, only that something arrived."
+            },
+            {
+              "text": "Push is a mobile thing. On desktop there's no always-on push service, so a desktop Hollow picks up messages when the app is open and connected. You will receive local notifications if the app is backgrounded (in a tray)."
+            }
+          ]
+        },
+        {
+          "id": "5.4",
+          "title": "Self-hosting the relay",
+          "sections": [
+            {
+              "text": "The relay (the one piece of infrastructure that passes encrypted traffic between people) is open source, and the relay address is configurable."
+            },
+            {
+              "text": "That means you're not locked to the default relay. You can point Hollow at a different one, including the one you run yourself, by changing the relay domain in the app. Since the relay only ever sees encrypted noise, this is about who carries your sealed envelopes, not about who can read them."
+            },
+			{
+              "text": "Note: self-hosted relays are isolated from the official network, so if someone is on custom relay and someone is on official one, you can't communicate. Federation is not supported by design because someone can add logging or manipulate the relay in a bad way, potentially causing damage or disrupting the service to everybody."
+            },
+            {
+              "text": "If you want to run an isolated relay network yourself, check the docs [here.](https://github.com/VitalikPro13/HOLLOW/blob/main/relay-uws/README.md) For everyday use, the default relay works fine and you can ignore this entirely."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "m6",
+      "title": "Living with a serverless network",
+      "subtitle": "The honest trade-offs of owning your own data",
+      "lessons": [
+        {
+          "id": "6.1",
+          "title": "Why a message sometimes waits",
+          "sections": [
+            {
+              "text": "This is the behavior most likely to surprise someone coming from a normal chat app, so it's worth understanding rather than discovering it as a bug."
+            },
+            {
+              "text": "If the other person is online, your message arrives right away, sent directly and encrypted. That's the normal case, on every platform."
+            },
+            {
+              "text": "If they're offline and on mobile, a push wakes their phone, and it fetches your message. So it still arrives soon after, even with the app closed."
+            },
+            {
+              "text": "If they're offline and on desktop, there's no always-on push to wake a desktop, so they'll get the message the next time they open Hollow. If you also go offline before they come back, the message simply won't sync to them because the relay doesn't hold it in its RAM."
+            },
+            {
+              "text": "Push covers the gap on phones, and on desktop the model to keep in mind is simply: people get your message when they're next reachable."
+            }
+          ]
+        },
+        {
+          "id": "6.2",
+          "title": "When a server is asleep",
+          "sections": [
+            {
+              "text": "Since members host their servers together, a server isn't a machine that's always on. It's the people in it."
+            },
+            {
+              "text": "If everyone in a space happens to be offline at the same time, the space is effectively asleep. Nobody is there to serve its history or receive new activity. The moment someone comes back online, it wakes up and syncs."
+            },
+            {
+              "text": "In practice, any space with a few active people stays lively, because someone is usually around. It's only on tiny servers where you'd notice the difference."
+            }
+          ]
+        },
+        {
+          "id": "6.3",
+          "title": "Catching up on history you missed",
+          "sections": [
+            {
+              "text": "When you reconnect after being away, Hollow syncs the messages you missed from the other members who have them. Your local database fills back in automatically."
+            },
+            {
+              "text": "Messages are kept in sync across members using CRDTs, a method for merging everyone's copies without conflicts and without a central authority deciding the order. Each person keeps their own encrypted copy, so the history is held collectively rather than by one server."
+            },
+            {
+              "text": "There's one honest edge case. If you missed some messages and every member who had that particular stretch of history is also offline, that part stays unavailable until one of them comes back to share it. Once someone with the data is online, the gap fills in."
+            }
+          ]
+        },
+        {
+          "id": "6.4",
+          "title": "Files and availability",
+          "sections": [
+            {
+              "text": "Files follow the same logic as history. They live among members rather than on a central drive, so their availability depends on enough of those members being reachable."
+            },
+            {
+              "text": "For a file that was split into pieces and spread across people (see 5.1), you need enough of those pieces back online to reconstruct it, not all of them. So a few people being offline is usually fine. It's only when too many piece-holders are offline at once that a file can be temporarily unavailable."
+            },
+            {
+              "text": "When the people holding the pieces come back, the file becomes available again. Nothing is lost, it's just waiting on enough of the network to be present, the same as everything else in a distributed system."
+            }
+          ]
+        },
+        {
+          "id": "6.5",
+          "title": "No resets, by design",
+          "sections": [
+            {
+              "text": "As from the lessons 1.1 and 1.2, there is simply no way to reset a password or get your account back in case of it being lost. We can't email you, verify your identity or do anything at all because we store nothing."
+            },
+            {
+              "text": "Your identity is your responsibility: your security phrase, your data and what you do. We recommend to always export your identity using the Account Backup under Settings ==> Security to keep all your messages, friends, and servers intact. This is the easiest way to have all your data with you."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
