@@ -9,7 +9,7 @@ import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
-import 'package:hollow/src/core/providers/peers_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
@@ -251,7 +251,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final friends = ref.watch(friendsProvider);
-    final peers = ref.watch(peersProvider);
+    final online = ref.watch(onlineIdentitiesProvider);
     final lastMessages = ref.watch(lastDmMessageProvider);
     final servers = ref.watch(serverListProvider);
     final hiddenDms = ref.watch(hiddenArchiveDmsProvider);
@@ -272,7 +272,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
         name: displayNameFor(profiles, friend.peerId),
         lastMessage: last,
         unreadCount: unread.dmUnreadCount(friend.peerId),
-        isOnline: peers.containsKey(friend.peerId),
+        isOnline: online.contains(friend.peerId),
         timestamp: last?.timestamp,
       ));
     }

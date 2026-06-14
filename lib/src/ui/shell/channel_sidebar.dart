@@ -15,6 +15,7 @@ import 'package:hollow/src/ui/animations/reveal_widgets.dart';
 import 'package:hollow/src/ui/animations/selection_shimmer.dart';
 import 'package:hollow/src/ui/dialogs/storage_dashboard_dialog.dart';
 import 'package:hollow/src/ui/animations/startup_reveal.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -572,6 +573,9 @@ class _HomeContent extends ConsumerWidget {
   @override
   Widget build(BuildContext innerContext, WidgetRef ref) {
     final friends = ref.watch(friendsProvider);
+    // Multi-device: a friend is online if ANY of their devices is online,
+    // collapsed to the master identity. Single-device resolves to itself.
+    final online = ref.watch(onlineIdentitiesProvider);
     final dividerTextStyle = HollowTypography.caption.copyWith(
       color: hollow.textSecondary,
       fontWeight: FontWeight.w600,
@@ -592,8 +596,8 @@ class _HomeContent extends ConsumerWidget {
 
     // Sort accepted: online first, then by peer ID.
     accepted.sort((a, b) {
-      final aOnline = peers.containsKey(a.peerId) ? 0 : 1;
-      final bOnline = peers.containsKey(b.peerId) ? 0 : 1;
+      final aOnline = online.contains(a.peerId) ? 0 : 1;
+      final bOnline = online.contains(b.peerId) ? 0 : 1;
       if (aOnline != bOnline) return aOnline.compareTo(bOnline);
       return a.peerId.compareTo(b.peerId);
     });
@@ -696,7 +700,7 @@ class _HomeContent extends ConsumerWidget {
                       vertical: HollowSpacing.xs),
                   itemBuilder: (context, index) {
                     final friend = accepted[index];
-                    final isOnline = peers.containsKey(friend.peerId);
+                    final isOnline = online.contains(friend.peerId);
                     final peer = peers[friend.peerId];
                     final isSelected = friend.peerId == selectedPeerId;
                     final last = lastMessage(friend.peerId);

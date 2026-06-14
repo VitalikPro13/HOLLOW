@@ -2035,6 +2035,21 @@ impl MessageStore {
         Ok(out)
     }
 
+    /// Wipe ALL persisted device lists + reverse-index links (multi-device,
+    /// Phase 6). Testing/maintenance aid: union-merge never removes a device id,
+    /// so repeated wipe+reimport test cycles leave ghost devices accumulating in
+    /// our own published list. Clearing lets the set rebuild from currently-live
+    /// siblings. (Production cleanup of a single device = Step 7 revocation.)
+    pub fn clear_all_device_lists(&self) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM device_links", [])
+            .map_err(|e| format!("Failed to clear device_links: {e}"))?;
+        self.conn
+            .execute("DELETE FROM device_lists", [])
+            .map_err(|e| format!("Failed to clear device_lists: {e}"))?;
+        Ok(())
+    }
+
     // ── User Profile Persistence (Phase 3.5) ──
 
     /// Upsert a user profile (ours or a peer's).

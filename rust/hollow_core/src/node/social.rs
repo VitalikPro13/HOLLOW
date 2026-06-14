@@ -453,10 +453,15 @@ pub(crate) async fn handle_envelope_typing(
 }
 
 /// Handle `MessageEnvelope::ProfileUpdate` — persist profile + update member display names.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_profile_update(
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_states: &mut HashMap<String, ServerState>,
     local_master_peer_id: &str,
+    local_device_peer_id: &str,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     sender_peer_id: String,
     display_name: String,
     status: String,
@@ -470,9 +475,17 @@ pub(crate) async fn handle_envelope_profile_update(
     db_passphrase: &str,
 ) {
     // Multi-device: ingest the sender's signed device list (verify + monotonic +
-    // persist + resolver update + DeviceListUpdated). No-op for old clients.
-    super::crypto_handler::ingest_device_list(
-        event_tx, local_master_peer_id, device_list, db_path, db_passphrase,
+    // persist + resolver update + DeviceListUpdated). A list for our OWN master
+    // is a sibling device → merged (union). No-op for old clients.
+    //
+    // The returned "our device set grew" flag is consumed by the PLAINTEXT
+    // `HavenMessage::ProfileUpdate` handler (swarm.rs), which re-announces our
+    // profile to friends on a sibling merge. Siblings meet in the inbox room via
+    // that plaintext path, not this MLS server-member envelope, so we don't
+    // re-broadcast here (a sibling is not an MLS co-member in the DM/inbox case).
+    let _our_devices_grew = super::crypto_handler::ingest_device_list(
+        event_tx, local_master_peer_id, local_device_peer_id, master_keypair,
+        &sender_peer_id, ws_cmd_tx, ws_room_peers, device_list, db_path, db_passphrase,
     ).await;
 
     // Decode avatar/banner base64 (same logic as HavenMessage::ProfileUpdate handler).

@@ -8,12 +8,24 @@
 //! relay, rooms, and Olm. Two devices of one identity therefore present DISTINCT
 //! peer_ids and never clobber each other's relay socket or crypto sessions.
 //!
-//! ## Migration keystone (do NOT break)
-//! On an install that already has `identity.key` but no `identity.device`, the
-//! device key is SEEDED FROM THE MASTER KEY (not generated fresh). This makes
-//! `device_peer_id == master_peer_id == legacy peer_id`, so every existing
-//! friendship, DM thread, and room code keeps resolving to the same value.
-//! Generating a fresh device-1 key here would orphan all history.
+//! ## Every device gets a FRESH, distinct id (no keystone)
+//! On first run (no `identity.device`), the device key is ALWAYS generated fresh
+//! random — even on an upgrading single-device install. We deliberately do NOT
+//! seed it from the master.
+//!
+//! Why not the old "migration keystone" (device==master on existing installs)?
+//! Because the master id is shared across an identity's devices, so a device
+//! whose transport id EQUALS the master collides with every other device's
+//! `local_peer_str` (master): each sibling then filters the keystone device out
+//! as "self" and they can never see each other. Distinct-per-device ids are the
+//! whole point of the model; the keystone reintroduced the very collision it was
+//! meant to avoid the moment a second device appeared.
+//!
+//! Cost of dropping it: an existing install's TRANSPORT peer_id changes once on
+//! upgrade. That is safe — friendships, DM threads, room codes, message signing,
+//! and the DB passphrase are all MASTER-derived (unchanged). Only peer-keyed
+//! transient state (presence dots, Olm sessions) re-establishes, which it does
+//! automatically on reconnect/key-exchange.
 
 use std::fs;
 use std::path::PathBuf;
@@ -23,12 +35,23 @@ use super::native_identity::NativeKeypair;
 
 /// Load the per-device keypair from `identity.device`, creating it if absent.
 ///
-/// - File present  → decode (decrypting via the session key if encrypted).
-/// - File absent, master key provided → SEED FROM MASTER (migration keystone).
-/// - File absent, no master (brand-new identity) → generate fresh random key.
+/// - File present → decode. If it's a LEGACY keystone file (device id == master
+///   id, written by the old code), ROTATE it to a fresh random id in place — see
+///   the migration note below.
+/// - File absent → generate a FRESH random key (distinct from the master and
+///   from every other device). No master-seeding — see the module docs.
 ///
-/// `master` is the already-loaded master keypair; pass `Some` whenever it is
-/// available so an upgrading install adopts its legacy id as the device id.
+/// `master` is the loaded master keypair, used ONLY to detect (and rotate) a
+/// legacy keystone device file. Pass `Some` whenever it's available.
+///
+/// ## One-time keystone rotation (existing installs)
+/// The old code seeded `identity.device` from the master, so upgrading installs
+/// already have a file with `device_id == master_id`. That collides with every
+/// sibling's `local_peer_str` (= master) and breaks multi-device. So on load, if
+/// we detect that legacy equality, we regenerate a fresh random device key and
+/// overwrite the file (preserving its at-rest protection via `save_keypair_to`).
+/// This happens exactly once; subsequent loads read the rotated file. The
+/// transport id changes once — safe, since all durable state is master-keyed.
 pub(crate) fn load_or_create_device_keypair(
     master: Option<&NativeKeypair>,
 ) -> Result<NativeKeypair, String> {
@@ -53,22 +76,27 @@ fn load_or_create_device_keypair_at(
                 super::encryption::decrypt_identity(&bytes, &key)?
             }
         };
-        return NativeKeypair::from_protobuf_encoding(&plaintext)
-            .map_err(|e| format!("Failed to decode device key: {e}"));
+        let device = NativeKeypair::from_protobuf_encoding(&plaintext)
+            .map_err(|e| format!("Failed to decode device key: {e}"))?;
+
+        // One-time keystone rotation: a legacy file where device == master must
+        // become a fresh distinct id, or it collides with sibling masters.
+        if let Some(m) = master {
+            if device.peer_id() == m.peer_id() {
+                let mut secret = [0u8; 32];
+                getrandom::fill(&mut secret).map_err(|e| format!("RNG failed: {e}"))?;
+                let fresh = NativeKeypair::from_secret_bytes(&secret);
+                save_keypair_to(path, &fresh)?;
+                return Ok(fresh);
+            }
+        }
+        return Ok(device);
     }
 
-    // No device key file yet.
-    let device = match master {
-        // Migration keystone: adopt the master key as device-1's key so the
-        // device peer_id equals the legacy peer_id and nothing is orphaned.
-        Some(m) => NativeKeypair::from_secret_bytes(&m.secret_key_bytes()),
-        // Brand-new identity (no master available): fresh random device key.
-        None => {
-            let mut secret = [0u8; 32];
-            getrandom::fill(&mut secret).map_err(|e| format!("RNG failed: {e}"))?;
-            NativeKeypair::from_secret_bytes(&secret)
-        }
-    };
+    // No device key file yet → fresh random key, ALWAYS distinct from the master.
+    let mut secret = [0u8; 32];
+    getrandom::fill(&mut secret).map_err(|e| format!("RNG failed: {e}"))?;
+    let device = NativeKeypair::from_secret_bytes(&secret);
 
     save_keypair_to(path, &device)?;
     Ok(device)
@@ -145,27 +173,27 @@ mod tests {
         NativeKeypair::from_mnemonic(&mnemonic).unwrap()
     }
 
-    /// With a master present and no device file, the device key SEEDS FROM the
-    /// master (migration keystone): device peer_id == master peer_id.
+    /// First run (no device file) ALWAYS generates a fresh key DISTINCT from the
+    /// master — no keystone — so a device's transport id never collides with the
+    /// shared master id (which is another device's `local_peer_str`).
     #[test]
-    fn seeds_from_master_when_absent() {
+    fn fresh_and_distinct_from_master_when_absent() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("identity.device");
         let master = master_kp();
 
         let device = load_or_create_device_keypair_at(&path, Some(&master)).unwrap();
-        assert_eq!(device.peer_id(), master.peer_id());
-        assert_eq!(device.secret_key_bytes(), master.secret_key_bytes());
+        assert_ne!(device.peer_id(), master.peer_id());
+        assert_ne!(device.secret_key_bytes(), master.secret_key_bytes());
 
         // Second load reads the persisted file and is stable.
         let again = load_or_create_device_keypair_at(&path, Some(&master)).unwrap();
         assert_eq!(again.peer_id(), device.peer_id());
     }
 
-    /// With no master (brand-new identity), the device key is fresh + random and
-    /// therefore DISTINCT from any master, but stable across reloads.
+    /// Stable across reloads and distinct from the master.
     #[test]
-    fn fresh_random_when_no_master() {
+    fn fresh_random_stable_across_reloads() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("identity.device");
 
@@ -175,8 +203,8 @@ mod tests {
         assert_ne!(device.peer_id(), master_kp().peer_id());
     }
 
-    /// Two independent installs (no master) get DISTINCT random device keys —
-    /// the property that lets two devices of one identity coexist on the relay.
+    /// Two independent installs get DISTINCT random device keys — the property
+    /// that lets two devices of one identity coexist on the relay.
     #[test]
     fn two_fresh_devices_are_distinct() {
         let tmp_a = tempfile::tempdir().unwrap();
@@ -184,5 +212,27 @@ mod tests {
         let a = load_or_create_device_keypair_at(&tmp_a.path().join("d"), None).unwrap();
         let b = load_or_create_device_keypair_at(&tmp_b.path().join("d"), None).unwrap();
         assert_ne!(a.peer_id(), b.peer_id());
+    }
+
+    /// A LEGACY keystone file (device == master, written by the old code) is
+    /// rotated to a fresh distinct id on the next load, and is then stable.
+    #[test]
+    fn legacy_keystone_file_is_rotated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("identity.device");
+        let master = master_kp();
+
+        // Simulate the old keystone: device file == master key.
+        let legacy = NativeKeypair::from_secret_bytes(&master.secret_key_bytes());
+        save_keypair_to(&path, &legacy).unwrap();
+        assert_eq!(legacy.peer_id(), master.peer_id());
+
+        // Load with master present → must rotate to a distinct id.
+        let rotated = load_or_create_device_keypair_at(&path, Some(&master)).unwrap();
+        assert_ne!(rotated.peer_id(), master.peer_id());
+
+        // Stable afterwards (file now holds the rotated key).
+        let again = load_or_create_device_keypair_at(&path, Some(&master)).unwrap();
+        assert_eq!(again.peer_id(), rotated.peer_id());
     }
 }

@@ -19,6 +19,7 @@ import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
@@ -870,9 +871,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               HollowAvatar(peerId: widget.peerId, size: 28),
               const SizedBox(width: HollowSpacing.sm),
               Builder(builder: (_) {
-                final hasPeer = ref.watch(peersProvider.select((p) => p.containsKey(widget.peerId)));
-                final isInvisible = ref.watch(invisiblePeersProvider.select((inv) => inv.contains(widget.peerId)));
-                final isOnline = hasPeer && !isInvisible;
+                final isOnline = identityIsOnline(ref, widget.peerId);
                 return StatusDot(
                   color: isOnline ? hollow.success : hollow.textSecondary,
                   size: 8,
@@ -927,7 +926,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               // Voice call button
               Builder(builder: (_) {
                 final call = ref.watch(callProvider);
-                final isOnline = ref.watch(peersProvider).containsKey(widget.peerId);
+                final isOnline = identityIsOnline(ref, widget.peerId);
                 final isInCall = call.status != CallStatus.idle;
                 final isCallWithThisPeer = call.peerId == widget.peerId && isInCall;
 
@@ -957,7 +956,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               // Video call button
               Builder(builder: (_) {
                 final call = ref.watch(callProvider);
-                final isOnline = ref.watch(peersProvider).containsKey(widget.peerId);
+                final isOnline = identityIsOnline(ref, widget.peerId);
                 final isInCall = call.status != CallStatus.idle;
 
                 return HollowTooltip(
@@ -3707,8 +3706,7 @@ class _DmProfilePanel extends ConsumerWidget {
     final profile = ref.watch(profileProvider.select((p) => p[peerId]));
     final localNicknames = ref.watch(localNicknameProvider);
     final localNick = localNicknames[peerId];
-    final isOnline = ref.watch(peersProvider).containsKey(peerId) &&
-        !ref.watch(invisiblePeersProvider).contains(peerId);
+    final isOnline = identityIsOnline(ref, peerId);
     final friends = ref.watch(friendsProvider);
     final friendInfo = friends[peerId];
 

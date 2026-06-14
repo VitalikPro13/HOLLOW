@@ -119,6 +119,15 @@ pub(crate) fn clear_for_test() {
     }
 }
 
+/// Clear the in-memory resolver (multi-device testing/maintenance aid; pairs
+/// with `MessageStore::clear_all_device_lists`). Devices re-learn from live
+/// siblings on the next profile exchange.
+pub(crate) fn clear_all() {
+    if let Ok(mut map) = links().write() {
+        map.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
@@ -461,8 +462,7 @@ class _RecentConversationsColumn extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final friends = ref.watch(friendsProvider);
     final lastMessages = ref.watch(lastDmMessageProvider);
-    final peerIds = ref.watch(peersProvider.select((p) => p.keys.toSet()));
-    final invPeers = ref.watch(invisiblePeersProvider);
+    final online = ref.watch(onlineIdentitiesProvider);
     final dmUnreads = ref.watch(unreadProvider.select((s) => s.dmUnreadCounts));
 
     // Build list of friends with their last message, sorted by recency.
@@ -478,8 +478,7 @@ class _RecentConversationsColumn extends ConsumerWidget {
         peerId: friend.peerId,
         lastMessage: lastMsg,
         timestamp: timestamp,
-        isOnline: peerIds.contains(friend.peerId) &&
-            !invPeers.contains(friend.peerId),
+        isOnline: online.contains(friend.peerId),
         unreadCount: dmUnreads[friend.peerId] ?? 0,
       ));
     }
@@ -744,6 +743,9 @@ class _NetworkColumn extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final nodeState = ref.watch(nodeProvider);
     final peers = ref.watch(peersProvider);
+    // Multi-device: a friend can be online via a device whose peer_id differs
+    // from their master friend.peerId, so the master key won't be in `peers`.
+    final online = ref.watch(onlineIdentitiesProvider);
     final friends = ref.watch(friendsProvider);
     final relayStats = ref.watch(relayStatsProvider);
 
@@ -766,7 +768,11 @@ class _NetworkColumn extends ConsumerWidget {
           (cs.stage == PeerConnectionStage.connected ||
            cs.stage == PeerConnectionStage.keyExchange)) {
         activeFriends.add(cs);
-      } else if (peer != null && !peer.isEncrypted) {
+      } else if ((peer != null && !peer.isEncrypted) ||
+          online.contains(f.peerId)) {
+        // Either a direct (master-keyed) session is mid-handshake, or the
+        // friend is online via another device whose PeerInfo isn't keyed under
+        // their master id — count them as connecting, not offline.
         activeFriends.add(PeerConnectionStatus(
           peerId: f.peerId,
           stage: PeerConnectionStage.keyExchange,

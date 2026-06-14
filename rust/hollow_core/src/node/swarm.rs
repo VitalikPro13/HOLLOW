@@ -1394,8 +1394,9 @@ async fn run_event_loop(
                         // event (0 peers is normal when everyone's already connected via WS).
                         hollow_log!("[HOLLOW-SIGNALING] Bootstrap returned {} peers", peers.len());
                         for bp in peers {
-                            // Skip ourselves.
-                            if bp.peer_id == local_peer_str {
+                            // Skip ourselves (master AND device id — the relay/signaling
+                            // can report us under either).
+                            if bp.peer_id == local_peer_str || bp.peer_id == device_peer_id {
                                 continue;
                             }
                             // Skip peers already visible via WS relay.
@@ -1543,7 +1544,7 @@ async fn run_event_loop(
                         // Recovery pool: when a peer joins our recovery room, send them our inventory.
                         if room.starts_with("recovery:") {
                             if let Some(pool) = recovery_pool_state.as_ref() {
-                                if room == pool.room_code() && peer_id != local_peer_str {
+                                if room == pool.room_code() && peer_id != local_peer_str && peer_id != device_peer_id {
                                     hollow_log!("[RECOVERY-POOL] Peer {peer_id} joined — sending our inventory");
                                     if let Some(our_inv) = pool.members.get(&local_peer_str) {
                                         let welcome = HavenMessage::RecoveryWelcome {
@@ -1564,7 +1565,7 @@ async fn run_event_loop(
 
                         // Hollow Share: when a peer joins, immediately send our Have
                         // bitmap so they know we have chunks available.
-                        if room.starts_with("share:") && peer_id != local_peer_str {
+                        if room.starts_with("share:") && peer_id != local_peer_str && peer_id != device_peer_id {
                             let root_hash = room.trim_start_matches("share:");
                             super::share_handler::broadcast_have(
                                 &mut share_registry, &ws_cmd_tx, root_hash,
@@ -1577,7 +1578,11 @@ async fn run_event_loop(
                         }
 
                             // Update gossip overlay: add this peer and maybe connect.
-                            if peer_id != local_peer_str {
+                            // Multi-device: the relay reports US under our DEVICE id, which
+                            // differs from local_peer_str (= master). Exclude both, else a
+                            // node key-exchanges / WebRTCs with its OWN device presence
+                            // (endless MAC-mismatch re-key — the "VM fights itself" bug).
+                            if peer_id != local_peer_str && peer_id != device_peer_id {
                                 if let Some(overlay) = gossip_overlays.get_mut(&room) {
                                     if let Some(new_neighbor) = overlay.add_known_peer(&peer_id) {
                                         hollow_log!("[HOLLOW-GOSSIP] New neighbor {new_neighbor} joined server {room}");
@@ -1586,7 +1591,7 @@ async fn run_event_loop(
                                 }
                             }
 
-                            if peer_id != local_peer_str {
+                            if peer_id != local_peer_str && peer_id != device_peer_id {
 
                                 // Only trigger sync if not already synced this session
                                 // (prevents duplicate sync when both WS and libp2p fire).
@@ -1628,6 +1633,96 @@ async fn run_event_loop(
                                         is_invisible,
                                         &db_path, &db_passphrase,
                                     );
+
+                                    // Multi-device (Phase 6): a peer joining OUR OWN inbox room
+                                    // (`inbox:{master}`) is BY DEFINITION our own other device —
+                                    // only our devices ever join our master inbox. Use that as the
+                                    // sibling proof DIRECTLY, instead of `same_identity` (which
+                                    // depends on the device-list having already been exchanged — a
+                                    // chicken-and-egg that lost the friend-share to join-timing
+                                    // races). Seed the resolver from this fact, then push our friend
+                                    // list AND pull theirs (covers either side being the empty one).
+                                    let own_inbox = format!("inbox:{}", local_peer_str);
+                                    if room == own_inbox && peer_id != device_peer_id {
+                                        // The joining device belongs to our master identity.
+                                        super::resolver::update(&peer_id, &local_peer_str);
+
+                                        // CRITICAL (presence collapse): the inbox-proof tells us
+                                        // `peer_id` is OUR sibling device. Merge it into our own
+                                        // master-signed device list RIGHT HERE — do not wait for a
+                                        // ProfileUpdate carrying a device_list (a freshly-imported
+                                        // sibling has no profile, so it never sends one, and our list
+                                        // would stay 1 device forever → a friend like AL only ever
+                                        // learns ONE of our devices and shows us offline when that one
+                                        // quits). Union + re-sign + persist, then re-announce our
+                                        // profile (now carrying BOTH devices) to every friend we share
+                                        // a room with so they converge immediately.
+                                        let our_set_grew = super::crypto_handler::merge_sibling_device_id(
+                                            &master_keypair, &device_peer_id, &peer_id,
+                                            &db_path, &db_passphrase,
+                                        );
+                                        if our_set_grew {
+                                            let peers: Vec<String> = ws_room_peers.values()
+                                                .flat_map(|p| p.iter().cloned())
+                                                .collect();
+                                            hollow_log!(
+                                                "[HOLLOW-DEVICES] Inbox sibling {peer_id} merged — re-announcing to {} room peer(s)",
+                                                peers.len()
+                                            );
+                                            for pid in peers {
+                                                if pid == local_peer_str || pid == device_peer_id { continue; }
+                                                if super::resolver::same_identity(&pid, &local_peer_str) { continue; }
+                                                social::send_own_profile_to_peer(
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    &local_peer_str, &master_keypair, &device_peer_id, &pid,
+                                                    is_invisible,
+                                                    &db_path, &db_passphrase,
+                                                );
+                                            }
+                                        }
+                                        // Also hand the sibling our device list directly (via a
+                                        // ProfileUpdate) so IT converges on the union too — covers the
+                                        // case where the sibling is the one with a profile and we are
+                                        // the fresh device.
+                                        social::send_own_profile_to_peer(
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            &local_peer_str, &master_keypair, &device_peer_id, &peer_id,
+                                            is_invisible,
+                                            &db_path, &db_passphrase,
+                                        );
+
+                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                            if let Ok(friends) = store.load_friends(Some("accepted")) {
+                                                if !friends.is_empty() {
+                                                    let entries: Vec<FriendListEntry> = friends
+                                                        .into_iter()
+                                                        .map(|(pid, status, direction, requested_at, _updated)| FriendListEntry {
+                                                            peer_id: pid,
+                                                            status,
+                                                            direction,
+                                                            requested_at,
+                                                        })
+                                                        .collect();
+                                                    hollow_log!(
+                                                        "[HOLLOW-MULTIDEV] Sibling device {peer_id} joined our inbox — sharing {} friends",
+                                                        entries.len()
+                                                    );
+                                                    send_message_to_peer(
+                                                        &ws_cmd_tx, &ws_room_peers,
+                                                        &peer_id, HavenMessage::FriendListSync { friends: entries },
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        // Pull theirs too (in case WE are the empty device).
+                                        hollow_log!(
+                                            "[HOLLOW-MULTIDEV] Sibling {peer_id} joined our inbox — requesting their friend list"
+                                        );
+                                        send_message_to_peer(
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            &peer_id, HavenMessage::FriendListRequest,
+                                        );
+                                    }
 
                                     // Proactive key exchange if no CONFIRMED Olm session.
                                     // An outbound-only session is NOT proof the peer can decrypt
@@ -1902,8 +1997,12 @@ async fn run_event_loop(
                     WsEvent::RoomMembers { room, peers } => {
                         hollow_log!("[HOLLOW-WS] Room {room}: {} members", peers.len());
                         let local_peer = local_peer_str.to_string();
+                        // Exclude BOTH our master (local_peer) and our DEVICE id: the relay
+                        // lists us by our device id, so without this a node keeps its own
+                        // presence in ws_room_peers and key-exchanges / sends profile to
+                        // ITSELF (the "VM fights its own device id" loop).
                         let room_set: std::collections::HashSet<String> = peers.iter()
-                            .filter(|p| *p != &local_peer)
+                            .filter(|p| *p != &local_peer && p.as_str() != device_peer_id)
                             .cloned()
                             .collect();
                         // RoomMembers is the relay's AUTHORITATIVE snapshot for
@@ -1935,7 +2034,7 @@ async fn run_event_loop(
                                     .or_insert_with(|| super::gossip::GossipOverlay::new(room.clone()));
                                 // Add all room members as known peers.
                                 for pid in &peers {
-                                    if pid != &local_peer {
+                                    if pid != &local_peer && pid.as_str() != device_peer_id {
                                         overlay.add_known_peer(pid);
                                     }
                                 }
@@ -1956,9 +2055,10 @@ async fn run_event_loop(
                         if !profile_broadcast_done {
                             profile_broadcast_done = true;
                             hollow_log!("[HOLLOW-PROFILE] First RoomMembers — broadcasting our profile");
-                            // Send our profile to all peers in this room.
+                            // Send our profile to all peers in this room (not ourselves —
+                            // exclude both master and device id).
                             for pid in &peers {
-                                if pid != &local_peer {
+                                if pid != &local_peer && pid.as_str() != device_peer_id {
                                     social::send_own_profile_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
                                         &local_peer_str, &master_keypair, &device_peer_id, pid,
@@ -1978,7 +2078,7 @@ async fn run_event_loop(
                             .collect();
 
                         for pid_str in &peers {
-                            if pid_str != &local_peer {
+                            if pid_str != &local_peer && pid_str.as_str() != device_peer_id {
                                 let _ = event_tx.send(NetworkEvent::PeerDiscovered {
                                     peer: DiscoveredPeer {
                                         peer_id: pid_str.clone(),
@@ -2241,12 +2341,14 @@ async fn run_event_loop(
                         hollow_log!("[HOLLOW-WS] Discovered {} peers in room {room}", peers.len());
                         let room_set = ws_room_peers.entry(room.clone()).or_default();
                         for pid in &peers {
-                            if *pid != local_peer_str {
+                            // Exclude our own DEVICE id too (relay reports us by it,
+                            // not by master = local_peer_str).
+                            if *pid != local_peer_str && *pid != device_peer_id {
                                 room_set.insert(pid.clone());
                             }
                         }
                         for pid in &peers {
-                            if *pid == local_peer_str { continue; }
+                            if *pid == local_peer_str || *pid == device_peer_id { continue; }
                             if !olm.has_confirmed_session(pid)
                                 && !key_request_is_fresh(&key_request_in_flight, pid)
                             {
@@ -2840,7 +2942,7 @@ async fn run_event_loop(
                     let mut online: std::collections::HashSet<String> = std::collections::HashSet::new();
                     for peers in ws_room_peers.values() {
                         for p in peers {
-                            if p.as_str() != local_peer_str {
+                            if p.as_str() != local_peer_str && p.as_str() != device_peer_id {
                                 online.insert(p.clone());
                             }
                         }
@@ -6585,6 +6687,7 @@ async fn handle_incoming_request(
                                 }
                                 super::social::handle_envelope_profile_update(
                                     event_tx, server_states, master_peer_str,
+                                    device_peer_id, master_keypair, ws_cmd_tx, ws_room_peers,
                                     sender_peer_id, display_name, status, about_me,
                                     updated_at, avatar_b64, banner_b64, twitch_username,
                                     device_list, db_path, db_passphrase,
@@ -7266,6 +7369,150 @@ async fn handle_incoming_request(
             }).await;
         }
 
+        HavenMessage::FriendListSync { friends } => {
+            // Multi-device (Phase 6): accept a friend-list backfill ONLY from our
+            // own other device (verified-self). A non-self sender trying this is
+            // an attempt to inject friends — drop it.
+            if !super::resolver::same_identity(peer_str, local_peer_str) {
+                hollow_log!(
+                    "[HOLLOW-MULTIDEV] Dropped FriendListSync from non-self peer {peer_str}"
+                );
+                return;
+            }
+            hollow_log!(
+                "[HOLLOW-MULTIDEV] Sibling device {peer_str} shared {} friends",
+                friends.len()
+            );
+
+            let mut inserted: u32 = 0;
+            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                // Existing friends (any status) so we don't clobber a relationship
+                // we already track or re-add a removed one within the same session.
+                let existing: std::collections::HashSet<String> = store
+                    .load_friends(None)
+                    .map(|rows| rows.into_iter().map(|(pid, ..)| pid).collect())
+                    .unwrap_or_default();
+
+                for entry in &friends {
+                    // Never add ourselves (any of our own devices) as a friend.
+                    if super::resolver::same_identity(&entry.peer_id, local_peer_str) {
+                        continue;
+                    }
+                    if existing.contains(&entry.peer_id) {
+                        continue;
+                    }
+                    // v1 shares only accepted friends; persist as accepted.
+                    if store
+                        .save_friend(&entry.peer_id, "accepted", "", entry.requested_at)
+                        .is_ok()
+                    {
+                        inserted += 1;
+                    }
+                    // Join the friend's DM room so presence flows both ways and
+                    // future live messages arrive (history backfill is Step 4/5).
+                    let room = dm_room_code(local_peer_str, &entry.peer_id);
+                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                        room_code: room.clone(),
+                    });
+                    // CRITICAL (presence collapse): announce ourselves to this
+                    // freshly-learned friend with our profile + MERGED device list.
+                    // Without this, a substitute device (e.g. a VM that imported the
+                    // mnemonic) joins the friend's DM room but the friend never
+                    // receives a ProfileUpdate carrying our device id — so the
+                    // friend's resolver never maps our-device → master and shows the
+                    // identity OFFLINE when the original device quits.
+                    //
+                    // We just issued JoinRoom, so we are NOT in `ws_room_peers[room]`
+                    // yet — `send_own_profile_to_peer`'s room-lookup would drop the
+                    // send. Target the KNOWN DM room directly: on the same WS
+                    // connection JoinRoom is processed before this SendDirect (ordered
+                    // TCP), so by the time the relay routes it we are in the room.
+                    //
+                    // CRITICAL: a freshly-imported substitute device has NO local
+                    // profile row yet (no display name set), so we must NOT gate the
+                    // device-list send on `load_profile` being Some — that was the
+                    // exact bug where AL never learned the VM→master mapping. Build
+                    // the ProfileUpdate from whatever profile exists (or empty
+                    // defaults) and ALWAYS attach the device list.
+                    {
+                        let profile = crate::storage::MessageStore::open(db_path, db_passphrase)
+                            .ok()
+                            .and_then(|s| s.load_profile(local_peer_str).ok().flatten());
+                        let (display_name, status, about_me, updated_at, avatar_b64, banner_b64, twitch_username) =
+                            match profile {
+                                Some(p) => (
+                                    p.display_name, p.status, p.about_me, p.updated_at,
+                                    p.avatar_bytes.as_ref()
+                                        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+                                        .unwrap_or_default(),
+                                    p.banner_bytes.as_ref()
+                                        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+                                        .unwrap_or_default(),
+                                    p.twitch_username,
+                                ),
+                                None => (String::new(), String::new(), String::new(), 0, String::new(), String::new(), String::new()),
+                            };
+                        let device_list = super::crypto_handler::build_local_device_list(
+                            master_keypair, device_peer_id, db_path, db_passphrase,
+                        );
+                        let dev_count = device_list.as_ref().map(|d| d.devices.len()).unwrap_or(0);
+                        let msg = HavenMessage::ProfileUpdate {
+                            display_name, status, about_me, updated_at,
+                            avatar_b64, banner_b64, is_invisible, twitch_username,
+                            device_list,
+                        };
+                        let json = serde_json::to_string(&msg).unwrap_or_default();
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                            room_code: room,
+                            target_peer: entry.peer_id.clone(),
+                            data: json.into_bytes(),
+                        });
+                        hollow_log!(
+                            "[HOLLOW-DEVICES] Announced self ({dev_count}-device list) to backfilled friend {}",
+                            entry.peer_id
+                        );
+                    }
+                }
+            }
+
+            if inserted > 0 {
+                hollow_log!("[HOLLOW-MULTIDEV] Backfilled {inserted} friends from sibling device");
+                let _ = event_tx.send(NetworkEvent::FriendsBackfilled { count: inserted }).await;
+            }
+        }
+
+        HavenMessage::FriendListRequest => {
+            // Multi-device (Phase 6): a sibling asked for our friend list. Reply
+            // ONLY to our own other device (verified-self). Pull companion to the
+            // push in ingest_sibling_device_list — fixes the join-timing race.
+            if !super::resolver::same_identity(peer_str, local_peer_str) {
+                hollow_log!(
+                    "[HOLLOW-MULTIDEV] Dropped FriendListRequest from non-self peer {peer_str}"
+                );
+                return;
+            }
+            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                if let Ok(friends) = store.load_friends(Some("accepted")) {
+                    if !friends.is_empty() {
+                        let entries: Vec<FriendListEntry> = friends
+                            .into_iter()
+                            .map(|(pid, status, direction, requested_at, _u)| FriendListEntry {
+                                peer_id: pid, status, direction, requested_at,
+                            })
+                            .collect();
+                        hollow_log!(
+                            "[HOLLOW-MULTIDEV] Replying to FriendListRequest from {peer_str} with {} friends",
+                            entries.len()
+                        );
+                        crate::node::crypto_handler::send_message_to_peer(
+                            ws_cmd_tx, ws_room_peers,
+                            peer_str, HavenMessage::FriendListSync { friends: entries },
+                        );
+                    }
+                }
+            }
+        }
+
         HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview } => {
             if peer_str == local_peer_str { return; }
             message_ops::handle_envelope_channel_message(
@@ -7552,10 +7799,39 @@ async fn handle_incoming_request(
             }
 
             // Multi-device: ingest the sender's signed device list (verify +
-            // monotonic + persist + resolver update + DeviceListUpdated).
-            super::crypto_handler::ingest_device_list(
-                event_tx, master_peer_str, device_list, db_path, db_passphrase,
+            // monotonic + persist + resolver update + DeviceListUpdated). A list
+            // for our OWN master is a sibling device → merged (union) + friend
+            // list shared (see ingest_sibling_device_list).
+            let our_devices_grew = super::crypto_handler::ingest_device_list(
+                event_tx, master_peer_str, device_peer_id, master_keypair, peer_str,
+                ws_cmd_tx, ws_room_peers, device_list, db_path, db_passphrase,
             ).await;
+            // If a sibling merge added one of OUR device ids, re-announce our
+            // profile (now carrying the merged device list) to every peer we share
+            // a room with — friends converge on the full device set immediately,
+            // while we're still online. Without this, a friend only learns the
+            // union when our substitute device joins their DM room (racy), and
+            // shows us OFFLINE if our original device quits first.
+            if our_devices_grew {
+                let peers: Vec<String> = ws_room_peers.values()
+                    .flat_map(|p| p.iter().cloned())
+                    .collect();
+                hollow_log!(
+                    "[HOLLOW-DEVICES] Sibling merge grew our device set — re-announcing profile to {} room peer(s)",
+                    peers.len()
+                );
+                for pid in peers {
+                    if pid == local_peer_str || pid == device_peer_id { continue; }
+                    // Skip our own other devices (siblings) — they already have it.
+                    if super::resolver::same_identity(&pid, local_peer_str) { continue; }
+                    social::send_own_profile_to_peer(
+                        ws_cmd_tx, ws_room_peers,
+                        local_peer_str, master_keypair, device_peer_id, &pid,
+                        is_invisible,
+                        db_path, db_passphrase,
+                    );
+                }
+            }
 
             // SECURITY: Truncate profile fields to prevent oversized strings from malicious peers.
             // Slightly above UI limits (32/48/128) as a safety backstop.

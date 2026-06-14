@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
-import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/services/push_hints_cache.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -104,8 +104,10 @@ final friendsProvider =
 /// Memoized — only recomputes when the upstream providers change.
 final sortedFriendsProvider = Provider<List<FriendInfo>>((ref) {
   final friends = ref.watch(friendsProvider);
-  final peers = ref.watch(peersProvider);
-  final invisiblePeers = ref.watch(invisiblePeersProvider);
+  // Multi-device: collapse a friend's several device peer_ids into their one
+  // master identity for online status. Single-device installs resolve each peer
+  // to itself, so this is identical to the old `peers - invisible` check.
+  final online = ref.watch(onlineIdentitiesProvider);
   final profiles = ref.watch(profileProvider);
   final favourites = ref.watch(favouriteFriendsProvider);
 
@@ -113,14 +115,8 @@ final sortedFriendsProvider = Provider<List<FriendInfo>>((ref) {
       .where((f) => f.status == 'accepted')
       .toList();
   accepted.sort((a, b) {
-    final aOnline =
-        (peers.containsKey(a.peerId) && !invisiblePeers.contains(a.peerId))
-            ? 0
-            : 1;
-    final bOnline =
-        (peers.containsKey(b.peerId) && !invisiblePeers.contains(b.peerId))
-            ? 0
-            : 1;
+    final aOnline = online.contains(a.peerId) ? 0 : 1;
+    final bOnline = online.contains(b.peerId) ? 0 : 1;
     if (aOnline != bOnline) return aOnline.compareTo(bOnline);
     final aName = displayNameFor(profiles, a.peerId);
     final bName = displayNameFor(profiles, b.peerId);

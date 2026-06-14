@@ -1535,6 +1535,21 @@ class _SecurityTabState extends State<_SecurityTab> {
     }
   }
 
+  Future<void> _resetDeviceLists() async {
+    try {
+      await network_api.resetDeviceLists();
+      if (!mounted) return;
+      HollowToast.show(
+        context,
+        'Device lists reset. Restart the app so siblings re-merge.',
+        type: HollowToastType.success,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Reset failed: $e', type: HollowToastType.error);
+    }
+  }
+
   Future<void> _enablePassword() async {
     final passphrase = await _askPassphrase(context, 'Set App Password', confirm: true, buttonLabel: 'Set Password');
     if (passphrase == null || !mounted) return;
@@ -2162,6 +2177,24 @@ class _SecurityTabState extends State<_SecurityTab> {
             onPressed: _exportBackup,
             icon: Icon(LucideIcons.download, size: 16),
             child: const Text('Export Backup'),
+          ),
+
+          const SizedBox(height: HollowSpacing.xl),
+
+          // ── Multi-device maintenance ──
+          _SectionLabel(label: 'MULTI-DEVICE'),
+          const SizedBox(height: HollowSpacing.sm),
+          Text(
+            'If a device you removed still shows as linked, reset the device '
+            'list. It rebuilds from your devices that are currently online. '
+            'Restart the app afterward.',
+            style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          HollowButton.outline(
+            onPressed: _resetDeviceLists,
+            icon: Icon(LucideIcons.refreshCw, size: 16),
+            child: const Text('Reset Device List'),
           ),
 
           const SizedBox(height: HollowSpacing.xl),

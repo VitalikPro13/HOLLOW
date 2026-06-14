@@ -4,7 +4,7 @@ import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/temporary_nickname_provider.dart';
-import 'package:hollow/src/core/providers/peers_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -51,7 +51,7 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final friends = ref.watch(friendsProvider);
-    final peers = ref.watch(peersProvider);
+    final online = ref.watch(onlineIdentitiesProvider);
     ref.watch(profileProvider);
     final favourites = ref.watch(favouriteFriendsProvider);
     ref.watch(localNicknameProvider);
@@ -81,7 +81,7 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
 
       if (favourites.contains(f.peerId)) {
         favFriends.add(f);
-      } else if (peers.containsKey(f.peerId)) {
+      } else if (online.contains(f.peerId)) {
         onlineFriends.add(f);
       } else {
         offlineFriends.add(f);
@@ -285,7 +285,7 @@ class _FriendRow extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final profiles = ref.watch(profileProvider);
     final localNicknames = ref.watch(localNicknameProvider);
-    final isOnline = ref.watch(peersProvider.select((p) => p.containsKey(peerId)));
+    final isOnline = identityIsOnline(ref, peerId);
     final localNick = localNicknames[peerId];
     final name = localNick ?? displayNameFor(profiles, peerId);
 

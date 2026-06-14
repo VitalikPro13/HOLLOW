@@ -1,6 +1,8 @@
 # Multi-Device Identity & Sync — Implementation Tracker
 
-**Status:** In progress. Foundation not yet started; one quick-win bug fix landed.
+**Status:** In progress. Step 1 (device identity foundation) DONE and live-verified (host+phone+VM).
+Step 2 (device-list propagation + friend-UI device collapse) + Step 2.5 (sibling friend-list sync, the
+presence on-ramp the live test exposed as necessary) both code-complete, pending real-device test.
 **Companion to:** `reports/MULTI_DEVICE_SYNC_PLAN.md` (the design doc — decisions, flows, rejected
 alternatives). This file is the **execution tracker**: verified codebase facts, the real cost breakdown,
 and a step-by-step checklist with checkboxes to follow during implementation.
@@ -158,19 +160,153 @@ device==master). Awaiting the two-device live test below before declaring Step 1
       (both masters — see resolver header architecture note).
 - [x] Dart attribution. [#9] — FFI `identity_for(peer_id)` + `get_device_links()` (+ `DeviceLink` struct);
       `device_link_provider` mirrors the resolver, warmed on node start + refreshed on `DeviceListUpdated`. Codegen run.
-- [ ] **Test (Vitalik, main + VM):** same mnemonic on two devices → *distinct* peer_ids, both connect to
+- [x] **Test (Vitalik, main + VM):** same mnemonic on two devices → *distinct* peer_ids, both connect to
       the relay simultaneously without overwriting; no "self friend request"; no crypto corruption; existing
       single-device install unchanged (migration keystone: device_peer_id == legacy peer_id).
+      **Live-verified on host + phone + VM (2026-06-14, commit 2c0920d).** Step 1 DONE.
 
-### Step 2 — Device list propagation (profile-attached)  ▢ not started
+### Step 2 — Device list propagation (profile-attached)  ✅ code-complete (pending real-device test)
 *Goal: friends learn your device list in a tamper-proof way.*
 
-- [ ] Attach the signed device list to the existing profile sync (`ProfileUpdated` flow, `social.rs`).
-- [ ] Clients accept a device list only if `version` ≥ highest seen for that identity (replay protection).
-- [ ] Friend UI collapses multiple device peer_ids of one identity into one person (fixes the cosmetic
-      "two online dots for you" from fact #10).
-- [ ] **Test:** add/remove a device → friends' clients see the updated list; old (lower-version) lists are
-      rejected.
+- [x] Attach the signed device list to the existing profile sync (`ProfileUpdated` flow, `social.rs`).
+      **Done in Step 1** (commit 2c0920d): `build_local_device_list` re-signs with the master key and rides
+      on all profile-broadcast paths (`handle_update_profile`, `ProfileUpdate` variants, `send_own_profile_to_peer`).
+- [x] Clients accept a device list only if `version` ≥ highest seen for that identity (replay protection).
+      **Done in Step 1**: `ingest_device_list` verifies the signature and enforces a strictly-increasing
+      version before persisting; our own master's list is never overwritten by a peer.
+- [x] Friend UI collapses multiple device peer_ids of one identity into one person (fixes the cosmetic
+      "two online dots for you" from fact #10). **Done 2026-06-14 (Dart-side):** new
+      `onlineIdentitiesProvider` + `identityIsOnline(ref, masterId)` in `device_link_provider.dart` fold every
+      visible online *device* into its *master* identity (mirrors the Rust `peer_is_reachable`). All
+      friend/DM/profile online checks now route through it — desktop (`friends_bar`, `channel_sidebar`,
+      `home_dashboard` incl. the connection-health summary, `chat_pane` header/call-buttons/profile-panel) and
+      mobile (`mobile_chats_tab`, `mobile_friends_tab`, `mobile_profile_sheet`, `mobile_chat_route`
+      header/call-buttons). Single-device installs resolve each peer to itself → perfect no-op. `flutter
+      analyze` clean (only pre-existing info lints); 16 widget tests pass.
+      *Note: server-member panels (`member_panel`, `user_bar`, `mobile_member_panel/route`, `server_provider`,
+      `channel_chat_pane`) deliberately NOT collapsed — server membership stays one-leaf-per-human until Step 6
+      (MLS per-device leaves). A multi-device friend who is also a server member will show offline in the member
+      list while online via a non-master device; fix lands with Step 6.*
+- [ ] **Test (Vitalik):** with two devices of one identity online, a friend sees ONE online dot per person
+      (not two), online-first sorting is correct, and DM header/call buttons reflect online-via-any-device.
+      Single-device friends list behaves exactly as before. Add/remove a device → friends' clients update;
+      old (lower-version) lists are rejected (Rust replay guard, already live).
+
+### Step 2.5 — Sibling friend-list sync (presence on-ramp)  ✅ code-complete (pending real-device test)
+*Goal: a freshly-linked device learns who its identity's friends are, so it joins their DM rooms and presence
+flows both ways. Discovered necessary during the Step 2 live test: a fresh device (e.g. an imported mnemonic
+on a VM) has an EMPTY friends table, so the `WsEvent::Connected` DM-room auto-join loop (`swarm.rs` ~L1446,
+keyed on `load_friends()`) joins ZERO DM rooms → the new device is never in any friend's DM room → that friend
+shows OFFLINE even when the new device is online. The Step 2 UI collapse was correct but had nothing to
+collapse. This is the minimal fix (identity metadata only, no history — that stays Step 4/5) and is the
+on-ramp to backfill.*
+
+- [x] New wire type `HavenMessage::FriendListSync { friends: Vec<FriendListEntry> }` + `FriendListEntry`
+      (peer_id/status/direction/requested_at), all `#[serde(default)]` (`types.rs`).
+- [x] Send on sibling detect: in `PeerJoined`, when `peer_id != device_peer_id && same_identity(peer_id,
+      local_peer_str)`, send our accepted friends DIRECTLY to the sibling (`swarm.rs`, plaintext `SendDirect`
+      via `send_message_to_peer` — same path as `FriendRequest`/`FriendRemove`; siblings meet in the shared
+      `inbox:{master}` room). Verified-self only.
+- [x] Receive handler (`handle_incoming_request`): accept ONLY from a `same_identity` sender (drop injection
+      attempts); per entry `save_friend` (idempotent — skips friends already present, never re-adds self),
+      then `JoinRoom dm_room_code(local, friend)` so presence flows + future live DMs arrive; emit
+      `NetworkEvent::FriendsBackfilled { count }`.
+- [x] Dart: `event_provider` handles `FriendsBackfilled` → `friendsProvider.loadAll()` (friend appears, then
+      the Step 2 collapse resolves its online status). Codegen run; `cargo check` clean; analyze clean; 16
+      widget tests pass.
+- [x] **CRITICAL FOLLOW-UP #2 — dropped the migration keystone (THE root collision).** Second log dive
+      (VM `third_debug.txt` + Pixel via adb + AL Release log) found the actual blocker. Pixel was an existing
+      install so its DEVICE id == MASTER id (`A9nW…`) via the keystone. But VM's MASTER is also `A9nW…`, so
+      Pixel's transport id collided with VM's `local_peer_str` → VM filtered Pixel out as "self" and they never
+      exchanged. Also, the per-node self-filter used ONLY `local_peer_str` (master), but the relay reports a
+      node by its DEVICE id, so VM saw its OWN `VM-dev` in the room and key-exchanged/WebRTC'd with ITSELF
+      (endless MAC-mismatch re-key — visible in the VM log). **Fixes:** (1) `device_key.rs` — NO MORE keystone;
+      every device (even an upgrading single-device install) gets a FRESH random device id ≠ master. Master-keyed
+      data (friendships, DMs, rooms, signing, DB passphrase) is unchanged; only the transport id rotates once.
+      **FOLLOW-UP #2b (the last collision): existing installs already HAVE a keystone `identity.device` file
+      (device==master), and #2 only affects NEW files — so Pixel/AL kept `device==master` after the rebuild and
+      still collided.** Verified in the 3rd log set: VM(fresh, distinct) + AL(union-merged, saw 2 devices, all
+      sessions OK) worked, but Pixel's `local=A9nW`==master persisted, so VM filtered Pixel as "self" and AL had
+      an ambiguous `A9nW` (is it Pixel-device or VM-master?). Fix: `load_or_create_device_keypair` now ROTATES a
+      legacy keystone file (device id == master id) to a fresh random id IN PLACE on next load (preserving
+      at-rest protection via `save_keypair_to`); one-time, then stable. Unit test `legacy_keystone_file_is_rotated`.
+      After this, every device — fresh import, brand-new, OR upgraded existing — has a distinct transport id ≠
+      master. (2)
+      swarm.rs — every presence/room self-filter now excludes BOTH `local_peer_str` AND `device_peer_id`
+      (PeerJoined gossip+sync, RoomMembers room_set/profile/overlay/per-member loop, DiscoveredPeers, bootstrap,
+      reconciliation sweep). (3) `ingest_device_list` non-self path now UNION-merges instead of reject-on-stale
+      (the AL log literally showed `Ignored stale device list … v1<=v1` — two devices both at v1, so AL only ever
+      learned one). `cargo check` clean, 16 widget tests pass. **NOTE: AL/Pixel transport ids change on next
+      launch — expected.** Awaiting re-test.
+- [x] **CRITICAL FOLLOW-UP #4 — inbox-room = sibling proof; pull+push friend sync; + isolated the DM-send gap.**
+      5th log set (post device-list reset, all 3 rebuilt): device lists clean (2 devices), keystone rotation
+      confirmed on Pixel(`JQcW`)+AL(`BVoC`). But VM still never got friends and never saw AL. Root: the friend
+      share was gated on `same_identity`/list-diff, which needs the device-list already exchanged BOTH ways — a
+      join-timing chicken-and-egg (VM's profile reached Pixel before Pixel was listening; Pixel never merged VM,
+      never shared). **Fix:** a peer joining OUR OWN `inbox:{master}` room is BY DEFINITION our sibling (only our
+      devices join our master inbox) — use that as the proof directly in PeerJoined: seed the resolver
+      (`resolver::update(peer,master)`), PUSH our friend list, and PULL theirs via a new `HavenMessage::
+      FriendListRequest` (responder replies `FriendListSync`; both verified-self). Covers either side being the
+      empty device, independent of timing/resolver-warm order. `cargo check` clean, 16 widget tests pass.
+      **ISOLATED THE REAL "messages don't send" CAUSE → it's Step 3, not a bug.** AL log: `SendMessage for A9nW
+      (Pixel's MASTER) … Sent encrypted DM to OFFLINE A9nW` — even though Pixel is online as device `JQcW` and
+      `JQcW` is in the DM room. The DM send resolves the recipient to their MASTER id, then targets it directly —
+      but no device authenticates as the master, so the relay has no such room member → it falls to the offline
+      buffer. **Delivery needs master→device reverse resolution + per-device fan-out = Step 3.** dm_room_code
+      already shares a room; only the final per-device send is missing. The "feels worse" is exactly this: both
+      ends are now master-aware, so sends address the master (nobody's transport id) instead of the live device.
+- [x] **CRITICAL FOLLOW-UP #3 — friend-list send must target the LIVE sender, not the list-diff.** 4th log
+      set: keystone rotation CONFIRMED working (Pixel's device id rotated `A9nW`→`JQcW…`, distinct from master).
+      But VM stopped getting the friend backfill. Cause: the friend-list send was gated on `new_siblings` (device
+      ids absent from our stored list), and across repeated wipe+reimport tests the stored device list accumulated
+      DEAD ids (log showed "device set now 4 (v5)"). A reconnecting/fresh sibling whose id was already in the
+      bloated list → `new_siblings` empty → no friend send. Fix: `ingest_sibling_device_list` now sends the friend
+      list to **`sender_peer_id`** (the sibling that JUST contacted us, live, in-room) unconditionally — decoupled
+      from device-list diff and from the `changed` block. Receiver is idempotent (skips known friends), so a
+      redundant send is harmless. `cargo check` clean, 16 widget tests pass.
+      **KNOWN LIMITATION (not blocking): device-list pollution.** Union-merge never removes ids, so each
+      wipe+reimport leaves a permanent ghost device on AL/Pixel (4 accumulated in testing). Harmless to presence
+      (P is online if ANY device is up) and to the friend-fetch (now sender-targeted), but unbounded. Proper
+      cleanup = **Step 7 revocation** (master-signed remove). For a clean test slate, added a manual reset:
+      FFI `reset_device_lists()` (clears `device_lists` + `device_links` + the in-memory resolver) +
+      `MessageStore::clear_all_device_lists` + `resolver::clear_all`, surfaced as a "Reset Device List" button
+      under User Settings → Security → MULTI-DEVICE. Run it on the devices that accumulated ghosts (AL + Pixel),
+      then restart so live siblings re-merge a clean set. Codegen run; analyze clean; 16 widget tests pass.
+- [x] **CRITICAL FOLLOW-UP #1 — sibling device-list MERGE (found via first Pixel/VM log dive).**
+      First live attempt failed: NO `[HOLLOW-MULTIDEV]` logs on any device, AL still saw P offline when only VM
+      up. Root cause: `ingest_device_list` had `if list.master_peer_id == local_master { return; }` ("a peer
+      can't rewrite our own list" — correct for security) which ALSO threw away a **sibling's** list. So Pixel
+      never learned VM-dev→P → resolver never mapped it → `same_identity(VM-dev, P-master)` stayed false → the
+      sibling-sync branch never fired. Second latent bug: each device published its OWN list `[self-dev]` at
+      version 1, so a friend (AL) hit the v1≤v1 replay guard on the second device and only ever learned ONE.
+      **Fix (`crypto_handler::ingest_sibling_device_list`):** when a validly-master-signed list arrives for our
+      OWN master, take the UNION of device ids, re-sign with `max(ours,theirs)+1`, persist, update resolver
+      (`seed_self`), emit `DeviceListUpdated`; the merged list rides the next `send_own_profile_to_peer` (fires
+      every PeerJoined) so friends converge on both devices. On discovering a brand-new sibling, send it our
+      friend list right there (reliable trigger, not dependent on PeerJoined/resolver ordering). Both ingest
+      sites (plaintext inbox `ProfileUpdate` @ swarm.rs ~7645 AND MLS-envelope @ ~6621) pass the master keypair
+      + device id + ws ctx through now. `cargo check` clean, 16 widget tests pass. **Awaiting re-test.**
+- [x] **CRITICAL FOLLOW-UP #5 — inbox-proof must MERGE device lists, not just share friends (THE presence
+      fix).** Live-verified the gap: sibling detection (inbox-proof) and device-list merge were on two
+      different rails. The inbox-proof shared friends + seeded the resolver but never merged device LISTS;
+      the merge only fired via a `ProfileUpdate` carrying a `device_list`. A fresh-imported VM has NO profile
+      row → never sends a ProfileUpdate → the profile-HOLDING device (Pixel) never learned VM's id → Pixel's
+      list stayed 1 device → AL only ever ingested ONE device and P went offline when Pixel quit. **Fix:**
+      (1) new `crypto_handler::merge_sibling_device_id` (union the proven sibling id into our own
+      master-signed list, re-sign+bump+persist+`seed_self`, returns "grew") called from the PeerJoined
+      inbox-proof block; (2) on a grow, re-announce our profile (carrying BOTH devices) to all room peers, so
+      Pixel (already in AL's DM room) pushes the 2-device list to AL while online — `ingest_device_list` /
+      `ingest_sibling_device_list` now return `bool` consumed by the plaintext `ProfileUpdate` handler; (3)
+      de-gated the backfill announce from `load_profile` being Some (a profile-less device still sends its
+      device list — empty profile fields + populated `device_list`). `cargo check` clean, 316 lib tests pass.
+- [x] **Test (Vitalik, Pixel+VM+AnonListen): ✅ LIVE-VERIFIED 2026-06-14.** AL log:
+      `[HOLLOW-DEVICES] Ingested device list for <master> (v2, 2 devices, +2 new)`; Pixel:
+      `Merged inbox sibling … → own device set now 2`, `re-announcing to N room peer(s)`. **P STAYS ONLINE
+      when only VM is up** (the real proof — confirmed by Vitalik). Friend list on VM populated. Olm sessions
+      all confirmed bidirectional. KNOWN-REMAINING (next): the substitute device's PROFILE (name/avatar) — a
+      separate attribution bug (profiles saved under the sender's raw DEVICE id while the UI reads by MASTER,
+      and a profile-less device writes a blank). Fix = attribute incoming profiles to `resolve(peer_str)` +
+      sibling profile sync + don't-overwrite-populated-with-empty guard. NOT Olm, NOT Step 3.
 
 ### Step 3 — Olm sender-side fan-out  ▢ not started
 *Goal: a new DM reaches all of the recipient's devices.*

@@ -65,6 +65,16 @@ Future<String> identityFor({required String peerId}) =>
 Future<List<DeviceLink>> getDeviceLinks() =>
     RustLib.instance.api.crateApiNetworkGetDeviceLinks();
 
+/// Wipe all persisted device lists + the in-memory resolver (multi-device,
+/// Phase 6). Testing/maintenance aid: union-merge never removes a device id, so
+/// repeated wipe+reimport cycles leave ghost devices accumulating in the
+/// published list. Calling this lets the device set rebuild from currently-live
+/// siblings on the next profile exchange. Restart the node afterward (or just
+/// reconnect) so siblings re-merge. Production single-device removal = Step 7
+/// revocation, not this blunt reset.
+Future<void> resetDeviceLists() =>
+    RustLib.instance.api.crateApiNetworkResetDeviceLists();
+
 /// Verify an Ed25519 message signature against a canonical payload.
 ///
 /// Used by the Message Proof dialog ("The RAT Files") to show real-time
@@ -1040,6 +1050,10 @@ sealed class NetworkEvent with _$NetworkEvent {
       NetworkEvent_FriendRequestRejected;
   const factory NetworkEvent.friendRemoved({required String peerId}) =
       NetworkEvent_FriendRemoved;
+
+  /// Multi-device: a sibling device backfilled `count` new friends (Phase 6).
+  const factory NetworkEvent.friendsBackfilled({required int count}) =
+      NetworkEvent_FriendsBackfilled;
   const factory NetworkEvent.nicknameClaimed({required String nickname}) =
       NetworkEvent_NicknameClaimed;
   const factory NetworkEvent.nicknameReleased() = NetworkEvent_NicknameReleased;

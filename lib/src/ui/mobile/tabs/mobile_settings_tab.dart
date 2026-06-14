@@ -2085,6 +2085,22 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         const SizedBox(height: HollowSpacing.sm),
         const _BackupExportButton(),
 
+        // Multi-device maintenance (Phase 6): reset the accumulated device list.
+        const SizedBox(height: HollowSpacing.xl),
+        _SectionLabel(label: 'Multi-Device'),
+        const SizedBox(height: HollowSpacing.sm),
+        Text(
+          'If a device you removed still shows as linked, reset the device '
+          'list. It rebuilds from your devices that are currently online. '
+          'Restart the app afterward.',
+          style: HollowTypography.body.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 12,
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        const _ResetDeviceListButton(),
+
         // iOS push diagnostics — exports the NSE memory footprint + push logs so
         // we can validate the Notification Service Extension fits its memory cap.
         if (Platform.isIOS) ...[
@@ -2619,6 +2635,38 @@ Future<String?> _askBackupPassphrase(
 /// save it via the file picker, so it can be shared back for diagnosis. There's
 /// no debugger access on TestFlight builds — this is how we read the NSE's
 /// runtime memory and whether the on-device fetch+decrypt succeeded.
+class _ResetDeviceListButton extends StatelessWidget {
+  const _ResetDeviceListButton();
+
+  @override
+  Widget build(BuildContext context) {
+    return HollowButton.outline(
+      onPressed: () => _reset(context),
+      expand: true,
+      icon: const Icon(LucideIcons.refreshCw, size: 16),
+      child: const Text('Reset Device List'),
+    );
+  }
+
+  Future<void> _reset(BuildContext context) async {
+    try {
+      await network_api.resetDeviceLists();
+      if (context.mounted) {
+        HollowToast.show(
+          context,
+          'Device lists reset. Restart the app so devices re-merge.',
+          type: HollowToastType.success,
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        HollowToast.show(context, 'Reset failed: $e',
+            type: HollowToastType.error);
+      }
+    }
+  }
+}
+
 class _ExportPushDiagnosticsButton extends StatelessWidget {
   const _ExportPushDiagnosticsButton();
 

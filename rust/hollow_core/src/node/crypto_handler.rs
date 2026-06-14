@@ -144,6 +144,58 @@ pub(crate) fn build_local_device_list(
     Some(signed)
 }
 
+/// Union a single sibling device id into OUR OWN master-signed device list.
+///
+/// Used by the inbox-proof path: a peer joining our own `inbox:{master}` room is,
+/// by definition, our own device — but a freshly-imported sibling has no profile
+/// and never sends a ProfileUpdate carrying a device list, so the normal
+/// `ingest_sibling_device_list` merge never fires for it and our list would stay
+/// at one device forever. This adds the proven sibling id directly: union, re-sign
+/// with a bumped version, persist, seed the resolver. Returns `true` if the id was
+/// new (so the caller re-announces our profile to friends).
+pub(crate) fn merge_sibling_device_id(
+    master: &crate::identity::native_identity::NativeKeypair,
+    local_device_peer_id: &str,
+    sibling_device_peer_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return false;
+    };
+    let master_peer_id = master.peer_id();
+    let (mut devices, version): (Vec<String>, u64) = match store.load_device_list(&master_peer_id) {
+        Ok(Some(list)) => (list.devices.clone(), list.version),
+        _ => (vec![local_device_peer_id.to_string()], 0),
+    };
+    if !devices.iter().any(|d| d == local_device_peer_id) {
+        devices.push(local_device_peer_id.to_string());
+    }
+    if devices.iter().any(|d| d == sibling_device_peer_id) {
+        // Already known — keep the resolver warm, but nothing to re-announce.
+        super::resolver::seed_self(&master_peer_id, &devices);
+        return false;
+    }
+    devices.push(sibling_device_peer_id.to_string());
+    let next_version = version.saturating_add(1).max(1);
+    let signed = build_signed_device_list(master, next_version, devices);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    if let Ok(json) = serde_json::to_string(&signed) {
+        let _ = store.save_device_list(
+            &signed.master_peer_id, &json, signed.version, &signed.devices, now,
+        );
+    }
+    super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
+    hollow_log!(
+        "[HOLLOW-DEVICES] Merged inbox sibling {sibling_device_peer_id} → own device set now {} (v{})",
+        signed.devices.len(), signed.version
+    );
+    true
+}
+
 /// Ingest a device list received on a peer's profile sync.
 ///
 /// Verifies the signature, enforces monotonic version (replay protection), and
@@ -154,63 +206,260 @@ pub(crate) fn build_local_device_list(
 pub(crate) async fn ingest_device_list(
     event_tx: &mpsc::Sender<NetworkEvent>,
     local_master_peer_id: &str,
+    local_device_peer_id: &str,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    sender_peer_id: &str,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     list: Option<SignedDeviceList>,
     db_path: &str,
     db_passphrase: &str,
-) {
-    let Some(list) = list else { return };
+) -> bool {
+    let Some(list) = list else { return false };
     if list.master_peer_id.is_empty() || list.devices.is_empty() {
-        return;
+        return false;
     }
-    // Never let a peer overwrite our own device list — we publish it ourselves.
+    // Multi-device: a list for OUR OWN master came from one of our other devices
+    // (a sibling, same imported mnemonic → same master key, so it is validly
+    // signed). We must NOT blindly replace our list, but we MUST learn about the
+    // sibling's device id — otherwise the resolver never maps sibling→master,
+    // `same_identity` stays false, and neither sibling sync nor a friend's
+    // device-collapse can work. Merge (union) the sibling's devices into ours,
+    // re-sign with a bumped version, persist, update the resolver, re-publish so
+    // friends converge on the full set, and (if the sibling is new) hand it our
+    // friend list so it can join their DM rooms.
     if list.master_peer_id == local_master_peer_id {
-        return;
+        return ingest_sibling_device_list(
+            event_tx, local_master_peer_id, local_device_peer_id, master_keypair,
+            sender_peer_id, ws_cmd_tx, ws_room_peers, list, db_path, db_passphrase,
+        ).await;
     }
     if !verify_device_list(&list) {
         hollow_log!(
             "[HOLLOW-DEVICES] Rejected device list for {}: bad signature",
             list.master_peer_id
         );
-        return;
+        return false;
     }
     let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
-        return;
+        return false;
     };
-    // Replay protection: accept only a strictly newer version.
-    let current = store.device_list_version(&list.master_peer_id).unwrap_or(0);
-    if list.version <= current {
-        hollow_log!(
-            "[HOLLOW-DEVICES] Ignored stale device list for {} (v{} <= v{})",
-            list.master_peer_id, list.version, current
-        );
-        return;
+
+    // UNION-merge, do NOT reject-on-stale. Two devices of one identity each start
+    // their list at version 1, so a naive `version <= current` guard makes the
+    // SECOND device's list look like a replay and drops it — the friend then only
+    // ever learns ONE device and the other device's presence is never attributed
+    // (exactly the "offline when the other device is up" bug). Adding device ids
+    // is always safe (you cannot un-revoke by adding; removal/revocation is a
+    // separate signed statement — Step 7). So we union the incoming devices into
+    // whatever we already have for this master and keep the highest version seen.
+    let (prev_devices, prev_version): (Vec<String>, u64) =
+        match store.load_device_list(&list.master_peer_id) {
+            Ok(Some(cur)) => (cur.devices.clone(), cur.version),
+            _ => (Vec::new(), 0),
+        };
+    let mut merged: Vec<String> = prev_devices.clone();
+    let known: std::collections::HashSet<String> = prev_devices.iter().cloned().collect();
+    let mut added = 0u32;
+    for d in &list.devices {
+        if !known.contains(d) {
+            merged.push(d.clone());
+            added += 1;
+        }
     }
+    let nothing_new = added == 0 && list.version <= prev_version;
+    if nothing_new {
+        // Truly redundant (same or older, no new devices) — skip the write but
+        // still ensure the resolver is warm (cheap; survives restarts).
+        super::resolver::update_many(
+            &list.master_peer_id,
+            merged.iter().map(|s| s.as_str()),
+        );
+        return false;
+    }
+
+    // Persist the union. Re-sign so the stored list stays self-consistent and any
+    // onward re-publish carries a valid signature. The list claims `master_peer_id`
+    // and we are NOT that master here (self lists go through the sibling path), so
+    // we cannot re-sign with the master key — store the union under the higher
+    // version with the INCOMING signature/pubkey (the membership is the union; the
+    // sig still proves the incoming subset was master-authorized). Verification on
+    // re-broadcast is sender-side; observers trust the per-device profile sig path.
+    let version = prev_version.max(list.version).max(1);
+    let stored = SignedDeviceList {
+        master_pubkey_b64: list.master_pubkey_b64.clone(),
+        master_peer_id: list.master_peer_id.clone(),
+        devices: merged.clone(),
+        version,
+        sig_b64: list.sig_b64.clone(),
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
-    let json = match serde_json::to_string(&list) {
+    let json = match serde_json::to_string(&stored) {
         Ok(j) => j,
-        Err(_) => return,
+        Err(_) => return false,
     };
     if let Err(e) = store.save_device_list(
-        &list.master_peer_id, &json, list.version, &list.devices, now,
+        &stored.master_peer_id, &json, stored.version, &stored.devices, now,
     ) {
         hollow_log!("[HOLLOW-DEVICES] Failed to save device list: {e}");
-        return;
+        return false;
     }
     // Update the in-memory resolver so attribution/self-checks pick it up at once.
     super::resolver::update_many(
-        &list.master_peer_id,
-        list.devices.iter().map(|s| s.as_str()),
+        &stored.master_peer_id,
+        stored.devices.iter().map(|s| s.as_str()),
     );
     hollow_log!(
-        "[HOLLOW-DEVICES] Ingested device list for {} (v{}, {} devices)",
-        list.master_peer_id, list.version, list.devices.len()
+        "[HOLLOW-DEVICES] Ingested device list for {} (v{}, {} devices, +{} new)",
+        stored.master_peer_id, stored.version, stored.devices.len(), added
     );
     let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
-        master_peer_id: list.master_peer_id,
+        master_peer_id: stored.master_peer_id,
     }).await;
+    // A FRIEND's device set grew — no self re-broadcast needed (that's for our
+    // OWN sibling merges, handled on the self path above).
+    false
+}
+
+/// Merge a sibling device's list (for our OWN master) into ours.
+///
+/// The sibling holds the same master key (imported mnemonic), so its list is
+/// validly signed by our master. We take the UNION of device ids — never a
+/// removal (removal = revocation, Step 7) — re-sign with a bumped version,
+/// persist, update the resolver, and re-publish to friends so they converge on
+/// the full device set (fixes the v1-vs-v1 collision where a friend only ever
+/// learned ONE of two devices). When the merge reveals a brand-new sibling
+/// device, we also hand it our accepted-friend list so it can join their DM
+/// rooms (presence on-ramp, Step 2.5).
+/// Returns `true` if OUR OWN device set grew as a result of this merge (i.e. we
+/// learned a new sibling device id). Callers use this to re-broadcast our profile
+/// to friends so they converge on the full device set WHILE we're still online —
+/// without it, a friend only learns the union when our substitute device joins
+/// their DM room later (racy), and shows us offline if our original device quits.
+#[allow(clippy::too_many_arguments)]
+async fn ingest_sibling_device_list(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    local_master_peer_id: &str,
+    local_device_peer_id: &str,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    sender_peer_id: &str,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    list: SignedDeviceList,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    // The list claims our master — verify it's actually signed by our master key
+    // (a forgery would fail; only a real sibling holding the mnemonic can sign).
+    if !verify_device_list(&list) {
+        hollow_log!(
+            "[HOLLOW-DEVICES] Rejected sibling device list from {sender_peer_id}: bad signature"
+        );
+        return false;
+    }
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return false;
+    };
+
+    // Our currently-known device set (+ version) for our master.
+    let (mut devices, our_version): (Vec<String>, u64) =
+        match store.load_device_list(local_master_peer_id) {
+            Ok(Some(cur)) => (cur.devices.clone(), cur.version),
+            _ => (vec![local_device_peer_id.to_string()], 0),
+        };
+    // Always include ourselves.
+    if !devices.iter().any(|d| d == local_device_peer_id) {
+        devices.push(local_device_peer_id.to_string());
+    }
+
+    // Union in the sibling's devices.
+    let before: std::collections::HashSet<String> = devices.iter().cloned().collect();
+    for d in &list.devices {
+        if !before.contains(d) {
+            devices.push(d.clone());
+        }
+    }
+
+    // Resolver must learn the union NOW (even if nothing changed, this is cheap
+    // and keeps same_identity correct after a restart).
+    super::resolver::update_many(
+        local_master_peer_id,
+        devices.iter().map(|s| s.as_str()),
+    );
+
+    let changed = devices.len() != before.len();
+    if changed {
+        // Re-sign the merged set with a version strictly greater than both ours
+        // and the sibling's, so every observer (and the sibling) accepts it.
+        let next_version = our_version.max(list.version).saturating_add(1);
+        let signed = build_signed_device_list(master_keypair, next_version, devices);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        if let Ok(json) = serde_json::to_string(&signed) {
+            let _ = store.save_device_list(
+                &signed.master_peer_id, &json, signed.version, &signed.devices, now,
+            );
+        }
+        super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
+        hollow_log!(
+            "[HOLLOW-MULTIDEV] Merged sibling {sender_peer_id} → device set now {} (v{})",
+            signed.devices.len(), signed.version
+        );
+
+        // The merged list is now persisted. We RETURN `changed=true` so the caller
+        // (the ProfileUpdate handler, which HAS profile context) re-broadcasts our
+        // profile to all current room peers — friends converge on the full device
+        // set WHILE we're online, instead of only when our substitute device later
+        // joins their DM room (racy, and too late if our original device quits).
+        let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
+            master_peer_id: signed.master_peer_id,
+        }).await;
+    }
+
+    // Hand our friend list to the sibling that JUST contacted us (the live
+    // `sender_peer_id`), not to whichever ids look "new" in the merged list.
+    // Gating on list-diff was fragile: across repeated wipe+reimport tests the
+    // stored list accumulates dead device ids, so a reconnecting sibling can
+    // already be "known" → no send → the fresh device never gets the friends.
+    // The connected sender is the device that actually needs them right now, and
+    // the receiver is idempotent (skips friends it already has), so an
+    // occasional redundant send is harmless. Skip only if the sender is OUR own
+    // device id (shouldn't happen — self lists don't reach here).
+    if sender_peer_id != local_device_peer_id {
+        if let Ok(friends) = store.load_friends(Some("accepted")) {
+            if !friends.is_empty() {
+                let entries: Vec<FriendListEntry> = friends
+                    .into_iter()
+                    .map(|(pid, status, direction, requested_at, _u)| FriendListEntry {
+                        peer_id: pid, status, direction, requested_at,
+                    })
+                    .collect();
+                hollow_log!(
+                    "[HOLLOW-MULTIDEV] Sharing {} friends with sibling {sender_peer_id}",
+                    entries.len()
+                );
+                send_message_to_peer(
+                    ws_cmd_tx, ws_room_peers,
+                    sender_peer_id, HavenMessage::FriendListSync { friends: entries.clone() },
+                );
+            }
+        }
+        // Also PULL: ask the sibling for ITS friends. Covers the case where WE
+        // are the fresh/empty device and the sibling's push didn't reach us (join
+        // timing). Responder replies with FriendListSync. Idempotent + cheap.
+        hollow_log!("[HOLLOW-MULTIDEV] Requesting friend list from sibling {sender_peer_id}");
+        send_message_to_peer(
+            ws_cmd_tx, ws_room_peers,
+            sender_peer_id, HavenMessage::FriendListRequest,
+        );
+    }
+
+    changed
 }
 
 /// Sign a message payload with the local keypair.

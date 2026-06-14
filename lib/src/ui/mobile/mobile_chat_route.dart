@@ -14,7 +14,7 @@ import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
-import 'package:hollow/src/core/providers/peers_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/typing_provider.dart';
@@ -1624,8 +1624,7 @@ class _MobileChatHeader extends ConsumerWidget {
       title = '# ${channelName ?? 'Channel'}';
     }
 
-    final isOnline = isDm &&
-        ref.watch(peersProvider.select((p) => p.containsKey(peerId)));
+    final isOnline = isDm && identityIsOnline(ref, peerId!);
 
     return Container(
       height: 52,
@@ -2113,7 +2112,7 @@ class _DmCallButtons extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final isOnline = ref.watch(peersProvider.select((p) => p.containsKey(peerId)));
+    final isOnline = identityIsOnline(ref, peerId);
     final call = ref.watch(callProvider);
     final isInCall = call.status != CallStatus.idle;
     final isCallWithThisPeer = isInCall && call.peerId == peerId;

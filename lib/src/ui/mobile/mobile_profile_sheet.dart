@@ -5,7 +5,7 @@ import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
-import 'package:hollow/src/core/providers/peers_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -91,7 +91,7 @@ class MobileProfileSheet extends ConsumerWidget {
     final localNick = localNicknames[peerId];
     final name = localNick ?? displayNameFor(profiles, peerId);
     final profileName = displayNameFor(profiles, peerId);
-    final isOnline = ref.watch(peersProvider.select((p) => p.containsKey(peerId)));
+    final isOnline = identityIsOnline(ref, peerId);
     final bannerBytes = ref.watch(bannerProvider(peerId)).valueOrNull;
     final bannerColor = bannerColorFromId(peerId);
     final myPeerId = ref.watch(identityProvider).peerId ?? '';

@@ -622,6 +622,13 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Friend rejected by $peerId');
         ref.read(friendsProvider.notifier).loadAll();
 
+      case NetworkEvent_FriendsBackfilled(:final count):
+        // Multi-device: a sibling device shared our identity's friend list and
+        // the node inserted `count` new friend rows. Reload so they appear and
+        // the device-collapse online status can resolve them (Phase 6).
+        debugPrint('[HOLLOW] Friends backfilled from sibling device: $count');
+        ref.read(friendsProvider.notifier).loadAll();
+
       case NetworkEvent_FriendRemoved(:final peerId):
         debugPrint('[HOLLOW] Friend removed: $peerId');
         ref.read(friendsProvider.notifier).loadAll();

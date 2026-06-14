@@ -174,6 +174,8 @@ pub enum NetworkEvent {
     FriendRequestAccepted { peer_id: String },
     FriendRequestRejected { peer_id: String },
     FriendRemoved { peer_id: String },
+    /// Multi-device: a sibling device backfilled `count` new friends (Phase 6).
+    FriendsBackfilled { count: u32 },
     // -- Temporary nickname events --
     NicknameClaimed { nickname: String },
     NicknameReleased,
@@ -722,6 +724,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::FriendRemoved { peer_id } => {
             NetworkEvent::FriendRemoved { peer_id }
         }
+        node::NetworkEvent::FriendsBackfilled { count } => {
+            NetworkEvent::FriendsBackfilled { count }
+        }
         node::NetworkEvent::NicknameClaimed { nickname } => {
             NetworkEvent::NicknameClaimed { nickname }
         }
@@ -1236,6 +1241,37 @@ pub fn get_device_links() -> Vec<DeviceLink> {
         .into_iter()
         .map(|(device_peer_id, master_peer_id)| DeviceLink { device_peer_id, master_peer_id })
         .collect()
+}
+
+/// Wipe all persisted device lists + the in-memory resolver (multi-device,
+/// Phase 6). Testing/maintenance aid: union-merge never removes a device id, so
+/// repeated wipe+reimport cycles leave ghost devices accumulating in the
+/// published list. Calling this lets the device set rebuild from currently-live
+/// siblings on the next profile exchange. Restart the node afterward (or just
+/// reconnect) so siblings re-merge. Production single-device removal = Step 7
+/// revocation, not this blunt reset.
+#[frb]
+pub fn reset_device_lists() -> Result<(), String> {
+    let id = identity::load_or_create_identity()?;
+    let proto = id
+        .keypair
+        .to_protobuf_encoding()
+        .map_err(|e| format!("Failed to encode keypair: {e}"))?;
+    let key_bytes = &proto[..32.min(proto.len())];
+    let passphrase = hex::encode(key_bytes);
+
+    let hollow_dir = crate::identity::data_dir()?;
+    let db_path = hollow_dir
+        .join("messages.db")
+        .to_str()
+        .ok_or("Invalid path encoding")?
+        .to_string();
+
+    let store = MessageStore::open(&db_path, &passphrase)?;
+    store.clear_all_device_lists()?;
+    crate::node::resolver::clear_all();
+    hollow_log!("[HOLLOW-MULTIDEV] Device lists + resolver reset (manual)");
+    Ok(())
 }
 
 /// Verify an Ed25519 message signature against a canonical payload.

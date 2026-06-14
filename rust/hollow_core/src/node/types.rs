@@ -74,6 +74,21 @@ pub(crate) struct SignedDeviceList {
     pub sig_b64: String,
 }
 
+/// One accepted-friend entry shared between a master identity's own devices
+/// (multi-device, Phase 6). Carries identity + relationship metadata only — no
+/// message history. See `HavenMessage::FriendListSync`.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct FriendListEntry {
+    #[serde(default)]
+    pub peer_id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub direction: String,
+    #[serde(default)]
+    pub requested_at: i64,
+}
+
 /// Events emitted by the network node.
 pub(crate) enum NetworkEvent {
     PeerDiscovered { peer: DiscoveredPeer },
@@ -127,6 +142,9 @@ pub(crate) enum NetworkEvent {
     FriendRequestAccepted { peer_id: String },
     FriendRequestRejected { peer_id: String },
     FriendRemoved { peer_id: String },
+    /// Multi-device (Phase 6): a sibling device sent us our identity's friend
+    /// list and we inserted `count` new friend rows. Dart reloads `friendsProvider`.
+    FriendsBackfilled { count: u32 },
     // -- Temporary nickname events --
     NicknameClaimed { nickname: String },
     NicknameReleased,
@@ -739,6 +757,29 @@ pub(crate) enum HavenMessage {
 
     #[serde(rename = "friend_remove")]
     FriendRemove,
+
+    /// Multi-device (Phase 6): one device shares its accepted-friend list with a
+    /// SIBLING device of the same master identity, so a freshly-linked device
+    /// learns who its identity's friends are and can join their DM rooms (and
+    /// thus appear/observe presence). Sent DIRECTLY to the sibling, only after
+    /// `resolver::same_identity` confirms the recipient is our own other device.
+    /// Carries no message history — that is Step 4/5 backfill. Idempotent on the
+    /// receiver (skips friends it already has).
+    #[serde(rename = "friend_list_sync")]
+    FriendListSync {
+        #[serde(default)]
+        friends: Vec<FriendListEntry>,
+    },
+
+    /// Multi-device (Phase 6): ask a SIBLING device to send us its friend list.
+    /// Pull-based companion to `FriendListSync` — fixes the join-timing race where
+    /// a freshly-linked device's profile reached the established device before it
+    /// was listening, so the established device never push-shared its friends. On
+    /// detecting a sibling (ingesting its device list), we both push our friends
+    /// AND request theirs. Verified-self only; the responder replies with a
+    /// `FriendListSync`.
+    #[serde(rename = "friend_list_request")]
+    FriendListRequest,
 
     /// Lightweight notification hint for unsubscribed channels (topic routing).
     /// Sent via SendToRoom (0x03) so all room members receive it.
