@@ -22,6 +22,73 @@ pub(crate) fn message_signing_payload(
     format!("hollow-msg:{msg_type}:{context}:{sender}:{ts}:{text}")
 }
 
+// -- Multi-device signed device list (Phase 6) --
+
+/// Canonical payload for signing a device list.
+/// Format: "hollow-devices:{master_peer_id}:{version}:{sorted_device_ids_csv}".
+/// `devices` MUST be sorted before calling so the payload is deterministic.
+pub(crate) fn device_list_signing_payload(
+    master_peer_id: &str,
+    version: u64,
+    devices: &[String],
+) -> String {
+    format!(
+        "hollow-devices:{master_peer_id}:{version}:{}",
+        devices.join(",")
+    )
+}
+
+/// Build a master-signed [`SignedDeviceList`] for the given device peer_ids.
+/// `master` is the master keypair (the cross-device identity). `devices` is
+/// sorted internally so the signed payload is canonical.
+pub(crate) fn build_signed_device_list(
+    master: &crate::identity::native_identity::NativeKeypair,
+    version: u64,
+    mut devices: Vec<String>,
+) -> SignedDeviceList {
+    use base64::engine::general_purpose::STANDARD as B64;
+    devices.sort();
+    devices.dedup();
+    let master_peer_id = master.peer_id();
+    let payload = device_list_signing_payload(&master_peer_id, version, &devices);
+    let sig = master.sign(payload.as_bytes());
+    SignedDeviceList {
+        master_pubkey_b64: B64.encode(master.public_key_protobuf()),
+        master_peer_id,
+        devices,
+        version,
+        sig_b64: B64.encode(sig),
+    }
+}
+
+/// Verify a received [`SignedDeviceList`]: the master pubkey must derive to the
+/// claimed `master_peer_id`, and the signature must validate over the canonical
+/// payload. Does NOT enforce version monotonicity — that is the DB layer's job
+/// (it has the previously-seen version). Returns true iff cryptographically sound.
+pub(crate) fn verify_device_list(list: &SignedDeviceList) -> bool {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use crate::identity::native_identity::NativeKeypair;
+
+    let Ok(pk_bytes) = B64.decode(&list.master_pubkey_b64) else {
+        return false;
+    };
+    // Bind pubkey → claimed master peer_id.
+    match NativeKeypair::peer_id_from_pubkey_protobuf(&pk_bytes) {
+        Some(derived) if derived == list.master_peer_id => {}
+        _ => return false,
+    }
+    let Ok(sig_bytes) = B64.decode(&list.sig_b64) else {
+        return false;
+    };
+    // Devices must be sorted as signed; verify over the canonical payload using a
+    // sorted copy so an attacker can't reorder the array post-signing.
+    let mut devices = list.devices.clone();
+    devices.sort();
+    let payload = device_list_signing_payload(&list.master_peer_id, list.version, &devices);
+    NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, payload.as_bytes())
+        .unwrap_or(false)
+}
+
 /// Sign a message payload with the local keypair.
 /// Returns (signature_base64, public_key_base64).
 pub(crate) fn sign_message(
@@ -575,5 +642,63 @@ mod tests {
         let members: Vec<String> = vec![];
         let rooms = HashMap::new();
         assert_eq!(elect_coordinator(&members, "peer_x", &rooms), None);
+    }
+
+    fn test_master() -> crate::identity::native_identity::NativeKeypair {
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let m: bip39::Mnemonic = phrase.parse().unwrap();
+        crate::identity::native_identity::NativeKeypair::from_mnemonic(&m).unwrap()
+    }
+
+    #[test]
+    fn device_list_sign_verify_roundtrip() {
+        let master = test_master();
+        let list = build_signed_device_list(
+            &master,
+            1,
+            vec!["12D3KooWdevA".into(), "12D3KooWdevB".into()],
+        );
+        assert_eq!(list.master_peer_id, master.peer_id());
+        assert!(verify_device_list(&list));
+    }
+
+    #[test]
+    fn device_list_devices_are_sorted_and_deduped() {
+        let master = test_master();
+        let list = build_signed_device_list(
+            &master,
+            3,
+            vec!["zzz".into(), "aaa".into(), "aaa".into(), "mmm".into()],
+        );
+        assert_eq!(list.devices, vec!["aaa", "mmm", "zzz"]);
+        assert!(verify_device_list(&list));
+    }
+
+    #[test]
+    fn device_list_tampered_devices_fail() {
+        let master = test_master();
+        let mut list = build_signed_device_list(&master, 1, vec!["aaa".into()]);
+        // Inject a device the master never signed.
+        list.devices.push("evil".into());
+        assert!(!verify_device_list(&list), "tampered device list must not verify");
+    }
+
+    #[test]
+    fn device_list_wrong_master_peer_id_fails() {
+        let master = test_master();
+        let mut list = build_signed_device_list(&master, 1, vec!["aaa".into()]);
+        // Claim a different identity than the pubkey derives to.
+        list.master_peer_id = "12D3KooWnotme".into();
+        assert!(!verify_device_list(&list));
+    }
+
+    #[test]
+    fn device_list_bumped_version_changes_signature() {
+        let master = test_master();
+        let v1 = build_signed_device_list(&master, 1, vec!["aaa".into()]);
+        let v2 = build_signed_device_list(&master, 2, vec!["aaa".into()]);
+        assert_ne!(v1.sig_b64, v2.sig_b64, "version is part of the signed payload");
+        assert!(verify_device_list(&v1));
+        assert!(verify_device_list(&v2));
     }
 }

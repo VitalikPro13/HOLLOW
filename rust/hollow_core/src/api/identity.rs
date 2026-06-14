@@ -4,7 +4,11 @@ use crate::identity;
 
 /// Result of creating or loading an identity.
 pub struct IdentityInfo {
+    /// Master peer_id — the cross-device IDENTITY (display, friendships).
     pub peer_id: String,
+    /// This device's transport peer_id. Equals `peer_id` on a pre-multi-device
+    /// install (migration keystone); distinct on a freshly-linked device.
+    pub device_peer_id: String,
     /// The 24-word mnemonic phrase. Only present on first creation — save it!
     pub mnemonic: Option<String>,
 }
@@ -32,6 +36,7 @@ pub fn load_or_create_identity() -> Result<IdentityInfo, String> {
     let data = identity::load_or_create_identity()?;
     Ok(IdentityInfo {
         peer_id: data.peer_id,
+        device_peer_id: data.device_peer_id,
         mnemonic: data.mnemonic,
     })
 }
@@ -43,6 +48,7 @@ pub fn generate_new_identity() -> Result<IdentityInfo, String> {
     let data = identity::generate_new_identity()?;
     Ok(IdentityInfo {
         peer_id: data.peer_id,
+        device_peer_id: data.device_peer_id,
         mnemonic: data.mnemonic,
     })
 }
@@ -54,6 +60,7 @@ pub fn restore_identity_from_mnemonic(phrase: String) -> Result<IdentityInfo, St
     let data = identity::restore_identity_from_mnemonic(&phrase)?;
     Ok(IdentityInfo {
         peer_id: data.peer_id,
+        device_peer_id: data.device_peer_id,
         mnemonic: data.mnemonic,
     })
 }
@@ -144,6 +151,7 @@ pub fn unlock_identity(password: Option<String>) -> Result<IdentityInfo, String>
     let data = identity::load_or_create_identity()?;
     Ok(IdentityInfo {
         peer_id: data.peer_id,
+        device_peer_id: data.device_peer_id,
         mnemonic: data.mnemonic,
     })
 }
@@ -200,6 +208,14 @@ pub fn enable_password_protection(
         .map_err(|e| format!("Failed to write encrypted identity: {e}"))?;
 
     encryption::set_session_key(wrapping_key);
+
+    // Mirror the new protection onto the per-device key file (hazard R2).
+    identity::device_key::rewrite_device_key_protection(
+        &data.device_keypair,
+        Some(&wrapping_key),
+        true,
+        use_keychain,
+    )?;
     Ok(())
 }
 
@@ -244,7 +260,16 @@ pub fn change_password(old_password: String, new_password: String) -> Result<(),
     std::fs::write(&path, &encrypted)
         .map_err(|e| format!("Failed to write encrypted identity: {e}"))?;
 
+    // Re-encrypt the device key file under the new key (hazard R2). Read it with
+    // the OLD key first, while we still have it.
+    let device = identity::device_key::load_device_keypair_with_key(&old_key)?;
     encryption::set_session_key(new_key);
+    identity::device_key::rewrite_device_key_protection(
+        &device,
+        Some(&new_key),
+        true,
+        had_keychain,
+    )?;
     Ok(())
 }
 
@@ -278,6 +303,11 @@ pub fn remove_password_protection(password: String) -> Result<(), String> {
     // Write plaintext. OS keychain is a separate opt-in from Settings.
     std::fs::write(&path, &plaintext)
         .map_err(|e| format!("Failed to write identity: {e}"))?;
+
+    // Mirror onto the device key file: read with the old key, write plaintext.
+    let device = identity::device_key::load_device_keypair_with_key(&key)?;
+    identity::device_key::rewrite_device_key_protection(&device, None, false, false)?;
+
     let _ = platform_keystore::delete_key();
     encryption::clear_session_key();
 
@@ -329,6 +359,16 @@ pub fn set_require_password_on_launch(require: bool) -> Result<(), String> {
 
     std::fs::write(&path, &encrypted)
         .map_err(|e| format!("Failed to write identity: {e}"))?;
+
+    // Keep the device key file's flags in sync. Session key is unchanged, so the
+    // device key remains decryptable regardless; this keeps the files consistent.
+    let device = identity::device_key::load_device_keypair_with_key(&session_key)?;
+    identity::device_key::rewrite_device_key_protection(
+        &device,
+        Some(&session_key),
+        true,
+        want_keychain,
+    )?;
 
     Ok(())
 }
@@ -385,6 +425,14 @@ pub fn enable_os_keychain_protection() -> Result<(), String> {
         .map_err(|e| format!("Failed to write encrypted identity: {e}"))?;
 
     encryption::set_session_key(wrapping_key);
+
+    // Mirror keychain protection onto the device key file (hazard R2).
+    identity::device_key::rewrite_device_key_protection(
+        &data.device_keypair,
+        Some(&wrapping_key),
+        false,
+        true,
+    )?;
     wrapping_key.fill(0);
     Ok(())
 }
@@ -407,6 +455,9 @@ pub fn disable_os_keychain_protection() -> Result<(), String> {
 
     std::fs::write(&path, &plaintext)
         .map_err(|e| format!("Failed to write identity: {e}"))?;
+
+    // Mirror onto the device key file: write plaintext (hazard R2).
+    identity::device_key::rewrite_device_key_protection(&data.device_keypair, None, false, false)?;
 
     let _ = platform_keystore::delete_key();
     encryption::clear_session_key();

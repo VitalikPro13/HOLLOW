@@ -7,8 +7,17 @@ use super::native_identity::NativeKeypair;
 
 /// The result of identity generation/loading.
 pub(crate) struct IdentityData {
+    /// Master keypair (from the mnemonic). The cross-device IDENTITY: drives
+    /// display, friendships, message-content signing, and the DB passphrase.
     pub keypair: NativeKeypair,
+    /// Master peer_id — the identity-level id shared across all devices.
     pub peer_id: String,
+    /// Per-device keypair (random, NOT from the mnemonic). Drives this device's
+    /// transport-level peer_id (relay/rooms/Olm). See `device_key.rs`.
+    pub device_keypair: NativeKeypair,
+    /// This device's peer_id = `compute_peer_id(device_keypair)`. On an existing
+    /// (pre-multi-device) install this equals `peer_id` (migration keystone).
+    pub device_peer_id: String,
     pub mnemonic: Option<String>,
 }
 
@@ -36,9 +45,15 @@ pub fn data_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Path to the stored identity keypair file.
+/// Path to the stored identity keypair file (master key).
 fn keypair_path() -> Result<PathBuf, String> {
     Ok(data_dir()?.join("identity.key"))
+}
+
+/// Path to the stored per-device keypair file. Sibling of `identity.key`,
+/// encrypted with the same session key. See `device_key.rs`.
+pub(crate) fn device_keypair_path() -> Result<PathBuf, String> {
+    Ok(data_dir()?.join("identity.device"))
 }
 
 /// Generate a brand new identity from a fresh BIP-39 mnemonic.
@@ -56,9 +71,15 @@ pub(crate) fn generate_new_identity() -> Result<IdentityData, String> {
     // Save the keypair to disk.
     save_keypair(&keypair)?;
 
+    // Brand-new identity → fresh random device key (distinct from the master).
+    let device_keypair = super::device_key::load_or_create_device_keypair(None)?;
+    let device_peer_id = device_keypair.peer_id();
+
     Ok(IdentityData {
         keypair,
         peer_id,
+        device_keypair,
+        device_peer_id,
         mnemonic: Some(mnemonic_phrase),
     })
 }
@@ -75,9 +96,25 @@ pub(crate) fn restore_identity_from_mnemonic(phrase: &str) -> Result<IdentityDat
     // Save the restored keypair to disk.
     save_keypair(&keypair)?;
 
+    // Restoring the mnemonic onto a device IS the multi-device case ("import my
+    // identity here"). This device MUST get a FRESH random device key so its
+    // peer_id is distinct from the originating device — seeding from master
+    // would recreate the same-peer_id collision we are fixing. We overwrite any
+    // stale identity.device left over from a previous identity on this install.
+    let device_secret = {
+        let mut s = [0u8; 32];
+        getrandom::fill(&mut s).map_err(|e| format!("RNG failed: {e}"))?;
+        s
+    };
+    let device_keypair = NativeKeypair::from_secret_bytes(&device_secret);
+    save_keypair_to(&device_keypair_path()?, &device_keypair)?;
+    let device_peer_id = device_keypair.peer_id();
+
     Ok(IdentityData {
         keypair,
         peer_id,
+        device_keypair,
+        device_peer_id,
         mnemonic: Some(mnemonic.to_string()),
     })
 }
@@ -104,9 +141,17 @@ pub(crate) fn load_or_create_identity() -> Result<IdentityData, String> {
             .map_err(|e| format!("Failed to decode identity: {e}"))?;
         let peer_id = keypair.peer_id();
 
+        // Existing install → device key seeds from the master on first run
+        // (migration keystone: device_peer_id == legacy peer_id), or loads the
+        // already-persisted device key on subsequent runs.
+        let device_keypair = super::device_key::load_or_create_device_keypair(Some(&keypair))?;
+        let device_peer_id = device_keypair.peer_id();
+
         Ok(IdentityData {
             keypair,
             peer_id,
+            device_keypair,
+            device_peer_id,
             mnemonic: None,
         })
     } else {
@@ -142,9 +187,16 @@ pub(crate) fn load_existing_identity() -> Result<Option<IdentityData>, String> {
         .map_err(|e| format!("Failed to decode identity: {e}"))?;
     let peer_id = keypair.peer_id();
 
+    // Background isolates (FCM fetch) need the real device key too. Seed from
+    // master if absent (consistent with the foreground load path).
+    let device_keypair = super::device_key::load_or_create_device_keypair(Some(&keypair))?;
+    let device_peer_id = device_keypair.peer_id();
+
     Ok(Some(IdentityData {
         keypair,
         peer_id,
+        device_keypair,
+        device_peer_id,
         mnemonic: None,
     }))
 }
@@ -152,14 +204,21 @@ pub(crate) fn load_existing_identity() -> Result<Option<IdentityData>, String> {
 /// Save a keypair to disk. If encryption is active (session key set),
 /// the file is written as an encrypted HKEYV1 envelope. Otherwise plaintext protobuf.
 fn save_keypair(keypair: &NativeKeypair) -> Result<(), String> {
-    let path = keypair_path()?;
+    save_keypair_to(&keypair_path()?, keypair)
+}
+
+/// Save a keypair to an arbitrary path, mirroring the protection mode of the
+/// file already at that path (so the device key file matches the master file's
+/// password/keychain state independently). Used for both `identity.key` and
+/// `identity.device`.
+pub(crate) fn save_keypair_to(path: &PathBuf, keypair: &NativeKeypair) -> Result<(), String> {
     let plaintext = keypair.to_protobuf_encoding()
         .map_err(|e| format!("Failed to encode keypair: {e}"))?;
 
     let bytes_to_write = if let Some(key) = super::encryption::get_session_key() {
         // Determine current protection flags by reading existing file (if any).
         let (password_used, os_keychain_used) = if path.exists() {
-            let existing = fs::read(&path).unwrap_or_default();
+            let existing = fs::read(path).unwrap_or_default();
             match super::encryption::detect_format(&existing) {
                 Ok(super::encryption::IdentityFormat::Encrypted { flags, .. }) => {
                     (super::encryption::flags_has_password(flags),
@@ -179,7 +238,7 @@ fn save_keypair(keypair: &NativeKeypair) -> Result<(), String> {
         plaintext
     };
 
-    fs::write(&path, bytes_to_write).map_err(|e| format!("Failed to write identity file: {e}"))?;
+    fs::write(path, bytes_to_write).map_err(|e| format!("Failed to write identity file: {e}"))?;
     Ok(())
 }
 

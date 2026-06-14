@@ -708,6 +708,36 @@ impl MessageStore {
             );
         }
 
+        // -- Multi-device: signed device lists (Phase 6) --
+        // One row per master identity holding its full signed device list JSON +
+        // monotonic version (replay protection). `device_links` is the fast
+        // reverse index used by the device→master resolver.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS device_lists (
+                master_peer_id TEXT PRIMARY KEY,
+                json           TEXT    NOT NULL,
+                version        INTEGER NOT NULL DEFAULT 0,
+                updated_at     INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .map_err(|e| format!("Failed to create device_lists table: {e}"))?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS device_links (
+                device_peer_id TEXT PRIMARY KEY,
+                master_peer_id TEXT NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| format!("Failed to create device_links table: {e}"))?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_device_links_master ON device_links (master_peer_id)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create device_links index: {e}"))?;
+
         Ok(MessageStore { conn })
     }
 
@@ -1896,6 +1926,92 @@ impl MessageStore {
             Some(Err(e)) => Err(format!("Failed to read mls_identity row: {e}")),
             None => Ok(None),
         }
+    }
+
+    // ── Multi-device signed device lists (Phase 6) ──
+
+    /// Current stored device-list version for a master, or 0 if none.
+    /// Callers use this to enforce monotonic version (replay protection) BEFORE
+    /// accepting an incoming list.
+    pub fn device_list_version(&self, master_peer_id: &str) -> Result<u64, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT version FROM device_lists WHERE master_peer_id = ?1")
+            .map_err(|e| format!("Failed to prepare device_list_version: {e}"))?;
+        let mut rows = stmt
+            .query_map([master_peer_id], |row| row.get::<_, i64>(0))
+            .map_err(|e| format!("Failed to query device_list_version: {e}"))?;
+        match rows.next() {
+            Some(Ok(v)) => Ok(v.max(0) as u64),
+            _ => Ok(0),
+        }
+    }
+
+    /// Persist a verified device list: upsert the master row and rebuild its
+    /// `device_links` reverse-index entries. The caller MUST have cryptographically
+    /// verified the list AND confirmed `version` strictly increases (use
+    /// `device_list_version`). `devices` is the authoritative member set.
+    ///
+    /// Stale links from a previous (lower-version) list for this master are
+    /// removed so a revoked device no longer resolves to it.
+    pub fn save_device_list(
+        &self,
+        master_peer_id: &str,
+        json: &str,
+        version: u64,
+        devices: &[String],
+        updated_at: i64,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO device_lists (master_peer_id, json, version, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(master_peer_id) DO UPDATE SET
+                    json = excluded.json,
+                    version = excluded.version,
+                    updated_at = excluded.updated_at",
+                rusqlite::params![master_peer_id, json, version as i64, updated_at],
+            )
+            .map_err(|e| format!("Failed to upsert device_lists: {e}"))?;
+
+        // Rebuild reverse index for this master: drop its old links, insert the
+        // current device set. A device can only belong to one master, so an
+        // INSERT OR REPLACE re-homes any device that moved (shouldn't happen for
+        // honest lists, but keeps the index consistent).
+        self.conn
+            .execute(
+                "DELETE FROM device_links WHERE master_peer_id = ?1",
+                [master_peer_id],
+            )
+            .map_err(|e| format!("Failed to clear device_links: {e}"))?;
+        for dev in devices {
+            self.conn
+                .execute(
+                    "INSERT OR REPLACE INTO device_links (device_peer_id, master_peer_id)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![dev, master_peer_id],
+                )
+                .map_err(|e| format!("Failed to insert device_link: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Load all (device_peer_id → master_peer_id) links for resolver warmup.
+    pub fn get_all_device_links(&self) -> Result<Vec<(String, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT device_peer_id, master_peer_id FROM device_links")
+            .map_err(|e| format!("Failed to prepare get_all_device_links: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("Failed to query device_links: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("Failed to read device_link row: {e}"))?);
+        }
+        Ok(out)
     }
 
     // ── User Profile Persistence (Phase 3.5) ──

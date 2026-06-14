@@ -100,15 +100,25 @@ Future<bool> isIdentityUnlocked() =>
 
 /// Result of creating or loading an identity.
 class IdentityInfo {
+  /// Master peer_id — the cross-device IDENTITY (display, friendships).
   final String peerId;
+
+  /// This device's transport peer_id. Equals `peer_id` on a pre-multi-device
+  /// install (migration keystone); distinct on a freshly-linked device.
+  final String devicePeerId;
 
   /// The 24-word mnemonic phrase. Only present on first creation — save it!
   final String? mnemonic;
 
-  const IdentityInfo({required this.peerId, this.mnemonic});
+  const IdentityInfo({
+    required this.peerId,
+    required this.devicePeerId,
+    this.mnemonic,
+  });
 
   @override
-  int get hashCode => peerId.hashCode ^ mnemonic.hashCode;
+  int get hashCode =>
+      peerId.hashCode ^ devicePeerId.hashCode ^ mnemonic.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -116,6 +126,7 @@ class IdentityInfo {
       other is IdentityInfo &&
           runtimeType == other.runtimeType &&
           peerId == other.peerId &&
+          devicePeerId == other.devicePeerId &&
           mnemonic == other.mnemonic;
 }
 

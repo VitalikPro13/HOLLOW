@@ -8185,11 +8185,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   IdentityInfo dco_decode_identity_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return IdentityInfo(
       peerId: dco_decode_String(arr[0]),
-      mnemonic: dco_decode_opt_String(arr[1]),
+      devicePeerId: dco_decode_String(arr[1]),
+      mnemonic: dco_decode_opt_String(arr[2]),
     );
   }
 
@@ -10078,8 +10079,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   IdentityInfo sse_decode_identity_info(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_peerId = sse_decode_String(deserializer);
+    var var_devicePeerId = sse_decode_String(deserializer);
     var var_mnemonic = sse_decode_opt_String(deserializer);
-    return IdentityInfo(peerId: var_peerId, mnemonic: var_mnemonic);
+    return IdentityInfo(
+      peerId: var_peerId,
+      devicePeerId: var_devicePeerId,
+      mnemonic: var_mnemonic,
+    );
   }
 
   @protected
@@ -12548,6 +12554,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_identity_info(IdentityInfo self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.peerId, serializer);
+    sse_encode_String(self.devicePeerId, serializer);
     sse_encode_opt_String(self.mnemonic, serializer);
   }
 

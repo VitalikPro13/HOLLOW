@@ -606,6 +606,21 @@ Tests verify:
 - Sign + verify cycle (valid signature passes, tampered message fails)
 - Public key protobuf format (36 bytes, correct header)
 
+- `native_identity.rs:NativeKeypair::peer_id_from_pubkey_protobuf(pubkey)` -- Static. Derives a `12D3KooW…` PeerId from a 36-byte public-key protobuf alone (no private key). Used to bind a signature's pubkey to a claimed peer_id (message verify + multi-device device-list verify). Returns `Option<String>`.
+
+---
+
+## Multi-Device Foundation (Phase 6 — Step 1, foundation only)
+
+Sources: `identity/device_key.rs`, `node/resolver.rs`, `node/crypto_handler.rs` (device-list helpers), `node/types.rs` (`SignedDeviceList`), `storage/messages.rs` (`device_lists`/`device_links`).
+
+The multi-device epic gives each physical device its OWN random Ed25519 key while the mnemonic-derived MASTER key stays the cross-device identity. **As of Step 1's foundation this is behavior-neutral** — the resolver maps every peer to itself until signed device lists are actually published/ingested (the wiring, Tasks 6-9, is not done yet). Authoritative status: `reports/MULTI_DEVICE_IMPLEMENTATION_TRACKER.md` + memory `project_multi_device_sync`.
+
+- **Per-device key (`device_key.rs`):** `load_or_create_device_keypair(master)` loads/creates `identity.device` (sibling of `identity.key`, same SESSION_KEY encryption). Existing install with no device file → SEEDS FROM MASTER (migration keystone: device peer_id == master == legacy peer_id, no orphaning). Brand-new/restore → fresh random key (distinct peer_id). `IdentityData`/`IdentityInfo` carry `device_keypair`/`device_peer_id`. `rewrite_device_key_protection()` keeps the device file's at-rest protection in lockstep with the 6 identity-protection FFIs.
+- **Signed device list (`crypto_handler.rs`):** `SignedDeviceList { master_pubkey_b64, master_peer_id, devices (sorted), version, sig_b64 }`. `build_signed_device_list(master, version, devices)` signs `hollow-devices:{master_peer_id}:{version}:{sorted_csv}`; `verify_device_list()` checks the pubkey→master_peer_id binding + signature. Attached to both `ProfileUpdate` wire variants as `#[serde(default)] device_list: Option<SignedDeviceList>`. Monotonic `version` = replay protection.
+- **DB (`messages.rs`):** `device_lists(master_peer_id PK, json, version, updated_at)` + `device_links(device_peer_id PK, master_peer_id)` reverse index. `save_device_list()` (version-gated upsert + link rebuild), `device_list_version()`, `get_all_device_links()`.
+- **Resolver (`node/resolver.rs`):** process-global `OnceLock<RwLock<HashMap>>`. `resolve(peer_id)` → master, **unknown → itself** (backward-compat). `same_identity(a,b)` is the generalized replacement for `a == b` self/friend checks. `seed_self()`/`warm_from_links()` at startup, `update()`/`update_many()` on ingest. Lock-poison-safe (degrades to identity-passthrough).
+
 ---
 
 ## Identity System: keys.rs (Key Management)

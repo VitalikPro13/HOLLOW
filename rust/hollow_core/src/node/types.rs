@@ -40,6 +40,31 @@ pub(crate) struct DiscoveredPeer {
     pub addresses: Vec<String>,
 }
 
+/// A master-signed list of the device peer_ids belonging to one identity
+/// (multi-device, Phase 6). Rides on profile sync so friends learn which device
+/// peer_ids resolve to one person, in a tamper-proof way.
+///
+/// - `master_pubkey_b64`: the master Ed25519 public key (36-byte protobuf,
+///   base64). `peer_id_from_pubkey_protobuf(master_pubkey)` MUST equal
+///   `master_peer_id` (binds pubkey → identity).
+/// - `devices`: sorted device peer_ids (sorted so the signed payload is canonical).
+/// - `version`: monotonic; clients reject a list whose version is not greater
+///   than the highest already seen for that master (replay protection).
+/// - `sig_b64`: master's Ed25519 signature over `device_list_signing_payload`.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct SignedDeviceList {
+    #[serde(default)]
+    pub master_pubkey_b64: String,
+    #[serde(default)]
+    pub master_peer_id: String,
+    #[serde(default)]
+    pub devices: Vec<String>,
+    #[serde(default)]
+    pub version: u64,
+    #[serde(default)]
+    pub sig_b64: String,
+}
+
 /// Events emitted by the network node.
 pub(crate) enum NetworkEvent {
     PeerDiscovered { peer: DiscoveredPeer },
@@ -74,6 +99,9 @@ pub(crate) enum NetworkEvent {
     DmSyncCompleted { peer_id: String, new_message_count: u32 },
     // -- Profile events (Phase 3.5) --
     ProfileUpdated { peer_id: String },
+    /// A device list was ingested for `master_peer_id` (multi-device, Phase 6).
+    /// Dart invalidates its device→identity map so attribution updates.
+    DeviceListUpdated { master_peer_id: String },
     // -- Message editing events (Phase 3.5) --
     ChannelMessageEdited { server_id: String, channel_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
     DmMessageEdited { peer_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
@@ -666,6 +694,10 @@ pub(crate) enum HavenMessage {
         is_invisible: bool,
         #[serde(default)]
         twitch_username: String,
+        /// Multi-device: the sender's master-signed device list (Phase 6).
+        /// `None` from older clients → sender is treated as single-device.
+        #[serde(default)]
+        device_list: Option<SignedDeviceList>,
     },
 
     // -- Multi-peer fan-out sync (Phase 3.5) --
@@ -1619,6 +1651,9 @@ pub(crate) enum MessageEnvelope {
         is_invisible: bool,
         #[serde(default)]
         twitch_username: String,
+        /// Multi-device: the sender's master-signed device list (Phase 6).
+        #[serde(default)]
+        device_list: Option<SignedDeviceList>,
     },
 
     /// CRDT sync request (replaces HavenMessage::SyncRequest for MLS path).

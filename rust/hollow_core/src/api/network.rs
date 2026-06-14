@@ -156,6 +156,8 @@ pub enum NetworkEvent {
     DmSyncCompleted { peer_id: String, new_message_count: u32 },
     // -- Profile events (Phase 3.5) --
     ProfileUpdated { peer_id: String },
+    /// A device list was ingested for `master_peer_id` (multi-device, Phase 6).
+    DeviceListUpdated { master_peer_id: String },
     // -- Message editing events (Phase 3.5) --
     ChannelMessageEdited { server_id: String, channel_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
     DmMessageEdited { peer_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
@@ -680,6 +682,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::ProfileUpdated { peer_id } => {
             NetworkEvent::ProfileUpdated { peer_id }
+        }
+        node::NetworkEvent::DeviceListUpdated { master_peer_id } => {
+            NetworkEvent::DeviceListUpdated { master_peer_id }
         }
         node::NetworkEvent::ChannelMessageEdited { server_id, channel_id, message_id, new_text, edited_at, signature, public_key } => {
             NetworkEvent::ChannelMessageEdited { server_id, channel_id, message_id, new_text, edited_at, signature, public_key }

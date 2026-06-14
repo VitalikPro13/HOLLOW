@@ -131,6 +131,32 @@ impl NativeKeypair {
         self.signing_key.to_bytes()
     }
 
+    /// Derive a libp2p-style PeerId string (`12D3KooW…`) from a protobuf-encoded
+    /// public key (the 36-byte `[0x08,0x01,0x12,0x20,...pubkey]` format).
+    ///
+    /// Mirrors `compute_peer_id` but works from a PUBLIC key alone — used to bind
+    /// a signature's pubkey to a claimed peer_id (message + device-list verify).
+    /// Returns `None` if the protobuf header is malformed.
+    pub fn peer_id_from_pubkey_protobuf(pubkey_protobuf: &[u8]) -> Option<String> {
+        if pubkey_protobuf.len() < 36
+            || pubkey_protobuf[0] != 0x08
+            || pubkey_protobuf[1] != 0x01
+            || pubkey_protobuf[2] != 0x12
+            || pubkey_protobuf[3] != 0x20
+        {
+            return None;
+        }
+        let mut multihash = Vec::with_capacity(2 + pubkey_protobuf.len());
+        multihash.push(0x00); // identity multihash code
+        multihash.push(pubkey_protobuf.len() as u8);
+        multihash.extend_from_slice(pubkey_protobuf);
+        Some(
+            bs58::encode(&multihash)
+                .with_alphabet(bs58::Alphabet::BITCOIN)
+                .into_string(),
+        )
+    }
+
     /// Verify a signature from a peer, given their protobuf-encoded public key.
     ///
     /// `pubkey_protobuf` is the 36-byte `[0x08, 0x01, 0x12, 0x20, ...pubkey]` format.

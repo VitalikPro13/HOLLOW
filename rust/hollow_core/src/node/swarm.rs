@@ -6496,7 +6496,7 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username } => {
+                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list: _incoming_device_list } => {
                                 if peer_invisible {
                                     let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
                                         peer_id: sender_peer_id.clone(),
@@ -7092,7 +7092,15 @@ async fn handle_incoming_request(
         // -- Profile sync (Phase 3.5) --
 
         HavenMessage::FriendRequest { requested_at } => {
-            
+
+            // A friend request whose sender resolves to our own identity is one of
+            // our own devices (multi-device: same master identity). Never render it
+            // as a stranger's request ("your own friend friend-requested you").
+            if peer_str == local_peer_str {
+                hollow_log!("[HOLLOW-FRIENDS] Ignored self friend request (own device)");
+                return;
+            }
+
             hollow_log!("[HOLLOW-FRIENDS] Friend request from {peer_str}");
 
             // Save as pending incoming.
@@ -7453,7 +7461,7 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username } => {
+        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list: _incoming_device_list } => {
             // If the profile carries an invisible flag, emit PeerStatusChanged so the
             // UI treats this peer as offline from the very first event.
             if peer_invisible {

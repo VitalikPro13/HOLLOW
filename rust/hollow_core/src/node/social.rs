@@ -334,6 +334,8 @@ pub(crate) async fn handle_update_profile(
         banner_b64: banner_b64.clone(),
         is_invisible,
         twitch_username: twitch_username.clone(),
+        // Populated below (after we build the local signed device list).
+        device_list: None,
     };
     let mut mls_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Send via MLS to each server we're in.
@@ -360,6 +362,8 @@ pub(crate) async fn handle_update_profile(
         banner_b64: banner_b64.clone(),
         is_invisible,
         twitch_username: twitch_username.clone(),
+        // Populated below (after we build the local signed device list).
+        device_list: None,
     };
     hollow_log!("[HOLLOW-SWARM] Broadcasting profile update");
     {
@@ -416,6 +420,8 @@ pub(crate) fn send_own_profile_to_peer(
                 banner_b64,
                 is_invisible,
                 twitch_username: profile.twitch_username,
+                // Populated by the publish path (Task #6).
+                device_list: None,
             };
             send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, msg);
         }

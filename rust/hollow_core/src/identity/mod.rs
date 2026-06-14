@@ -1,4 +1,5 @@
 mod keys;
+pub(crate) mod device_key;
 pub(crate) mod encryption;
 pub(crate) mod native_identity;
 pub(crate) mod platform_keystore;
