@@ -195,7 +195,7 @@ Always shown at the top. `Container` with `hollow.surface` background and bottom
 1. **Avatar**: `HollowAvatar(peerId, size: 28)` with avatar bytes from `profileProvider`
 2. **Status dot**: Reads `peersProvider` and `invisiblePeersProvider`. Green pulse if online, gray if offline
 3. **Name column**: Display name (from `profileProvider`, via `displayNameFor()`) in bold 13px, truncated peer ID (first 16 chars) below in 10px caption
-4. **Connection progress**: `ConnectionProgress` widget showing encryption stage. `encrypted` if peer exists and is encrypted and not invisible, `offline` otherwise
+4. **Connection progress**: `ConnectionProgress` widget showing encryption stage. **Multi-device (fixed 2026-06-15):** stage is `encrypted` if ANY device of the friend's master has an encrypted session — `peers.entries.any((e) => links.identityOf(e.key) == widget.peerId && e.value.isEncrypted)` — not a direct `peersProvider[widget.peerId]` lookup (that's device-keyed → always null for a multi-device/keystone-rotated friend → falsely showed Offline while dots/call-buttons showed online). Same scan pattern as the Home network column. Else `customNetwork` (custom relay) / `offline`. Invisible peer → not encrypted.
 5. **Voice call button**: `LucideIcons.phone` / `LucideIcons.phoneCall`. Enabled when peer is online and not already in a call. Tapping calls `callProvider.notifier.startCall(peerId)`. Green when in-call with this peer
 6. **Video call button**: `LucideIcons.video`. Same enable logic. Calls `startCall(peerId, withVideo: true)`
 7. **Profile toggle**: `LucideIcons.user`. Toggles `dmProfilePanelProvider`. Accent when panel visible

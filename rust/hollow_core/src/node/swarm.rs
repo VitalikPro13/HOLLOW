@@ -528,7 +528,7 @@ async fn run_event_loop(
                         message_ops::handle_send_message(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut key_request_in_flight,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_peer_id,
                             peer_id_str, text, message_id, reply_to_mid, link_preview,
                             &db_path, &db_passphrase,
                         ).await;
@@ -914,8 +914,8 @@ async fn run_event_loop(
                     NodeCommand::EditDmMessage { peer_id: peer_id_str, message_id, new_text } => {
                         message_ops::handle_edit_dm_message(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &mut pending_messages,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &mut pending_messages, &mut key_request_in_flight,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_peer_id,
                             peer_id_str, message_id, new_text,
                             &db_path, &db_passphrase,
                         ).await;
@@ -934,7 +934,8 @@ async fn run_event_loop(
                     NodeCommand::DeleteDmMessage { peer_id: peer_id_str, message_id } => {
                         message_ops::handle_delete_dm_message(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &mut pending_messages, &mut key_request_in_flight,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_peer_id,
                             peer_id_str, message_id,
                             &db_path, &db_passphrase,
                         ).await;
@@ -953,7 +954,8 @@ async fn run_event_loop(
                     NodeCommand::AddDmReaction { peer_id: peer_id_str, message_id, emoji } => {
                         message_ops::handle_add_dm_reaction(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &mut pending_messages, &mut key_request_in_flight,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_peer_id,
                             peer_id_str, message_id, emoji,
                             &db_path, &db_passphrase,
                         ).await;
@@ -972,7 +974,8 @@ async fn run_event_loop(
                     NodeCommand::RemoveDmReaction { peer_id: peer_id_str, message_id, emoji } => {
                         message_ops::handle_remove_dm_reaction(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &mut pending_messages, &mut key_request_in_flight,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_peer_id,
                             peer_id_str, message_id, emoji,
                             &db_path, &db_passphrase,
                         ).await;
@@ -1165,6 +1168,7 @@ async fn run_event_loop(
                             peer_id, server_id, channel_id, file_path, message_id, message_text,
                             vthumb, override_width, override_height, share_ref,
                             &event_tx, &server_states, &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &device_peer_id,
                             &mut olm, &crypto_store, &mut mls,
                             &ws_cmd_tx, &ws_room_peers, &webrtc_peers, &mut pending_webrtc_sends,
                             &mut gossip_overlays,
@@ -3501,6 +3505,30 @@ async fn run_event_loop(
 // handle_completed_stream, stream_to_peer, broadcast_to_gossip_neighbors moved to file_handler.rs
 
 
+/// Resolve the DM conversation a received edit/delete/reaction event belongs to
+/// (multi-device self fan-out, Phase 6 Step 3). For a normal DM from a friend the
+/// sender IS the conversation peer → `resolve(sender)`. For a copy echoed from our
+/// OWN sibling device, the sender is US, so the event must be keyed to the OTHER
+/// party — look that up from the message's stored row by `mid` (the edit/delete/
+/// reaction envelopes carry no convo field). Falls back to `resolve(sender)` if
+/// the row isn't found (e.g. not yet synced), which is the pre-fan-out behavior.
+fn dm_event_convo(
+    sender_peer: &str,
+    local_master: &str,
+    mid: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> String {
+    if super::resolver::same_identity(sender_peer, local_master) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            if let Some(peer) = store.get_dm_message_peer(mid) {
+                return peer;
+            }
+        }
+    }
+    super::resolver::resolve(sender_peer)
+}
+
 /// Handle an incoming request from a peer.
 async fn handle_incoming_request(
     olm: &mut OlmManager,
@@ -4089,7 +4117,7 @@ async fn handle_incoming_request(
                     }
                 }
                 Ok(MessageEnvelope::DirectMessage { inner }) => {
-                    let DirectMessagePayload { text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview } = *inner;
+                    let DirectMessagePayload { text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, convo } = *inner;
                     // SECURITY: Enforce 4,000 character limit on message text.
                     let msg_text = if msg_text.len() > 4000 { msg_text[..4000].to_string() } else { msg_text };
 
@@ -4097,8 +4125,15 @@ async fn handle_incoming_request(
                     // so messages from any of a friend's devices land in the single
                     // DM thread (and our own other-device sends attribute to us).
                     // Pre-multi-device this resolves to peer_str unchanged.
-                    let convo_peer = super::resolver::resolve(&peer_str);
                     let is_own_device = super::resolver::same_identity(&peer_str, master_peer_str);
+                    // Self fan-out (Step 3): a copy echoed from our OWN sibling carries
+                    // `convo` = the OTHER party's master, so we file it under the real
+                    // conversation rather than resolving it to ourselves (the sender).
+                    // For a normal DM from a friend, `convo` is None → resolve the sender.
+                    let convo_peer = match (is_own_device, convo.as_deref()) {
+                        (true, Some(c)) => c.to_string(),
+                        _ => super::resolver::resolve(&peer_str),
+                    };
 
                     // Verify DM signature if present. Context = OUR master identity
                     // (the recipient the sender signed over); the signature is made by
@@ -4150,6 +4185,8 @@ async fn handle_incoming_request(
                                 link_preview,
                                 signature: sig,
                                 public_key: pk,
+                                // Sibling echo of our OWN send → render outgoing.
+                                is_own: is_own_device,
                             })
                             .await;
                     }
@@ -4355,9 +4392,14 @@ async fn handle_incoming_request(
                             }
                             // sender == None → message not synced yet; sync batch will bring the edited version.
                         } else {
-                            // DM edit — verify the message is NOT mine (i.e. it's from this peer).
+                            // DM edit. Normally the editor must be the SENDER (the
+                            // message is NOT ours: is_mine==false). Self fan-out
+                            // (Step 3) is the one exception: a sibling echoing OUR
+                            // OWN edit carries is_mine==true, and is legitimate
+                            // because it resolves to our own master.
                             let is_mine = store.get_dm_message_is_mine(&mid);
-                            if is_mine == Some(false) {
+                            let is_sibling = super::resolver::same_identity(&peer_str, master_peer_str);
+                            if is_mine == Some(false) || (is_mine == Some(true) && is_sibling) {
                                 let _ = store.edit_dm_message(
                                     &mid, &new_text, ts,
                                     sig.as_deref(), pk.as_deref(),
@@ -4384,8 +4426,12 @@ async fn handle_incoming_request(
                                 public_key: pk,
                             }).await;
                         } else {
+                            // Convo attribution: for a sibling self-echo the sender
+                            // is US, so resolve(peer_str) would mis-key it — look up
+                            // the row's real conversation peer by mid.
+                            let convo_peer = dm_event_convo(&peer_str, master_peer_str, &mid, &db_path, &db_passphrase);
                             let _ = event_tx.send(NetworkEvent::DmMessageEdited {
-                                peer_id: super::resolver::resolve(&peer_str),
+                                peer_id: convo_peer,
                                 message_id: mid,
                                 new_text,
                                 edited_at: ts,
@@ -4412,11 +4458,16 @@ async fn handle_incoming_request(
                                 sig.as_deref(), pk.as_deref(),
                             );
                         } else {
-                            // SECURITY: Verify sender owns the DM message.
+                            // SECURITY: the deleter must own the DM message (is_mine
+                            // ==false). Self fan-out (Step 3) exception: a sibling
+                            // echoing OUR OWN delete carries is_mine==true and is
+                            // legitimate (it resolves to our master).
                             let is_mine = store.get_dm_message_is_mine(&mid);
-                            if is_mine != Some(false) {
-                                // If is_mine is true, it's OUR message (not the peer's).
-                                // If is_mine is None, message not found. Either way, reject.
+                            let is_sibling = super::resolver::same_identity(&peer_str, master_peer_str);
+                            let allowed = is_mine == Some(false) || (is_mine == Some(true) && is_sibling);
+                            if !allowed {
+                                // is_mine None → message not found; true & not sibling
+                                // → a peer trying to delete our message. Reject both.
                                 hollow_log!("[HOLLOW-SECURITY] REJECTED DeleteMessage (DM) from {peer_str} — not the sender of message {mid}");
                                 return;
                             }
@@ -4436,8 +4487,9 @@ async fn handle_incoming_request(
                             deleted_at: ts,
                         }).await;
                     } else {
+                        let convo_peer = dm_event_convo(&peer_str, master_peer_str, &mid, &db_path, &db_passphrase);
                         let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
-                            peer_id: super::resolver::resolve(&peer_str),
+                            peer_id: convo_peer,
                             message_id: mid,
                             deleted_at: ts,
                         }).await;
@@ -4477,8 +4529,13 @@ async fn handle_incoming_request(
                             added_at: ts,
                         }).await;
                     } else {
+                        // peer_id = the DM thread key (the OTHER party). For a normal
+                        // friend reaction reactor==thread peer, but for a sibling
+                        // self-echo the reactor is US while the thread is the friend —
+                        // resolve the thread by the message's row, not the reactor.
+                        let convo_peer = dm_event_convo(&peer_str, master_peer_str, &mid, &db_path, &db_passphrase);
                         let _ = event_tx.send(NetworkEvent::DmReactionAdded {
-                            peer_id: reactor_key.clone(),
+                            peer_id: convo_peer,
                             message_id: mid,
                             emoji,
                             reactor: reactor_key,
@@ -4513,8 +4570,9 @@ async fn handle_incoming_request(
                             removed_at: ts,
                         }).await;
                     } else {
+                        let convo_peer = dm_event_convo(&peer_str, master_peer_str, &mid, &db_path, &db_passphrase);
                         let _ = event_tx.send(NetworkEvent::DmReactionRemoved {
-                            peer_id: reactor_key.clone(),
+                            peer_id: convo_peer,
                             message_id: mid,
                             emoji,
                             reactor: reactor_key,
@@ -5366,6 +5424,7 @@ async fn handle_incoming_request(
                             link_preview: None,
                             signature: None,
                             public_key: None,
+                            is_own: false,
                         })
                         .await;
                 }
@@ -7793,8 +7852,11 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::TypingIndicator { server_id, channel_id } => {
-
-
+            hollow_log!(
+                "[HOLLOW-TYPING] Received from {peer_str} (server={}, resolves to master {})",
+                if server_id.is_empty() { "DM" } else { &server_id },
+                super::resolver::resolve(peer_str)
+            );
             let _ = event_tx.send(NetworkEvent::TypingStarted {
                 peer_id: peer_str.to_string(),
                 server_id,

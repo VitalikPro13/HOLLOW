@@ -241,9 +241,27 @@ pub(crate) async fn ingest_device_list(
         );
         return false;
     }
+    // Register the SENDER device → master link. The list is master-signed and
+    // arrived over this device's authenticated socket in the master's room, so
+    // the delivering device provably belongs to that master EVEN IF it is not
+    // (yet) listed in `list.devices` — the common case when the stored list is
+    // stale/polluted (old wipe+reimport ghosts) or the sender's id rotated. This
+    // is what lets presence collapse the LIVE device and the DM fan-out target it
+    // by `resolve(sender) == master`, instead of chasing a dead ghost id.
+    if sender_peer_id != list.master_peer_id {
+        super::resolver::update(sender_peer_id, &list.master_peer_id);
+    }
     let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
         return false;
     };
+    // Fold the live sender device into the merge set too, so it's persisted and
+    // surfaced to Dart (presence) — not just held in the volatile resolver. A
+    // device that delivered a master-signed list IS a member of that identity.
+    let sender_is_new_member = sender_peer_id != list.master_peer_id
+        && store.load_device_list(&list.master_peer_id)
+            .ok().flatten()
+            .map(|cur| !cur.devices.iter().any(|d| d == sender_peer_id))
+            .unwrap_or(true);
 
     // UNION-merge, do NOT reject-on-stale. Two devices of one identity each start
     // their list at version 1, so a naive `version <= current` guard makes the
@@ -259,22 +277,43 @@ pub(crate) async fn ingest_device_list(
             _ => (Vec::new(), 0),
         };
     let mut merged: Vec<String> = prev_devices.clone();
-    let known: std::collections::HashSet<String> = prev_devices.iter().cloned().collect();
+    let mut known: std::collections::HashSet<String> = prev_devices.iter().cloned().collect();
     let mut added = 0u32;
     for d in &list.devices {
         if !known.contains(d) {
             merged.push(d.clone());
+            known.insert(d.clone());
             added += 1;
         }
     }
+    // The delivering device proves membership — include it even if absent from the
+    // signed `devices` (stale list / rotated id). Counts as "new" so we persist.
+    if sender_is_new_member && !known.contains(sender_peer_id) {
+        merged.push(sender_peer_id.to_string());
+        added += 1;
+    }
     let nothing_new = added == 0 && list.version <= prev_version;
     if nothing_new {
-        // Truly redundant (same or older, no new devices) — skip the write but
-        // still ensure the resolver is warm (cheap; survives restarts).
+        // Truly redundant on the RUST side (same/older list, no new devices) — skip
+        // the DB write, but STILL re-warm the resolver AND emit DeviceListUpdated.
+        // The event is the load-bearing part: Dart's `deviceLinkProvider` warms
+        // ONCE at startup (event_provider) by pulling `get_device_links()`, which
+        // RACES the Rust resolver warm-up (`warm_from_links` from `device_links`).
+        // If Dart wins that race it caches an empty/partial map and, because a
+        // redundant re-ingest used to return here WITHOUT an event, it never
+        // refreshed again — so a friend whose device id ≠ master (rotated keystone,
+        // e.g. AL = device BVoC / master JJU9) showed OFFLINE until a manual Device
+        // List reset forced a fresh (version-bumping) ingest. A peer re-sends its
+        // (unchanged v1) list on every room join, so emitting here makes Dart
+        // re-pull the now-warm map within seconds of every reconnect — the
+        // self-heal that removes the need to ever reset. Cheap + idempotent.
         super::resolver::update_many(
             &list.master_peer_id,
             merged.iter().map(|s| s.as_str()),
         );
+        let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
+            master_peer_id: list.master_peer_id.clone(),
+        }).await;
         return false;
     }
 

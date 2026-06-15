@@ -61,11 +61,16 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
       String messageId, String replyToMid,
       {network_api.LinkPreviewRef? linkPreview,
       String? signature,
-      String? publicKey}) {
+      String? publicKey,
+      bool isOwn = false}) {
+    // Multi-device self fan-out: `isOwn` means this DM is an echo of a message
+    // WE sent from a sibling device — `fromPeer` is the conversation's other
+    // party (the recipient), and it must render as an OUTGOING bubble. Without
+    // this a sibling shows our own sent message as if the friend sent it to us.
     final ts = DateTime.fromMillisecondsSinceEpoch(timestamp);
     final msg = ChatMessage(
       text: text,
-      isMe: false,
+      isMe: isOwn,
       timestamp: ts,
       messageId: messageId.isNotEmpty ? messageId : null,
       replyToMid: replyToMid.isNotEmpty ? replyToMid : null,

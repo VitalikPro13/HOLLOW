@@ -112,7 +112,7 @@ When a peer becomes reachable (`PeerJoined` or `RoomMembers` events in swarm.rs)
 Called when the local user types in a chat (`NodeCommand::SendTypingIndicator`). Supports two modes:
 
 ### DM typing (server_id is empty)
-When `server_id.is_empty()`, the `channel_id` field is repurposed as the target peer ID. Sends `HavenMessage::TypingIndicator { server_id: "", channel_id: peer_id }` directly to the peer if reachable. No MLS involved — DMs use Olm sessions, but typing indicators are plaintext for simplicity (they reveal no content).
+When `server_id.is_empty()`, the `channel_id` field carries the recipient's MASTER id. **Multi-device (fixed 2026-06-15):** the master authenticates as NO socket — only its device peer_ids do — so sending `HavenMessage::TypingIndicator` to the bare master is silently dropped (`send_message_to_peer` finds no room). Instead it **fans out to the recipient's DEVICES**: target set = `resolver::devices_for(master)` UNION every peer in the DM room (`dm_room_code(local_master, recipient_master)`) that resolves to that master, sending to each reachable device. Single-device recipient → falls back to the master id itself. Logs `[HOLLOW-TYPING] DM typing → master …: sent to N device(s)`. No MLS — typing is plaintext (reveals no content). Receive side resolves the sender device→master and keys DM typing on the master (`event_provider`).
 
 ### Channel typing (server_id is non-empty)
 1. **MLS path:** If the server has an active MLS group, constructs `MessageEnvelope::Typing { sid, cid }` and broadcasts via `send_mls_broadcast()`. This is the preferred path — the typing indicator is encrypted within the server's MLS group.
@@ -203,7 +203,7 @@ Processes `MessageEnvelope::Typing` received via MLS decryption. Simply emits `N
 
 ### HavenMessage::TypingIndicator (plaintext, swarm.rs)
 
-Processed directly in `swarm.rs:handle_incoming_request()`. Emits `NetworkEvent::TypingStarted { peer_id, server_id, channel_id }`. No additional validation — any connected peer can send typing indicators. For DM typing, `server_id` is empty and `channel_id` is the sender's peer ID.
+Processed directly in `swarm.rs:handle_incoming_request()`. Logs `[HOLLOW-TYPING] Received from {peer} …` then emits `NetworkEvent::TypingStarted { peer_id, server_id, channel_id }` where `peer_id` is the sender's DEVICE id. No additional validation — any connected peer can send typing indicators. Dart `event_provider` resolves the device→master via `deviceLinkProvider.identityOf` and keys DM typing on the master (matching the chat view's `typingProvider[widget.peerId]` lookup). For DM typing, `server_id` is empty.
 
 ---
 

@@ -218,13 +218,47 @@ pub(crate) fn handle_send_typing_indicator(
     };
 
     if server_id.is_empty() {
-        // DM typing: channel_id is actually the peer ID.
-            if peer_is_reachable(&ws_room_peers, &channel_id) {
-                send_message_to_peer(
-                    &ws_cmd_tx, &ws_room_peers,
-                    &channel_id, msg,
-                );
+        // DM typing: `channel_id` is the recipient's MASTER id (what the UI keys
+        // the DM on). Multi-device: the master authenticates as NO socket — only
+        // its device peer_ids do — so `send_message_to_peer(master)` finds no room
+        // and silently drops (the bug where a multi-device / keystone-rotated
+        // friend never saw "typing…"). Fan out to the recipient's DEVICES, exactly
+        // like a DM message: the device set is `devices_for(master)` UNION every
+        // peer currently in the DM room that resolves to that master (live
+        // presence is authoritative — robust to a stale/polluted stored list).
+        // Single-device recipient → the set is just the master id itself (it both
+        // is the device and authenticates as it), so this is the old behavior.
+        let recipient_master = super::resolver::resolve(&channel_id);
+        let dm_room = super::types::dm_room_code(local_peer_str, &recipient_master);
+        let mut targets: std::collections::HashSet<String> =
+            super::resolver::devices_for(&recipient_master).into_iter().collect();
+        if let Some(peers) = ws_room_peers.get(&dm_room) {
+            for p in peers {
+                if super::resolver::resolve(p) == recipient_master {
+                    targets.insert(p.clone());
+                }
             }
+        }
+        // Fallback for a single-device recipient (no device links): send to the
+        // master id as-is — it IS the device that authenticates.
+        if targets.is_empty() {
+            targets.insert(recipient_master.clone());
+        }
+        let mut sent_to = 0u32;
+        for target in &targets {
+            // Skip the bare master only when we also have real device ids (it
+            // authenticates as nothing); keep it in the single-device fallback.
+            if target == &recipient_master && targets.len() > 1 {
+                continue;
+            }
+            if super::crypto_handler::ws_room_for_peer(&ws_room_peers, target).is_some() {
+                send_message_to_peer(&ws_cmd_tx, &ws_room_peers, target, msg.clone());
+                sent_to += 1;
+            }
+        }
+        hollow_log!(
+            "[HOLLOW-TYPING] DM typing → master {recipient_master}: sent to {sent_to} device(s)"
+        );
     } else {
         // Channel typing: MLS broadcast first, plaintext fallback.
         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
@@ -463,31 +497,41 @@ pub(crate) fn send_own_profile_to_peer(
     db_passphrase: &str,
 ) {
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        if let Ok(Some(profile)) = store.load_profile(local_peer_str) {
-            let avatar_b64 = profile.avatar_bytes
-                .as_ref()
-                .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
-                .unwrap_or_default();
-            let banner_b64 = profile.banner_bytes
-                .as_ref()
-                .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
-                .unwrap_or_default();
-            let device_list = super::crypto_handler::build_local_device_list(
-                master_keypair, device_peer_id, db_path, db_passphrase,
-            );
-            let msg = HavenMessage::ProfileUpdate {
-                display_name: profile.display_name,
-                status: profile.status,
-                about_me: profile.about_me,
-                updated_at: profile.updated_at,
-                avatar_b64,
-                banner_b64,
-                is_invisible,
-                twitch_username: profile.twitch_username,
-                device_list,
+        // CRITICAL (presence collapse): ALWAYS attach + send the device list, even
+        // when we have no profile row yet. The device list is what teaches a friend
+        // `our-device → our-master`, which is what collapses our devices to ONE
+        // online identity on their side. Gating the whole ProfileUpdate (device
+        // list included) on `load_profile == Some` was the bug where a friend never
+        // ingested our device list — every `[HOLLOW-DEVICES]` ingest was missing in
+        // the logs and the identity showed OFFLINE. A profile-less node (fresh
+        // import, or a master row not yet written) sends empty profile fields with
+        // a populated `device_list`. Mirrors the de-gated backfill announce
+        // (swarm.rs) and the receive-side empty-profile guard that ignores blank
+        // names so this never clobbers a real cached profile.
+        let profile = store.load_profile(local_peer_str).ok().flatten();
+        let (display_name, status, about_me, updated_at, avatar_b64, banner_b64, twitch_username) =
+            match profile {
+                Some(p) => (
+                    p.display_name, p.status, p.about_me, p.updated_at,
+                    p.avatar_bytes.as_ref()
+                        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+                        .unwrap_or_default(),
+                    p.banner_bytes.as_ref()
+                        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+                        .unwrap_or_default(),
+                    p.twitch_username,
+                ),
+                None => (String::new(), String::new(), String::new(), 0, String::new(), String::new(), String::new()),
             };
-            send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, msg);
-        }
+        let device_list = super::crypto_handler::build_local_device_list(
+            master_keypair, device_peer_id, db_path, db_passphrase,
+        );
+        let msg = HavenMessage::ProfileUpdate {
+            display_name, status, about_me, updated_at,
+            avatar_b64, banner_b64, is_invisible, twitch_username,
+            device_list,
+        };
+        send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, msg);
     }
 }
 

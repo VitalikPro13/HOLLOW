@@ -53,6 +53,12 @@ struct PerSocketData {
     bool is_guest = false;
     std::string ip_key;
     bool is_fetch = false;  // Invisible background fetch mode (FCM wake-up)
+    // Set when a NEWER socket for the same peer_id authenticates and takes over
+    // this peer's room/socket state. A superseded ghost must NOT run the shared
+    // peer cleanup on close (it would evict the live successor from every room);
+    // it only cleans up its own per-connection accounting (IP/guest). See
+    // handle_auth supersede path + cleanup_peer guard in ws_handler.cpp.
+    bool superseded = false;
     std::chrono::steady_clock::time_point last_binary_activity;
     uint32_t binary_frames_this_minute = 0;
     std::chrono::steady_clock::time_point minute_window_start;

@@ -1,8 +1,11 @@
 # Multi-Device Identity & Sync — Implementation Tracker
 
-**Status:** In progress. Step 1 (device identity foundation) DONE and live-verified (host+phone+VM).
-Step 2 (device-list propagation + friend-UI device collapse) + Step 2.5 (sibling friend-list sync, the
-presence on-ramp the live test exposed as necessary) both code-complete, pending real-device test.
+**Status:** In progress. Steps 1, 2, 2.5 DONE and live-verified (host+phone+VM): per-device identity,
+presence collapse, profile sync all work — a friend sees one online identity with the right name/avatar via
+any device. **Step 3 (Olm sender-side fan-out — the DM-delivery fix) code-complete, pending real-device
+test:** every DM send path (message/edit/delete/reaction/file/image) now fans out to all the recipient's
+devices AND your own siblings (real-time mirroring). 318 lib + 16 widget tests pass; no codegen (no FFI
+change); relay untouched.
 **Companion to:** `reports/MULTI_DEVICE_SYNC_PLAN.md` (the design doc — decisions, flows, rejected
 alternatives). This file is the **execution tracker**: verified codebase facts, the real cost breakdown,
 and a step-by-step checklist with checkboxes to follow during implementation.
@@ -319,14 +322,163 @@ on-ramp to backfill.*
       friend sees the right profile via either device, syncing in real time.** Remaining multi-device gap:
       DM DELIVERY between devices = Step 3 (Olm send-side fan-out). NOT Olm sessions (all confirmed bidi).
 
-### Step 3 — Olm sender-side fan-out  ▢ not started
-*Goal: a new DM reaches all of the recipient's devices.*
+### Step 3 — Olm sender-side fan-out  ✅ code-complete (pending real-device test)
+*Goal: a new DM reaches all of the recipient's devices, AND a DM typed on one of YOUR devices mirrors
+live onto your other device (self fan-out — real-time mirroring, distinct from Step 5 history backfill).*
 
-- [ ] Every encrypt-to-peer site encrypts once per recipient device session (N = 2-3).
-- [ ] Audit ALL Olm encrypt call sites (see CLAUDE.md offline-image/caption ratchet rules — they get N×
-      more delicate; do NOT burn ratchet slots).
-- [ ] **Test:** desktop sends DM → both of friend's devices receive it; your own second device also receives
-      your sent message (self-fan-out for sent-message sync).
+**Root cause (confirmed in code):** Dart sends DM commands targeting the recipient's MASTER id (that's
+what the friend list / UI keys on). But Olm sessions, `pending_messages`, and `ws_room_peers` are all keyed
+by DEVICE peer_ids — the master matches none of them, so `olm.has_session(master)` is false and
+`ws_room_for_peer(master)` is None → the send silently drops ("peer unreachable — not delivered") or lands
+in the offline buffer addressed to an id no device authenticates as. The entire receive/session/drain
+machinery (key exchange, `pending_messages` drain on PeerJoined/RoomMembers/KeyBundle, DM-sync) was ALREADY
+per-device; only the SEND entry point was master-keyed.
+
+**The fix (all client-side, relay untouched):**
+- [x] `resolver::devices_for(master) -> Vec<String>` — reverse lookup (inverse of `resolve()`), excludes the
+      bare master (no device authenticates as it). EMPTY for an unknown master → caller falls back to the
+      master id as-is = byte-for-byte pre-multi-device behavior. 2 new unit tests (318 lib tests pass).
+- [x] **Fan-out helper** `message_ops::fan_out_dm_envelope` + per-device `send_dm_to_device`: expand the
+      recipient master into `devices_for(recipient) ∪ devices_for(own_master)` (self fan-out, minus THIS
+      device), then run the existing three-way branch (online / offline-buffer / no-session-KeyRequest) once
+      per target device. **EXACT-device reachability** (`ws_room_for_peer(...).is_some()`, NOT the
+      identity-wide `peer_is_reachable`): in a fan-out device A may be online while sibling B is offline; the
+      identity-wide check would route B down the online path and `send_encrypted_message`'s own exact-membership
+      lookup would then DROP B's copy with no offline buffering.
+- [x] **Every DM send path fanned out** (real-time mirroring, per Vitalik): new message (`handle_send_message`),
+      edit (`handle_edit_dm_message`), delete (`handle_delete_dm_message`), reaction add/remove
+      (`handle_add/remove_dm_reaction`), AND files/images/video (`file_handler::handle_send_file` DM branch
+      wrapped in a per-device loop). Local DB write + UI event stay keyed on the MASTER. `device_peer_id`
+      threaded into all 6 handlers + their swarm call sites (internal node params — NO `api/` change, NO codegen).
+- [x] **Offline-image/caption ratchet rules honored PER DEVICE** (CLAUDE.md): the "caption sent exactly once
+      via `send_encrypted_text_to_peer`, never `send_encrypted_message`" rule generalizes to "exactly once PER
+      DEVICE" — each device has its own Olm ratchet, so the per-device loop is the correct shape. Per-device
+      stream temp file (`.stream_send_{file_id}_{device}.tmp`) so concurrent sibling streams don't collide.
+- [x] **Self-echo conversation attribution (the subtle part).** A DM envelope carries no recipient/convo
+      field, so the receiver historically resolved the conversation from the SENDER. That breaks self fan-out:
+      the sibling echo's sender is US, so it would file our outgoing DM under a conversation with ourselves.
+      **Fix:** new `#[serde(default)]` `convo` field on `DirectMessagePayload` (the OTHER party's master),
+      populated ONLY on the sibling-echo copy (`build_dm(Some(recipient_master))` in message + file paths) and
+      consumed in the receive path (`(is_own_device, convo) => file under convo`). Backward-compatible (None on
+      every normal send → resolve(sender), exactly as before). For edit/delete/reaction the envelopes carry NO
+      convo (no field added) — the message already exists on the sibling under the right thread, so the receive
+      path looks the convo up by `mid` via new `MessageStore::get_dm_message_peer` + helper `dm_event_convo`.
+- [x] **Self-echo edit/delete authorization.** The DM edit/delete receive guards required `is_mine==false`
+      (only the sender may edit/delete). A sibling echoing OUR OWN edit/delete carries `is_mine==true`, so the
+      guard now also allows it WHEN `same_identity(sender, local_master)` (a verified sibling) — the security
+      guard against a genuine peer editing our messages is preserved (peer + is_mine=true still rejected).
+- [x] **Pending-queue edit patch now scans all device queues** (was keyed only on the master): the original
+      message is queued per-device now, so an edit-before-delivery must patch every device's queued copy.
+- [x] **FIRST LIVE TEST (AL + Pixel) FAILED → root cause + 2 follow-up fixes.** Symptom: both showed each
+      OTHER Offline (no "Encrypting…"), AL's first DM lost, messages eventually flowed ~1 min late. Log dive
+      (AL `Sent encrypted DM to offline 12D3KooWBkiY…`; Pixel same to the SAME `BkiY`) found it was NOT a
+      fan-out logic flaw but **device-list pollution**: many wipe+reimport cycles left a GHOST device id
+      (`BkiY`) attached to each identity's master, while the LIVE device (`BVoC` for AL, `JQcW` for Pixel) was
+      either absent from the stored list or lost the version race. So `devices_for(master)` returned the dead
+      ghost and the fan-out skipped the connected device. Presence broke for the same reason (resolver never
+      mapped the live device → master). **Two durable fixes (make the system robust to pollution, not just a
+      one-off cleanup):**
+      (1) **Live-room union for fan-out targets** — `message_ops::collect_target_devices` (+ the file path)
+      now targets `devices_for(master)` UNIONED with every peer CURRENTLY in the DM room that resolves to that
+      master. Live presence is authoritative: an online device is always reached even if the stored list is
+      stale; a ghost id is harmless (queues + KeyRequests, never connects).
+      (2) **Sender-device link registration** — `crypto_handler::ingest_device_list` now registers (and
+      persists into `device_links`, emitting `DeviceListUpdated`) the SENDER device → master link, because a
+      device that delivered a master-signed list provably belongs to that master EVEN IF absent from the
+      signed `devices` (stale list / rotated id). This is what lets presence collapse the live device and the
+      union match it by `resolve(sender)==master`. 318 lib tests pass, clippy clean, no codegen.
+      *NOTE: union never removes the ghost (cleanup = Step 7 revocation), so for a clean re-test Vitalik resets
+      the device list on AL + Pixel (Settings → Security → Multi-Device) then restarts → lists re-converge with
+      only live device ids.*
+- [x] **2ND LIVE TEST (AL + Pixel, then VM imported): DM FAN-OUT WORKS.** After the device-list reset +
+      live-union + sender-link fixes: AL ingests P's list cleanly (`v1,1` → `v2,2 devices` = Pixel+VM), NO more
+      "Sent to offline <ghost>", AL→DM reaches BOTH Pixel and VM live. First message to VM was missed only
+      because VM joined the DM room ~990s AFTER that send (it was still importing) — expected, closes via
+      Step 5 backfill, NOT a bug. Recipient fan-out + self fan-out confirmed working.
+- [x] **UI follow-ups found in the 2nd test (multi-device attribution, both Dart-only, no codegen):**
+      (1) **Typing indicator** — the `TypingStarted` event carries the sender's DEVICE id, but the chat view
+      looks up typing by the friend's MASTER id, so they never matched → indicator never showed. Fixed:
+      `event_provider._dispatch` resolves the typist via `deviceLinkProvider.identityOf` before `setTyping`
+      (DM key + stored typist both collapse to master; single-device no-op).
+      (2) **Home tab network-status column** (`home_dashboard._NetworkColumn`) — looked up `peers[f.peerId]`
+      / `connStatus.peers[f.peerId]` by the friend's MASTER id, but those maps are DEVICE-keyed, so a
+      multi-device friend never matched the encrypted/connected branches and showed stuck "connecting" forever.
+      Fixed: scan for ANY device of the friend's master that's encrypted/connected (`links.identityOf(e.key)
+      == f.peerId`). Single-device collapses to the old direct lookup. `flutter analyze` clean, 16 tests pass.
+- [x] **ROOT-CAUSED + FIXED (relay-side) — the WS/relay presence flakiness was GHOST-CONNECTION EVICTION.**
+      2nd test showed AL↔Pixel presence ASYMMETRIC (Pixel showed AL offline despite DMs flowing); AL saw Pixel
+      LEAVE all shared rooms at t≈...095 and not rejoin until t≈...916 (~14 min) with NO Pixel `Connecting to
+      wss` in that window. **Root cause (read in `relay-uws/src/ws_handler.cpp`):** the relay keys
+      `peer_sockets` + every `ws_rooms[room].peers` slot by `peer_id` with NO duplicate-connection handling.
+      When a client reconnects (mobile resume / blip / TLS re-handshake) it opens a NEW socket while its old
+      TCP socket is still half-open — the relay doesn't notice the dead socket until its 120s `idleTimeout`
+      fires. During that window the new socket takes over the rooms and works fine; then the OLD socket's
+      delayed close runs `cleanup_peer` → `leave_room` for every room in the (stale) `peer_rooms[peer_id]`,
+      **erasing the LIVE socket's room entries and broadcasting `peer_left`** to friends. The peer never
+      reconnects (its socket is fine), so nothing rejoins until the 60s `check_peers` self-heal — the ~14-min
+      phantom-offline. **Fix (deployed 2026-06-15):** (1) `handle_auth` now SUPERSEDES a stale duplicate — when
+      a newer socket authenticates for a `peer_id` that already has a different socket, the old one is marked
+      `superseded`, its rooms+socket entry are evicted immediately, and it's closed (`end(1000,"superseded")`);
+      the new socket re-joins via the `WsEvent::Connected` loop so friends get a fresh `peer_joined`+members.
+      (2) `cleanup_peer`/`leave_room` are now socket-aware (`expected_ws`): a closing socket only tears down the
+      peer's shared state + a room slot if that slot STILL points at it, so a ghost can never unjoin the live
+      successor. PURE relay change — no Rust/Dart/codegen. Client-side `RoomMembers`/`PeerLeft` reconciliation
+      was already correct; it was being fed a lie. Built+deployed to VPS, relay active on :443.
+- [x] **ALSO FIXED (relay-side) — first-DM-to-a-just-connected-peer was silently dropped (the "VM/peer doesn't
+      get the FIRST message, only later ones" + "session can't establish with the other device" symptoms).**
+      In `handle_direct` (text) and `handle_binary_direct_msg` (0x04/0x08), if the target was connected
+      (`peer_sockets` had it) but NOT yet in the DM room — the race window between a recipient's WS auth and its
+      DM-room join, also widened by the ghost-eviction flap — the message was dropped with no buffer, no
+      delivery, no push. **Fix:** buffer the frame in that case too (replays the instant they join the room),
+      pushing only when FULLY offline. This is what makes a fresh device's first plaintext KeyRequest /
+      FriendRequest / SyncRequest / DM actually land, so the Olm session establishes. Buffer is per-(peer,room)
+      capped + TTL-swept; receiver dedups by message_id, so a redundant buffered copy is harmless.
+- [x] **DETERMINISTIC DM ROOMS — `dm_room_code` made PURE (no resolver). ✅ LIVE-VERIFIED.** The committed
+      multi-device work had `dm_room_code` resolve BOTH ends through the device→master resolver, breaking the
+      load-bearing invariant that two friends always compute the SAME room: the moment one side's resolver
+      diverged (stale/polluted link, or one side ingested a device list the other hadn't) they computed
+      DIFFERENT rooms, never met, and key exchange never landed → "keying error" for AL's OTHER plain friends.
+      **Fix:** `dm_room_code(a,b)` is now a pure function of the two ids (no resolver) — room = f(my_master,
+      friend_identity), both sides always agree, byte-for-byte pre-multi-device. Sub-devices still share the
+      room because the event loop passes the MASTER for the local end. Per-device fan-out sends now target the
+      MASTER-pair room (computed from `recipient_master`) with the device id only as the direct `target_peer`
+      (message_ops `send_dm_to_device` takes `dm_room`; file_handler uses `dm_room_f`). 318 lib tests pass.
+- [x] **DEVICE-LIST SELF-HEAL — stale-on-own-restart presence + typing. ✅ LIVE-VERIFIED.** Symptom (Vitalik):
+      presence went stale across a plain restart and ONLY a manual Device List reset fixed it. Two parts:
+      (1) `social::send_own_profile_to_peer` was GATED on `load_profile == Some`, so a friend never received
+      our device list when we had no profile row — every `[HOLLOW-DEVICES]` ingest was missing. De-gated: ALWAYS
+      send the device list (empty profile fields if none); receive-side empty-profile guard prevents clobber.
+      (2) `crypto_handler::ingest_device_list`'s `nothing_new` early-return (redundant v1 re-ingest on reconnect)
+      now ALSO emits `DeviceListUpdated`. Dart's `deviceLinkProvider` warms ONCE at startup, RACING the Rust
+      resolver warm; if Dart won it cached an empty map and never refreshed (no event) → a keystone-rotated
+      friend (device≠master, e.g. AL = device BVoC / master JJU9) showed OFFLINE until a reset forced a
+      version-bumping ingest. A peer re-sends its list on every room join, so emitting on the redundant path
+      makes Dart re-pull the warm map within seconds of every reconnect — the self-heal that removes the reset.
+- [x] **SIBLING-ECHO DM DIRECTION — `MessageReceived.is_own`. ✅ LIVE-VERIFIED (needed codegen).** Symptom: when
+      Pixel sent "123" to AL, the sibling echo to VM rendered as an INCOMING message from AL (Pixel→AL mirrored
+      to VM looked like AL→VM). The DB row was correct (`is_mine=true` via `is_own_device`), but the live
+      `MessageReceived` event had NO direction field so Dart always rendered incoming. **Fix:** added `is_own:
+      bool` to the `MessageReceived` event (codegen); Dart `chatProvider.receiveMessage(isOwn:)` sets
+      `isMe=true`; the own-echo event path skips unread/notification and marks the DM seen. Dedup-by-message_id
+      still guards doubles.
+- [x] **DM TYPING INDICATOR — master→device fan-out. ✅ LIVE-VERIFIED (no codegen).** DM typing sent
+      `HavenMessage::TypingIndicator` to the recipient's MASTER id; `send_message_to_peer(master)` finds no room
+      (no socket authenticates as the master) and silently drops → zero typing on receivers. **Fix:**
+      `handle_send_typing_indicator` fans typing out to the recipient's DEVICES (`devices_for` UNION live DM-room
+      peers resolving to that master), same pattern as DM message fan-out; single-device falls back to the master
+      id. Receive side was already correct (resolves device→master, keys DM typing on master). Added
+      `[HOLLOW-TYPING]` send+receive logs.
+- [x] **CHAT-HEADER ENCRYPTED STATUS — scan-by-master. ✅ LIVE-VERIFIED (Dart-only).** The DM header status label
+      (`chat_pane.dart`) looked up `peersProvider[widget.peerId]` (master) but `peersProvider` is DEVICE-keyed →
+      always null for a multi-device/keystone-rotated friend → showed Offline while dots/call-buttons (which
+      collapse by master) showed online. Fixed: scan for ANY device of the master with an encrypted session
+      (`links.identityOf(e.key) == widget.peerId && e.value.isEncrypted`) — same pattern as the Home column.
+- [x] **TEST (Vitalik): ✅ ALL LIVE-VERIFIED 2026-06-15.** Presence symmetric+stable across restarts (no reset
+      needed); old-build device re-establishes Olm session; first DM lands; plain friends key fine; sibling DMs
+      render outgoing; typing shows for a multi-device friend; chat header reads Encrypted. Single-device
+      unaffected throughout. **Step 3 is DONE.** Remaining multi-device gap = servers/MLS (Step 6) — a second
+      device won't see server messages and server member panels intentionally don't collapse (see
+      `project_multidevice_migration_state` memory).
 
 ### Step 4 — QR link + standalone snapshot transfer  ▢ not started
 *Goal: a freshly-linked device feels full immediately.*

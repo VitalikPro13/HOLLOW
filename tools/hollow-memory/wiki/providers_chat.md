@@ -126,13 +126,13 @@ Private helper. Appends `message` to the list for `peerId`. If the list exceeds 
 
 **Critical timing note:** The Dart-side `DateTime.now()` timestamp is a placeholder. The real signed timestamp comes back via the `MessageSent` event and is applied by `hydrateSignature()`. This two-step flow ensures instant UI feedback while maintaining signature correctness.
 
-### receiveMessage(fromPeer, text, timestamp, messageId, replyToMid, {linkPreview?, signature?, publicKey?})
+### receiveMessage(fromPeer, text, timestamp, messageId, replyToMid, {linkPreview?, signature?, publicKey?, isOwn=false})
 
-Called from the event stream handler when a `DirectMessage` network event arrives.
+Called from the event stream handler when a `MessageReceived` network event arrives.
 1. Converts `timestamp` (int, milliseconds since epoch) to `DateTime`.
-2. Creates a `ChatMessage` with `isMe: false`. Empty strings for `messageId` and `replyToMid` are converted to null.
+2. Creates a `ChatMessage` with `isMe: isOwn`. **Multi-device:** `isOwn` (from the event's `is_own` field) is true when this DM is a sibling echo of a message WE sent from another device — `fromPeer` is then the conversation's OTHER party (the recipient) and it must render OUTGOING, not incoming. Without it a sibling shows our own sent message as if the friend sent it. False for a normal friend DM. Empty strings for `messageId`/`replyToMid` → null.
 3. Dedup guard: if a message with this `message_id` already exists in memory (loaded from DB / written by the push-fetch node), returns early — the loaded copy is authoritative (reflects any edit already in the DB).
-4. Otherwise calls `_addMessage()`. No DB save here — Rust already persisted before emitting the event.
+4. Otherwise calls `_addMessage()`. No DB save here — Rust already persisted before emitting the event. (The own-echo event path in `event_provider` also skips unread/notification and marks the DM seen.)
 
 ### hydrateSignature(peerId, messageId, timestampMs, signature?, publicKey?)
 
@@ -364,8 +364,10 @@ Same pattern as DM's `addFileMessage` but reads `identityProvider` to set `sende
 
 ### Key Format
 
-- **DMs:** key = peer ID (the other peer's ID)
-- **Channels:** key = `"serverId:channelId"`
+- **DMs:** key = the other peer's **MASTER** identity id (the friend), and the stored typist is also the master id.
+- **Channels:** key = `"serverId:channelId"` (the stored typist is the master id).
+
+**Multi-device (Phase 6):** the `NetworkEvent::TypingStarted` event carries the sender's raw **DEVICE** peer_id, but the chat view (`chat_pane.dart`) looks up `typingProvider[widget.peerId]` where `widget.peerId` is the friend's **MASTER** id — so they would never match and a multi-device friend's "typing…" would never show. Fixed in `event_provider._dispatch`: the `TypingStarted` handler resolves the peerId via `deviceLinkProvider.identityOf(peerId)` BEFORE `setTyping` (so both the DM key and the stored typist collapse to master). `clearTyping` on `MessageReceived` already uses `fromPeer` = master (the Rust DM receive attributes via `convo_peer`). Single-device resolves to itself → no-op. **General rule:** any presence/typing UI comparing a relay-reported DEVICE id against a friend's MASTER id must route through `deviceLinkProvider`, or it silently never matches.
 
 ### Internal Timer Map
 

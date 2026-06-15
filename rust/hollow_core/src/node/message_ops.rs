@@ -13,6 +13,7 @@ use super::types::*;
 
 // ── 1. SendMessage (DM) ──────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_send_message(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
@@ -24,6 +25,7 @@ pub(crate) async fn handle_send_message(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    device_peer_id: &str,
     peer_id_str: String,
     text: String,
     message_id: String,
@@ -44,7 +46,8 @@ pub(crate) async fn handle_send_message(
         "dm", &peer_id_str, &local_peer, dm_timestamp, &text,
     );
     let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
-    let envelope = MessageEnvelope::DirectMessage {
+    let recipient_master = super::resolver::resolve(&peer_id_str);
+    let build_dm = |convo: Option<String>| MessageEnvelope::DirectMessage {
         inner: Box::new(DirectMessagePayload {
             text: text.clone(),
             ts: dm_timestamp,
@@ -54,9 +57,14 @@ pub(crate) async fn handle_send_message(
             reply_to: reply_to_mid.clone(),
             file_id: None,
             link_preview: link_preview.clone(),
+            convo,
         }),
     };
-    let envelope_json = serde_json::to_string(&envelope)
+    let envelope_json = serde_json::to_string(&build_dm(None))
+        .unwrap_or_else(|_| text.clone());
+    // Sibling self-echo variant carries the recipient master as the conversation
+    // key, so our other device files it under the right thread (not under us).
+    let sibling_envelope_json = serde_json::to_string(&build_dm(Some(recipient_master.clone())))
         .unwrap_or_else(|_| text.clone());
 
     // Persist sent DM locally with the same Rust-generated timestamp.
@@ -76,76 +84,27 @@ pub(crate) async fn handle_send_message(
         }
     }
 
-    if olm.has_session(&peer_id_str) {
-        if peer_is_reachable(ws_room_peers, &peer_id_str) {
-            // Session exists and peer is online — encrypt and send.
-            send_encrypted_message(
-                olm,
-                crypto_store,
-                &peer_id_str,
-                &envelope_json,
-                event_tx,
-                ws_cmd_tx, ws_room_peers,
-            ).await;
-        } else {
-            // Session exists but peer is offline — encrypt and send to DM room anyway.
-            // The relay will see the target isn't in the room and trigger a push notification.
-            match olm.encrypt(&peer_id_str, envelope_json.as_bytes()) {
-                Ok((msg_type, ciphertext)) => {
-                    super::crypto_handler::persist_olm_session(olm, crypto_store, &peer_id_str);
-                    let identity_key = if msg_type == 0 {
-                        Some(olm.identity_key_base64())
-                    } else {
-                        None
-                    };
-                    let haven_msg = HavenMessage::Encrypted {
-                        message_type: msg_type,
-                        body: OlmManager::encode_base64(&ciphertext),
-                        identity_key,
-                    };
-                    let dm_room = dm_room_code(local_peer_str, &peer_id_str);
-                    let json = serde_json::to_string(&haven_msg).unwrap_or_default();
-                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                        room_code: dm_room,
-                        target_peer: peer_id_str.clone(),
-                        data: json.into_bytes(),
-                    });
-                    hollow_log!("[HOLLOW-PUSH] Sent encrypted DM to offline {peer_id_str} via DM room (push trigger)");
-                }
-                Err(e) => {
-                    hollow_log!("[HOLLOW-PUSH] Encrypt for offline {peer_id_str} failed: {e}");
-                }
-            }
-            // Also queue for when they come back online (in case push doesn't work).
-            pending_messages
-                .entry(peer_id_str.clone())
-                .or_default()
-                .push(envelope_json);
-        }
-    } else {
-        // No session — queue the signed envelope.
-        // Messages will be drained when the peer reconnects (PeerJoined/RoomMembers).
-        pending_messages
-            .entry(peer_id_str.clone())
-            .or_default()
-            .push(envelope_json);
-
-        let req_fresh = key_request_in_flight
-            .get(&peer_id_str)
-            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(10));
-        if !req_fresh {
-            hollow_log!("[HOLLOW-SWARM] No session for {peer_id_str}, sending KeyRequest");
-            // Only mark in-flight if we actually sent it — peer_is_reachable gates
-            // the send, so don't strand the timestamp on an unreachable peer.
-            if peer_is_reachable(ws_room_peers, &peer_id_str) {
-                send_message_to_peer(
-                    ws_cmd_tx, ws_room_peers,
-                    &peer_id_str, HavenMessage::KeyRequest,
-                );
-                key_request_in_flight.insert(peer_id_str.clone(), std::time::Instant::now());
-            }
-        }
-    }
+    // ── Multi-device fan-out (Phase 6, Step 3) ──────────────────────────
+    // `peer_id_str` is the recipient's MASTER identity (that's what the friend
+    // list / UI keys on). Olm sessions, `pending_messages`, and room membership
+    // are all keyed by DEVICE peer_ids, so encrypting to the bare master would
+    // hit no session and target a peer nobody authenticates as. Expand the
+    // master into its known device peer_ids and run the per-device send for
+    // each. Single-device friends (no device list ingested) resolve to an empty
+    // device set → fall back to the master id as-is = byte-for-byte old behavior.
+    //
+    // We ALSO fan out to our OWN other online devices (self fan-out), so a DM
+    // typed on one of our devices appears live on the sibling. The local DB
+    // insert + `MessageSent` event above already happened keyed on the master,
+    // so the SENDING device's UI is correct; this delivers the same envelope to
+    // our other devices' Olm inboxes (they persist it on receive, keyed by our
+    // master via `convo_peer`).
+    fan_out_dm_envelope(
+        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+        pending_messages, key_request_in_flight,
+        local_peer_str, device_peer_id, &recipient_master, &envelope_json,
+        Some(&sibling_envelope_json),
+    ).await;
 
     // Hydrate the optimistic Dart entry with sig/pk so the
     // Message Proof dialog shows VERIFIED without a restart.
@@ -156,6 +115,226 @@ pub(crate) async fn handle_send_message(
         signature: sig.clone(),
         public_key: pk.clone(),
     }).await;
+}
+
+/// Expand a recipient MASTER id into its device set (plus our own sibling
+/// devices for self fan-out) and deliver one already-signed DM envelope to each
+/// (Phase 6 multi-device, Step 3). Single-device recipients (no device list
+/// ingested) resolve to an empty device set → the master id is used as-is, which
+/// is byte-for-byte the pre-multi-device behavior. Used by every DM send path:
+/// new message, edit, delete, reaction add/remove.
+///
+/// NOTE: `pending_messages` is keyed per DEVICE, so a queued envelope is drained
+/// to the right device when ITS session establishes (PeerJoined/RoomMembers/
+/// KeyBundle). The caller is responsible for the local DB write + UI event, both
+/// of which stay keyed on the MASTER.
+#[allow(clippy::too_many_arguments)]
+async fn fan_out_dm_envelope(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    recipient_master: &str,
+    envelope_json: &str,
+    // For DirectMessage sends, a variant of the envelope with `convo` set to
+    // `recipient_master` — delivered to OUR OWN sibling devices so they file the
+    // echo under the right conversation (not under ourselves). `None` for
+    // edit/delete/reaction (siblings resolve the convo from the message row by
+    // mid on receive), so siblings get the plain `envelope_json`.
+    sibling_envelope_json: Option<&str>,
+) {
+    // Recipient's devices (genuine other party) always get the plain envelope.
+    // Target set = the persisted device list UNION the devices CURRENTLY in the
+    // DM room that resolve to this master. The live room is authoritative: a
+    // device that's online right now must be reached even if the stored device
+    // list is stale/polluted (ghost ids from old wipe+reimport tests) or simply
+    // doesn't yet contain this freshly-rotated device id. Without the live union
+    // the fan-out would deliver only to a dead ghost id and skip the connected
+    // device — the exact "first message lost, peer shows offline" symptom.
+    let dm_room = dm_room_code(local_peer_str, recipient_master);
+    let recipient_devices = collect_target_devices(
+        ws_room_peers, &dm_room, recipient_master, recipient_master, /*exclude*/ None,
+    );
+    for device_peer in &recipient_devices {
+        send_dm_to_device(
+            olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+            pending_messages, key_request_in_flight,
+            device_peer, envelope_json, &dm_room,
+        ).await;
+    }
+
+    // Our own sibling devices (self fan-out) get the convo-tagged variant when one
+    // is supplied; otherwise the plain envelope. Same live-union logic, excluding
+    // THIS device (never echo to ourselves).
+    let own_master = super::resolver::resolve(local_peer_str);
+    let sibling_json = sibling_envelope_json.unwrap_or(envelope_json);
+    let siblings = collect_target_devices(
+        ws_room_peers, &dm_room, &own_master, "", /*exclude*/ Some(device_peer_id),
+    );
+    for sibling in &siblings {
+        if recipient_devices.contains(sibling) {
+            continue;
+        }
+        send_dm_to_device(
+            olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+            pending_messages, key_request_in_flight,
+            sibling, sibling_json, &dm_room,
+        ).await;
+    }
+}
+
+/// Build the set of device peer_ids to fan a DM out to for one master identity:
+/// the persisted device list (`resolver::devices_for`) UNION every peer currently
+/// in `dm_room` that resolves to `master`. The live-room union is what makes this
+/// robust to a stale/polluted stored list — an online device is always included,
+/// a ghost id in the stored list is harmless (it just queues + KeyRequests and
+/// never connects). `fallback_self` is pushed only if the whole set is empty and
+/// non-empty itself (single-device recipient → send to the master id as-is,
+/// pre-multi-device behavior); pass "" to skip the fallback (self fan-out, where
+/// "no siblings" must mean send to nobody). `exclude` drops one id (our own
+/// device) from the result.
+fn collect_target_devices(
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    dm_room: &str,
+    master: &str,
+    fallback_self: &str,
+    exclude: Option<&str>,
+) -> Vec<String> {
+    let mut set: HashSet<String> = super::resolver::devices_for(master).into_iter().collect();
+    // Union: peers physically in the DM room that resolve to this master.
+    if let Some(peers) = ws_room_peers.get(dm_room) {
+        for p in peers {
+            if super::resolver::resolve(p) == master {
+                set.insert(p.clone());
+            }
+        }
+    }
+    if let Some(ex) = exclude {
+        set.remove(ex);
+    }
+    // Never target the bare master (no device authenticates as it) — except the
+    // single-device fallback below, where master == device id by definition.
+    set.remove(master);
+    if set.is_empty() && !fallback_self.is_empty() {
+        return vec![fallback_self.to_string()];
+    }
+    set.into_iter().collect()
+}
+
+/// Send one already-signed DM envelope to ONE concrete device peer_id (Phase 6
+/// multi-device fan-out). This is the per-device half of `handle_send_message`,
+/// split out so the master→devices loop can run it once per target. `device_peer`
+/// is always a real device id (or the master id itself for a single-device
+/// recipient), never a master that no device authenticates as.
+///
+/// Three branches, identical in shape to the pre-fan-out code, just keyed by the
+/// device id:
+///   - session + online → encrypt and deliver now,
+///   - session + offline → encrypt to the DM room (push trigger) + queue for
+///     reconnect,
+///   - no session → queue + KeyRequest (drained on session establishment).
+#[allow(clippy::too_many_arguments)]
+async fn send_dm_to_device(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    device_peer: &str,
+    envelope_json: &str,
+    dm_room: &str,
+) {
+    // EXACT-device reachability, not the identity-wide `peer_is_reachable`: in a
+    // fan-out, device A may be online while sibling device B is offline. The
+    // identity-wide check would report B "reachable" (because A is), send B's
+    // copy down the online path, and `send_encrypted_message`'s own
+    // `ws_room_for_peer` (exact membership) would then find no room for B and
+    // DROP it with no offline buffering. Checking exact membership here routes an
+    // offline-but-sibling-online device into the offline-buffer branch correctly.
+    let device_online = super::crypto_handler::ws_room_for_peer(ws_room_peers, device_peer).is_some();
+
+    if olm.has_session(device_peer) {
+        if device_online {
+            // Session exists and device is online — encrypt and send.
+            send_encrypted_message(
+                olm,
+                crypto_store,
+                device_peer,
+                envelope_json,
+                event_tx,
+                ws_cmd_tx, ws_room_peers,
+            ).await;
+        } else {
+            // Session exists but device is offline — encrypt and send to DM room
+            // anyway. The relay sees the target isn't in the room and triggers a
+            // push notification.
+            match olm.encrypt(device_peer, envelope_json.as_bytes()) {
+                Ok((msg_type, ciphertext)) => {
+                    super::crypto_handler::persist_olm_session(olm, crypto_store, device_peer);
+                    let identity_key = if msg_type == 0 {
+                        Some(olm.identity_key_base64())
+                    } else {
+                        None
+                    };
+                    let haven_msg = HavenMessage::Encrypted {
+                        message_type: msg_type,
+                        body: OlmManager::encode_base64(&ciphertext),
+                        identity_key,
+                    };
+                    // The DM room is the MASTER-pair room (computed once by the
+                    // caller from the recipient's master) — every device of the
+                    // recipient is a member of it. `dm_room_code` is pure now, so
+                    // we must NOT recompute it from `device_peer` here (that would
+                    // key the room on the device id, not the identity).
+                    let json = serde_json::to_string(&haven_msg).unwrap_or_default();
+                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                        room_code: dm_room.to_string(),
+                        target_peer: device_peer.to_string(),
+                        data: json.into_bytes(),
+                    });
+                    hollow_log!("[HOLLOW-PUSH] Sent encrypted DM to offline {device_peer} via DM room (push trigger)");
+                }
+                Err(e) => {
+                    hollow_log!("[HOLLOW-PUSH] Encrypt for offline {device_peer} failed: {e}");
+                }
+            }
+            // Also queue for when this device comes back online (push may fail).
+            pending_messages
+                .entry(device_peer.to_string())
+                .or_default()
+                .push(envelope_json.to_string());
+        }
+    } else {
+        // No session with this device — queue the signed envelope. Drained when
+        // the device reconnects (PeerJoined/RoomMembers/KeyBundle).
+        pending_messages
+            .entry(device_peer.to_string())
+            .or_default()
+            .push(envelope_json.to_string());
+
+        let req_fresh = key_request_in_flight
+            .get(device_peer)
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(10));
+        if !req_fresh {
+            hollow_log!("[HOLLOW-SWARM] No session for {device_peer}, sending KeyRequest");
+            // Only mark in-flight if we actually sent it — exact-device presence
+            // gates the send, so don't strand the timestamp on an offline device.
+            if device_online {
+                send_message_to_peer(
+                    ws_cmd_tx, ws_room_peers,
+                    device_peer, HavenMessage::KeyRequest,
+                );
+                key_request_in_flight.insert(device_peer.to_string(), std::time::Instant::now());
+            }
+        }
+    }
 }
 
 // ── 2. SendChannelMessage ────────────────────────────────────────────
@@ -534,6 +713,7 @@ pub(crate) async fn handle_edit_channel_message(
 
 // ── 4. EditDmMessage ─────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_edit_dm_message(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
@@ -541,9 +721,11 @@ pub(crate) async fn handle_edit_dm_message(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    device_peer_id: &str,
     peer_id_str: String,
     message_id: String,
     new_text: String,
@@ -580,9 +762,11 @@ pub(crate) async fn handle_edit_dm_message(
         }
     }
 
-    // Update any queued pending message for this peer (pre-edit text → edited text).
-    // Without this, PeerJoined drain sends the stale original text.
-    if let Some(queued) = pending_messages.get_mut(&peer_id_str) {
+    // Update any queued pending message (pre-edit text → edited text) so a later
+    // PeerJoined drain sends the edited text, not the stale original. Multi-device:
+    // the original message was queued PER DEVICE (under device ids, not the master),
+    // so scan every queue rather than only the master's.
+    for queued in pending_messages.values_mut() {
         for entry in queued.iter_mut() {
             if let Ok(env) = serde_json::from_str::<MessageEnvelope>(entry) {
                 if let MessageEnvelope::DirectMessage { ref inner } = env {
@@ -597,6 +781,7 @@ pub(crate) async fn handle_edit_dm_message(
                                 reply_to: inner.reply_to.clone(),
                                 file_id: inner.file_id.clone(),
                                 link_preview: inner.link_preview.clone(),
+                                convo: inner.convo.clone(),
                             }),
                         };
                         if let Ok(json) = serde_json::to_string(&updated) {
@@ -621,49 +806,16 @@ pub(crate) async fn handle_edit_dm_message(
     };
     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
-    if olm.has_session(&peer_id_str) {
-        if peer_is_reachable(ws_room_peers, &peer_id_str) {
-            // Peer online — normal in-room delivery.
-            send_encrypted_message(
-                olm, crypto_store,
-                &peer_id_str, &envelope_json,
-                event_tx,
-                ws_cmd_tx, ws_room_peers,
-            ).await;
-        } else {
-            // Peer offline — encrypt and send to the DM room anyway so the relay
-            // buffers it (offline buffer) and fires a push. Without this, edits to
-            // an offline peer are silently dropped until a full DM-sync, which is
-            // also where the "edit shows as a duplicate" bug came from. Mirrors the
-            // offline branch in handle_send_dm/message.
-            match olm.encrypt(&peer_id_str, envelope_json.as_bytes()) {
-                Ok((msg_type, ciphertext)) => {
-                    super::crypto_handler::persist_olm_session(olm, crypto_store, &peer_id_str);
-                    let identity_key = if msg_type == 0 {
-                        Some(olm.identity_key_base64())
-                    } else {
-                        None
-                    };
-                    let haven_msg = HavenMessage::Encrypted {
-                        message_type: msg_type,
-                        body: OlmManager::encode_base64(&ciphertext),
-                        identity_key,
-                    };
-                    let dm_room = dm_room_code(local_peer_str, &peer_id_str);
-                    let json = serde_json::to_string(&haven_msg).unwrap_or_default();
-                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                        room_code: dm_room,
-                        target_peer: peer_id_str.clone(),
-                        data: json.into_bytes(),
-                    });
-                    hollow_log!("[HOLLOW-EDIT] Sent edit for {message_id} to offline {peer_id_str} via DM room (push trigger)");
-                }
-                Err(e) => {
-                    hollow_log!("[HOLLOW-EDIT] Encrypt edit for offline {peer_id_str} failed: {e}");
-                }
-            }
-        }
-    }
+    // Multi-device fan-out (Step 3): deliver the edit to every device of the
+    // recipient + our own siblings. A device with no session yet gets the whole
+    // edited conversation via Step 5 backfill.
+    let recipient_master = super::resolver::resolve(&peer_id_str);
+    fan_out_dm_envelope(
+        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+        pending_messages, key_request_in_flight,
+        local_peer_str, device_peer_id, &recipient_master, &envelope_json,
+        None, // edit/delete/reaction: sibling resolves convo by mid on receive
+    ).await;
 
     // Emit event so Dart updates UI — include sig/pk so the
     // in-memory message's fields match the canonical payload.
@@ -813,15 +965,19 @@ pub(crate) async fn handle_delete_channel_message(
 
 // ── 6. DeleteDmMessage ───────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_delete_dm_message(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    device_peer_id: &str,
     peer_id_str: String,
     message_id: String,
     db_path: &str,
@@ -873,14 +1029,15 @@ pub(crate) async fn handle_delete_dm_message(
     };
     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
-    if olm.has_session(&peer_id_str) {
-        send_encrypted_message(
-                                olm, crypto_store,
-                                &peer_id_str, &envelope_json,
-            event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-        ).await;
-    }
+    // Multi-device fan-out (Step 3): deliver the deletion to every device of the
+    // recipient + our own siblings (offline devices get it buffered/queued).
+    let recipient_master = super::resolver::resolve(&peer_id_str);
+    fan_out_dm_envelope(
+        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+        pending_messages, key_request_in_flight,
+        local_peer_str, device_peer_id, &recipient_master, &envelope_json,
+        None, // edit/delete/reaction: sibling resolves convo by mid on receive
+    ).await;
 
     // Emit event so Dart updates UI.
     // Multi-device: the DM thread key is the peer's MASTER id (no-op single-device).
@@ -1013,15 +1170,19 @@ pub(crate) async fn handle_add_channel_reaction(
 
 // ── 8. AddDmReaction ─────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_add_dm_reaction(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    device_peer_id: &str,
     peer_id_str: String,
     message_id: String,
     emoji: String,
@@ -1065,14 +1226,14 @@ pub(crate) async fn handle_add_dm_reaction(
     };
     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
-    if olm.has_session(&peer_id_str) {
-        send_encrypted_message(
-                                olm, crypto_store,
-                                &peer_id_str, &envelope_json,
-            event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-        ).await;
-    }
+    // Multi-device fan-out (Step 3): every device of the recipient + our siblings.
+    let recipient_master = super::resolver::resolve(&peer_id_str);
+    fan_out_dm_envelope(
+        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+        pending_messages, key_request_in_flight,
+        local_peer_str, device_peer_id, &recipient_master, &envelope_json,
+        None, // edit/delete/reaction: sibling resolves convo by mid on receive
+    ).await;
 
     let _ = event_tx.send(NetworkEvent::DmReactionAdded {
         peer_id: super::resolver::resolve(&peer_id_str),
@@ -1205,15 +1366,19 @@ pub(crate) async fn handle_remove_channel_reaction(
 
 // ── 10. RemoveDmReaction ─────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_remove_dm_reaction(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    device_peer_id: &str,
     peer_id_str: String,
     message_id: String,
     emoji: String,
@@ -1256,14 +1421,14 @@ pub(crate) async fn handle_remove_dm_reaction(
     };
     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
-    if olm.has_session(&peer_id_str) {
-        send_encrypted_message(
-                                olm, crypto_store,
-                                &peer_id_str, &envelope_json,
-            event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-        ).await;
-    }
+    // Multi-device fan-out (Step 3): every device of the recipient + our siblings.
+    let recipient_master = super::resolver::resolve(&peer_id_str);
+    fan_out_dm_envelope(
+        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+        pending_messages, key_request_in_flight,
+        local_peer_str, device_peer_id, &recipient_master, &envelope_json,
+        None, // edit/delete/reaction: sibling resolves convo by mid on receive
+    ).await;
 
     let _ = event_tx.send(NetworkEvent::DmReactionRemoved {
         peer_id: super::resolver::resolve(&peer_id_str),

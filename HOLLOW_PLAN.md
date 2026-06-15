@@ -1935,6 +1935,7 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [ ] Camera front/back switching + double-side at the same time on mobile
 - [ ] Pill switching for mobile between screen and camera during calls
 - [ ] Image/file loading for the mobile (replicate the instant appearing; though, I feel like that it's a phone limitation)
+- [ ] Detect no internet connection and show a warning
 
 - [ ] **Share system for DMs (large file support).** Currently DMs cap at 34 MB (hard reject). Extend the hidden Share system to work in DMs so large files can be sent P2P with chunking, resume, and sequential download. Needs: DM-context share creation (`serverId=null`, `contextType="dm"`), auto-download on receiver side, vault_cache routing, no seeding after completion (1:1 only). Until then, 34 MB hard cap on DM files.
 - [ ] Screen share gossip relay for voice channels — current limit is 5 outgoing viewers (direct P2P). Need gossip-style forwarding or lightweight SFU relay so larger voice channels can all watch a screen share without creating N peer connections per viewer

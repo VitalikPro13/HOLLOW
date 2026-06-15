@@ -601,3 +601,39 @@ let _ = state.apply_op(&op);
 **Why:** `linux/runner/main.cc` forces `GDK_BACKEND=x11` via `setenv()`. With `--socket=fallback-x11`, the X11 socket is only exposed when Wayland is unavailable. On a Wayland session, the Flatpak sandbox has Wayland but no X11 → `cannot open display:` crash.
 
 **Where:** `flatpak/com.anonlisten.Hollow.yml` finish-args, `linux/runner/main.cc` line 6.
+
+## Multi-Device Gotchas (Phase 6)
+
+### Any per-person UI state must key on the MASTER id, never a raw device id
+
+**Rule:** A friend has several device peer_ids that all resolve to ONE master identity. The relay reports DEVICE ids in rooms / `peersProvider` / `connectionStatusProvider` / typing events. But friend/DM/profile/presence UI keys on the friend's MASTER id (`friend.peerId`). Any code that compares a relay-reported device id against a friend's master id must route through the resolver — Rust `node::resolver::resolve()` / `same_identity()`, or Dart `deviceLinkProvider.identityOf()` / `onlineIdentitiesProvider` / `identityIsOnline()`. A direct `map[friend.peerId]` lookup silently never matches a multi-device friend.
+
+**Why:** Symptoms of getting this wrong: a friend's "typing…" never shows; the Home network panel / DM chat-header shows a multi-device friend stuck "connecting"/"Offline" forever; presence shows offline despite working DMs. The flip side — addressing the bare MASTER where a SEND needs a device — silently drops, because the master authenticates as NO socket (only device peer_ids do). Fixed examples (2026-06-15): `event_provider` `TypingStarted` (resolve before `setTyping`); `home_dashboard._NetworkColumn` + `chat_pane.dart` DM header (scan `links.identityOf(e.key) == f.peerId && e.value.isEncrypted`); Step 2's `friends_bar`/`channel_sidebar` (`identityIsOnline`); **DM typing SEND** (`social::handle_send_typing_indicator` fans out to the recipient's devices — was sent to the bare master → dropped); **sibling-echo DM direction** (`MessageReceived.is_own` → Dart renders outgoing, not incoming). Single-device collapses to identity → perfect no-op.
+
+**Where:** `lib/src/core/providers/device_link_provider.dart`, `event_provider.dart`, `home_dashboard.dart`, `chat_pane.dart`; Rust `node/resolver.rs`, `social.rs` (typing send), `swarm.rs` (MessageReceived.is_own), `api/network.rs` + `types.rs` (the is_own FFI field).
+
+### DM room code is a PURE function of the two ids — never resolve inside it
+
+**Rule:** `node::types::dm_room_code(a, b)` hashes the two ids as-is (no `resolver::resolve`). Pass the MASTER for the local end (the event loop's `local_peer_str` is master) and the friend's identity id for the remote end. A per-device fan-out computes the room from the recipient's MASTER and uses the device id only as `target_peer`.
+
+**Why:** Two friends MUST always derive the SAME DM room. If the room depended on each side's mutable resolver state, a divergence (one side ingested a device list the other hadn't, or a stale/polluted link) makes them compute DIFFERENT rooms → they never meet → key exchange never lands → "keying error" even for plain single-device friends. This regressed plain-friend keying when `dm_room_code` resolved both ends (committed multi-device work); reverted to pure 2026-06-15.
+
+**Where:** `rust/hollow_core/src/node/types.rs` (`dm_room_code`), `message_ops.rs` + `file_handler.rs` (per-device sends pass the master-pair room).
+
+### DM send fan-out: live-room union, not just the stored device list
+
+**Rule:** `message_ops::collect_target_devices` builds the fan-out target set as `resolver::devices_for(master)` UNIONed with every peer currently in the DM room that resolves to that master. Never rely on the persisted device list alone.
+
+**Why:** The persisted device list pollutes across wipe+reimport cycles (ghost device ids accumulate; union-merge never removes — that's Step 7 revocation) and can lag a rotated device id. Targeting the stored list alone sends to a dead ghost (offline → push buffer) and SKIPS the connected device → "first message lost, friend shows offline." The live room is authoritative. Companion fix: `crypto_handler::ingest_device_list` registers the SENDER device→master link (a device that delivered a master-signed list belongs to that master even if absent from the stored `devices`).
+
+**Where:** `rust/hollow_core/src/node/message_ops.rs` (`collect_target_devices`, `fan_out_dm_envelope`), `file_handler.rs` (DM branch), `crypto_handler.rs` (`ingest_device_list`).
+
+### SOLVED: WS/relay presence churn was GHOST-CONNECTION EVICTION (relay-side)
+
+**Symptom (was):** A friend showed offline for stretches even though DMs flowed; the observer saw the peer LEAVE all shared rooms for ~14 min with NO reconnect line in the peer's log. Surfaced — not caused — by multi-device.
+
+**Root cause:** the relay keyed `peer_sockets` + every `ws_rooms[room].peers` slot by `peer_id` with no duplicate-connection handling. A client reconnect (resume/blip/TLS re-handshake) opens a NEW socket while the OLD TCP socket is still half-open; the relay doesn't notice the dead one until its 120s `idleTimeout`. In that window the new socket takes over the rooms; then the OLD socket's delayed close ran `cleanup_peer` → `leave_room` for every stale `peer_rooms` entry, ERASING the live socket's room entries + broadcasting `peer_left`. Nothing rejoined until the 60s `check_peers` heal.
+
+**Fix (deployed 2026-06-15):** (1) `handle_auth` SUPERSEDES a stale duplicate (mark `superseded`, evict its rooms+socket, `end(1000,"superseded")`); (2) `cleanup_peer`/`leave_room` are socket-aware (`expected_ws`) — only tear down a slot that STILL points at the closing socket; (3) buffer a DM for a connected-but-not-yet-in-room target (the WS-auth→room-join race) instead of dropping it. Client `PeerLeft`/`RoomMembers` logic was already correct — it was being fed a lie. **Companion (presence stale on OWN restart):** `ingest_device_list` emits `DeviceListUpdated` even on a redundant re-ingest, so Dart's `deviceLinkProvider` (warmed once at startup, racing the Rust resolver warm) re-pulls the map on every reconnect — removed the need for manual Device List resets.
+
+**Where:** `relay-uws/src/ws_handler.cpp` (`handle_auth`, `cleanup_peer`, `leave_room`, `handle_direct`/`handle_binary_direct_msg`) + `state.h` (`superseded` flag); `rust/hollow_core/src/node/crypto_handler.rs` (`ingest_device_list` nothing_new path), `social.rs` (`send_own_profile_to_peer` de-gate). See memory `feedback_relay_ghost_connection_eviction`, `project_ws_presence_churn`.

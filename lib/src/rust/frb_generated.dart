@@ -8593,6 +8593,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           linkPreview: dco_decode_opt_box_autoadd_link_preview_ref(raw[6]),
           signature: dco_decode_opt_String(raw[7]),
           publicKey: dco_decode_opt_String(raw[8]),
+          isOwn: dco_decode_bool(raw[9]),
         );
       case 6:
         return NetworkEvent_ChannelMessageReceived(
@@ -10709,6 +10710,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         );
         var var_signature = sse_decode_opt_String(deserializer);
         var var_publicKey = sse_decode_opt_String(deserializer);
+        var var_isOwn = sse_decode_bool(deserializer);
         return NetworkEvent_MessageReceived(
           fromPeer: var_fromPeer,
           text: var_text,
@@ -10718,6 +10720,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           linkPreview: var_linkPreview,
           signature: var_signature,
           publicKey: var_publicKey,
+          isOwn: var_isOwn,
         );
       case 6:
         var var_serverId = sse_decode_String(deserializer);
@@ -13157,6 +13160,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         linkPreview: final linkPreview,
         signature: final signature,
         publicKey: final publicKey,
+        isOwn: final isOwn,
       ):
         sse_encode_i_32(5, serializer);
         sse_encode_String(fromPeer, serializer);
@@ -13167,6 +13171,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_opt_box_autoadd_link_preview_ref(linkPreview, serializer);
         sse_encode_opt_String(signature, serializer);
         sse_encode_opt_String(publicKey, serializer);
+        sse_encode_bool(isOwn, serializer);
       case NetworkEvent_ChannelMessageReceived(
         serverId: final serverId,
         channelId: final channelId,

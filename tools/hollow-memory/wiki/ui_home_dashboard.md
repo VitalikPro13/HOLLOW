@@ -139,13 +139,13 @@ Fields: `peerId` (String), `lastMessage` (ChatMessage?), `timestamp` (DateTime),
 - Status label: "Connected" when online, otherwise maps `NodeStatus` via `_nodeLabel()`: starting -> "Starting...", loading -> "Loading...", error -> "Error"
 - Peer count: `"N peer(s) reachable"` (pluralized)
 
-**Friend categorization:** Accepted friends are split into three buckets using `connectionStatusProvider`:
+**Friend categorization:** Accepted friends are split into three buckets. **Multi-device (Phase 6) — the categorization must resolve through device links.** `peersProvider` and `connectionStatusProvider` are keyed by the relay-reported **DEVICE** peer_id, but a friend is `f.peerId` = their **MASTER** id. Looking up `peers[f.peerId]` / `connStatus.peers[f.peerId]` directly (the old code) NEVER matches a friend who is online via a non-master device → the friend gets stuck showing "connecting" forever even though DMs work. The loop now scans for ANY of the friend's devices using `links.identityOf(e.key) == f.peerId` (`links = ref.watch(deviceLinkProvider)`); single-device collapses to the old direct lookup.
 
-1. **Encrypted friends** (`encryptedFriends`): `peers[peerId].isEncrypted == true`. Shown as a `_CounterRow` with `LucideIcons.shieldCheck`, label "Encrypted", `hollow.success` color.
+1. **Encrypted friends** (`encryptedFriends`): ANY device session for this friend's master has `isEncrypted == true` (`peers.entries.any((e) => links.identityOf(e.key) == f.peerId && e.value.isEncrypted)`). `_CounterRow`, `LucideIcons.shieldCheck`, "Encrypted", `hollow.success`.
 
-2. **Active friends** (`activeFriends`): Either `connectionStatus.stage` is `connected`/`keyExchange`, OR peer exists in `peersProvider` but is not encrypted (treated as `keyExchange`). Each rendered as a `_ConnectionRow` with avatar, name, stage label, spinner (if not failed/encrypted), and status color (`hollow.error` for failed, `hollow.accent` otherwise).
+2. **Active friends** (`activeFriends`): the most-advanced `connectionStatus.stage` (`connected` > `keyExchange`) across this friend's devices; failing that, `onlineIdentitiesProvider.contains(f.peerId)` (online via a device whose PeerInfo isn't surfaced yet → treated as `keyExchange`). `_ConnectionRow` with avatar, name, stage label, spinner, status color.
 
-3. **Offline friends** (`offlineFriends`): Not in peers map and no connection status. Shown as a `_CounterRow` with `LucideIcons.wifiOff`, label "Offline", `hollow.textSecondary` color.
+3. **Offline friends** (`offlineFriends`): no encrypted device, no active connection status, and not in `onlineIdentitiesProvider`. `_CounterRow`, `LucideIcons.wifiOff`, "Offline", `hollow.textSecondary`.
 
 If no accepted friends exist, shows "No friends added" caption.
 

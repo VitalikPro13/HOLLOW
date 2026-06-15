@@ -756,23 +756,40 @@ class _NetworkColumn extends ConsumerWidget {
     final accepted = friends.values
         .where((f) => f.status == 'accepted')
         .toList();
+    // Multi-device (Phase 6): `peers` / `connStatus` are keyed by the DEVICE
+    // peer_id the relay reports, but a friend is `f.peerId` = their MASTER id.
+    // So resolve per friend by scanning for ANY of their devices: a friend is
+    // encrypted/connected if any device session is, online if any device is in
+    // `online` (master-collapsed). Looking up the master id directly leaves a
+    // multi-device friend stuck in a fake "connecting" state forever even though
+    // the DM works. Single-device: the device id IS the master, so this collapses
+    // to the old direct lookup.
+    final links = ref.watch(deviceLinkProvider);
     final encryptedFriends = <String>[];
     final activeFriends = <PeerConnectionStatus>[];
     final offlineFriends = <String>[];
     for (final f in accepted) {
-      final peer = peers[f.peerId];
-      final cs = connStatus.peers[f.peerId];
-      if (peer != null && peer.isEncrypted) {
+      // A device session for this friend's master that is encrypted?
+      final hasEncrypted = peers.entries.any((e) =>
+          links.identityOf(e.key) == f.peerId && e.value.isEncrypted);
+      // The most-advanced connection status across this friend's devices.
+      PeerConnectionStatus? bestCs;
+      for (final e in connStatus.peers.entries) {
+        if (links.identityOf(e.key) != f.peerId) continue;
+        final stage = e.value.stage;
+        if (stage == PeerConnectionStage.connected ||
+            stage == PeerConnectionStage.keyExchange) {
+          bestCs = e.value;
+          if (stage == PeerConnectionStage.connected) break;
+        }
+      }
+      if (hasEncrypted) {
         encryptedFriends.add(f.peerId);
-      } else if (cs != null &&
-          (cs.stage == PeerConnectionStage.connected ||
-           cs.stage == PeerConnectionStage.keyExchange)) {
-        activeFriends.add(cs);
-      } else if ((peer != null && !peer.isEncrypted) ||
-          online.contains(f.peerId)) {
-        // Either a direct (master-keyed) session is mid-handshake, or the
-        // friend is online via another device whose PeerInfo isn't keyed under
-        // their master id — count them as connecting, not offline.
+      } else if (bestCs != null) {
+        activeFriends.add(bestCs);
+      } else if (online.contains(f.peerId)) {
+        // Online via a device whose PeerInfo/connStatus isn't surfaced yet —
+        // count them as connecting, not offline.
         activeFriends.add(PeerConnectionStatus(
           peerId: f.peerId,
           stage: PeerConnectionStage.keyExchange,

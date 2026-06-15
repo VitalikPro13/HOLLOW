@@ -906,11 +906,22 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                 ),
               ),
               Builder(builder: (_) {
-                final peer = ref.watch(peersProvider)[widget.peerId];
+                // Multi-device: `widget.peerId` is the friend's MASTER id, but
+                // `peersProvider` is keyed by the DEVICE peer_ids the relay
+                // reports. A direct `peers[master]` lookup is always null for a
+                // multi-device / keystone-rotated friend, so the header showed
+                // Offline while the dots/call-buttons (which collapse by master)
+                // showed online. Scan for ANY device of this master with an
+                // encrypted session (same pattern as the Home network column).
+                // Single-device: the device id IS the master → direct lookup.
+                final links = ref.watch(deviceLinkProvider);
+                final peers = ref.watch(peersProvider);
+                final isEncryptedViaAnyDevice = peers.entries.any((e) =>
+                    links.identityOf(e.key) == widget.peerId && e.value.isEncrypted);
                 final isInvisible = ref.watch(invisiblePeersProvider).contains(widget.peerId);
                 final isCustomRelay = ref.watch(relayDomainProvider) != kDefaultRelayDomain;
                 final ConnectionStage stage;
-                if (peer != null && peer.isEncrypted && !isInvisible) {
+                if (isEncryptedViaAnyDevice && !isInvisible) {
                   stage = ConnectionStage.encrypted;
                 } else if (isCustomRelay) {
                   stage = ConnectionStage.customNetwork;

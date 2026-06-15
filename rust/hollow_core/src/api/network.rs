@@ -129,7 +129,7 @@ pub enum NetworkEvent {
     PeerDisconnected { peer_id: String },
     RoomCleared,
     Listening { address: String },
-    MessageReceived { from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String> },
+    MessageReceived { from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, is_own: bool },
     ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String> },
     MessageSent { to_peer: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     ChannelMessageSent { server_id: String, channel_id: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
@@ -612,8 +612,8 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::RoomCleared => NetworkEvent::RoomCleared,
         node::NetworkEvent::Listening { address } => NetworkEvent::Listening { address },
-        node::NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key } => {
-            NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key }
+        node::NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, is_own } => {
+            NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, is_own }
         }
         node::NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key } => {
             NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key }

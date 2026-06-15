@@ -480,7 +480,7 @@ The architecture follows a strict delegation pattern:
 
 ## Helper Functions (in swarm.rs)
 
-- `dm_room_code(a, b)` — deterministic DM room code from two peer IDs (lexicographic ordering). **Multi-device:** resolves BOTH ends to their master identity first (`resolver::resolve`), so every device of two people shares ONE DM room; unknown peers resolve to themselves so single-device codes are unchanged.
+- `dm_room_code(a, b)` — deterministic DM room code from two peer IDs (lexicographic ordering). **PURE function of the two ids — NO resolver lookup** (changed 2026-06-15). Resolving inside it broke the invariant that two friends always derive the SAME room: if one side's resolver diverged (stale/polluted link, or one side ingested a device list the other hadn't) they computed different rooms and never met → keying errors. Callers pass the MASTER for the local end (the event loop's `local_peer_str` is master) and the friend's identity id for the remote end, so all of a master's devices land in the same room. A per-device fan-out send computes the room from the recipient's MASTER (`resolver::resolve` at the call site) and uses the device id only as the direct `target_peer` — it must NOT pass a device id here.
 - `SyncCoordinator` — struct for multi-peer fan-out sync coordination with 500ms collection window.
 
 All other helper functions have been extracted to their respective modules (see comments at line ~2563):

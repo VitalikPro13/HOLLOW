@@ -175,13 +175,25 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_Listening(:final address):
         debugPrint('[HOLLOW] Listening: $address');
 
-      case NetworkEvent_MessageReceived(:final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey):
+      case NetworkEvent_MessageReceived(:final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final isOwn):
         ref.read(chatProvider.notifier).receiveMessage(
               fromPeer, text, timestamp, messageId, replyToMid,
               linkPreview: linkPreview,
               signature: signature,
               publicKey: publicKey,
+              isOwn: isOwn,
             );
+        // A sibling echo of OUR OWN sent message: it's outgoing, so it must NOT
+        // mark the conversation unread, raise a notification, or be treated as
+        // the friend typing. Mirror it into the thread (above) and stop.
+        if (isOwn) {
+          // Our own send clears any lingering "friend is typing" + marks the DM
+          // read up to here (we just participated in it from another device).
+          ref.read(typingProvider.notifier).clearTyping(fromPeer, fromPeer);
+          ref.read(unreadProvider.notifier).markDmSeen(
+              fromPeer, messageId.isNotEmpty ? messageId : null);
+          break;
+        }
         ref.read(typingProvider.notifier).clearTyping(fromPeer, fromPeer);
         // Track unread DM — only if not muted.
         // Window must be visible AND viewing this DM to count as "viewing".
@@ -703,8 +715,16 @@ class EventStreamNotifier extends Notifier<bool> {
       // -- Typing indicator events (Phase 3.5) --
       case NetworkEvent_TypingStarted(
             :final peerId, :final serverId, :final channelId):
-        final key = serverId.isEmpty ? peerId : '$serverId:$channelId';
-        ref.read(typingProvider.notifier).setTyping(key, peerId);
+        // Multi-device (Phase 6): the typing event carries the sender's raw
+        // DEVICE peer_id, but DM threads (and the chat view's lookup) key on the
+        // sender's MASTER identity. Resolve it so the indicator matches the
+        // conversation key — otherwise a multi-device friend's "typing…" never
+        // shows. Single-device resolves to itself (no-op). Channel key is
+        // unchanged (serverId:channelId), but the stored typist is also collapsed
+        // to master so per-person channel typing attributes correctly.
+        final typist = ref.read(deviceLinkProvider).identityOf(peerId);
+        final key = serverId.isEmpty ? typist : '$serverId:$channelId';
+        ref.read(typingProvider.notifier).setTyping(key, typist);
 
       // -- Presence events (Phase 6.75) --
       case NetworkEvent_PeerStatusChanged(:final peerId, :final status):

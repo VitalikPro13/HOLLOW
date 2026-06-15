@@ -26,17 +26,28 @@ pub(crate) const VC_SIGNAL_RATE_REFILL: u32 = 10;
 /// Both peers compute the same code so signaling can match them.
 /// Uses SHA-256 truncated to 32 hex chars for collision resistance.
 ///
-/// Multi-device (Phase 6): both arguments are resolved to their MASTER identity
-/// first, so EVERY device of one person and EVERY device of the other land in
-/// the SAME DM room regardless of which device peer_id is passed. Pre-multi-device
-/// (and for any peer whose device list we haven't ingested) the resolver returns
-/// the input unchanged, so this is byte-for-byte the old behavior — the known-good
-/// room codes are preserved for single-device installs.
+/// PURE function of the two ids passed in — NO resolver lookup. This is the
+/// load-bearing invariant: two friends MUST always derive the same DM room, and
+/// the only way to guarantee that is to key the room on ids both sides agreed on
+/// at friend-request time (the identity each authenticates/signs as), never on
+/// per-peer mutable resolver state (which can diverge — one side ingested a
+/// device list the other didn't, or has a stale/polluted link — and would then
+/// compute a DIFFERENT room, so the two never meet and key exchange never lands).
+///
+/// Multi-device (Phase 6): a person's DM room is `f(my_master, friend_identity)`.
+/// The event loop passes the MASTER id for the local end (a device always knows
+/// its own master for certain), and the friend's identity id for the remote end.
+/// All of a master's devices therefore land in the same room because they each
+/// pass the SAME master as the local end. A fan-out send to a SPECIFIC device
+/// must compute the room from the recipient's MASTER (resolve at the call site)
+/// and use the device id only as the direct `target_peer` — NOT pass the device
+/// id here (that would key the room on the device, not the identity).
+///
+/// Pre-multi-device installs pass `device_peer_id == master`, so this is
+/// byte-for-byte the old behavior — known-good room codes are preserved.
 pub(crate) fn dm_room_code(peer_a: &str, peer_b: &str) -> String {
     use sha2::{Sha256, Digest};
-    let master_a = super::resolver::resolve(peer_a);
-    let master_b = super::resolver::resolve(peer_b);
-    let mut sorted = [master_a.as_str(), master_b.as_str()];
+    let mut sorted = [peer_a, peer_b];
     sorted.sort();
     let combined = format!("dm-{}-{}", sorted[0], sorted[1]);
     let hash = Sha256::digest(combined.as_bytes());
@@ -96,7 +107,14 @@ pub(crate) enum NetworkEvent {
     PeerDisconnected { peer_id: String },
     RoomCleared,
     Listening { address: String },
-    MessageReceived { from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String> },
+    MessageReceived { from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>,
+        /// Multi-device self fan-out: true when this DM is a copy echoed from one
+        /// of OUR OWN sibling devices (we are the SENDER, `from_peer` is the
+        /// conversation's OTHER party = the recipient master). Dart must render it
+        /// as an OUTGOING bubble (isMe=true), not incoming — otherwise a sibling
+        /// shows our own sent message as if the friend sent it to us. False for a
+        /// normal DM from a friend (the overwhelmingly common case).
+        is_own: bool },
     ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String> },
     MessageSent { to_peer: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     ChannelMessageSent { server_id: String, channel_id: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
@@ -1324,6 +1342,14 @@ pub(crate) struct DirectMessagePayload {
     pub file_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_preview: Option<LinkPreviewRef>,
+    /// Multi-device self fan-out (Phase 6, Step 3): the OTHER party's MASTER id,
+    /// set ONLY on the copy we echo to our OWN sibling device so it files the
+    /// message under the correct conversation. Without it the sibling would
+    /// resolve the convo from the SENDER (us) and misfile our outgoing DM as a
+    /// conversation with ourselves. `None` on every normal send (recipient uses
+    /// `resolve(sender)` as before) → backward-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub convo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

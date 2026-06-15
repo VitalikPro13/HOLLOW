@@ -2282,6 +2282,21 @@ impl MessageStore {
             .ok()
     }
 
+    /// Returns the conversation peer_id (the OTHER party's master id) a DM is
+    /// filed under. Used by multi-device self fan-out (Phase 6, Step 3): when a
+    /// sibling echoes an edit/delete/reaction on a message WE sent, we attribute
+    /// the resulting UI event to the right conversation by looking up the row's
+    /// peer_id by message_id (the edit/delete/reaction envelopes carry no convo).
+    pub fn get_dm_message_peer(&self, message_id: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT peer_id FROM messages WHERE message_id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+
     /// Returns the current text of a channel message by message_id.
     /// Used when signing deletions so the canonical payload reflects the
     /// text at deletion time (rather than the ad-hoc "delete:..." format).

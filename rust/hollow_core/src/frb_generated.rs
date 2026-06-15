@@ -8337,6 +8337,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     <Option<crate::api::network::LinkPreviewRef>>::sse_decode(deserializer);
                 let mut var_signature = <Option<String>>::sse_decode(deserializer);
                 let mut var_publicKey = <Option<String>>::sse_decode(deserializer);
+                let mut var_isOwn = <bool>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::MessageReceived {
                     from_peer: var_fromPeer,
                     text: var_text,
@@ -8346,6 +8347,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     link_preview: var_linkPreview,
                     signature: var_signature,
                     public_key: var_publicKey,
+                    is_own: var_isOwn,
                 };
             }
             6 => {
@@ -11132,6 +11134,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 link_preview,
                 signature,
                 public_key,
+                is_own,
             } => [
                 5.into_dart(),
                 from_peer.into_into_dart().into_dart(),
@@ -11142,6 +11145,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 link_preview.into_into_dart().into_dart(),
                 signature.into_into_dart().into_dart(),
                 public_key.into_into_dart().into_dart(),
+                is_own.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::ChannelMessageReceived {
@@ -13386,6 +13390,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 link_preview,
                 signature,
                 public_key,
+                is_own,
             } => {
                 <i32>::sse_encode(5, serializer);
                 <String>::sse_encode(from_peer, serializer);
@@ -13396,6 +13401,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 <Option<crate::api::network::LinkPreviewRef>>::sse_encode(link_preview, serializer);
                 <Option<String>>::sse_encode(signature, serializer);
                 <Option<String>>::sse_encode(public_key, serializer);
+                <bool>::sse_encode(is_own, serializer);
             }
             crate::api::network::NetworkEvent::ChannelMessageReceived {
                 server_id,

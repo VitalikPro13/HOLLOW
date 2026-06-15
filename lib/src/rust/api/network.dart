@@ -872,6 +872,7 @@ sealed class NetworkEvent with _$NetworkEvent {
     LinkPreviewRef? linkPreview,
     String? signature,
     String? publicKey,
+    required bool isOwn,
   }) = NetworkEvent_MessageReceived;
   const factory NetworkEvent.channelMessageReceived({
     required String serverId,

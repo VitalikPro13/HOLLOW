@@ -112,6 +112,30 @@ pub(crate) fn all_links() -> Vec<(String, String)> {
     }
 }
 
+/// Reverse lookup: all known device peer_ids belonging to `master_peer_id`
+/// (multi-device DM fan-out, Step 3). The inverse of `resolve()`. Includes the
+/// master id itself iff it appears as a key (it does for our own identity via
+/// `seed_self`, and for any device list that lists the master). Excludes the
+/// master id when it is ONLY a value (a friend's master we know via its devices
+/// but that never authenticates as itself) so we never fan a send out to an id
+/// no device connects as.
+///
+/// Returns EMPTY when the master is unknown (single-device friend, or a device
+/// list we haven't ingested yet) — callers fall back to sending to the master id
+/// as-is, which is byte-for-byte the pre-multi-device behavior.
+pub(crate) fn devices_for(master_peer_id: &str) -> Vec<String> {
+    match links().read() {
+        Ok(map) => map
+            .iter()
+            .filter(|(device, master)| {
+                master.as_str() == master_peer_id && device.as_str() != master_peer_id
+            })
+            .map(|(device, _)| device.clone())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn clear_for_test() {
     if let Ok(mut map) = links().write() {
@@ -182,5 +206,26 @@ mod tests {
         warm_from_links(&[("d1".into(), "m1".into()), ("d2".into(), "m1".into())]);
         assert!(same_identity("d1", "d2"));
         assert_eq!(resolve("d1"), "m1");
+    }
+
+    #[test]
+    fn devices_for_returns_device_set_excluding_master() {
+        let _g = guarded();
+        update_many("M", ["devA", "devB"]);
+        let mut devs = devices_for("M");
+        devs.sort();
+        assert_eq!(devs, vec!["devA".to_string(), "devB".to_string()]);
+        // Unknown master → empty (caller falls back to sending to the id as-is).
+        assert!(devices_for("stranger").is_empty());
+    }
+
+    #[test]
+    fn devices_for_excludes_self_master_seed() {
+        let _g = guarded();
+        // seed_self inserts master→master plus our other devices.
+        seed_self("M", &["M".into(), "devB".into()]);
+        let devs = devices_for("M");
+        // The bare master must NOT appear (no device authenticates as it).
+        assert_eq!(devs, vec!["devB".to_string()]);
     }
 }

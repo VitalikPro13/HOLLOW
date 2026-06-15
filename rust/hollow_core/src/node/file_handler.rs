@@ -42,6 +42,7 @@ pub(crate) async fn handle_send_file(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    device_peer_id: &str,
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     mls: &mut Option<MlsManager>,
@@ -272,8 +273,10 @@ pub(crate) async fn handle_send_file(
     };
 
     if let Some(peer_str) = peer_id {
-        // DM path
-        let envelope = MessageEnvelope::DirectMessage {
+        // DM path. The companion caption / "[file:...]" DM is a DirectMessage; for
+        // a sibling self-echo it must carry `convo` = the recipient master so our
+        // other device files it under the right thread (see message_ops fan-out).
+        let build_file_dm = |convo: Option<String>| MessageEnvelope::DirectMessage {
             inner: Box::new(DirectMessagePayload {
                 text: signing_payload_text.clone(),
                 ts: timestamp,
@@ -283,12 +286,12 @@ pub(crate) async fn handle_send_file(
                 reply_to: None,
                 file_id: Some(file_id.clone()),
                 link_preview: None,
+                convo,
             }),
         };
-        let envelope_json = serde_json::to_string(&envelope)
-            .unwrap_or_else(|_| signing_payload_text.clone());
 
-        // Store the text message.
+        // Store the text message (keyed by the recipient MASTER id — same as the
+        // DM-thread key the UI/receive path uses).
         {
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 let _ = store.insert(
@@ -299,9 +302,64 @@ pub(crate) async fn handle_send_file(
             }
         }
 
+        // ── Multi-device fan-out (Phase 6, Step 3) ──────────────────────
+        // `peer_str` is the recipient's MASTER id. The companion DM caption,
+        // FileHeader, and (online) WebRTC stream all key on per-DEVICE Olm
+        // sessions / room membership, so we must deliver to each of the
+        // recipient's devices AND our own siblings (so a file sent from one of
+        // our devices mirrors live to the other). Single-device recipients
+        // resolve to an empty device set → fall back to the master id = exact
+        // pre-multi-device behavior. The DELICATE offline-image caption ratchet
+        // rule (send exactly once via send_encrypted_text_to_peer, never
+        // send_encrypted_message) holds PER DEVICE — each device has its own Olm
+        // ratchet, so "exactly once per device" is the correct generalization.
+        // Target set = persisted device list UNION devices currently in the DM
+        // room (live presence is authoritative — see message_ops::collect_target_devices;
+        // a stale/polluted stored list must not hide the connected device).
+        let recipient_master = crate::node::resolver::resolve(&peer_str);
+        let dm_room_f = crate::node::types::dm_room_code(local_peer_str, &recipient_master);
+        let mut file_set: std::collections::HashSet<String> =
+            crate::node::resolver::devices_for(&recipient_master).into_iter().collect();
+        let own_master_f = crate::node::resolver::resolve(local_peer_str);
+        for sib in crate::node::resolver::devices_for(&own_master_f) {
+            file_set.insert(sib);
+        }
+        if let Some(peers) = ws_room_peers.get(&dm_room_f) {
+            for p in peers {
+                let m = crate::node::resolver::resolve(p);
+                if m == recipient_master || m == own_master_f {
+                    file_set.insert(p.clone());
+                }
+            }
+        }
+        file_set.remove(device_peer_id);      // never send to ourselves
+        file_set.remove(&recipient_master);   // never the bare master
+        file_set.remove(&own_master_f);
+        let mut file_targets: Vec<String> = file_set.into_iter().collect();
+        if file_targets.is_empty() {
+            // Single-device recipient with no live device → master id as-is.
+            file_targets.push(peer_str.clone());
+        }
+        hollow_log!(
+            "[HOLLOW-MULTIDEV] DM file fan-out for master {peer_str}: {} target device(s)",
+            file_targets.len()
+        );
+
+        for peer_str in &file_targets {
+        let peer_str = peer_str.as_str();
+        // Per-device companion DM envelope: a sibling self-echo carries `convo`
+        // (recipient master) so it files under the right thread; the recipient's
+        // own devices get the plain envelope (convo=None).
+        let is_sibling_target = crate::node::resolver::same_identity(peer_str, local_peer_str);
+        let envelope_json = serde_json::to_string(&build_file_dm(
+            if is_sibling_target { Some(recipient_master.clone()) } else { None },
+        )).unwrap_or_else(|_| signing_payload_text.clone());
         // Encrypt and send the message + FileHeader + FileChunks via Olm.
-        if olm.has_session(&peer_str) {
-            let reachable = peer_is_reachable(&ws_room_peers, &peer_str);
+        if olm.has_session(peer_str) {
+            // EXACT-device reachability (not identity-wide): in a fan-out one
+            // device may be online while a sibling is offline. ws_room_for_peer
+            // = exact membership.
+            let reachable = ws_room_for_peer(&ws_room_peers, peer_str).is_some();
 
             // Send the message (caption / "[file:...]") envelope.
             //
@@ -318,7 +376,7 @@ pub(crate) async fn handle_send_file(
             if !offline_image {
                 send_encrypted_message(
                                 olm, crypto_store,
-                                &peer_str, &envelope_json, event_tx,
+                                peer_str, &envelope_json, event_tx,
                                             &ws_cmd_tx, &ws_room_peers,
                 ).await;
             }
@@ -330,7 +388,9 @@ pub(crate) async fn handle_send_file(
             // AES-encrypt the file, write ciphertext to temp file.
             let encrypted = crate::vault::pipeline::aes_encrypt(&final_data);
             if let Ok(enc) = encrypted {
-                let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}.tmp"));
+                // Per-device temp file: sibling devices may stream the same
+                // file_id concurrently, so the ciphertext temp must not collide.
+                let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}_{peer_str}.tmp"));
                 if let Ok(()) = tokio::fs::write(&temp_path, &enc.ciphertext).await {
                     let aes_key_hex = hex::encode(enc.key);
                     let aes_nonce_hex = hex::encode(enc.nonce);
@@ -364,7 +424,7 @@ pub(crate) async fn handle_send_file(
                     let header_json = serde_json::to_string(&header).unwrap_or_default();
                     send_encrypted_message(
                                 olm, crypto_store,
-                                &peer_str, &header_json, event_tx,
+                                peer_str, &header_json, event_tx,
                                                             &ws_cmd_tx, &ws_room_peers,
                     ).await;
 
@@ -372,7 +432,7 @@ pub(crate) async fn handle_send_file(
                     stream_to_peer(
                         &ws_cmd_tx, &ws_room_peers,
                         &webrtc_peers, pending_webrtc_sends, &event_tx,
-                        &peer_str, &ws_stream_transfer::StreamKind::File,
+                        peer_str, &ws_stream_transfer::StreamKind::File,
                         &file_id, &temp_path, enc.ciphertext.len() as u64,
                     ).await;
                     hollow_log!("[HOLLOW-FILE] Streaming {file_id} ({} bytes) to DM {peer_str}", enc.ciphertext.len());
@@ -424,14 +484,16 @@ pub(crate) async fn handle_send_file(
                         }),
                     };
                     let header_json = serde_json::to_string(&header).unwrap_or_default();
-                    // Target the deterministic DM room directly — the offline peer
-                    // is not a member of any known room, so a lookup would drop the
-                    // message. The relay buffers it under the image cap (mirrors the
-                    // offline text-DM path).
-                    let dm_room = crate::node::types::dm_room_code(&local_peer, &peer_str);
+                    // Target the MASTER-pair DM room directly (computed once above
+                    // as `dm_room_f`) — the offline peer is not a member of any
+                    // known room, so a lookup would drop the message, and
+                    // `dm_room_code` is pure now so it must NOT be recomputed from
+                    // the per-device `peer_str` (that keys the room on the device,
+                    // not the identity → the offline buffer/replay room mismatches).
+                    // The relay buffers it under the image cap (mirrors offline text-DM).
                     crate::node::crypto_handler::send_encrypted_image_to_peer(
                         olm, crypto_store,
-                        &peer_str, dm_room.clone(), &header_json, event_tx,
+                        peer_str, dm_room_f.clone(), &header_json, event_tx,
                         &ws_cmd_tx,
                     ).await;
                     hollow_log!("[HOLLOW-FILE] Inlined offline image {file_id} ({} enc bytes) to DM {peer_str}", enc.ciphertext.len());
@@ -448,7 +510,7 @@ pub(crate) async fn handle_send_file(
                     if !message_text.is_empty() {
                         crate::node::crypto_handler::send_encrypted_text_to_peer(
                             olm, crypto_store,
-                            &peer_str, dm_room, &envelope_json, event_tx,
+                            peer_str, dm_room_f.clone(), &envelope_json, event_tx,
                             &ws_cmd_tx,
                         ).await;
                         hollow_log!("[HOLLOW-FILE] Buffered offline image caption for DM {peer_str}");
@@ -458,6 +520,7 @@ pub(crate) async fn handle_send_file(
         }
 
         hollow_log!("[HOLLOW-FILE] Sent {total_chunks} chunks for {file_id} to DM {peer_str}");
+        } // for peer_str in &file_targets
 
     } else if let (Some(sid), Some(cid)) = (server_id, channel_id) {
         // Channel path — broadcast via MLS.

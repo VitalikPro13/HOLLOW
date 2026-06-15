@@ -80,6 +80,10 @@ static void send_to_peer(SSLWebSocket* ws, std::string_view data, uWS::OpCode op
 static void replay_buffered_msgs(SSLWebSocket* ws, const std::string& peer_id,
                                  const std::string& room, bool full_node,
                                  RelayState& state);
+// cleanup_peer is defined near the close handler but used by handle_auth's
+// supersede path (evict a stale duplicate connection's room state).
+static void cleanup_peer(RelayState& state, const std::string& peer_id,
+                         SSLWebSocket* expected_ws);
 
 static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
                          std::string_view message, RelayState& state) {
@@ -170,12 +174,35 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         data->auth_timer = nullptr;
     }
 
-    state.peer_rooms[peer_id] = {};
-    // Fetch-mode peers stay invisible — don't register in peer_sockets
-    // so check_peers reports them as offline and push logic isn't affected.
+    // Supersede a stale duplicate connection. A client that reconnects (mobile
+    // resume, network blip, TLS re-handshake) opens a NEW socket while its old
+    // TCP socket may still be half-open — the relay won't notice the dead socket
+    // until the 120s idleTimeout fires. Without this, the old socket lingers in
+    // peer_sockets + every room map; when it finally closes, cleanup_peer would
+    // leave_room ALL of this peer's rooms and broadcast peer_left — evicting the
+    // LIVE new socket from every room and telling friends the peer went offline
+    // (the "Pixel left all rooms with no reconnect for ~14 min" churn). Fix: the
+    // moment a newer socket authenticates for this peer_id, fully evict the old
+    // one (its rooms + socket entry) and mark it superseded so its later close
+    // is a no-op for the shared peer state. Only the genuinely live socket owns
+    // the peer's presence. Fetch-mode peers never register in peer_sockets, so
+    // they never supersede a full node (and vice-versa — full node wins).
     if (!data->is_fetch) {
+        auto existing = state.peer_sockets.find(peer_id);
+        if (existing != state.peer_sockets.end() && existing->second != ws) {
+            SSLWebSocket* ghost = existing->second;
+            ghost->getUserData()->superseded = true;
+            // Evict the ghost's room memberships + socket entry. leave_room
+            // broadcasts peer_left, but the new socket immediately re-joins
+            // (WsEvent::Connected re-join loop), so friends get a fresh
+            // peer_joined + members snapshot — net presence stays correct.
+            cleanup_peer(state, peer_id, ghost);
+            // Close the dead socket so it stops consuming a connection slot.
+            ghost->end(1000, "superseded");
+        }
         state.peer_sockets[peer_id] = ws;
     }
+    state.peer_rooms[peer_id] = {};
 
     send_json(ws, {{"type", "auth_ok"}});
     // privacy: no connection logging
@@ -256,10 +283,26 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     }
 }
 
+// Remove `peer_id` from `room`. If `expected_ws` is non-null, only erase the
+// room slot when it currently points at that exact socket — this prevents a
+// stale/superseded duplicate connection from erasing the LIVE socket's room
+// membership (the room slot may have already been overwritten by the newer
+// socket's re-join). Pass nullptr to force the erase (used by the supersede
+// path, where the ghost IS the slot owner being evicted).
 static void leave_room(RelayState& state, const std::string& peer_id,
-                        const std::string& room) {
+                        const std::string& room,
+                        SSLWebSocket* expected_ws = nullptr) {
     auto rit = state.ws_rooms.find(room);
     if (rit == state.ws_rooms.end()) return;
+
+    if (expected_ws != nullptr) {
+        auto pit = rit->second.peers.find(peer_id);
+        if (pit == rit->second.peers.end() || pit->second != expected_ws) {
+            // The live socket already owns this room slot (or the peer isn't in
+            // it). Do NOT erase or broadcast peer_left — the peer is still here.
+            return;
+        }
+    }
 
     // Check visibility BEFORE erasing from room
     bool leaving_peer_invisible = is_invisible_in_room(state, peer_id, room);
@@ -702,15 +745,20 @@ static void handle_direct(PerSocketData* data, const std::string& room,
 
     auto tit = rit->second.peers.find(target);
     if (tit == rit->second.peers.end()) {
-        // Target not in room — buffer + push notification if they're fully offline.
+        // Target not in THIS room. Buffer either way (replays on join); only
+        // push when fully offline. A connected-but-not-yet-joined target hits a
+        // race (first plaintext DM — friend request / key exchange / sync —
+        // sent before the recipient joins the DM room); buffering instead of
+        // dropping is what lets a fresh device's Olm session actually establish
+        // (the "session can't be established with the other device" symptom).
         bool in_sockets = state.peer_sockets.find(target) != state.peer_sockets.end();
         fprintf(stderr, "[push] direct: target %.12s... not in room, in_sockets=%d\n",
                 target.c_str(), in_sockets);
+        // Buffer as a 0x06 frame so the fetch node's binary parser handles it
+        // uniformly with binary DMs.
+        buffer_offline_msg(target, room,
+                           build_direct_frame(room, data->peer_id, msg_data), state);
         if (!in_sockets) {
-            // Buffer as a 0x06 frame so the fetch node's binary parser handles it
-            // uniformly with binary DMs.
-            buffer_offline_msg(target, room,
-                               build_direct_frame(room, data->peer_id, msg_data), state);
             try_push_notify(target, data->peer_id, state);
         }
         return;
@@ -868,11 +916,21 @@ static void handle_binary_direct_msg(PerSocketData* data,
 
     auto tit = rit->second.peers.find(target_str);
     if (tit == rit->second.peers.end()) {
-        // Target not in room — buffer + push if fully offline.
-        if (state.peer_sockets.find(target_str) == state.peer_sockets.end()) {
-            buffer_offline_msg(target_str, room_str,
-                               build_direct_frame(room_code, data->peer_id, payload), state,
-                               is_image);
+        // Target not in THIS room. Two cases:
+        //  - fully offline (not in peer_sockets): buffer + push.
+        //  - connected but not yet in the room (race: a DM sent in the gap
+        //    between the recipient's WS auth and its DM-room join, or during a
+        //    reconnect/supersede room flap): buffer WITHOUT a push so it replays
+        //    the instant they join the room. Previously this case dropped the
+        //    message silently — the "first message is lost, later ones arrive"
+        //    symptom. The buffer is per-(peer,room) capped + TTL-swept, and the
+        //    full node owns durability via DM-sync, so a redundant buffered copy
+        //    is harmless (the receiver dedups by message_id).
+        bool fully_offline = state.peer_sockets.find(target_str) == state.peer_sockets.end();
+        buffer_offline_msg(target_str, room_str,
+                           build_direct_frame(room_code, data->peer_id, payload), state,
+                           is_image);
+        if (fully_offline) {
             try_push_notify(target_str, data->peer_id, state);
         }
         return;
@@ -1086,29 +1144,53 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
 // Ed25519 auth + license key revocation. IPs tracked in-memory only, never logged.
 
 
-static void cleanup_peer(RelayState& state, const std::string& peer_id) {
-    // Release temporary nickname
-    auto nit = state.peer_to_nickname.find(peer_id);
-    if (nit != state.peer_to_nickname.end()) {
-        state.nickname_to_peer.erase(nit->second);
-        state.peer_to_nickname.erase(nit);
+// Tear down all shared state for `peer_id`, owned by `expected_ws`. Only the
+// socket that currently owns the peer's entries does the teardown: if a newer
+// socket has already taken over (peer_sockets points elsewhere / room slots
+// point at the successor), this is a stale duplicate closing and must NOT evict
+// the live successor. `expected_ws` is the closing/evicted socket; room erases
+// are gated on it via leave_room so a ghost can't unjoin the live socket.
+static void cleanup_peer(RelayState& state, const std::string& peer_id,
+                         SSLWebSocket* expected_ws) {
+    // If a DIFFERENT socket now owns this peer_id, the closing socket is a stale
+    // duplicate that was already replaced — skip the shared cleanup (nickname,
+    // push, license, peer_sockets) so we don't tear down the live successor's
+    // state. The per-room leave below is always safe to run because leave_room
+    // is itself gated on expected_ws.
+    // (In the supersede path cleanup_peer is called while peer_sockets still
+    // points at the ghost — owns_peer is true there, so the ghost's shared
+    // state IS cleared before the new socket registers, exactly as intended.)
+    auto sock_it = state.peer_sockets.find(peer_id);
+    bool owns_peer = (sock_it == state.peer_sockets.end() || sock_it->second == expected_ws);
+
+    if (owns_peer) {
+        // Release temporary nickname
+        auto nit = state.peer_to_nickname.find(peer_id);
+        if (nit != state.peer_to_nickname.end()) {
+            state.nickname_to_peer.erase(nit->second);
+            state.peer_to_nickname.erase(nit);
+        }
+
+        // Clear push debounce on disconnect (token stays — needed for offline pushes)
+        state.last_push_sent.erase(peer_id);
+
+        state.license.release_key(peer_id);
+        state.peer_sockets.erase(peer_id);
     }
-
-    // Clear push debounce on disconnect (token stays — needed for offline pushes)
-    state.last_push_sent.erase(peer_id);
-
-    state.license.release_key(peer_id);
-    state.peer_sockets.erase(peer_id);
 
     auto pit = state.peer_rooms.find(peer_id);
     if (pit == state.peer_rooms.end()) return;
 
-    // Copy the set since leave_room modifies it
+    // Copy the set since leave_room modifies it. leave_room only erases a room
+    // slot that still points at expected_ws, so a stale duplicate can't unjoin
+    // the live socket's rooms (and won't broadcast a spurious peer_left).
     std::vector<std::string> rooms(pit->second.begin(), pit->second.end());
     for (auto& room : rooms) {
-        leave_room(state, peer_id, room);
+        leave_room(state, peer_id, room, expected_ws);
     }
-    state.peer_rooms.erase(peer_id);
+    if (owns_peer) {
+        state.peer_rooms.erase(peer_id);
+    }
 }
 
 void setup_ws_handler(uWS::SSLApp& app, RelayState& state) {
@@ -1257,9 +1339,13 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state) {
                 us_timer_close(data->auth_timer);
                 data->auth_timer = nullptr;
             }
-            if (data->authenticated) {
+            if (data->authenticated && !data->superseded) {
                 // privacy: no connection logging
-                cleanup_peer(state, data->peer_id);
+                // Pass the closing socket so cleanup only fires if THIS socket
+                // still owns the peer's state — a stale duplicate that was
+                // already superseded by a newer connection is a no-op here and
+                // must not evict the live socket from its rooms.
+                cleanup_peer(state, data->peer_id, ws);
             }
         }
     });
