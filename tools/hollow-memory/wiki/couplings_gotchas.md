@@ -628,6 +628,14 @@ let _ = state.apply_op(&op);
 
 **Where:** `rust/hollow_core/src/node/message_ops.rs` (`collect_target_devices`, `fan_out_dm_envelope`), `file_handler.rs` (DM branch), `crypto_handler.rs` (`ingest_device_list`).
 
+### Device linking (Step 4): import the snapshot at NEXT BOOT, never in-place
+
+**Rule:** the multi-device link transfer REUSES the `.hollow` backup pipeline (link CODE as the passphrase) and imports on the NEXT LAUNCH, pre-node-start — the identical path as a manual "Restore from backup". Sender `storage::export_backup_bytes(code,…)` → stream `StreamKind::LinkSnapshot` → receiver `stash_pending_link(blob, code)` (writes `pending_link.hollow`+`.code`) → restart → `_bootstrap` FIRST (before `hasIdentity()`) `has_pending_link()`→`import_pending_link()`→`import_backup_bytes`. NEVER call an in-place importer while the node is running.
+
+**Why:** the first attempt (`import_snapshot_bytes` in-place, while the node ran on the throwaway link identity) corrupted the identity → "Loading… / Offline / peer_id ---" forever. It fought (a) the live SQLCipher connection + its `messages.db-wal`/`-shm` checkpointing back OVER the import, (b) a stale post-import summary handle (read 0 rows), and (c) a leftover throwaway `identity.device` whose at-rest protection mismatched the freshly-imported plaintext master → `load_or_create_device_keypair` throws "Device key is encrypted". `import_backup` sidesteps ALL of this purely by running pre-node-start. General rule: any in-place identity/DB swap while the app/node is live is a trap — stash + restart + reuse the backup pipeline. The empty device uses a THROWAWAY identity just to get a relay socket (the relay needs no new "guest" mode); the snapshot overwrites it.
+
+**Where:** `rust/hollow_core/src/api/storage.rs` (`export_backup_bytes`/`import_backup_bytes`/`stash_pending_link`/`has_pending_link`/`import_pending_link`), `node/link_handler.rs`, `node/file_handler.rs` (completion→stash), `lib/src/ui/shell/hollow_shell.dart` (`_bootstrap` pending-import). See memory `feedback_link_import_identity_device`.
+
 ### SOLVED: WS/relay presence churn was GHOST-CONNECTION EVICTION (relay-side)
 
 **Symptom (was):** A friend showed offline for stretches even though DMs flowed; the observer saw the peer LEAVE all shared rooms for ~14 min with NO reconnect line in the peer's log. Surfaced — not caused — by multi-device.

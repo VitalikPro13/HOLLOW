@@ -34,6 +34,10 @@ pub enum StreamKind {
     /// Hollow Share encrypted chunk. `id` is the share's root_hash (hex);
     /// `chunk_index` identifies which chunk this is.
     ShareChunk { chunk_index: u32 },
+    /// Multi-device link snapshot (full encrypted DB+identity bundle). `id` is the
+    /// link session id (hex). Same wire shape as `File` — reassembled to a temp file,
+    /// then decrypted+imported by `file_handler::handle_completed_stream`.
+    LinkSnapshot,
 }
 
 /// The request type used for both sending and receiving.
@@ -71,6 +75,7 @@ const WS_CHUNK_SIZE: usize = 256 * 1024;
 const TYPE_FILE: u8 = 0;
 const TYPE_SHARD: u8 = 1;
 const TYPE_SHARE_CHUNK: u8 = 2;
+const TYPE_LINK: u8 = 3;
 const TYPE_CONTINUATION: u8 = 0xFF;
 
 /// State for an in-progress WS stream transfer (receiver side).
@@ -122,7 +127,7 @@ pub async fn ws_stream_send(
     //   ShareChunk: extra = chunk_index:u32 LE (4 bytes)
     let id_padded = pad_id(id);
     let extra_len: usize = match kind {
-        StreamKind::File => 0,
+        StreamKind::File | StreamKind::LinkSnapshot => 0,
         StreamKind::Shard { .. } => 2,
         StreamKind::ShareChunk { .. } => 4,
     };
@@ -134,6 +139,7 @@ pub async fn ws_stream_send(
         StreamKind::File => TYPE_FILE,
         StreamKind::Shard { .. } => TYPE_SHARD,
         StreamKind::ShareChunk { .. } => TYPE_SHARE_CHUNK,
+        StreamKind::LinkSnapshot => TYPE_LINK,
     });
     first_chunk.extend_from_slice(&id_padded);
     first_chunk.extend_from_slice(&total_size.to_le_bytes());
@@ -144,7 +150,7 @@ pub async fn ws_stream_send(
         StreamKind::ShareChunk { chunk_index } => {
             first_chunk.extend_from_slice(&chunk_index.to_le_bytes());
         }
-        StreamKind::File => {}
+        StreamKind::File | StreamKind::LinkSnapshot => {}
     }
 
     let mut read_buf = vec![0u8; first_data_cap];
@@ -215,7 +221,7 @@ pub async fn ws_stream_send_bytes(
 
     let id_padded = pad_id(id);
     let extra_len: usize = match kind {
-        StreamKind::File => 0,
+        StreamKind::File | StreamKind::LinkSnapshot => 0,
         StreamKind::Shard { .. } => 2,
         StreamKind::ShareChunk { .. } => 4,
     };
@@ -227,6 +233,7 @@ pub async fn ws_stream_send_bytes(
         StreamKind::File => TYPE_FILE,
         StreamKind::Shard { .. } => TYPE_SHARD,
         StreamKind::ShareChunk { .. } => TYPE_SHARE_CHUNK,
+        StreamKind::LinkSnapshot => TYPE_LINK,
     });
     first_chunk.extend_from_slice(&id_padded);
     first_chunk.extend_from_slice(&total_size.to_le_bytes());
@@ -237,7 +244,7 @@ pub async fn ws_stream_send_bytes(
         StreamKind::ShareChunk { chunk_index } => {
             first_chunk.extend_from_slice(&chunk_index.to_le_bytes());
         }
-        StreamKind::File => {}
+        StreamKind::File | StreamKind::LinkSnapshot => {}
     }
 
     let mut read_buf = vec![0u8; first_data_cap];
@@ -326,7 +333,7 @@ pub fn ws_stream_receive(
             return complete_transfer(pending, &id);
         }
         None
-    } else if type_byte == TYPE_FILE || type_byte == TYPE_SHARD || type_byte == TYPE_SHARE_CHUNK {
+    } else if type_byte == TYPE_FILE || type_byte == TYPE_SHARD || type_byte == TYPE_SHARE_CHUNK || type_byte == TYPE_LINK {
         // First chunk: [type][id:64][size:8][extra...][data]
         let min_len = 1 + 64 + 8;
         if data.len() < min_len {
@@ -350,6 +357,7 @@ pub fn ws_stream_receive(
                 let ci = u32::from_le_bytes(data[73..77].try_into().unwrap_or([0; 4]));
                 (StreamKind::ShareChunk { chunk_index: ci }, 77)
             }
+            TYPE_LINK => (StreamKind::LinkSnapshot, 73),
             _ => (StreamKind::File, 73),
         };
 
@@ -389,8 +397,8 @@ pub fn ws_stream_receive(
 
         let bytes_received = payload.len() as u64;
 
-        // Register progress tracking for file transfers (same global map as libp2p).
-        let progress = if matches!(kind, StreamKind::File) {
+        // Register progress tracking for file + link-snapshot transfers (same global map).
+        let progress = if matches!(kind, StreamKind::File | StreamKind::LinkSnapshot) {
             let counter = Arc::new(AtomicU64::new(bytes_received));
             if let Ok(mut map) = stream_progress().lock() {
                 map.insert(id.clone(), StreamProgress {
@@ -429,7 +437,7 @@ fn complete_transfer(
     drop(state.temp_file); // flush and close
 
     // Clean up progress tracking.
-    if matches!(state.kind, StreamKind::File) {
+    if matches!(state.kind, StreamKind::File | StreamKind::LinkSnapshot) {
         if let Ok(mut map) = stream_progress().lock() {
             map.remove(id);
         }

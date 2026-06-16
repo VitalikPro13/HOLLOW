@@ -227,6 +227,33 @@ pub enum NetworkEvent {
         file_id: String,
         error: String,
     },
+    // -- Multi-device link snapshot events (Step 4) --
+    LinkCodeClaimed { code: String },
+    LinkCodeError { error: String, code: String },
+    SiblingLinkAvailable {
+        peer_id: String,
+        their_msg_count: u32,
+        their_friend_count: u32,
+        their_has_profile: bool,
+    },
+    LinkProgress {
+        link_id: String,
+        bytes_received: u64,
+        total_bytes: u64,
+    },
+    LinkComplete {
+        link_id: String,
+        msg_count: u32,
+        friend_count: u32,
+        server_count: u32,
+    },
+    LinkFailed {
+        link_id: String,
+        error: String,
+    },
+    LinkPushComplete {
+        bytes: u64,
+    },
     // -- Vault shard events (Phase 4) --
     ShardStored { server_id: String, content_id: String, shard_index: u16, from_peer: String },
     ShardStoreAckReceived { server_id: String, content_id: String, shard_index: u16, success: bool, error: String },
@@ -779,6 +806,28 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::FileFailed { file_id, error } => {
             NetworkEvent::FileFailed { file_id, error }
+        }
+        // -- Multi-device link snapshot events (Step 4) --
+        node::NetworkEvent::LinkCodeClaimed { code } => {
+            NetworkEvent::LinkCodeClaimed { code }
+        }
+        node::NetworkEvent::LinkCodeError { error, code } => {
+            NetworkEvent::LinkCodeError { error, code }
+        }
+        node::NetworkEvent::SiblingLinkAvailable { peer_id, their_msg_count, their_friend_count, their_has_profile } => {
+            NetworkEvent::SiblingLinkAvailable { peer_id, their_msg_count, their_friend_count, their_has_profile }
+        }
+        node::NetworkEvent::LinkProgress { link_id, bytes_received, total_bytes } => {
+            NetworkEvent::LinkProgress { link_id, bytes_received, total_bytes }
+        }
+        node::NetworkEvent::LinkComplete { link_id, msg_count, friend_count, server_count } => {
+            NetworkEvent::LinkComplete { link_id, msg_count, friend_count, server_count }
+        }
+        node::NetworkEvent::LinkFailed { link_id, error } => {
+            NetworkEvent::LinkFailed { link_id, error }
+        }
+        node::NetworkEvent::LinkPushComplete { bytes } => {
+            NetworkEvent::LinkPushComplete { bytes }
         }
         // -- Vault shard events (Phase 4) --
         node::NetworkEvent::ShardStored { server_id, content_id, shard_index, from_peer } => {
@@ -1683,6 +1732,60 @@ pub fn release_nickname() -> Result<(), String> {
     rt.block_on(state.cmd_tx.send(node::NodeCommand::ReleaseNickname))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
+}
+
+// ── Multi-device device linking (Step 4) ──────────────────────────────────────
+
+fn send_node_command(cmd: node::NodeCommand) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let state = guard.as_ref().ok_or("Node is not running")?;
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(cmd))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// (Populated device) Claim a 6-char link code on the relay + join its rendezvous
+/// room, so an empty sibling can pull your data by entering the code. The code
+/// (echoed back via the `LinkCodeClaimed` event) should be generated client-side
+/// from an unambiguous alphabet and displayed with a 5-minute countdown.
+#[frb]
+pub fn claim_link_code(code: String) -> Result<(), String> {
+    send_node_command(node::NodeCommand::ClaimLinkCode { code })
+}
+
+/// (Populated device) Release the currently claimed link code + leave its room.
+#[frb]
+pub fn release_link_code() -> Result<(), String> {
+    send_node_command(node::NodeCommand::ReleaseLinkCode)
+}
+
+/// (Empty device) Resolve a link code shown on the populated device, then request
+/// its full snapshot. `include_vault`/`include_files` control snapshot scope.
+#[frb]
+pub fn resolve_link_code(code: String, include_vault: bool, include_files: bool) -> Result<(), String> {
+    send_node_command(node::NodeCommand::ResolveLinkCode { code, include_vault, include_files })
+}
+
+/// (Empty device, mnemonic path) Request a full snapshot directly from a known
+/// sibling device (no code; used when the sibling is already in a shared room).
+#[frb]
+pub fn request_link_snapshot(target_peer: String, include_vault: bool, include_files: bool) -> Result<(), String> {
+    send_node_command(node::NodeCommand::RequestLinkSnapshot { target_peer, include_vault, include_files })
+}
+
+/// (Populated device) Accept an inbound link request and push the snapshot to the
+/// target device. Build scope is chosen here (files/vault).
+#[frb]
+pub fn accept_link_push(target_peer: String, include_vault: bool, include_files: bool) -> Result<(), String> {
+    send_node_command(node::NodeCommand::AcceptLinkPush { target_peer, include_vault, include_files })
+}
+
+/// (Populated device) Decline an inbound link request.
+#[frb]
+pub fn decline_link_push(target_peer: String) -> Result<(), String> {
+    send_node_command(node::NodeCommand::DeclineLinkPush { target_peer })
 }
 
 /// Profile data for push notifications (Tier 1: cached profile, no node needed).

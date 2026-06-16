@@ -867,20 +867,46 @@ pub fn has_identity() -> Result<bool, String> {
     Ok(dir.join("identity.key").exists())
 }
 
+/// Delete the on-disk identity + local DB so the next launch shows the Welcome
+/// screen fresh. Used to discard a THROWAWAY identity created for the "Link a
+/// device" first-run flow when the user cancels it. Best-effort — missing files
+/// are ignored. The caller must restart the app afterward (the live DB handle
+/// is still open). DESTRUCTIVE: only call on a throwaway with no real data.
+#[frb]
+pub fn delete_identity() -> Result<(), String> {
+    let dir = crate::identity::data_dir()?;
+    for name in [
+        "identity.key",
+        "identity.device",
+        "messages.db",
+        "messages.db-wal",
+        "messages.db-shm",
+    ] {
+        let p = dir.join(name);
+        if p.exists() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+    Ok(())
+}
+
 /// Export account backup as a passphrase-encrypted blob (.hollow file).
 /// Includes identity.key + messages.db. Optionally includes vault/ shard data
 /// and/or downloaded files from files/.
 /// The backup is: [16-byte salt][12-byte nonce][AES-256-GCM ciphertext of zip bytes]
 /// Key derived from passphrase via Argon2id (memory=64MB, iterations=3, parallelism=1).
-#[frb]
-pub fn export_backup(output_path: String, include_vault: bool, include_files: bool, passphrase: String) -> Result<u64, String> {
+/// Build the plaintext snapshot ZIP in memory (no encryption layer).
+///
+/// Contents: `identity.key` (plaintext keypair) + `messages.db` (WAL-checkpointed)
+/// + optionally `vault/` shards and `files/` downloads. This is the shared core of
+/// both the on-disk backup (`export_backup`, wrapped in Argon2id+AES) and the
+/// multi-device link snapshot (`api/network` link transfer, wrapped in a one-time
+/// random AES key). Returns the raw zip bytes.
+pub(crate) fn build_snapshot_bytes(include_vault: bool, include_files: bool) -> Result<Vec<u8>, String> {
     use std::io::Write;
-    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
-    use aes_gcm::Nonce;
 
     let data_dir = crate::identity::data_dir()?;
 
-    // Build zip in memory.
     let mut zip_buf = std::io::Cursor::new(Vec::new());
     {
         let mut zip = zip::ZipWriter::new(&mut zip_buf);
@@ -889,9 +915,9 @@ pub fn export_backup(output_path: String, include_vault: bool, include_files: bo
 
         let key_path = data_dir.join("identity.key");
         if key_path.exists() {
-            // Always export the PLAINTEXT keypair — the backup ZIP has its own
-            // Argon2id encryption layer. Reading via load_or_create_identity()
-            // transparently decrypts if the file is protected.
+            // Always export the PLAINTEXT keypair — the wrapping layer (backup
+            // passphrase or link transfer key) provides encryption. Reading via
+            // load_or_create_identity() transparently decrypts if protected.
             let id = crate::identity::load_or_create_identity()?;
             let data = id.keypair.to_protobuf_encoding()
                 .map_err(|e| format!("Failed to encode keypair: {e}"))?;
@@ -948,7 +974,138 @@ pub fn export_backup(output_path: String, include_vault: bool, include_files: bo
 
         zip.finish().map_err(|e| format!("Failed to finalize zip: {e}"))?;
     }
-    let zip_bytes = zip_buf.into_inner();
+    Ok(zip_buf.into_inner())
+}
+
+/// Extract a plaintext snapshot ZIP into the data directory (REPLACES existing
+/// files of the same name). Shared core of `import_backup` and the link-snapshot
+/// import. Requires the zip to contain `identity.key`.
+pub(crate) fn import_snapshot_bytes(zip_bytes: &[u8]) -> Result<(), String> {
+    use std::io::Read;
+
+    let data_dir = crate::identity::data_dir()?;
+    let cursor = std::io::Cursor::new(zip_bytes.to_vec());
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| format!("Invalid snapshot data: {e}"))?;
+
+    let has_key = (0..archive.len()).any(|i| {
+        archive.by_index(i).map(|f| f.name() == "identity.key").unwrap_or(false)
+    });
+    if !has_key {
+        return Err("Snapshot does not contain identity.key".into());
+    }
+
+    // CRITICAL: the multi-device link import runs while the node is LIVE on a
+    // throwaway identity, so the global STORE holds an open SQLCipher connection
+    // (with its own WAL). If we just overwrite messages.db, the throwaway's WAL/SHM
+    // would later checkpoint back OVER the imported DB, and the live handle reads
+    // the stale (empty) DB. So: drop the live connection and delete its WAL/SHM
+    // BEFORE writing the imported files. The caller restarts the app afterward,
+    // which reopens the real DB with the real (imported-identity) passphrase.
+    if let Ok(mut guard) = get_store().lock() {
+        let _ = guard.take(); // drops MessageStore → closes the connection
+    }
+    for stale in ["messages.db-wal", "messages.db-shm"] {
+        let p = data_dir.join(stale);
+        if p.exists() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+
+    // CRITICAL: delete the THROWAWAY identity.device. The snapshot carries only a
+    // PLAINTEXT identity.key (no identity.device), so if we keep the throwaway's
+    // device file there are two failure modes:
+    //   (1) protection mismatch — a keychain/password-protected throwaway device
+    //       file (HKEYV1) can't be decrypted after the plaintext master replaces
+    //       identity.key (no session key is established), so load_or_create_identity
+    //       throws "Device key is encrypted" and the identity never loads ("Loading…"
+    //       forever — the exact symptom seen on the VM).
+    //   (2) the throwaway device id was minted under the throwaway identity and is
+    //       meaningless under the real master.
+    // Deleting it makes the next launch generate a FRESH, distinct, plaintext device
+    // key under the real master — the correct multi-device shape.
+    let dev_path = data_dir.join("identity.device");
+    if dev_path.exists() {
+        let _ = std::fs::remove_file(&dev_path);
+        hollow_log!("[HOLLOW-LINK] Removed throwaway identity.device — fresh device key on restart");
+    }
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("Zip read error: {e}"))?;
+        let name = entry.name().to_string();
+        let out_path = data_dir.join(&name);
+        hollow_log!("[HOLLOW-LINK] Import writing {name} → {}", out_path.display());
+
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {e}"))?;
+        }
+
+        if entry.is_file() {
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).map_err(|e| format!("Failed to read zip entry: {e}"))?;
+            std::fs::write(&out_path, &data).map_err(|e| format!("Failed to write {name}: {e}"))?;
+            hollow_log!("[HOLLOW-LINK] Import wrote {name} ({} bytes)", data.len());
+        }
+    }
+
+    // Sanity-log what the imported identity resolves to, so a post-restart failure
+    // is diagnosable: the master peer_id below MUST match the source device's, and
+    // the next launch derives the DB passphrase from this same key.
+    match crate::identity::load_or_create_identity() {
+        Ok(id) => hollow_log!(
+            "[HOLLOW-LINK] Import OK — imported identity peer_id={} device_peer_id={}",
+            id.peer_id, id.device_peer_id
+        ),
+        Err(e) => hollow_log!("[HOLLOW-LINK] Import WARNING — imported identity failed to load: {e}"),
+    }
+
+    Ok(())
+}
+
+/// A compact summary of local DB state, used by multi-device linking to decide
+/// data-flow direction (which device is populated vs empty) and for the post-import
+/// summary. NOT a user-facing feature on its own.
+pub(crate) fn snapshot_state_summary() -> (u32, u32, u32, bool) {
+    let store = get_store();
+    let Ok(guard) = store.lock() else { return (0, 0, 0, false); };
+    let Some(ms) = guard.as_ref() else { return (0, 0, 0, false); };
+
+    let msg_count: u32 = ms
+        .get_dm_peer_ids()
+        .iter()
+        .map(|p| ms.count_dm_messages(p))
+        .sum();
+    let friend_count = ms
+        .load_friends(Some("accepted"))
+        .map(|f| f.len() as u32)
+        .unwrap_or(0);
+    let server_count = ms
+        .load_all_servers()
+        .map(|s| s.len() as u32)
+        .unwrap_or(0);
+    let has_profile = match get_peer_id() {
+        Ok(pid) => ms
+            .load_profile(pid)
+            .ok()
+            .flatten()
+            .map(|p| !p.display_name.is_empty())
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+
+    (msg_count, friend_count, server_count, has_profile)
+}
+
+/// Build a passphrase-encrypted `.hollow` backup blob IN MEMORY — the exact same
+/// format `export_backup` writes to disk: `[magic:6][salt:16][nonce:12][ciphertext]`,
+/// Argon2id-derived AES-256-GCM. Shared by the on-disk export AND the multi-device
+/// link transfer (which uses the link CODE as the passphrase and streams the blob,
+/// so the receiver imports via the identical `import_backup` pipeline).
+pub(crate) fn export_backup_bytes(passphrase: &str, include_vault: bool, include_files: bool) -> Result<Vec<u8>, String> {
+    use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+    use aes_gcm::Nonce;
+
+    let zip_bytes = build_snapshot_bytes(include_vault, include_files)?;
 
     // Derive encryption key from passphrase via Argon2id.
     let mut salt = [0u8; 16];
@@ -969,28 +1126,30 @@ pub fn export_backup(output_path: String, include_vault: bool, include_files: bo
     let ciphertext = cipher.encrypt(nonce, zip_bytes.as_slice())
         .map_err(|_| "Encryption failed".to_string())?;
 
-    // Write: [magic:6][salt:16][nonce:12][ciphertext...]
+    // [magic:6][salt:16][nonce:12][ciphertext...]
     let mut output = Vec::with_capacity(6 + 16 + 12 + ciphertext.len());
     output.extend_from_slice(b"HOLLOW"); // magic header
     output.extend_from_slice(&salt);
     output.extend_from_slice(&nonce_bytes);
     output.extend_from_slice(&ciphertext);
+    Ok(output)
+}
+
+#[frb]
+pub fn export_backup(output_path: String, include_vault: bool, include_files: bool, passphrase: String) -> Result<u64, String> {
+    let output = export_backup_bytes(&passphrase, include_vault, include_files)?;
     std::fs::write(&output_path, &output)
         .map_err(|e| format!("Failed to write backup: {e}"))?;
-
     Ok(output.len() as u64)
 }
 
-/// Import account backup from a passphrase-encrypted .hollow file.
-/// Must be called BEFORE start_node() since it overwrites the data directory.
-#[frb]
-pub fn import_backup(backup_path: String, passphrase: String) -> Result<(), String> {
-    use std::io::Read;
+/// Decrypt a `.hollow` backup blob (in memory) and extract it into the data
+/// directory. Shared by `import_backup` (file) and `import_pending_link` (the
+/// multi-device link blob stashed for next-boot import). Same Argon2id+AES scheme
+/// as `export_backup_bytes`.
+pub(crate) fn import_backup_bytes(blob: &[u8], passphrase: &str) -> Result<(), String> {
     use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
     use aes_gcm::Nonce;
-
-    let blob = std::fs::read(&backup_path)
-        .map_err(|e| format!("Failed to read backup: {e}"))?;
 
     // Validate magic header.
     if blob.len() < 6 + 16 + 12 + 16 || &blob[..6] != b"HOLLOW" {
@@ -1016,34 +1175,76 @@ pub fn import_backup(backup_path: String, passphrase: String) -> Result<(), Stri
     let zip_bytes = cipher.decrypt(nonce, ciphertext)
         .map_err(|_| "Wrong passphrase or corrupted backup".to_string())?;
 
-    // Extract zip to data directory.
-    let data_dir = crate::identity::data_dir()?;
-    let cursor = std::io::Cursor::new(zip_bytes);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| format!("Invalid backup data: {e}"))?;
+    // Extract zip to data directory (shared core).
+    import_snapshot_bytes(&zip_bytes)
+}
 
-    let has_key = (0..archive.len()).any(|i| {
-        archive.by_index(i).map(|f| f.name() == "identity.key").unwrap_or(false)
-    });
-    if !has_key {
-        return Err("Backup does not contain identity.key".into());
-    }
+/// Import account backup from a passphrase-encrypted .hollow file.
+/// Must be called BEFORE start_node() since it overwrites the data directory.
+#[frb]
+pub fn import_backup(backup_path: String, passphrase: String) -> Result<(), String> {
+    let blob = std::fs::read(&backup_path)
+        .map_err(|e| format!("Failed to read backup: {e}"))?;
+    import_backup_bytes(&blob, &passphrase)
+}
 
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| format!("Zip read error: {e}"))?;
-        let name = entry.name().to_string();
-        let out_path = data_dir.join(&name);
+// ── Multi-device link: pending-blob stash + next-boot import ──────────────────
 
-        if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {e}"))?;
-        }
+fn pending_link_blob_path() -> Result<std::path::PathBuf, String> {
+    Ok(crate::identity::data_dir()?.join("pending_link.hollow"))
+}
+fn pending_link_code_path() -> Result<std::path::PathBuf, String> {
+    Ok(crate::identity::data_dir()?.join("pending_link.code"))
+}
 
-        if entry.is_file() {
-            let mut data = Vec::new();
-            entry.read_to_end(&mut data).map_err(|e| format!("Failed to read zip entry: {e}"))?;
-            std::fs::write(&out_path, &data).map_err(|e| format!("Failed to write {name}: {e}"))?;
-        }
-    }
-
+/// (Receiver) Stash an encrypted `.hollow` link blob + the code that decrypts it,
+/// to be imported on the NEXT launch (pre-node-start, the known-good window — the
+/// exact same path as a manual "Restore from backup"). Called from the link
+/// completion handler. Does NOT import in-place (that was the fragile path).
+pub(crate) fn stash_pending_link(blob: &[u8], code: &str) -> Result<(), String> {
+    std::fs::write(pending_link_blob_path()?, blob)
+        .map_err(|e| format!("Failed to stash link blob: {e}"))?;
+    std::fs::write(pending_link_code_path()?, code.as_bytes())
+        .map_err(|e| format!("Failed to stash link code: {e}"))?;
     Ok(())
+}
+
+/// True if a pending link blob is waiting to be imported on launch.
+#[frb]
+pub fn has_pending_link() -> Result<bool, String> {
+    Ok(pending_link_blob_path()?.exists() && pending_link_code_path()?.exists())
+}
+
+/// (Receiver, at launch BEFORE start_node) Import a stashed link blob via the exact
+/// same pipeline as a manual `.hollow` restore: delete the throwaway identity,
+/// decrypt with the stashed code, extract into the data dir, then clean up the
+/// stash. After this the bootstrap proceeds as a normal restored-backup launch.
+#[frb]
+pub fn import_pending_link() -> Result<(), String> {
+    let blob_path = pending_link_blob_path()?;
+    let code_path = pending_link_code_path()?;
+    let blob = std::fs::read(&blob_path)
+        .map_err(|e| format!("Failed to read pending link blob: {e}"))?;
+    let code = std::fs::read_to_string(&code_path)
+        .map_err(|e| format!("Failed to read pending link code: {e}"))?;
+
+    // Discard the throwaway identity so import lands on a clean slate, exactly like
+    // a fresh "Restore from backup" (which runs on first launch with no identity).
+    let data_dir = crate::identity::data_dir()?;
+    for name in ["identity.key", "identity.device", "messages.db", "messages.db-wal", "messages.db-shm"] {
+        let p = data_dir.join(name);
+        if p.exists() { let _ = std::fs::remove_file(&p); }
+    }
+
+    let result = import_backup_bytes(&blob, code.trim());
+
+    // Clean up the stash regardless of outcome (a failed import shouldn't loop).
+    let _ = std::fs::remove_file(&blob_path);
+    let _ = std::fs::remove_file(&code_path);
+
+    match &result {
+        Ok(()) => hollow_log!("[HOLLOW-LINK] Pending link imported via backup pipeline ({} bytes)", blob.len()),
+        Err(e) => hollow_log!("[HOLLOW-LINK] Pending link import FAILED: {e}"),
+    }
+    result
 }

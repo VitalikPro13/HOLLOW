@@ -1059,6 +1059,111 @@ static void handle_resolve_nickname(SSLWebSocket* ws, PerSocketData* /*data*/,
     }
 }
 
+// ── Multi-device link codes (Step 4) — mirrors the nickname registry ──────────
+
+static std::string to_uppercase(std::string_view s) {
+    std::string out(s);
+    for (char& c : out) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return out;
+}
+
+static bool is_valid_link_code(std::string_view code) {
+    if (code.size() != 6) return false;
+    for (char c : code) {
+        if (!std::isupper(static_cast<unsigned char>(c)) &&
+            !std::isdigit(static_cast<unsigned char>(c))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// LINK_CODE_TTL_SECS: a claimed code lives 5 minutes, then the sweep releases it.
+static constexpr uint64_t LINK_CODE_TTL_SECS = 300;
+
+static void handle_claim_link_code(SSLWebSocket* ws, PerSocketData* data,
+                                    const std::string& raw_code, RelayState& state) {
+    if (data->is_guest) return;
+
+    std::string code = to_uppercase(raw_code);
+    if (!is_valid_link_code(code)) {
+        send_json(ws, {{"type", "link_code_error"}, {"error", "invalid"}});
+        return;
+    }
+
+    // Auto-release the peer's previous code if any.
+    auto old = state.peer_to_linkcode.find(data->peer_id);
+    if (old != state.peer_to_linkcode.end()) {
+        state.linkcode_expiry.erase(old->second);
+        state.linkcode_to_peer.erase(old->second);
+        state.peer_to_linkcode.erase(old);
+    }
+
+    if (state.linkcode_to_peer.count(code)) {
+        send_json(ws, {{"type", "link_code_error"}, {"error", "taken"}});
+        return;
+    }
+
+    state.linkcode_to_peer[code] = data->peer_id;
+    state.peer_to_linkcode[data->peer_id] = code;
+    state.linkcode_expiry[code] = now_unix_secs() + LINK_CODE_TTL_SECS;
+    send_json(ws, {{"type", "link_code_claimed"}, {"code", code}});
+}
+
+static void handle_release_link_code(SSLWebSocket* ws, PerSocketData* data,
+                                      RelayState& state) {
+    auto it = state.peer_to_linkcode.find(data->peer_id);
+    if (it != state.peer_to_linkcode.end()) {
+        state.linkcode_expiry.erase(it->second);
+        state.linkcode_to_peer.erase(it->second);
+        state.peer_to_linkcode.erase(it);
+    }
+    send_json(ws, {{"type", "link_code_released"}});
+}
+
+static void handle_resolve_link_code(SSLWebSocket* ws, PerSocketData* /*data*/,
+                                      const std::string& raw_code, RelayState& state) {
+    std::string code = to_uppercase(raw_code);
+    auto it = state.linkcode_to_peer.find(code);
+    if (it == state.linkcode_to_peer.end()) {
+        send_json(ws, {{"type", "link_code_error"}, {"error", "not_found"}, {"code", code}});
+        return;
+    }
+    // Honor TTL even if the sweep hasn't run yet.
+    auto exp = state.linkcode_expiry.find(code);
+    if (exp != state.linkcode_expiry.end() && now_unix_secs() > exp->second) {
+        state.linkcode_expiry.erase(code);
+        state.peer_to_linkcode.erase(it->second);
+        state.linkcode_to_peer.erase(it);
+        send_json(ws, {{"type", "link_code_error"}, {"error", "not_found"}, {"code", code}});
+        return;
+    }
+    std::string peer_id = it->second;
+    // One-shot: consume the code on a successful resolve.
+    state.linkcode_expiry.erase(code);
+    state.peer_to_linkcode.erase(peer_id);
+    state.linkcode_to_peer.erase(it);
+    send_json(ws, {{"type", "link_code_resolved"}, {"code", code}, {"peer_id", peer_id}});
+}
+
+// Release link codes whose 5-minute TTL has elapsed (server-side backstop; the
+// live countdown is client-side). Called from the offline-buffer sweep timer.
+void sweep_link_codes(RelayState& state) {
+    uint64_t now = now_unix_secs();
+    std::vector<std::string> expired;
+    for (auto& [code, exp] : state.linkcode_expiry) {
+        if (now > exp) expired.push_back(code);
+    }
+    for (auto& code : expired) {
+        auto it = state.linkcode_to_peer.find(code);
+        if (it != state.linkcode_to_peer.end()) {
+            state.peer_to_linkcode.erase(it->second);
+            state.linkcode_to_peer.erase(it);
+        }
+        state.linkcode_expiry.erase(code);
+    }
+}
+
 static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                                  std::string_view message, RelayState& state) {
     json j;
@@ -1132,6 +1237,12 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         handle_release_nickname(ws, data, state);
     } else if (type == "resolve_nickname") {
         handle_resolve_nickname(ws, data, j.value("nickname", ""), state);
+    } else if (type == "claim_link_code") {
+        handle_claim_link_code(ws, data, j.value("code", ""), state);
+    } else if (type == "release_link_code") {
+        handle_release_link_code(ws, data, state);
+    } else if (type == "resolve_link_code") {
+        handle_resolve_link_code(ws, data, j.value("code", ""), state);
     } else if (type == "register_push_token") {
         handle_register_push_token(ws, data, j.value("token", ""),
                                    j.value("platform", ""), state);
@@ -1169,6 +1280,14 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
         if (nit != state.peer_to_nickname.end()) {
             state.nickname_to_peer.erase(nit->second);
             state.peer_to_nickname.erase(nit);
+        }
+
+        // Release multi-device link code
+        auto lit = state.peer_to_linkcode.find(peer_id);
+        if (lit != state.peer_to_linkcode.end()) {
+            state.linkcode_expiry.erase(lit->second);
+            state.linkcode_to_peer.erase(lit->second);
+            state.peer_to_linkcode.erase(lit);
         }
 
         // Clear push debounce on disconnect (token stays — needed for offline pushes)

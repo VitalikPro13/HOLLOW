@@ -50,6 +50,12 @@ pub enum WsCommand {
     ReleaseNickname,
     /// Resolve a nickname to a peer_id via the relay.
     ResolveNickname { nickname: String },
+    /// Claim a multi-device link code on the relay (RAM only, 5-min TTL).
+    ClaimLinkCode { code: String },
+    /// Release the currently claimed link code.
+    ReleaseLinkCode,
+    /// Resolve a link code to a peer_id via the relay (consumed on resolve).
+    ResolveLinkCode { code: String },
     /// Register FCM/APNs push token with the relay for offline notifications.
     RegisterPushToken { token: String, platform: String },
     /// Register per-server channel push preferences with the relay (RAM only).
@@ -104,6 +110,14 @@ pub enum WsEvent {
     NicknameError { error: String, nickname: String },
     /// Nickname resolved to a peer_id.
     NicknameResolved { nickname: String, peer_id: String },
+    /// Multi-device link code successfully claimed.
+    LinkCodeClaimed { code: String },
+    /// Multi-device link code released.
+    LinkCodeReleased,
+    /// Link code operation error (claim failed or resolve failed).
+    LinkCodeError { error: String, code: String },
+    /// Link code resolved to the populated sibling's peer_id.
+    LinkCodeResolved { code: String, peer_id: String },
 }
 
 // -- Wire protocol (matches relay/src/ws_router.rs) --
@@ -144,6 +158,10 @@ enum ServerMsg {
     NicknameReleased,
     NicknameError { error: String, #[serde(default)] nickname: String },
     NicknameResolved { nickname: String, peer_id: String },
+    LinkCodeClaimed { code: String },
+    LinkCodeReleased,
+    LinkCodeError { error: String, #[serde(default)] code: String },
+    LinkCodeResolved { code: String, peer_id: String },
 }
 
 // -- State --
@@ -502,6 +520,30 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
+        WsCommand::ClaimLinkCode { code } => {
+            let msg = serde_json::json!({ "type": "claim_link_code", "code": code });
+            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] ClaimLinkCode send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::ReleaseLinkCode => {
+            let msg = serde_json::json!({ "type": "release_link_code" });
+            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] ReleaseLinkCode send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::ResolveLinkCode { code } => {
+            let msg = serde_json::json!({ "type": "resolve_link_code", "code": code });
+            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] ResolveLinkCode send failed: {e}");
+                return false;
+            }
+            return true;
+        }
         WsCommand::RegisterPushToken { token, platform } => {
             let msg = serde_json::json!({ "type": "register_push_token", "token": token, "platform": platform });
             if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
@@ -718,6 +760,22 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
         ServerMsg::NicknameResolved { nickname, peer_id } => {
             hollow_log!("[HOLLOW-WS] Nickname resolved: {nickname} -> {peer_id}");
             WsEvent::NicknameResolved { nickname, peer_id }
+        }
+        ServerMsg::LinkCodeClaimed { code } => {
+            hollow_log!("[HOLLOW-LINK] Link code claimed: {code}");
+            WsEvent::LinkCodeClaimed { code }
+        }
+        ServerMsg::LinkCodeReleased => {
+            hollow_log!("[HOLLOW-LINK] Link code released");
+            WsEvent::LinkCodeReleased
+        }
+        ServerMsg::LinkCodeError { error, code } => {
+            hollow_log!("[HOLLOW-LINK] Link code error: {error} (code={code})");
+            WsEvent::LinkCodeError { error, code }
+        }
+        ServerMsg::LinkCodeResolved { code, peer_id } => {
+            hollow_log!("[HOLLOW-LINK] Link code resolved: {code} -> {peer_id}");
+            WsEvent::LinkCodeResolved { code, peer_id }
         }
         ServerMsg::AuthOk | ServerMsg::AuthFailed { .. } => return,
     };

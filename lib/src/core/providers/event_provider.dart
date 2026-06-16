@@ -7,6 +7,7 @@ import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/device_link_sync_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 
@@ -667,9 +668,55 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_NicknameResolveFailed(:final nickname, :final error):
         debugPrint('[HOLLOW] Nickname resolve failed: $nickname — $error');
 
+      // -- Multi-device device linking (Step 4) --
+      case NetworkEvent_LinkCodeClaimed(:final code):
+        ref.read(deviceLinkSyncProvider.notifier).onCodeClaimed(code);
+
+      case NetworkEvent_LinkCodeError(:final error, :final code):
+        ref.read(deviceLinkSyncProvider.notifier).onCodeError(error, code);
+
+      case NetworkEvent_SiblingLinkAvailable(
+          :final peerId,
+          :final theirMsgCount,
+          :final theirFriendCount,
+          :final theirHasProfile,
+        ):
+        ref.read(deviceLinkSyncProvider.notifier).onSiblingLinkAvailable(
+              peerId,
+              theirMsgCount,
+              theirFriendCount,
+              theirHasProfile,
+            );
+
+      case NetworkEvent_LinkProgress(:final bytesReceived, :final totalBytes):
+        ref.read(deviceLinkSyncProvider.notifier).onLinkProgress(
+              bytesReceived.toInt(),
+              totalBytes.toInt(),
+            );
+
+      case NetworkEvent_LinkComplete(
+          :final msgCount,
+          :final friendCount,
+          :final serverCount,
+        ):
+        ref.read(deviceLinkSyncProvider.notifier).onLinkComplete(
+              msgCount,
+              friendCount,
+              serverCount,
+            );
+        // The DB was replaced — refresh friends/profiles so the UI populates.
+        ref.read(friendsProvider.notifier).loadAll();
+
+      case NetworkEvent_LinkFailed(:final error):
+        ref.read(deviceLinkSyncProvider.notifier).onLinkFailed(error);
+
+      case NetworkEvent_LinkPushComplete():
+        ref.read(deviceLinkSyncProvider.notifier).onPushComplete();
+
       // -- Relay connection events --
       case NetworkEvent_RelayDisconnected():
         ref.read(temporaryNicknameProvider.notifier).onDisconnected();
+        ref.read(deviceLinkSyncProvider.notifier).onDisconnected();
         ref
             .read(connectionStatusProvider.notifier)
             .onRelayStatusChanged('disconnected');

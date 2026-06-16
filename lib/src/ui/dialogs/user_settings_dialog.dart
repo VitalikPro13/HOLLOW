@@ -38,6 +38,7 @@ import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
 import 'package:hollow/src/ui/dialogs/ringtone_clip_editor_dialog.dart';
 import 'package:hollow/src/ui/dialogs/twitch_device_code_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -2184,6 +2185,19 @@ class _SecurityTabState extends State<_SecurityTab> {
           // ── Multi-device maintenance ──
           _SectionLabel(label: 'MULTI-DEVICE'),
           const SizedBox(height: HollowSpacing.sm),
+          Text(
+            'Link another device to this account. Show a code here, then enter it '
+            'on your other (empty) device to copy your messages, friends and '
+            'profile across. Keep both devices online during the transfer.',
+            style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          HollowButton.filled(
+            onPressed: () => showDeviceLinkDialog(context, mode: DeviceLinkMode.showCode),
+            icon: Icon(LucideIcons.smartphone, size: 16),
+            child: const Text('Link a device'),
+          ),
+          const SizedBox(height: HollowSpacing.lg),
           Text(
             'If a device you removed still shows as linked, reset the device '
             'list. It rebuilds from your devices that are currently online. '

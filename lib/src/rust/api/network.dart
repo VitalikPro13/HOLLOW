@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'network.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `to_ffi_event`
+// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `send_node_command`, `to_ffi_event`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NodeState`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`
 
@@ -265,6 +265,57 @@ Future<void> claimNickname({required String nickname}) =>
 /// Release the currently claimed temporary nickname.
 Future<void> releaseNickname() =>
     RustLib.instance.api.crateApiNetworkReleaseNickname();
+
+/// (Populated device) Claim a 6-char link code on the relay + join its rendezvous
+/// room, so an empty sibling can pull your data by entering the code. The code
+/// (echoed back via the `LinkCodeClaimed` event) should be generated client-side
+/// from an unambiguous alphabet and displayed with a 5-minute countdown.
+Future<void> claimLinkCode({required String code}) =>
+    RustLib.instance.api.crateApiNetworkClaimLinkCode(code: code);
+
+/// (Populated device) Release the currently claimed link code + leave its room.
+Future<void> releaseLinkCode() =>
+    RustLib.instance.api.crateApiNetworkReleaseLinkCode();
+
+/// (Empty device) Resolve a link code shown on the populated device, then request
+/// its full snapshot. `include_vault`/`include_files` control snapshot scope.
+Future<void> resolveLinkCode({
+  required String code,
+  required bool includeVault,
+  required bool includeFiles,
+}) => RustLib.instance.api.crateApiNetworkResolveLinkCode(
+  code: code,
+  includeVault: includeVault,
+  includeFiles: includeFiles,
+);
+
+/// (Empty device, mnemonic path) Request a full snapshot directly from a known
+/// sibling device (no code; used when the sibling is already in a shared room).
+Future<void> requestLinkSnapshot({
+  required String targetPeer,
+  required bool includeVault,
+  required bool includeFiles,
+}) => RustLib.instance.api.crateApiNetworkRequestLinkSnapshot(
+  targetPeer: targetPeer,
+  includeVault: includeVault,
+  includeFiles: includeFiles,
+);
+
+/// (Populated device) Accept an inbound link request and push the snapshot to the
+/// target device. Build scope is chosen here (files/vault).
+Future<void> acceptLinkPush({
+  required String targetPeer,
+  required bool includeVault,
+  required bool includeFiles,
+}) => RustLib.instance.api.crateApiNetworkAcceptLinkPush(
+  targetPeer: targetPeer,
+  includeVault: includeVault,
+  includeFiles: includeFiles,
+);
+
+/// (Populated device) Decline an inbound link request.
+Future<void> declineLinkPush({required String targetPeer}) =>
+    RustLib.instance.api.crateApiNetworkDeclineLinkPush(targetPeer: targetPeer);
 
 /// Load a peer's cached profile directly from SQLCipher for push notification display.
 /// Works without a running node — opens its own DB connection.
@@ -1127,6 +1178,35 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String fileId,
     required String error,
   }) = NetworkEvent_FileFailed;
+  const factory NetworkEvent.linkCodeClaimed({required String code}) =
+      NetworkEvent_LinkCodeClaimed;
+  const factory NetworkEvent.linkCodeError({
+    required String error,
+    required String code,
+  }) = NetworkEvent_LinkCodeError;
+  const factory NetworkEvent.siblingLinkAvailable({
+    required String peerId,
+    required int theirMsgCount,
+    required int theirFriendCount,
+    required bool theirHasProfile,
+  }) = NetworkEvent_SiblingLinkAvailable;
+  const factory NetworkEvent.linkProgress({
+    required String linkId,
+    required BigInt bytesReceived,
+    required BigInt totalBytes,
+  }) = NetworkEvent_LinkProgress;
+  const factory NetworkEvent.linkComplete({
+    required String linkId,
+    required int msgCount,
+    required int friendCount,
+    required int serverCount,
+  }) = NetworkEvent_LinkComplete;
+  const factory NetworkEvent.linkFailed({
+    required String linkId,
+    required String error,
+  }) = NetworkEvent_LinkFailed;
+  const factory NetworkEvent.linkPushComplete({required BigInt bytes}) =
+      NetworkEvent_LinkPushComplete;
   const factory NetworkEvent.shardStored({
     required String serverId,
     required String contentId,

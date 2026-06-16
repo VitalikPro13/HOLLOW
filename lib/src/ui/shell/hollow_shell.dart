@@ -17,6 +17,7 @@ import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/help_panel_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
+import 'package:hollow/src/core/providers/device_link_sync_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
@@ -58,6 +59,7 @@ import 'package:hollow/src/ui/components/notification_overlay.dart';
 import 'package:hollow/src/ui/components/active_call_bar.dart';
 import 'package:hollow/src/ui/dialogs/incoming_call_dialog.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
+import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:hollow/src/ui/dialogs/welcome_dialog.dart';
@@ -625,6 +627,17 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (_initialized) return;
     _initialized = true;
 
+    // Multi-device: a link transfer stashed an encrypted .hollow blob for us to
+    // import. Do it FIRST — pre-node-start, the same known-good window as a manual
+    // "Restore from backup" — then fall through as a normal restored launch.
+    try {
+      if (await storage_api.hasPendingLink()) {
+        await storage_api.importPendingLink();
+      }
+    } catch (e) {
+      debugPrint('[HOLLOW] Pending link import failed: $e');
+    }
+
     // Check if an identity already exists on disk.
     final hasExisting = await storage_api.hasIdentity();
 
@@ -674,7 +687,19 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
     } catch (_) {}
 
-    if (identity.mnemonic != null && mounted) {
+    // A 'link_device' welcome choice creates a THROWAWAY identity just to connect;
+    // the snapshot pull will replace it. Don't nag the user to back up its mnemonic
+    // — it's about to be overwritten by their real identity.
+    final isLinkDevice = welcomeResult?.action == 'link_device';
+
+    // Node startup + relay connect takes a few seconds; without feedback the
+    // welcome dialog just vanishes and the link prompt appears ~7s later. Show a
+    // "Connecting…" dialog now and dismiss it right before the link flow opens.
+    if (isLinkDevice && mounted) {
+      showConnectingDialog(context, message: 'Connecting to link your device…');
+    }
+
+    if (identity.mnemonic != null && mounted && !isLinkDevice) {
       // New identity was generated — save mnemonic to DB then show dialog.
       await storage_api.saveMnemonic(mnemonic: identity.mnemonic!);
       if (!mounted) return;
@@ -803,6 +828,24 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     // Initialize native notifications (for tray mode).
     await ref.read(systemNotificationProvider.notifier).init();
+
+    // Multi-device: the user chose "Link a device" on the welcome screen. The node
+    // is now connected on a throwaway identity — open the enter-code flow so they
+    // can pull their real data. A successful import replaces identity + DB; the UI
+    // prompts a restart at that point.
+    if (isLinkDevice && mounted) {
+      // Dismiss the "Connecting…" placeholder now that the node is up.
+      dismissConnectingDialog();
+      final wentBack = await showDeviceLinkDialog(context, mode: DeviceLinkMode.enterCode);
+      // Cancel = "go back to Welcome". The throwaway identity we just created has
+      // no real data, so discard it and restart — the next launch sees no identity
+      // and shows the Welcome dialog fresh (the running node still holds the old DB
+      // handle, so we can't just re-show Welcome in place).
+      if (wentBack == true) {
+        await storage_api.deleteIdentity();
+        exit(0);
+      }
+    }
 
     // Android: acquire WiFi lock to prevent network throttling, and
     // request battery optimization exemption on first launch.
@@ -1222,6 +1265,21 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (ref.watch(annotationModeProvider)) {
       return const SizedBox.shrink();
     }
+
+    // Multi-device: when another device asks to link, pop the confirm flow
+    // globally — UNLESS a link dialog is already showing (e.g. the Settings
+    // show-code dialog), in which case it re-renders into the confirm view on the
+    // phase change. Opening a second dialog would re-run its initState and mint a
+    // fresh code (the "entering the code spawns a new code" bug).
+    ref.listen<DeviceLinkState>(deviceLinkSyncProvider, (prev, next) {
+      if (next.phase == LinkPhase.confirmPush &&
+          prev?.phase != LinkPhase.confirmPush &&
+          !deviceLinkDialogIsOpen &&
+          mounted) {
+        showDeviceLinkDialog(context, mode: DeviceLinkMode.showCode);
+      }
+    });
+
     final hollow = HollowTheme.of(context);
 
     final nodeState = ref.watch(nodeProvider);

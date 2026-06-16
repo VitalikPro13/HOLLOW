@@ -213,6 +213,46 @@ pub(crate) enum NetworkEvent {
         file_id: String,
         error: String,
     },
+    // -- Multi-device link snapshot events (Step 4) --
+    /// (Populated device) Our link code was successfully claimed on the relay —
+    /// show it (with countdown) for the empty device to enter.
+    LinkCodeClaimed { code: String },
+    /// (Populated/empty) A link-code claim or resolve failed (taken / invalid /
+    /// not_found / expired).
+    LinkCodeError { error: String, code: String },
+    /// A populated sibling is offering / an empty sibling is requesting a full DB
+    /// snapshot. Carries the sender's state summary so the UI can auto-detect
+    /// data-flow direction. `peer_id` is the sibling DEVICE id.
+    SiblingLinkAvailable {
+        peer_id: String,
+        their_msg_count: u32,
+        their_friend_count: u32,
+        their_has_profile: bool,
+    },
+    /// Real-time progress of an inbound link snapshot transfer (drives the bar).
+    LinkProgress {
+        link_id: String,
+        bytes_received: u64,
+        total_bytes: u64,
+    },
+    /// The inbound snapshot was decrypted and imported. Counts are from the freshly
+    /// imported DB (post-import summary).
+    LinkComplete {
+        link_id: String,
+        msg_count: u32,
+        friend_count: u32,
+        server_count: u32,
+    },
+    /// The link snapshot transfer/decrypt/import failed.
+    LinkFailed {
+        link_id: String,
+        error: String,
+    },
+    /// (Sender/populated device) The snapshot was fully queued to the target — lets
+    /// the sender close its dialog. The sender does NOT restart (its DB is intact).
+    LinkPushComplete {
+        bytes: u64,
+    },
     // -- Vault shard events (Phase 4) --
     ShardStored { server_id: String, content_id: String, shard_index: u16, from_peer: String },
     ShardStoreAckReceived { server_id: String, content_id: String, shard_index: u16, success: bool, error: String },
@@ -476,6 +516,22 @@ pub(crate) enum NodeCommand {
     // -- Temporary nicknames --
     ClaimNickname { nickname: String },
     ReleaseNickname,
+    // -- Multi-device linking (Step 4) --
+    /// (Populated device) Claim a 6-char link code on the relay so an empty
+    /// sibling can find this device by code. Reply arrives as `LinkCodeClaimed`.
+    ClaimLinkCode { code: String },
+    /// (Populated device) Release the claimed link code.
+    ReleaseLinkCode,
+    /// (Empty device) Resolve a link code to the populated device, then send it a
+    /// snapshot request. Reply path: `LinkCodeResolved` → `LinkSnapshotRequest`.
+    ResolveLinkCode { code: String, include_vault: bool, include_files: bool },
+    /// (Empty device, mnemonic path) Ask an already-known sibling device for a
+    /// full snapshot directly (no code; used when the device list is already known).
+    RequestLinkSnapshot { target_peer: String, include_vault: bool, include_files: bool },
+    /// (Populated device) Accept an inbound link request and push the snapshot.
+    AcceptLinkPush { target_peer: String, include_vault: bool, include_files: bool },
+    /// (Populated device) Decline an inbound link request.
+    DeclineLinkPush { target_peer: String },
     // -- Push notifications --
     RegisterPushToken { token: String, platform: String },
     /// Register per-server/channel push notification prefs with the relay
@@ -798,6 +854,42 @@ pub(crate) enum HavenMessage {
     /// `FriendListSync`.
     #[serde(rename = "friend_list_request")]
     FriendListRequest,
+
+    // -- Multi-device link snapshot (Step 4) --
+
+    /// (Empty → populated sibling) "Send me your full DB snapshot." Carries the
+    /// requester's tiny state summary so the populated device can show direction.
+    /// The populated device responds by emitting `SiblingLinkAvailable` (UI confirm)
+    /// then, on accept, `LinkSnapshotKey` + the streamed bytes.
+    #[serde(rename = "link_snapshot_request")]
+    LinkSnapshotRequest {
+        #[serde(default)]
+        include_vault: bool,
+        #[serde(default)]
+        include_files: bool,
+        #[serde(default)]
+        msg_count: u32,
+        #[serde(default)]
+        friend_count: u32,
+        #[serde(default)]
+        has_profile: bool,
+    },
+
+    /// (Populated → empty) The one-time AES key/nonce to decrypt the snapshot bytes
+    /// that follow on the `LinkSnapshot` binary stream. `link_id` matches the stream id.
+    #[serde(rename = "link_snapshot_key")]
+    LinkSnapshotKey {
+        #[serde(default)]
+        link_id: String,
+        #[serde(default)]
+        aes_key: String,
+        #[serde(default)]
+        aes_nonce: String,
+    },
+
+    /// (Populated → empty) The populated device declined the link request.
+    #[serde(rename = "link_declined")]
+    LinkDeclined,
 
     /// Lightweight notification hint for unsubscribed channels (topic routing).
     /// Sent via SendToRoom (0x03) so all room members receive it.

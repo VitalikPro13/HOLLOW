@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'network.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `derive_db_key_public`, `derive_db_key`, `get_peer_id`, `get_store`, `stored_file_to_ffi`
+// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `derive_db_key_public`, `derive_db_key`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `pending_link_blob_path`, `pending_link_code_path`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`
 
 /// Open the encrypted message database. Must be called after identity is loaded.
 /// Typically called once at app start (after `load_or_create_identity`).
@@ -303,11 +303,14 @@ Future<String?> getMnemonic() =>
 /// Check if an identity key file exists on disk.
 Future<bool> hasIdentity() => RustLib.instance.api.crateApiStorageHasIdentity();
 
-/// Export account backup as a passphrase-encrypted blob (.hollow file).
-/// Includes identity.key + messages.db. Optionally includes vault/ shard data
-/// and/or downloaded files from files/.
-/// The backup is: [16-byte salt][12-byte nonce][AES-256-GCM ciphertext of zip bytes]
-/// Key derived from passphrase via Argon2id (memory=64MB, iterations=3, parallelism=1).
+/// Delete the on-disk identity + local DB so the next launch shows the Welcome
+/// screen fresh. Used to discard a THROWAWAY identity created for the "Link a
+/// device" first-run flow when the user cancels it. Best-effort — missing files
+/// are ignored. The caller must restart the app afterward (the live DB handle
+/// is still open). DESTRUCTIVE: only call on a throwaway with no real data.
+Future<void> deleteIdentity() =>
+    RustLib.instance.api.crateApiStorageDeleteIdentity();
+
 Future<BigInt> exportBackup({
   required String outputPath,
   required bool includeVault,
@@ -329,6 +332,17 @@ Future<void> importBackup({
   backupPath: backupPath,
   passphrase: passphrase,
 );
+
+/// True if a pending link blob is waiting to be imported on launch.
+Future<bool> hasPendingLink() =>
+    RustLib.instance.api.crateApiStorageHasPendingLink();
+
+/// (Receiver, at launch BEFORE start_node) Import a stashed link blob via the exact
+/// same pipeline as a manual `.hollow` restore: delete the throwaway identity,
+/// decrypt with the stashed code, extract into the data dir, then clean up the
+/// stash. After this the bootstrap proceeds as a normal restored-backup launch.
+Future<void> importPendingLink() =>
+    RustLib.instance.api.crateApiStorageImportPendingLink();
 
 /// A friend entry returned to Dart.
 class FriendFfi {

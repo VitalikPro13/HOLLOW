@@ -788,6 +788,8 @@ pub(crate) async fn handle_webrtc_transfer_complete(
         size: file_size,
         temp_path: temp_path_buf,
     };
+    // WebRTC-completed transfers are File/Shard only; link snapshots are relay-only.
+    let mut empty_link_snapshots = HashMap::new();
     handle_completed_stream(
         request,
         &sender_peer_id,
@@ -795,6 +797,7 @@ pub(crate) async fn handle_webrtc_transfer_complete(
         pending_shard_streams,
         pending_vault_downloads,
         early_file_streams,
+        &mut empty_link_snapshots,
         bundle_keypair,
         event_tx,
         ws_cmd_tx,
@@ -891,7 +894,18 @@ pub(crate) async fn handle_webrtc_transfer_failed(
     }
 }
 
-/// Handle a completed stream transfer (file or shard).
+/// Decryption material for an in-flight multi-device link snapshot. The snapshot
+/// bytes are AES-256-GCM encrypted with a one-time random key generated for this
+/// link session; the receiver holds the key/nonce here keyed by link session id
+/// until the chunked transfer reassembles.
+pub(crate) struct LinkSnapshotState {
+    /// The link CODE the receiver typed — the passphrase the inbound `.hollow` blob
+    /// is encrypted with. We stash the blob + this code for a next-launch import via
+    /// the proven `import_backup` pipeline (NOT an in-place import).
+    pub code: String,
+}
+
+/// Handle a completed stream transfer (file, shard, or link snapshot).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_completed_stream(
     request: ws_stream_transfer::StreamRequest,
@@ -900,6 +914,7 @@ pub(crate) async fn handle_completed_stream(
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
     pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
     early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
+    pending_link_snapshots: &mut HashMap<String, LinkSnapshotState>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -915,6 +930,54 @@ pub(crate) async fn handle_completed_stream(
 
     match request.kind {
         StreamKind::ShareChunk { .. } => unreachable!(),
+        StreamKind::LinkSnapshot => {
+            let link_id = request.id.clone();
+            // Events use the bare session id (no "link_" transport prefix) so Dart
+            // sees a consistent id across LinkProgress/LinkComplete/LinkFailed.
+            let bare_id = link_id.strip_prefix("link_").unwrap_or(&link_id).to_string();
+            hollow_log!("[HOLLOW-LINK] Inbound link snapshot: {link_id} ({} bytes)", request.size);
+
+            let Some(state) = pending_link_snapshots.remove(&link_id) else {
+                // No decryption material registered for this link session — drop it.
+                hollow_log!("[HOLLOW-LINK] No pending link state for {link_id} — dropping snapshot");
+                let _ = std::fs::remove_file(&request.temp_path);
+                let _ = event_tx.send(NetworkEvent::LinkFailed {
+                    link_id: bare_id,
+                    error: "no pending link session".to_string(),
+                }).await;
+                return;
+            };
+
+            // The inbound bytes are a full `.hollow` backup blob encrypted with the
+            // link CODE. We DON'T import in-place (that path was fragile). Instead we
+            // STASH the blob + code and signal a restart; on next launch the bootstrap
+            // imports it via the exact same `import_backup` pipeline as a manual
+            // restore (the known-good, pre-node-start window).
+            let outcome: Result<(), String> = (|| {
+                let blob = std::fs::read(&request.temp_path)
+                    .map_err(|e| format!("read link blob: {e}"))?;
+                crate::api::storage::stash_pending_link(&blob, &state.code)
+                    .map_err(|e| format!("stash failed: {e}"))
+            })();
+
+            let _ = std::fs::remove_file(&request.temp_path);
+
+            match outcome {
+                Ok(()) => {
+                    hollow_log!("[HOLLOW-LINK] Snapshot {link_id} stashed ({} bytes) — restart to import", request.size);
+                    let _ = event_tx.send(NetworkEvent::LinkComplete {
+                        link_id: bare_id,
+                        msg_count: 0,
+                        friend_count: 0,
+                        server_count: 0,
+                    }).await;
+                }
+                Err(e) => {
+                    hollow_log!("[HOLLOW-LINK] Snapshot {link_id} stash failed: {e}");
+                    let _ = event_tx.send(NetworkEvent::LinkFailed { link_id: bare_id, error: e }).await;
+                }
+            }
+        }
         StreamKind::File => {
             let file_id = request.id.clone();
             hollow_log!("[HOLLOW-STREAM] Inbound file stream: {file_id} ({} bytes)", request.size);
@@ -1094,9 +1157,10 @@ pub(crate) async fn stream_to_peer(
     // Prefer WebRTC data channel if peer has one active.
     if webrtc_peers.contains(peer_str) {
         let kind_str = match kind {
-            ws_stream_transfer::StreamKind::File => "file",
             ws_stream_transfer::StreamKind::Shard { .. } => "shard",
             ws_stream_transfer::StreamKind::ShareChunk { .. } => "share_chunk",
+            // LinkSnapshot is relay-only and never routed over WebRTC; treat as file.
+            ws_stream_transfer::StreamKind::File | ws_stream_transfer::StreamKind::LinkSnapshot => "file",
         };
         let shard_index = match kind {
             ws_stream_transfer::StreamKind::Shard { shard_index } => *shard_index,
@@ -1148,9 +1212,10 @@ pub(crate) async fn stream_to_peer_bytes(
         let _ = std::fs::write(&temp_path, data);
         let total_size = data.len() as u64;
         let kind_str = match kind {
-            ws_stream_transfer::StreamKind::File => "file",
             ws_stream_transfer::StreamKind::Shard { .. } => "shard",
             ws_stream_transfer::StreamKind::ShareChunk { .. } => "share_chunk",
+            // LinkSnapshot is relay-only and never routed over WebRTC; treat as file.
+            ws_stream_transfer::StreamKind::File | ws_stream_transfer::StreamKind::LinkSnapshot => "file",
         };
         let shard_index = match kind {
             ws_stream_transfer::StreamKind::Shard { shard_index } => *shard_index,
@@ -1319,10 +1384,14 @@ pub(crate) async fn handle_envelope_file_header(
                 temp_path,
             };
             let mut empty_vault_dl = HashMap::new();
+            // This early-arrival path only ever carries StreamKind::File; link
+            // snapshots never take the WebRTC early-arrival route, so an empty map is fine.
+            let mut empty_link_snapshots = HashMap::new();
             handle_completed_stream(
                 request, &sender,
                 pending_file_streams, pending_shard_streams,
                 &mut empty_vault_dl, early_file_streams,
+                &mut empty_link_snapshots,
                 bundle_keypair, event_tx,
                 ws_cmd_tx, ws_room_peers,
                 db_path, db_passphrase,

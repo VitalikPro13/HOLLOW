@@ -37,6 +37,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/rainbow_slider_track.dart';
+import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
 import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/ringtone_clip_editor_dialog.dart';
@@ -2085,10 +2086,23 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         const SizedBox(height: HollowSpacing.sm),
         const _BackupExportButton(),
 
-        // Multi-device maintenance (Phase 6): reset the accumulated device list.
+        // Multi-device (Phase 6 / Step 4): link another device, + reset the
+        // accumulated device list.
         const SizedBox(height: HollowSpacing.xl),
         _SectionLabel(label: 'Multi-Device'),
         const SizedBox(height: HollowSpacing.sm),
+        Text(
+          'Link another device to this account. Show a code here, then enter it '
+          'on your other (empty) device to copy your messages, friends and '
+          'profile across. Keep both devices online during the transfer.',
+          style: HollowTypography.body.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 12,
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        const _LinkDeviceButton(),
+        const SizedBox(height: HollowSpacing.lg),
         Text(
           'If a device you removed still shows as linked, reset the device '
           'list. It rebuilds from your devices that are currently online. '
@@ -2635,6 +2649,23 @@ Future<String?> _askBackupPassphrase(
 /// save it via the file picker, so it can be shared back for diagnosis. There's
 /// no debugger access on TestFlight builds — this is how we read the NSE's
 /// runtime memory and whether the on-device fetch+decrypt succeeded.
+/// Opens the multi-device link flow in show-code mode (this device has the data;
+/// an empty device enters the code to pull a full snapshot). Mirrors the desktop
+/// Settings → Security entry.
+class _LinkDeviceButton extends StatelessWidget {
+  const _LinkDeviceButton();
+
+  @override
+  Widget build(BuildContext context) {
+    return HollowButton.filled(
+      onPressed: () => showDeviceLinkDialog(context, mode: DeviceLinkMode.showCode),
+      expand: true,
+      icon: const Icon(LucideIcons.smartphone, size: 16),
+      child: const Text('Link a device'),
+    );
+  }
+}
+
 class _ResetDeviceListButton extends StatelessWidget {
   const _ResetDeviceListButton();
 

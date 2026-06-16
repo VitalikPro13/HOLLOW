@@ -6,6 +6,7 @@ pub(crate) mod file_transfer;
 pub(crate) mod gossip;
 pub(crate) mod gossip_relay;
 pub(crate) mod image_convert;
+pub(crate) mod link_handler;
 pub(crate) mod link_preview;
 pub(crate) mod message_ops;
 pub(crate) mod recovery_pool;

@@ -43,6 +43,7 @@ use super::crypto_handler::{
     send_message_to_peer, send_raw_to_peer,
 };
 use super::file_handler;
+use super::link_handler;
 use super::message_ops;
 use super::social;
 use super::sync_handler;
@@ -176,6 +177,10 @@ async fn run_event_loop(
     // Key: file_id, Value: (temp_path, size, sender_peer_id)
     let mut early_file_streams: HashMap<String, (std::path::PathBuf, u64, String)> = HashMap::new();
     let mut pending_shard_streams: HashMap<String, PendingShardStream> = HashMap::new();
+
+    // Pending multi-device link snapshots awaiting reassembly. Key: link session id,
+    // Value: the AES key/nonce to decrypt the assembled snapshot bytes with.
+    let mut pending_link_snapshots: HashMap<String, file_handler::LinkSnapshotState> = HashMap::new();
 
     // Pending vault downloads waiting for remote shards.
     // Key: content_id, Value: (server_id, shards_needed: k, shards_requested: count)
@@ -363,6 +368,14 @@ async fn run_event_loop(
     // Queued when peer isn't reachable (no shared rooms), sent when they appear.
     let mut pending_friend_requests: HashMap<String, i64> = HashMap::new();
     let mut pending_nickname_resolve: Option<String> = None;
+    // Multi-device linking (Step 4). `pending_link_resolve` = (code, include_vault,
+    // include_files) carried from ResolveLinkCode to the LinkCodeResolved event.
+    // `pending_link_code` = the code WE claimed (populated device), so we can leave
+    // its room on release.
+    let mut pending_link_resolve: Option<(String, bool, bool)> = None;
+    let mut pending_link_code: Option<String> = None;
+    // Siblings we've already auto-requested a snapshot from this session (fire-once).
+    let mut link_snapshot_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Pending friend removals: peer_ids whose FriendRemove wasn't delivered (peer offline).
     let mut pending_friend_removals: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
@@ -1001,6 +1014,45 @@ async fn run_event_loop(
 
                     NodeCommand::ReleaseNickname => {
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ReleaseNickname);
+                    }
+
+                    // -- Multi-device linking (Step 4) --
+                    NodeCommand::ClaimLinkCode { code } => {
+                        pending_link_code = Some(code.clone());
+                        link_handler::handle_claim_link_code(&ws_cmd_tx, &code);
+                    }
+                    NodeCommand::ReleaseLinkCode => {
+                        if let Some(code) = pending_link_code.take() {
+                            link_handler::handle_release_link_code(&ws_cmd_tx, &code);
+                        }
+                    }
+                    NodeCommand::ResolveLinkCode { code, include_vault, include_files } => {
+                        pending_link_resolve = Some((code.clone(), include_vault, include_files));
+                        link_handler::set_my_link_code(&code); // receiver: decrypts the blob
+                        link_handler::handle_resolve_link_code(&ws_cmd_tx, &code);
+                    }
+                    NodeCommand::RequestLinkSnapshot { target_peer, include_vault, include_files } => {
+                        link_handler::handle_request_link_snapshot(
+                            &ws_cmd_tx, &ws_room_peers, &target_peer, include_vault, include_files,
+                        );
+                    }
+                    NodeCommand::AcceptLinkPush { target_peer, include_vault, include_files } => {
+                        // Code path: encrypt with the code WE claimed. Mnemonic path
+                        // (no claimed code): the requester is a sibling sharing our
+                        // master, so use the master id as the shared passphrase.
+                        let code = match &pending_link_code {
+                            Some(c) if !c.is_empty() => c.clone(),
+                            _ => local_peer_str.to_string(),
+                        };
+                        link_handler::handle_accept_link_push(
+                            &ws_cmd_tx, &ws_room_peers, &event_tx,
+                            &target_peer, include_vault, include_files, &device_peer_id, &code,
+                        ).await;
+                    }
+                    NodeCommand::DeclineLinkPush { target_peer } => {
+                        send_message_to_peer(
+                            &ws_cmd_tx, &ws_room_peers, &target_peer, HavenMessage::LinkDeclined,
+                        );
                     }
 
                     NodeCommand::RegisterPushToken { token, platform } => {
@@ -1748,6 +1800,28 @@ async fn run_event_loop(
                                             &ws_cmd_tx, &ws_room_peers,
                                             &peer_id, HavenMessage::FriendListRequest,
                                         );
+
+                                        // Multi-device link (Step 4): if WE are essentially empty
+                                        // (a fresh mnemonic import) and a populated sibling is now
+                                        // online, AUTO-REQUEST a full snapshot from it. The sibling
+                                        // shows a Confirm before sending. We gate on a near-empty DB
+                                        // so a populated device never re-pulls, and we only fire once
+                                        // per sibling per session (link_snapshot_requested).
+                                        let (my_msgs, my_friends, _my_servers, _hp) =
+                                            crate::api::storage::snapshot_state_summary();
+                                        if my_msgs == 0 && my_friends == 0
+                                            && link_snapshot_requested.insert(peer_id.clone())
+                                        {
+                                            hollow_log!(
+                                                "[HOLLOW-LINK] Empty device — auto-requesting snapshot from sibling {peer_id}"
+                                            );
+                                            // Mnemonic path has no typed code; both siblings share the
+                                            // master id, so use it as the .hollow passphrase.
+                                            link_handler::set_my_link_code(&local_peer_str);
+                                            link_handler::handle_request_link_snapshot(
+                                                &ws_cmd_tx, &ws_room_peers, &peer_id, false, false,
+                                            );
+                                        }
                                     }
 
                                     // Proactive key exchange if no CONFIRMED Olm session.
@@ -2325,6 +2399,7 @@ async fn run_event_loop(
                                 &mut pending_shard_streams,
                                 &mut pending_vault_downloads,
                                 &mut early_file_streams,
+                                &mut pending_link_snapshots,
                                 &bundle_keypair,
                                 &event_tx,
                                 &ws_cmd_tx, &ws_room_peers,
@@ -2407,6 +2482,29 @@ async fn run_event_loop(
                                 &local_peer_str, peer_id,
                                 &db_path, &db_passphrase,
                             ).await;
+                        }
+                    }
+                    // -- Multi-device link codes (Step 4) --
+                    WsEvent::LinkCodeClaimed { code } => {
+                        let _ = event_tx.send(NetworkEvent::LinkCodeClaimed { code }).await;
+                    }
+                    WsEvent::LinkCodeReleased => {
+                        pending_link_code = None;
+                    }
+                    WsEvent::LinkCodeError { error, code } => {
+                        // A resolve we initiated failing means the code was wrong/expired.
+                        if pending_link_resolve.as_ref().map(|(c, _, _)| c.as_str()) == Some(code.as_str()) {
+                            pending_link_resolve = None;
+                        }
+                        let _ = event_tx.send(NetworkEvent::LinkCodeError { error, code }).await;
+                    }
+                    WsEvent::LinkCodeResolved { code, peer_id } => {
+                        if let Some((c, include_vault, include_files)) = pending_link_resolve.take() {
+                            if c == code {
+                                link_handler::handle_link_code_resolved(
+                                    &ws_cmd_tx, &ws_room_peers, &peer_id, include_vault, include_files,
+                                );
+                            }
                         }
                     }
                     WsEvent::Message { room, from, data } | WsEvent::DirectMessage { room, from, data } => {
@@ -2743,6 +2841,7 @@ async fn run_event_loop(
                                         &sig_cmd_tx,
                                         &mut pending_shard_assembly, &mut pending_file_streams,
                                         &mut pending_shard_streams, &mut early_file_streams,
+                                        &mut pending_link_snapshots,
                                         &mut decrypt_fail_cooldown,
                                         &mut pending_mls_key_packages, &mut pending_mls_removals,
                                         &mut mls_decrypt_failures,
@@ -3110,7 +3209,16 @@ async fn run_event_loop(
                     }).collect()
                 };
                 for (file_id, received, total) in snapshot {
-                    if received > 0 {
+                    if received == 0 { continue; }
+                    // Link snapshot ids carry a "link_" prefix so they emit real-byte
+                    // LinkProgress (drives the device-link bar) instead of FileProgress.
+                    if let Some(link_id) = file_id.strip_prefix("link_") {
+                        let _ = event_tx.send(NetworkEvent::LinkProgress {
+                            link_id: link_id.to_string(),
+                            bytes_received: received,
+                            total_bytes: total,
+                        }).await;
+                    } else {
                         let _ = event_tx.send(NetworkEvent::FileProgress {
                             file_id,
                             chunks_received: (received / (1024 * 1024)).max(1) as u32,
@@ -3552,6 +3660,7 @@ async fn handle_incoming_request(
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
     early_file_streams: &mut HashMap<String, (std::path::PathBuf, u64, String)>,
+    pending_link_snapshots: &mut HashMap<String, file_handler::LinkSnapshotState>,
     decrypt_fail_cooldown: &mut HashMap<String, std::time::Instant>,
     pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
     pending_mls_removals: &mut HashMap<String, Vec<String>>,
@@ -4659,10 +4768,13 @@ async fn handle_incoming_request(
                                 temp_path,
                             };
                             let mut empty_vault_dl = HashMap::new();
+                            // Early-arrival path is File-only; link snapshots never route here.
+                            let mut empty_link_snapshots = HashMap::new();
                             file_handler::handle_completed_stream(
                                 request, &sender,
                                 pending_file_streams, pending_shard_streams,
                                 &mut empty_vault_dl, early_file_streams,
+                                &mut empty_link_snapshots,
                                 bundle_keypair, event_tx,
                                 ws_cmd_tx, ws_room_peers,
                                 db_path, db_passphrase,
@@ -7592,6 +7704,34 @@ async fn handle_incoming_request(
                     }
                 }
             }
+        }
+
+        // -- Multi-device link snapshot (Step 4) --
+        HavenMessage::LinkSnapshotRequest { include_vault: _, include_files: _, msg_count, friend_count, has_profile } => {
+            // An empty device wants our full snapshot. We do NOT require same_identity
+            // here: the code-path requester isn't a sibling yet (no shared master). The
+            // authorization is the human Confirm on THIS (populated) device — surfaced
+            // via SiblingLinkAvailable. The actual push happens on AcceptLinkPush.
+            link_handler::handle_inbound_link_request(
+                &event_tx, peer_str, msg_count, friend_count, has_profile,
+            ).await;
+        }
+
+        HavenMessage::LinkSnapshotKey { link_id, aes_key: _, aes_nonce: _ } => {
+            // The populated device announced the link_id. The `.hollow` blob that
+            // follows is encrypted with the CODE WE typed (no key travels in the
+            // message), so register the pending stash keyed by link_id + our code.
+            link_handler::handle_inbound_link_key(
+                pending_link_snapshots, &link_id, link_handler::my_link_code(),
+            );
+        }
+
+        HavenMessage::LinkDeclined => {
+            hollow_log!("[HOLLOW-LINK] Link request declined by {peer_str}");
+            let _ = event_tx.send(NetworkEvent::LinkFailed {
+                link_id: String::new(),
+                error: "declined by other device".to_string(),
+            }).await;
         }
 
         HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview } => {

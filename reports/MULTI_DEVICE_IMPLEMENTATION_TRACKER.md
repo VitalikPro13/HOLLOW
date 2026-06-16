@@ -1,11 +1,12 @@
 # Multi-Device Identity & Sync — Implementation Tracker
 
-**Status:** In progress. Steps 1, 2, 2.5 DONE and live-verified (host+phone+VM): per-device identity,
-presence collapse, profile sync all work — a friend sees one online identity with the right name/avatar via
-any device. **Step 3 (Olm sender-side fan-out — the DM-delivery fix) code-complete, pending real-device
-test:** every DM send path (message/edit/delete/reaction/file/image) now fans out to all the recipient's
-devices AND your own siblings (real-time mirroring). 318 lib + 16 widget tests pass; no codegen (no FFI
-change); relay untouched.
+**Status:** In progress. Steps 1, 2, 2.5, **3 DONE and live-verified** (host+phone+VM, commit `bbf91aa`):
+per-device identity, presence collapse, profile sync, sibling friend-list sync, and Olm sender-side DM
+fan-out all work — a friend sees one online identity with the right name/avatar via any device, and DMs
+(message/edit/delete/reaction/file/image) fan out to all the recipient's devices AND your own siblings
+(real-time mirroring). **Step 4 (device linking + snapshot sync) DESIGN LOCKED, not yet started** — full
+design in `reports/MULTI_DEVICE_STEP4_LINK_DESIGN.md` (QR cut; codes + mnemonic; reuse
+`export_backup`/`ws_stream_transfer`; honest real-time progress). Next session implements it.
 **Companion to:** `reports/MULTI_DEVICE_SYNC_PLAN.md` (the design doc — decisions, flows, rejected
 alternatives). This file is the **execution tracker**: verified codebase facts, the real cost breakdown,
 and a step-by-step checklist with checkboxes to follow during implementation.
@@ -480,14 +481,141 @@ per-device; only the SEND entry point was master-keyed.
       device won't see server messages and server member panels intentionally don't collapse (see
       `project_multidevice_migration_state` memory).
 
-### Step 4 — QR link + standalone snapshot transfer  ▢ not started
-*Goal: a freshly-linked device feels full immediately.*
+### Step 4 — Device linking + snapshot sync  ✅ LIVE-VERIFIED 2026-06-15 (one follow-up bug open)
+*Built + live-verified in one session (Pixel master → VM subdevice). Full code-path link works
+end-to-end: enter code on empty device → populated device confirms → encrypted `.hollow` blob
+streams → receiver stashes + restarts → imports via the backup pipeline → fully synced with all
+messages/friends/profile. 318 lib + 16 widget tests pass; relay deployed + active on VPS.*
 
-- [ ] Desktop shows QR (transfer key + relay rendezvous + expiry/nonce); phone scans (camera).
-- [ ] One-time AES-256-GCM transfer key; standalone-encrypted snapshot streamed via relay (dumb pipe).
-- [ ] Reuse `archive/exporter.rs` + `loader.rs` for the snapshot; chunk + resume for large DBs.
-- [ ] New device generates its own device key, announces it (master-signed) on its profile (Step 2).
-- [ ] **Test:** scan → phone populated with history; new device appears in friends' device lists.
+**⚠ THE WINNING ARCHITECTURE PIVOT (after the in-place import kept corrupting the identity):** the
+link transfer **REUSES the `.hollow` backup pipeline end-to-end**, with the link CODE as the
+passphrase, and imports on the **NEXT LAUNCH (pre-node-start)** — NOT in-place. The in-place
+`import_snapshot_bytes` fought the live SQLCipher connection + WAL + a protection-mismatched throwaway
+`identity.device` → "Loading… forever". Stash-and-reboot sidesteps all of it. See
+`feedback_link_import_identity_device` memory for the full why. **The description below documents the
+ORIGINAL in-place design and is partially superseded** — the live code is the stash-and-reboot flow.
+
+**What landed (live code):**
+- **Snapshot/backup core** (`api/storage.rs`): `export_backup_bytes(code,…)` produces the exact
+  `.hollow` bytes; receiver `stash_pending_link(blob, code)` writes `pending_link.hollow` +
+  `pending_link.code`; next launch `has_pending_link()` → `import_pending_link()` (deletes throwaway
+  identity, then `import_backup_bytes` — identical to a manual restore). `import_backup`/`export_backup`
+  now delegate to these `_bytes` cores.
+- **Transfer** (`ws_stream_transfer.rs`): `StreamKind::LinkSnapshot` (TYPE_LINK=3) reuses the chunked
+  binary pipeline + the real-byte `stream_progress()` AtomicU64. Completion arm STASHES (no in-place
+  import) → emits `LinkComplete` → UI auto-restarts.
+- **Orchestration** (`node/link_handler.rs`, NEW): rendezvous via `link:{code}` room; claim/resolve/
+  push/pull. Code path: populated device claims code + joins room; empty device resolves + joins +
+  `LinkSnapshotRequest`; populated device confirms → `AcceptLinkPush` exports `.hollow` (code as
+  passphrase) + streams. Receiver's typed code held in a process-global (`set_my_link_code`/
+  `my_link_code`) so the deep `LinkSnapshotKey` handler can read it. Mnemonic path (B6): empty device
+  auto-requests from an online sibling (passphrase = shared master id).
+
+- [ ] **OPEN FOLLOW-UP (fix tomorrow, before Step 5) — first VM→friend DM doesn't mirror to the
+      freshly-linked sibling.** Live test: AL↔VM/Pixel all sync EXCEPT the very FIRST message VM sends
+      to friend AL never echoes to sibling Pixel; every message after it does. Root cause (from VM log):
+      the sibling self-echo fan-out (`message_ops::fan_out_dm_envelope`) targets `devices_for(own_master)`
+      ∪ peers in the **DM-with-friend room**. On the FIRST send the freshly-linked Pixel is in
+      `inbox:{master}` (sibling rendezvous, immediate) but hasn't joined the DM-with-AL room yet, so the
+      union misses it and `devices_for` returns only a STALE GHOST id (Pixel's pre-relink device) →
+      echo goes to an offline ghost. **First fix attempt (union `inbox:{master}` peers into the sibling
+      set) DID NOT resolve it** — so the cause is likely deeper: stale/ghost device-list ids resolving
+      weirdly, OR the live sibling isn't yet resolver-linked to own_master at first-send time, OR the
+      inbox-room peer set is empty at that instant. Re-investigate: dump `devices_for(own_master)`,
+      `resolve(JQcW)`, and the inbox/DM room membership at the exact first-send tick. Same family as the
+      Step 3 live-room-union fixes. Cosmetic-ish (one message, self-heals after), so it does NOT block
+      the Step 4 win, but fix before moving to Step 5.
+- **Relay** (`relay-uws`): `linkcode_to_peer`/`peer_to_linkcode`/`linkcode_expiry` maps (clone of
+  nicknames); `claim/resolve/release_link_code` verbs; `cleanup_peer` erasure; `sweep_link_codes`
+  5-min TTL on the 300s timer; one-shot consume on resolve. **Deployed + active on VPS.**
+- **Events/commands/FFI**: `LinkProgress`/`LinkComplete`/`LinkFailed`/`SiblingLinkAvailable`/
+  `LinkCodeClaimed`/`LinkCodeError`; NodeCommands + 6 FFI fns (`claim/release/resolve_link_code`,
+  `request_link_snapshot`, `accept/decline_link_push`); ws_client WsCommand/WsEvent/ServerMsg mirror
+  the nickname pattern; HavenMessages `LinkSnapshotRequest`/`LinkSnapshotKey`/`LinkDeclined`. Codegen run.
+- **Flutter**: `device_link_sync_provider.dart` (phase state machine + 6-char code gen, unambiguous
+  alphabet); `device_link_dialog.dart` (show-code + countdown, enter-code + scope toggles, confirm-push,
+  ONE real progress bar, honest "Servers & history copied" label, `exit(0)` restart on done);
+  `event_provider` dispatch; Welcome "Link a device" card (throwaway identity → enter-code, skips
+  mnemonic-backup nag); shell auto-opens enter-code after node start + a global `ref.listen` pops the
+  confirm flow on the populated device; Settings → Security MULTI-DEVICE "Link a device" (show-code).
+
+**KEY IMPLEMENTATION DECISIONS (made during build, beyond the design):**
+- **Code-path bootstrap = THROWAWAY identity + one restart.** The empty device has no `identity.key`
+  until the snapshot arrives, but needs an identity to connect/join `link:{code}`. So Welcome "Link a
+  device" creates a normal (throwaway) identity, connects, pulls the snapshot which REPLACES
+  identity.key + messages.db, then `exit(0)` → next launch re-derives the real DB passphrase from the
+  real identity and opens the real DB. The restart is REQUIRED: the running node holds the throwaway
+  DB connection (old passphrase) and can't read the newly-imported real DB (different passphrase).
+  Mirrors the existing `import_backup` restart UX.
+- **Snapshot IS the master-key handoff** (code path): the zip already contains `identity.key`, so no
+  separate key-exchange. Authorization = the populated device's on-screen Confirm (it's not a verified
+  sibling yet, so the `LinkSnapshotRequest` handler does NOT require `same_identity`).
+- **Roles are unambiguous:** the POPULATED device always shows `SiblingLinkAvailable`→confirm (via the
+  `LinkSnapshotRequest` handler); the EMPTY device never does (it requests). B6's empty-side path
+  auto-*requests* rather than emitting a confirm event, so the provider's confirm-push is always correct.
+
+**Deferred from v1 (design has them; build skipped for scope):** direction recommend+dropdown UI
+(empty always pulls, populated always confirms — no manual reverse), both-populated merge/replace/export
+escape hatch (replace-only for now), QR (cut by design). These are additive and don't block the core flow.
+
+#### Original locked checklist (all items above satisfy these):
+
+
+*Goal: a freshly-linked device feels full immediately.*
+**Full design: `reports/MULTI_DEVICE_STEP4_LINK_DESIGN.md` (2026-06-15, all decisions Vitalik-
+locked). The original QR ceremony in `MULTI_DEVICE_SYNC_PLAN.md` §3 is SUPERSEDED — read the new
+design doc, not the plan §3.**
+
+**Key design shifts (why this is smaller than the plan implied):**
+- **QR is CUT entirely.** Pairing = type 24 words (works TODAY — Steps 2.5/3 already pull
+  friends+profiles from an online sibling) OR a **6-char relay code**. No `qr_flutter`, no
+  `mobile_scanner`, no camera. The mnemonic IS the auth; the code is convenience.
+- **The 6-char code reuses the temporary-nickname RAM-on-relay pattern verbatim** (clone
+  `nickname_to_peer` → `link_code → peer_id`, `claim_link_code`/`resolve_link_code` text verbs,
+  released on disconnect/TTL). Nothing new on the relay beyond a text verb.
+- **Snapshot = reuse `export_backup`/`import_backup` (`api/storage.rs`)** — already a full
+  DB+identity AES-256-GCM blob with files/vault toggles. Split out in-memory
+  `build_snapshot_bytes`/`import_snapshot_bytes`. NOT `archive/exporter.rs` (that's per-conversation).
+- **Transfer = reuse `ws_stream_transfer.rs` + a new `StreamKind::LinkSnapshot`** — the
+  `stream_progress()` AtomicU64 gives a GENUINELY REAL byte-progress bar (Vitalik rejected fake
+  per-category bars).
+
+**Locked decisions (design doc §10 + body):**
+- [ ] Snapshot core refactor: `build_snapshot_bytes(include_vault, include_files)` +
+      `import_snapshot_bytes(bytes)` (in-memory, one-time random AES-256 key — NOT a passphrase;
+      relay carries ciphertext). Existing on-disk Settings export keeps its Argon2id wrapper.
+- [ ] `StreamKind::LinkSnapshot` in `ws_stream_transfer.rs` + `LinkProgress{phase,bytes,total}` /
+      `LinkComplete{summary}` / `LinkFailed{reason}` events. ONE real bar; end-summary counts from
+      real `count_*` FFIs (no mid-transfer per-category fiction).
+- [ ] Relay: `link_code → peer_id` RAM map (clone of nicknames) + claim/resolve verbs. 6 chars,
+      unambiguous alphabet (no 0/O/1/I/l), **5-min TTL with on-screen countdown below the code**,
+      released back to the pool on expiry, one-shot (consumed on link).
+- [ ] Code path: master-key handoff over the live relay channel AFTER the **populated device
+      confirms on-screen** ("a new device wants to link — send identity + data?"). Code = rendezvous
+      token, the human tap = authorization.
+- [ ] Rendezvous = the shared `inbox:{master}` room (no dedicated link room — siblings already meet
+      there).
+- [ ] Direction = auto-detect via a tiny state-summary exchange (**msg count + friend count +
+      has-profile** — internal direction-pick only, NOT a UI feature; per-conversation comparison is
+      Step 8). Recommended action shown prominently; reverse behind a warned dropdown ("overwrite the
+      other device"). "Other device must be online" labeled.
+- [ ] Receiver DB handling = **replace wholesale** (empty target; the point is to SYNC full data).
+- [ ] Both-populated (re-link / two masters): honest prompt — **merge** (safe via message_id dedup,
+      default) / replace (warned dropdown) / **export escape hatch** (transplanted Security-tab slice:
+      re-show phrase / export identity with files/vault choice, so two separate identities aren't
+      trapped).
+- [ ] Auto-pull on FIRST sibling-detect (master auto-offers + confirms, then pushes). After first
+      pull, gaps close via Step 5 backfill + manual Sync (Step 8). No whole-DB re-push per reconnect.
+- [ ] **Welcome dialog redesign (IN Step 4 scope):** Create new identity / Import (24 words) / Link a
+      device (code). Plus a "Link / sync a device" affordance in Settings → Security → Multi-Device.
+- [ ] **Honest server caveat:** snapshot copies server membership + history ROWS (they appear), but
+      live server messaging + MLS leaf are Step 6 — label UI "Servers & history copied", NOT "synced".
+- [ ] New device generates its own device key + announces it (master-signed) — Steps 1/2, already live.
+- [ ] **Test:** code/phrase link → empty device shows progress (real bar) → populated with history;
+      direction auto-picked; both-online required; new device appears in friends' device lists.
+
+**Open (decide when wiring, non-blocking):** none material — §10 of the design doc resolved all four
+original open questions.
 
 ### Step 5 — Backfill (device-first, peer-fallback)  ▢ not started
 *Goal: close the offline gap. Nearly free — sync engine already does it.*

@@ -255,6 +255,16 @@ class _WelcomeContentState extends State<_WelcomeContent> {
         const SizedBox(height: HollowSpacing.sm),
 
         _OptionCard(
+          icon: LucideIcons.smartphone,
+          title: 'Link a device',
+          subtitle: 'Sync from your other device with a 6-digit code',
+          hollow: hollow,
+          onTap: () => Navigator.of(context).pop((action: 'link_device', relayDomain: _relayDomain)),
+        ),
+
+        const SizedBox(height: HollowSpacing.sm),
+
+        _OptionCard(
           icon: LucideIcons.folderInput,
           title: 'Restore from Backup',
           subtitle: 'Import a .hollow backup file',

@@ -123,6 +123,13 @@ struct RelayState {
     std::unordered_map<std::string, std::string> nickname_to_peer;  // nickname -> peer_id
     std::unordered_map<std::string, std::string> peer_to_nickname;  // peer_id -> nickname
 
+    // Multi-device link-code registry (RAM only, released on disconnect, 5-min TTL,
+    // consumed on resolve). Mirrors the nickname registry. Used by Step 4 device
+    // linking so an empty device can find its populated sibling by a short code.
+    std::unordered_map<std::string, std::string> linkcode_to_peer;  // code -> peer_id
+    std::unordered_map<std::string, std::string> peer_to_linkcode;  // peer_id -> code
+    std::unordered_map<std::string, uint64_t>    linkcode_expiry;   // code -> expiry unix secs
+
     // Push notification tokens (RAM only — re-registered on each app launch)
     // peer_id -> { token, platform ("android"/"ios") }
     struct PushToken {

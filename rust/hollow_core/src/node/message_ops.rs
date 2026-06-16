@@ -173,9 +173,24 @@ async fn fan_out_dm_envelope(
     // THIS device (never echo to ourselves).
     let own_master = super::resolver::resolve(local_peer_str);
     let sibling_json = sibling_envelope_json.unwrap_or(envelope_json);
-    let siblings = collect_target_devices(
+    let mut siblings: HashSet<String> = collect_target_devices(
         ws_room_peers, &dm_room, &own_master, "", /*exclude*/ Some(device_peer_id),
-    );
+    ).into_iter().collect();
+    // ALSO union peers in our `inbox:{master}` room. A freshly-linked sibling joins
+    // the inbox room IMMEDIATELY (it's the sibling rendezvous) but may not have
+    // joined this specific DM-with-friend room yet when we send our FIRST message —
+    // so the DM-room union alone misses it and the echo goes to a stale ghost id
+    // from the stored device list. The inbox union catches the live sibling right
+    // away (fixes "VM's first DM to AL never mirrors to Pixel").
+    let inbox_room = format!("inbox:{own_master}");
+    if let Some(peers) = ws_room_peers.get(&inbox_room) {
+        for p in peers {
+            if p != device_peer_id && super::resolver::resolve(p) == own_master {
+                siblings.insert(p.clone());
+            }
+        }
+    }
+    siblings.remove(&own_master);
     for sibling in &siblings {
         if recipient_devices.contains(sibling) {
             continue;
