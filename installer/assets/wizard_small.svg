@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="1000" height="1000">
+  <defs>
+    <linearGradient id="hGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00E5C3"/>
+      <stop offset="100%" stop-color="#009980"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Transparent background — only the H mark, so no dark square shows in the header. -->
+  <path d="
+    M 260 234
+    A 14 14 0 0 1 274 220
+    L 324 220
+    A 14 14 0 0 1 338 234
+    L 338 448
+    L 400 448
+    L 400 412
+    L 414 412
+    L 414 335
+    A 86 86 0 0 1 586 335
+    L 586 412
+    L 600 412
+    L 600 448
+    L 662 448
+    L 662 234
+    A 14 14 0 0 1 676 220
+    L 726 220
+    A 14 14 0 0 1 740 234
+    L 740 766
+    A 14 14 0 0 1 726 780
+    L 676 780
+    A 14 14 0 0 1 662 766
+    L 662 536
+    L 600 536
+    L 600 552
+    A 16 16 0 0 1 584 568
+    L 416 568
+    A 16 16 0 0 1 400 552
+    L 400 536
+    L 338 536
+    L 338 766
+    A 14 14 0 0 1 324 780
+    L 274 780
+    A 14 14 0 0 1 260 766
+    L 260 234
+    Z
+    M 450 412
+    L 450 335
+    A 50 50 0 0 1 550 335
+    L 550 412
+    Z
+  "
+  fill="url(#hGrad)"
+  fill-rule="evenodd"
+  />
+  <circle cx="500" cy="477" r="18" fill="#0D0F14"/>
+  <rect x="493" y="487" width="14" height="34" rx="4" fill="#0D0F14"/>
+  <circle cx="500" cy="475" r="5" fill="#00BFA6" opacity="0.5"/>
+</svg>

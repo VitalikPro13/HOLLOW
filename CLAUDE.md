@@ -86,7 +86,14 @@ flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust
 # Deploy relay server updates to VPS (uWebSockets C++ relay)
 scp relay-uws/src/*.cpp relay-uws/src/*.h relay-uws/CMakeLists.txt ubuntu@141.227.186.209:/home/ubuntu/relay-uws/src/
 ssh ubuntu@141.227.186.209 "cd /home/ubuntu/relay-uws/build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j2 && sudo setcap cap_net_bind_service=+ep hollow-relay && sudo systemctl restart hollow-relay"
+
+# Windows release: build + code-sign all binaries + Inno Setup installer + sign installer + portable zip (one command, prompts for Certum card PIN)
+pwsh scripts\build_release.ps1                 # full pipeline (flutter build → sign → installer → sign → zip)
+pwsh scripts\build_release.ps1 -SkipBuild      # repackage an existing build without rebuilding
+pwsh scripts\sign_release.ps1                  # just code-sign every .exe/.dll in build\windows\x64\runner\Release
 ```
+
+**Windows code signing (Certum):** Cert lives on a `cryptoCertum3.7` USB card in minidriver mode. signtool needs the cert bound to the CNG Key Storage Provider — the scripts self-heal this via `certutil -repairstore`. Output (signed installer + zip) lands in `installer\Output\` (gitignored). See `reference_certum_signing_procedure` + `project_windows_installer_pipeline` memories. Vitalik tests the install/uninstall GUI flow himself.
 
 ## Hollow Design System (Phase 2.75)
 All UI uses custom Hollow widgets — no Material defaults.
