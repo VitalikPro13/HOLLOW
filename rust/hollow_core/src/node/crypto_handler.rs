@@ -496,6 +496,33 @@ async fn ingest_sibling_device_list(
             ws_cmd_tx, ws_room_peers,
             sender_peer_id, HavenMessage::FriendListRequest,
         );
+
+        // Multi-device backfill (Step 5): also ask this live sibling for our missed
+        // DM history. CRITICAL — sibling detection has TWO paths: the swarm.rs
+        // `inbox:{master}` join-proof AND this device-list-ingest (fired by a
+        // ProfileUpdate carrying a device list). A sibling may be detected via
+        // EITHER, so the DM-backfill request must fire from BOTH or it silently
+        // never runs (e.g. when the device list arrives before/without an inbox
+        // join). Incremental via per-conversation high-water marks + idempotent
+        // (message_id dedup), so a redundant request from both paths is harmless.
+        let per_convo_since: Vec<(String, i64)> = store.get_dm_peer_ids()
+            .into_iter()
+            .map(|c| {
+                let ts = store
+                    .get_latest_dm_timestamp_any(&c)
+                    .unwrap_or(None)
+                    .unwrap_or(0);
+                (c, ts)
+            })
+            .collect();
+        hollow_log!(
+            "[HOLLOW-SYNC] Requesting sibling DM backfill from {sender_peer_id} ({} known convo(s))",
+            per_convo_since.len()
+        );
+        send_message_to_peer(
+            ws_cmd_tx, ws_room_peers,
+            sender_peer_id, HavenMessage::DmSiblingSyncRequest { per_convo_since },
+        );
     }
 
     changed

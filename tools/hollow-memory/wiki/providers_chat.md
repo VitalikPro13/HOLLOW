@@ -111,7 +111,7 @@ Only allows overriding: `chunksReceived`, `isComplete`, `diskPath`, `videoThumb`
 
 ### _addMessage(peerId, message)
 
-Private helper. Appends `message` to the list for `peerId`. If the list exceeds `_maxMessages` (200), trims from the front (oldest messages dropped). Creates a shallow copy of the state map and the list to trigger Riverpod rebuild.
+Private helper. Inserts `message` into the list for `peerId` **keeping it ordered by timestamp** — fast O(1) append for the newest-message common case; an out-of-order arrival (e.g. a multi-device sibling backfill replaying an OLDER message, Step 5) walks back to find its slot. Without this it was a plain append, so an older backfilled message landed at the END and rendered in the wrong position. If the list exceeds `_maxMessages` (200), trims from the front (oldest messages dropped). Creates a shallow copy of the state map and the list to trigger Riverpod rebuild. (`channel_chat_provider._addMessage` mirrors the same timestamp-ordered insert.)
 
 **CRITICAL — message_id dedup:** Before appending, `_addMessage` skips when a non-null `message_id` already exists in the list. Messages without a message_id (system / send-failure notices) always append. Without this, a message persisted to SQLCipher by the FCM background push-fetch node (then loaded by `loadHistory`) is shown TWICE when the full node re-delivers it as a live `DirectMessage` event. The DB layer is already dedup-correct (`dm_message_exists`); this guards the in-memory list. See memory `feedback_ui_dedup_by_message_id.md`.
 
@@ -253,7 +253,7 @@ Returns `'$serverId:$channelId'` — the composite key for state lookup.
 
 ### _addMessage(serverId, channelId, message)
 
-Same pattern as DM's `_addMessage`: appends, trims if > 200, shallow-copies state.
+Same pattern as DM's `_addMessage`: timestamp-ordered insert (O(1) append for the newest-message common case, walk-back for out-of-order), trims if > 200, shallow-copies state.
 
 ### sendMessage(serverId, channelId, text, {replyToMid?, linkPreview?})
 

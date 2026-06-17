@@ -569,7 +569,18 @@ class ChannelChatNotifier
       String serverId, String channelId, ChannelChatMessage message) {
     final key = _key(serverId, channelId);
     final current = state[key] ?? <ChannelChatMessage>[];
-    var list = <ChannelChatMessage>[...current, message];
+    // Keep the list ordered by timestamp (fast O(1) append for the newest-message
+    // common case; only an out-of-order arrival walks back to its slot).
+    var list = <ChannelChatMessage>[...current];
+    if (list.isEmpty || !message.timestamp.isBefore(list.last.timestamp)) {
+      list.add(message);
+    } else {
+      var i = list.length - 1;
+      while (i >= 0 && message.timestamp.isBefore(list[i].timestamp)) {
+        i--;
+      }
+      list.insert(i + 1, message);
+    }
     // Trim oldest messages to prevent unbounded memory growth.
     if (list.length > _maxMessages) {
       list = list.sublist(list.length - _maxMessages);

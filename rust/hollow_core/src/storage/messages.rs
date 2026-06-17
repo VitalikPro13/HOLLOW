@@ -1102,6 +1102,81 @@ impl MessageStore {
         Ok(messages)
     }
 
+    /// Latest DM timestamp in a conversation **regardless of direction** (for
+    /// multi-device sibling backfill). The friend-sync `get_latest_dm_timestamp`
+    /// filters `is_mine = 0` (a friend only re-serves what THEY sent); a sibling
+    /// serves BOTH directions, so the requester's high-water mark must span both
+    /// — otherwise we'd re-pull our own already-known sends every reconnect.
+    pub fn get_latest_dm_timestamp_any(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<i64>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT MAX(timestamp) FROM messages WHERE peer_id = ?1")
+            .map_err(|e| format!("Failed to prepare dm latest-any timestamp query: {e}"))?;
+        let mut rows = stmt
+            .query_map(params![peer_id], |row| row.get::<_, Option<i64>>(0))
+            .map_err(|e| format!("Failed to query dm latest-any timestamp: {e}"))?;
+        match rows.next() {
+            Some(Ok(ts)) => Ok(ts),
+            Some(Err(e)) => Err(format!("Failed to read dm latest-any timestamp: {e}")),
+            None => Ok(None),
+        }
+    }
+
+    /// Get DM messages in a conversation newer than (or equal to) a timestamp,
+    /// **in BOTH directions** (for multi-device sibling backfill). Unlike
+    /// `get_dm_messages_since` (friend sync: `is_mine = 1` only), a sibling needs
+    /// the friend's half of the conversation too. `is_mine` is carried through so
+    /// the receiving sibling can render each message on the correct side.
+    /// Uses `>=` (inclusive) — `INSERT OR IGNORE` dedup handles overlap.
+    /// Includes hidden (deleted) messages — evidence must sync (Rat Files).
+    pub fn get_dm_messages_for_sibling(
+        &self,
+        peer_id: &str,
+        since_timestamp: i64,
+        limit: i32,
+    ) -> Result<Vec<StoredMessage>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json
+                 FROM messages
+                 WHERE peer_id = ?1 AND (timestamp >= ?2 OR updated_at >= ?2)
+                 ORDER BY timestamp ASC
+                 LIMIT ?3",
+            )
+            .map_err(|e| format!("Failed to prepare dm_messages_for_sibling query: {e}"))?;
+
+        let rows = stmt
+            .query_map(params![peer_id, since_timestamp, limit], |row| {
+                Ok(StoredMessage {
+                    id: row.get(0)?,
+                    peer_id: row.get(1)?,
+                    text: row.get(2)?,
+                    is_mine: row.get::<_, i32>(3)? != 0,
+                    timestamp: row.get(4)?,
+                    signature: row.get(5)?,
+                    public_key: row.get(6)?,
+                    message_id: row.get(7)?,
+                    edited_at: row.get(8)?,
+                    hidden_at: row.get(9)?,
+                    reply_to_mid: row.get(10)?,
+                    file_id: row.get(11)?,
+                    link_preview: row.get::<_, Option<String>>(12)?
+                        .and_then(|s| serde_json::from_str(&s).ok()),
+                })
+            })
+            .map_err(|e| format!("Failed to query dm_messages_for_sibling: {e}"))?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row.map_err(|e| format!("Failed to read dm_messages_for_sibling row: {e}"))?);
+        }
+        Ok(messages)
+    }
+
     // -- CRDT persistence methods --
 
     /// Save (upsert) a server's full CRDT state as JSON.

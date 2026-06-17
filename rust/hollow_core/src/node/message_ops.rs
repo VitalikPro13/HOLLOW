@@ -164,7 +164,7 @@ async fn fan_out_dm_envelope(
         send_dm_to_device(
             olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
             pending_messages, key_request_in_flight,
-            device_peer, envelope_json, &dm_room,
+            device_peer, envelope_json, &dm_room, /*is_sibling*/ false,
         ).await;
     }
 
@@ -198,7 +198,7 @@ async fn fan_out_dm_envelope(
         send_dm_to_device(
             olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
             pending_messages, key_request_in_flight,
-            sibling, sibling_json, &dm_room,
+            sibling, sibling_json, &dm_room, /*is_sibling*/ true,
         ).await;
     }
 }
@@ -265,6 +265,13 @@ async fn send_dm_to_device(
     device_peer: &str,
     envelope_json: &str,
     dm_room: &str,
+    // True when `device_peer` is one of OUR OWN sibling devices (self-echo fan-out),
+    // not the genuine recipient. A sibling mirror is NEVER notification-worthy, so
+    // when the sibling is offline we must NOT do the "encrypt to DM room (push
+    // trigger)" room-send (the relay would fire an FCM push and the sibling would
+    // buzz for OUR OWN outgoing message). We still queue it for silent delivery on
+    // the sibling's next reconnect (+ Step 5 backfill closes any residual gap).
+    is_sibling: bool,
 ) {
     // EXACT-device reachability, not the identity-wide `peer_is_reachable`: in a
     // fan-out, device A may be online while sibling device B is offline. The
@@ -307,6 +314,15 @@ async fn send_dm_to_device(
                 let overflow = q.len() - RETRY_QUEUE_CAP;
                 q.drain(0..overflow);
             }
+        } else if is_sibling {
+            // Session exists but our OWN sibling device is offline. Do NOT room-send
+            // (that would trigger a push — Pixel buzzing for VM's own message). Just
+            // queue for silent delivery when the sibling reconnects; Step 5 backfill
+            // also closes the gap on next inbox-join.
+            pending_messages
+                .entry(device_peer.to_string())
+                .or_default()
+                .push(envelope_json.to_string());
         } else {
             // Session exists but device is offline — encrypt and send to DM room
             // anyway. The relay sees the target isn't in the room and triggers a

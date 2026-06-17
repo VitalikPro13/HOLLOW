@@ -1,6 +1,9 @@
 # Multi-Device Identity & Sync — Implementation Tracker
 
-**Status:** In progress. Steps 1, 2, 2.5, **3 DONE and live-verified** (host+phone+VM, commit `bbf91aa`):
+**Status:** In progress. Steps 1, 2, 2.5, 3, **4, 5 DONE and live-verified** (2026-06-17, Pixel↔VM↔AL):
+DM sibling backfill closes the offline gap (near-instant). Next is **Step 6 — MLS per-device leaves** (the
+hardest slice; server messages to all devices). Step 5 detail in its section below; earlier baseline:
+Steps 1, 2, 2.5, **3 DONE and live-verified** (host+phone+VM, commit `bbf91aa`):
 per-device identity, presence collapse, profile sync, sibling friend-list sync, and Olm sender-side DM
 fan-out all work — a friend sees one online identity with the right name/avatar via any device, and DMs
 (message/edit/delete/reaction/file/image) fan out to all the recipient's devices AND your own siblings
@@ -658,13 +661,63 @@ design doc, not the plan §3.**
 **Open (decide when wiring, non-blocking):** none material — §10 of the design doc resolved all four
 original open questions.
 
-### Step 5 — Backfill (device-first, peer-fallback)  ▢ not started
-*Goal: close the offline gap. Nearly free — sync engine already does it.*
+### Step 5 — Backfill (device-first, peer-fallback)  ✅ LIVE-VERIFIED 2026-06-17 (Pixel↔VM↔AL, "near-instant")
+*Goal: close the offline gap. Done by extending the existing identity-agnostic DM-sync rails to siblings.*
 
-- [ ] On reconnect, pull gap from your other device first; conversation peer (signature-verified) as fallback.
-- [ ] Wire onto existing signed-op + message-id-dedup sync (`DmSyncRequest`, `compute_delta`, `merge_ops`).
-- [ ] **Test:** device #1 sends 10 msgs while #2 offline → #2 comes online → ends up with all 10 (via #1,
-      and again via the peer with #1 offline; dedup makes double-delivery harmless).
+**Scope (Vitalik-locked):** DMs only (servers/MLS = Step 6); trigger on every sibling-detect + reconnect,
+incremental via per-conversation since-timestamps. Reuses the friend `DmSyncRequest`/`DmSyncBatch` pattern.
+
+- [x] **New storage methods** (`storage/messages.rs`): `get_dm_messages_for_sibling(convo, since, limit)`
+      (returns BOTH directions — friend path's `get_dm_messages_since` is `is_mine=1`-only; a sibling needs
+      the friend's half too, carries `is_mine` through for render side) + `get_latest_dm_timestamp_any(convo)`
+      (MAX timestamp, NO `is_mine` filter — so the requester's high-water mark spans both directions and we
+      don't re-pull our own known sends).
+- [x] **New wire types** (`node/types.rs`, all `#[serde(default)]`): `HavenMessage::DmSiblingSyncRequest
+      { per_convo_since: Vec<(friend_master, latest_ts)> }` + `MessageEnvelope::DmSiblingSyncBatch
+      { convo, messages: Vec<DmSyncItem>, has_more }`. Dedicated batch (not a flag on `DmSyncBatch`) keeps the
+      hot friend path untouched + isolates the sibling sig-verify branch. Added `DmSiblingSyncBatch` to the
+      "DM-only envelopes never arrive via MLS" exhaustive guard.
+- [x] **Helper factored** (`swarm.rs` `build_dm_sync_items`): the `DmSyncItem` packing (reactions + file-meta
+      batch joins) extracted from the friend `DmSyncRequest` handler, reused by both responders.
+- [x] **Responder** (`swarm.rs` `DmSiblingSyncRequest`): `same_identity(peer_str, local)` guard (a FRIEND must
+      never pull our whole DB), enumerate `get_dm_peer_ids()`, serve one `DmSiblingSyncBatch` per convo from
+      the requester's per-convo high-water (omitted convo → from 0) via `send_encrypted_message` (Olm).
+- [x] **Requester** (`swarm.rs` `DmSiblingSyncBatch`): file under `convo` (the FRIEND master — NOT
+      `resolve(sender)`, which is our own master since the sender is our sibling); preserve `is_mine`
+      direction; verify the ORIGINAL sig context per direction (`mine=true` → sender=our master/recipient=convo;
+      `mine=false` → swapped — sigs never involve device ids, so the original sig validates intact); apply
+      edits/deletes/reactions/file-meta keyed on convo; emit `MessageReceived { is_own: msg.mine }` (reuses the
+      Step 3 `is_own` field) for fresh inserts + `DmMessageEdited/Deleted/FileHeaderReceived`; paginate by
+      re-requesting that one convo. NO FFI/codegen (internal variants + existing events).
+- [x] **Trigger fires from BOTH sibling-detection paths** (the bug that made it silently never run): (1) the
+      `swarm.rs` inbox-proof block (`room == inbox:{master}`) AND (2) `crypto_handler::ingest_sibling_device_list`
+      (fired by a ProfileUpdate carrying a device list). A sibling can be detected via EITHER; the first build
+      only had the trigger in (1), so a session that detected via (2) logged `Sharing N friends with sibling`
+      (from crypto_handler) but NEVER the DM-backfill request → looked like the log line "wasn't emitting."
+      Root cause was code reachability, NOT the `hollow_log!` macro. Both paths now send `DmSiblingSyncRequest`
+      with our per-convo high-water marks. Redundant double-fire is idempotent (message_id dedup).
+- [x] **Two UI/UX fixes found in the first live test:**
+      (1) **PUSH on sibling self-echo** (`message_ops::send_dm_to_device` gained `is_sibling: bool`): the DM
+      fan-out mirrors every send to our own siblings; when a sibling was offline the offline branch did the
+      "encrypt to DM room (push trigger)" room-send → relay fired an FCM push → the sibling phone buzzed for OUR
+      OWN outgoing message. Now an offline SIBLING target only QUEUES silently (delivered on reconnect + Step 5
+      backfill); only genuine recipient devices trigger pushes.
+      (2) **Out-of-order render** (`chat_provider`/`channel_chat_provider` `_addMessage`): was a plain append; a
+      backfilled message replaying an OLDER timestamp landed at the END of the in-memory list → wrong position.
+      `_addMessage` now keeps the list timestamp-ordered (O(1) append for the newest-message common case;
+      walk-back insert only for out-of-order arrivals).
+- [x] **TEST: ✅ LIVE-VERIFIED 2026-06-17 (Vitalik, Pixel↔VM↔AL).** Backfill "literally almost instant."
+      Logs show both detection paths firing, bidirectional serve, `0 new messages` on the dedup re-pull (correct),
+      siblings converge. Step 5 DONE.
+
+**KNOWN LIMITATION (deferred to Step 6, Vitalik-decided NOT to fix now):** when the phone is FULLY QUIT, the
+Tier 2 background-fetch push falls back to the generic "AL sent you a message" banner instead of the decrypted
+text. Cause: the relay-buffered ciphertext was sealed to a specific device's Olm ratchet; the background fetch
+isolate (subdevice / rotated device id) can't line up that ratchet, so decrypt fails → generic banner. The
+message itself is NOT lost (live delivery + Step 5 backfill bring it in full on app open) — only the rich push
+PREVIEW degrades. Push is the most fragile cross-cutting subsystem (FCM/APNs/NSE/App-Group/ratchet-slot rules)
+and single-device push works; patching the DM-fetch half now risks regressing the common case, and Step 6 (MLS)
+reshapes the fetch isolate's group-state handling anyway. Fix multi-device push holistically WITH Step 6.
 
 ### Step 6 — MLS per-device leaves  ▢ not started  ⚠ hardest slice
 *Goal: server messages reach all your devices. Do this LAST of the functional steps — servers limp along

@@ -1801,6 +1801,39 @@ async fn run_event_loop(
                                             &peer_id, HavenMessage::FriendListRequest,
                                         );
 
+                                        // Multi-device backfill (Step 5): ask the sibling for the
+                                        // FULL DM history across all conversations, both directions,
+                                        // since our per-conversation high-water mark. Closes the
+                                        // offline gap that live fan-out (Step 3) and the one-time
+                                        // link snapshot (Step 4) can't. Incremental + idempotent
+                                        // (message_id dedup), so it's cheap on every reconnect and a
+                                        // no-op when already in sync. A fresh device sends an empty
+                                        // list → the sibling serves everything from 0.
+                                        {
+                                            let per_convo_since: Vec<(String, i64)> =
+                                                match crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                                    Ok(store) => store.get_dm_peer_ids()
+                                                        .into_iter()
+                                                        .map(|c| {
+                                                            let ts = store
+                                                                .get_latest_dm_timestamp_any(&c)
+                                                                .unwrap_or(None)
+                                                                .unwrap_or(0);
+                                                            (c, ts)
+                                                        })
+                                                        .collect(),
+                                                    Err(_) => Vec::new(),
+                                                };
+                                            hollow_log!(
+                                                "[HOLLOW-SYNC] Requesting sibling DM backfill from {peer_id} ({} known convo(s))",
+                                                per_convo_since.len()
+                                            );
+                                            send_message_to_peer(
+                                                &ws_cmd_tx, &ws_room_peers,
+                                                &peer_id, HavenMessage::DmSiblingSyncRequest { per_convo_since },
+                                            );
+                                        }
+
                                         // Multi-device link (Step 4): if WE are essentially empty
                                         // (a fresh mnemonic import) and a populated sibling is now
                                         // online, AUTO-REQUEST a full snapshot from it. The sibling
@@ -3637,6 +3670,59 @@ fn dm_event_convo(
     super::resolver::resolve(sender_peer)
 }
 
+/// Pack a slice of stored DM messages into wire `DmSyncItem`s, joining in each
+/// message's reactions and file metadata in two batch queries. Shared by the
+/// friend `DmSyncRequest` responder and the multi-device sibling backfill
+/// responder so the (reactions + file-meta) join logic lives in one place.
+fn build_dm_sync_items(
+    store: &crate::storage::MessageStore,
+    messages: &[crate::storage::messages::StoredMessage],
+) -> Vec<DmSyncItem> {
+    let msg_ids: Vec<String> = messages.iter().filter_map(|m| m.message_id.clone()).collect();
+    let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
+    let file_ids: Vec<&str> = messages.iter().filter_map(|m| m.file_id.as_deref()).collect();
+    let file_meta_map = store.get_file_metadata_batch(&file_ids).unwrap_or_default();
+
+    messages.iter().map(|m| {
+        let reactions = m.message_id.as_ref()
+            .and_then(|mid| reactions_map.get(mid))
+            .map(|rs| rs.iter().map(|(e, p, ts, sig, pk)| SyncReactionItem {
+                e: e.clone(), p: p.clone(), ts: *ts, sig: sig.clone(), pk: pk.clone(),
+            }).collect())
+            .unwrap_or_default();
+        let file_meta = m.file_id.as_ref().and_then(|fid| {
+            file_meta_map.get(fid.as_str()).map(|f| SyncFileMetaItem {
+                fid: f.file_id.clone(),
+                name: f.file_name.clone(),
+                ext: f.file_ext.clone(),
+                mime: f.mime_type.clone(),
+                size: f.size_bytes,
+                img: f.is_image,
+                w: f.width,
+                h: f.height,
+                mid: f.message_id.clone(),
+                ts: f.created_at,
+                sender: f.sender_id.clone(),
+                vthumb: f.video_thumb.clone(),
+            })
+        });
+        DmSyncItem {
+            t: m.text.clone(),
+            ts: m.timestamp,
+            mine: m.is_mine,
+            sig: m.signature.clone(),
+            pk: m.public_key.clone(),
+            mid: m.message_id.clone(),
+            edited_at: m.edited_at,
+            reply_to: m.reply_to_mid.clone(),
+            file_id: m.file_id.clone(),
+            file_meta,
+            hidden_at: m.hidden_at,
+            reactions,
+        }
+    }).collect()
+}
+
 /// Handle an incoming request from a peer.
 async fn handle_incoming_request(
     olm: &mut OlmManager,
@@ -4474,6 +4560,194 @@ async fn handle_incoming_request(
                     // Dart may have cleared its in-memory cache on disconnect;
                     // this tells it to reload from DB regardless.
                     // Only emit completion when there are no more pages.
+                    if has_more != Some(true) {
+                        let _ = event_tx.send(NetworkEvent::DmSyncCompleted {
+                            peer_id: convo_peer.clone(),
+                            new_message_count: new_count,
+                        }).await;
+                    }
+                }
+                Ok(MessageEnvelope::DmSiblingSyncBatch { convo, messages, has_more }) => {
+                    // Multi-device (Phase 6 / Step 5): a sibling backfilled one of our
+                    // conversations. Honor ONLY from our own other device.
+                    if !super::resolver::same_identity(&peer_str, local_peer_str) {
+                        hollow_log!("[HOLLOW-SYNC] Dropped DmSiblingSyncBatch from non-self peer {peer_str}");
+                        return;
+                    }
+                    hollow_log!("[HOLLOW-SYNC] Received {} sibling DM(s) for convo {convo} from {peer_str} (has_more: {has_more:?})", messages.len());
+                    let local_peer = local_peer_str.to_string();
+                    // File these under the REAL conversation (the friend's master),
+                    // NOT resolve(peer_str) (which would be our own master, since the
+                    // sender is our sibling). Each item carries its own `mine` so both
+                    // directions land on the correct side.
+                    let convo_peer = convo.clone();
+                    let mut new_count = 0u32;
+
+                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        let _ = store.begin_transaction();
+                        let mut pk_cache: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+                        for msg in &messages {
+                            // Verify signature if present (skip edited — sig was over original).
+                            // The original sig context is the FRIEND conversation, not us:
+                            //   mine=true  → sender = our master, recipient = convo
+                            //   mine=false → sender = convo,      recipient = our master
+                            // The claimed signer (whose pubkey is checked) is the SENDER master.
+                            if msg.sig.is_some() && msg.edited_at.is_none() {
+                                let (sender_m, recipient_m): (&str, &str) = if msg.mine {
+                                    (&local_peer, &convo_peer)
+                                } else {
+                                    (&convo_peer, &local_peer)
+                                };
+                                let payload = message_signing_payload(
+                                    "dm", recipient_m, sender_m, msg.ts, &msg.t,
+                                );
+                                if !verify_message_signature_cached(sender_m, msg.sig.as_deref(), msg.pk.as_deref(), &payload, &mut pk_cache) {
+                                    hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for sibling DM (convo {convo_peer}, mine={}) ts={}", msg.mine, msg.ts);
+                                }
+                            }
+
+                            let already_exists = msg.mid.as_ref()
+                                .map(|mid| store.dm_message_exists(mid))
+                                .unwrap_or(false);
+
+                            // Reconcile against a row delivered via another path with a
+                            // NULL/different mid (same guard as the friend batch).
+                            let reconciled = if !already_exists {
+                                if let Some(mid) = msg.mid.as_deref() {
+                                    store.reconcile_dm_by_timestamp(
+                                        &convo_peer, mid, &msg.t, msg.ts, msg.edited_at,
+                                        msg.sig.as_deref(), msg.pk.as_deref(),
+                                    ).unwrap_or(false)
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            if reconciled {
+                                if let Some(mid) = &msg.mid {
+                                    let _ = event_tx.send(NetworkEvent::DmMessageEdited {
+                                        peer_id: convo_peer.clone(),
+                                        message_id: mid.clone(),
+                                        new_text: msg.t.clone(),
+                                        edited_at: msg.edited_at.unwrap_or(msg.ts),
+                                        signature: msg.sig.clone(),
+                                        public_key: msg.pk.clone(),
+                                    }).await;
+                                }
+                            }
+
+                            if !already_exists && !reconciled {
+                                match store.insert(
+                                    &convo_peer, &msg.t, msg.mine, msg.ts,
+                                    msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
+                                    msg.reply_to.as_deref(), msg.file_id.as_deref(),
+                                ) {
+                                    Ok(id) if id > 0 => {
+                                        new_count += 1;
+                                        if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
+                                            let _ = store.set_dm_message_edited_at(mid, edit_ts);
+                                        }
+                                        // Live UI update for the freshly-inserted message.
+                                        let _ = event_tx.send(NetworkEvent::MessageReceived {
+                                            from_peer: convo_peer.clone(),
+                                            text: msg.t.clone(),
+                                            timestamp: msg.ts,
+                                            message_id: msg.mid.clone().unwrap_or_default(),
+                                            reply_to_mid: msg.reply_to.clone().unwrap_or_default(),
+                                            link_preview: None,
+                                            signature: msg.sig.clone(),
+                                            public_key: msg.pk.clone(),
+                                            is_own: msg.mine,
+                                        }).await;
+                                    }
+                                    _ => {}
+                                }
+                            } else if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
+                                let edit_result = store.edit_dm_message(
+                                    mid, &msg.t, edit_ts,
+                                    msg.sig.as_deref(),
+                                    msg.pk.as_deref(),
+                                );
+                                if edit_result.unwrap_or(false) {
+                                    let _ = event_tx.send(NetworkEvent::DmMessageEdited {
+                                        peer_id: convo_peer.clone(),
+                                        message_id: mid.clone(),
+                                        new_text: msg.t.clone(),
+                                        edited_at: edit_ts,
+                                        signature: msg.sig.clone(),
+                                        public_key: msg.pk.clone(),
+                                    }).await;
+                                } else {
+                                    let _ = store.set_dm_message_edited_at(mid, edit_ts);
+                                }
+                            }
+
+                            // Apply deletion if hidden on the sibling.
+                            if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
+                                if store.set_dm_message_hidden(mid, hidden_ts).is_ok() {
+                                    let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
+                                        peer_id: convo_peer.clone(),
+                                        message_id: mid.clone(),
+                                        deleted_at: hidden_ts,
+                                    }).await;
+                                }
+                            }
+
+                            // File metadata (so the card renders; bytes fetch on demand).
+                            if let Some(ref fm) = msg.file_meta {
+                                let _ = store.insert_file_metadata(
+                                    &fm.fid, &fm.name, &fm.ext, &fm.mime,
+                                    fm.size, 0, fm.img, fm.w, fm.h,
+                                    fm.mid.as_deref(), "dm", &convo_peer,
+                                    &fm.sender, false, fm.ts,
+                                    fm.vthumb.as_ref(),
+                                );
+                                let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
+                                    file_id: fm.fid.clone(),
+                                    file_name: fm.name.clone(),
+                                    size_bytes: fm.size,
+                                    is_image: fm.img,
+                                    width: fm.w,
+                                    height: fm.h,
+                                    message_id: fm.mid.clone().unwrap_or_default(),
+                                    sender_id: fm.sender.clone(),
+                                    server_id: String::new(),
+                                    channel_id: convo_peer.clone(),
+                                    video_thumb: fm.vthumb.clone(),
+                                    share_ref: None,
+                                }).await;
+                            }
+
+                            // Reactions (INSERT OR IGNORE — idempotent).
+                            if let Some(mid) = &msg.mid {
+                                for r in &msg.reactions {
+                                    let _ = store.add_reaction(
+                                        mid, &r.e, &r.p, r.ts,
+                                        r.sig.as_deref(), r.pk.as_deref(),
+                                    );
+                                }
+                            }
+                        }
+                        let _ = store.commit_transaction();
+
+                        // Pagination: this convo has more — re-request it from the new high-water.
+                        if has_more == Some(true) {
+                            let since = store
+                                .get_latest_dm_timestamp_any(&convo_peer)
+                                .unwrap_or(None)
+                                .unwrap_or(0);
+                            hollow_log!("[HOLLOW-SYNC] Requesting next sibling DM page for {convo_peer} from {peer_str} since {since}");
+                            send_message_to_peer(
+                                ws_cmd_tx, ws_room_peers,
+                                &peer_str, HavenMessage::DmSiblingSyncRequest {
+                                    per_convo_since: vec![(convo_peer.clone(), since)],
+                                },
+                            );
+                        }
+                    }
+
+                    hollow_log!("[HOLLOW-SYNC] Sibling DM sync: {new_count} new messages for convo {convo_peer}");
                     if has_more != Some(true) {
                         let _ = event_tx.send(NetworkEvent::DmSyncCompleted {
                             peer_id: convo_peer.clone(),
@@ -6637,49 +6911,7 @@ async fn handle_incoming_request(
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 if let Ok(messages) = store.get_dm_messages_since(&peer_str, since_timestamp, 200) {
                         hollow_log!("[HOLLOW-SYNC] Sending {} DM sync messages to {peer_str}", messages.len());
-                        let msg_ids: Vec<String> = messages.iter().filter_map(|m| m.message_id.clone()).collect();
-                        let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
-                        let file_ids: Vec<&str> = messages.iter().filter_map(|m| m.file_id.as_deref()).collect();
-                        let file_meta_map = store.get_file_metadata_batch(&file_ids).unwrap_or_default();
-
-                        let items: Vec<DmSyncItem> = messages.iter().map(|m| {
-                            let reactions = m.message_id.as_ref()
-                                .and_then(|mid| reactions_map.get(mid))
-                                .map(|rs| rs.iter().map(|(e, p, ts, sig, pk)| SyncReactionItem {
-                                    e: e.clone(), p: p.clone(), ts: *ts, sig: sig.clone(), pk: pk.clone(),
-                                }).collect())
-                                .unwrap_or_default();
-                            let file_meta = m.file_id.as_ref().and_then(|fid| {
-                                file_meta_map.get(fid.as_str()).map(|f| SyncFileMetaItem {
-                                    fid: f.file_id.clone(),
-                                    name: f.file_name.clone(),
-                                    ext: f.file_ext.clone(),
-                                    mime: f.mime_type.clone(),
-                                    size: f.size_bytes,
-                                    img: f.is_image,
-                                    w: f.width,
-                                    h: f.height,
-                                    mid: f.message_id.clone(),
-                                    ts: f.created_at,
-                                    sender: f.sender_id.clone(),
-                                    vthumb: f.video_thumb.clone(),
-                                })
-                            });
-                            DmSyncItem {
-                                t: m.text.clone(),
-                                ts: m.timestamp,
-                                mine: m.is_mine,
-                                sig: m.signature.clone(),
-                                pk: m.public_key.clone(),
-                                mid: m.message_id.clone(),
-                                edited_at: m.edited_at,
-                                reply_to: m.reply_to_mid.clone(),
-                                file_id: m.file_id.clone(),
-                                file_meta,
-                                hidden_at: m.hidden_at,
-                                reactions,
-                            }
-                        }).collect();
+                        let items = build_dm_sync_items(&store, &messages);
 
                         if !items.is_empty() {
                             let has_more = if items.len() >= 200 {
@@ -6700,6 +6932,56 @@ async fn handle_incoming_request(
                             ).await;
                         }
                     }
+            }
+        }
+
+        HavenMessage::DmSiblingSyncRequest { per_convo_since } => {
+            // Multi-device (Phase 6 / Step 5): a sibling device asks for our FULL
+            // DM history across ALL conversations, both directions. Honor ONLY for
+            // our own other device — a friend must never pull our whole DB.
+            if !super::resolver::same_identity(peer_str, local_peer_str) {
+                hollow_log!(
+                    "[HOLLOW-SYNC] Dropped DmSiblingSyncRequest from non-self peer {peer_str}"
+                );
+                return;
+            }
+            let since_map: std::collections::HashMap<String, i64> =
+                per_convo_since.into_iter().collect();
+
+            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                let convos = store.get_dm_peer_ids();
+                hollow_log!(
+                    "[HOLLOW-SYNC] DmSiblingSyncRequest from sibling {peer_str} — serving {} conversation(s)",
+                    convos.len()
+                );
+                for convo in convos {
+                    let since = since_map.get(&convo).copied().unwrap_or(0);
+                    let messages = match store.get_dm_messages_for_sibling(&convo, since, 200) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            hollow_log!("[HOLLOW-SYNC] sibling sync read failed for {convo}: {e}");
+                            continue;
+                        }
+                    };
+                    if messages.is_empty() { continue; }
+                    let has_more = if messages.len() >= 200 { Some(true) } else { None };
+                    let items = build_dm_sync_items(&store, &messages);
+                    hollow_log!(
+                        "[HOLLOW-SYNC] Sending {} sibling DM(s) for convo {convo} to {peer_str} (has_more={has_more:?})",
+                        items.len()
+                    );
+                    let envelope = MessageEnvelope::DmSiblingSyncBatch {
+                        convo: convo.clone(),
+                        messages: items,
+                        has_more,
+                    };
+                    let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
+                    send_encrypted_message(
+                        olm, crypto_store,
+                        peer_str, &envelope_json, event_tx,
+                        ws_cmd_tx, ws_room_peers,
+                    ).await;
+                }
             }
         }
 
@@ -7141,6 +7423,7 @@ async fn handle_incoming_request(
                             // DM-only envelopes should never arrive via MLS.
                             MessageEnvelope::DirectMessage { .. }
                             | MessageEnvelope::DmSyncBatch { .. }
+                            | MessageEnvelope::DmSiblingSyncBatch { .. }
                             | MessageEnvelope::SessionAck => {
                                 hollow_log!("[HOLLOW-MLS] Unexpected DM envelope via MLS from {sender_peer_id} — ignoring");
                             }

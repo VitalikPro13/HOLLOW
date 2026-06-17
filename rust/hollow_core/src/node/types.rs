@@ -738,6 +738,18 @@ pub(crate) enum HavenMessage {
         since_timestamp: i64,
     },
 
+    /// Multi-device sibling DM backfill (Phase 6 / Step 5): a sibling device asks
+    /// for the FULL DM history across ALL conversations, both directions. Only
+    /// honored from a `same_identity` sender (a friend must never pull our DB).
+    /// `per_convo_since` carries the requester's per-conversation high-water mark
+    /// `(friend_master, latest_ts)`; conversations the requester omits are served
+    /// from `0`. The responder replies with one `DmSiblingSyncBatch` per convo.
+    #[serde(rename = "dm_sib_sync_req")]
+    DmSiblingSyncRequest {
+        #[serde(default)]
+        per_convo_since: Vec<(String, i64)>,
+    },
+
     /// Sent to all connected peers when the app is shutting down.
     #[serde(rename = "disconnecting")]
     PeerDisconnecting,
@@ -1571,6 +1583,20 @@ pub(crate) enum MessageEnvelope {
     DmSyncBatch {
         messages: Vec<DmSyncItem>,
         /// If true, more DMs are available — receiver should send a follow-up request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        has_more: Option<bool>,
+    },
+    /// Multi-device sibling DM backfill batch (Phase 6 / Step 5): one
+    /// conversation's missed DMs, BOTH directions (each item carries `mine`).
+    /// `convo` is the OTHER party's master id — the receiving sibling files these
+    /// under that thread (NOT under the sender, who is its own other device).
+    /// Only honored from a `same_identity` sender.
+    #[serde(rename = "dm_sib_sync")]
+    DmSiblingSyncBatch {
+        /// The conversation peer (the friend's master id).
+        convo: String,
+        messages: Vec<DmSyncItem>,
+        /// If true, this convo has more messages — re-request it from `convo`'s high-water mark.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         has_more: Option<bool>,
     },
