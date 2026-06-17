@@ -45,9 +45,11 @@ Signal type mapping:
 - `"answer"` -> `HavenMessage::RtcAnswer { sdp: payload, conn_id }`
 - `"ice"` -> `HavenMessage::RtcIceCandidate { candidate, sdp_mid, sdp_mline_index, conn_id }` (parsed from JSON payload)
 
-The `conn_id` field disambiguates multiple simultaneous WebRTC connections to the same peer (e.g., file transfer vs shard transfer). All signals are sent via `send_message_to_peer()` (plaintext HavenMessage over WS relay).
+The `conn_id` field disambiguates multiple simultaneous WebRTC connections to the same peer (e.g., file transfer vs shard transfer).
 
-Incoming path: When a remote peer's RtcOffer/RtcAnswer/RtcIceCandidate arrives, `swarm.rs:handle_incoming_request()` processes them directly (not delegated to voice_handler). It validates SDP size against `MAX_SDP_SIZE` (64 KB) and emits `NetworkEvent::WebRtcSignal { peer_id, signal_type, payload, conn_id }` to Dart.
+**Multi-device:** the signal is sent to `pick_online_device(ws_room_peers, peer_id)`, NOT the raw `peer_id`. `peer_id` may be the conversation MASTER (the UI key), which no socket authenticates as → a direct send is dropped and the data channel (used for P2P file transfer) never forms. `pick_online_device` resolves the master to ONE concrete online device (deterministic lowest id) — NOT a fan-out (a duplicate offer/answer to several devices creates competing peer connections / glare for one `conn_id`). **CRITICAL:** if `peer_id` is ALREADY a live device id (exact match in a room), it's returned UNCHANGED — so an ANSWER/ICE flows back to the EXACT device that sent the offer; the master→device pick only applies to an outbound offer where Dart only knows the master.
+
+Incoming path: When a remote peer's RtcOffer/RtcAnswer/RtcIceCandidate arrives, `swarm.rs:handle_incoming_request()` processes them directly (not delegated to voice_handler). It validates SDP size against `MAX_SDP_SIZE` (64 KB) and emits `NetworkEvent::WebRtcSignal { peer_id, signal_type, payload, conn_id }` to Dart (the sender's DEVICE id).
 
 ---
 
@@ -55,7 +57,9 @@ Incoming path: When a remote peer's RtcOffer/RtcAnswer/RtcIceCandidate arrives, 
 
 `voice_handler.rs:handle_call_send_signal(peer_id, signal_type, payload, ws_cmd_tx, ws_room_peers)`
 
-Outbound handler for 1:1 DM call signaling. Called from swarm.rs when Dart issues `NodeCommand::CallSendSignal`. Supports 14 signal types covering the full call lifecycle plus screen sharing:
+Outbound handler for 1:1 DM call signaling. Called from swarm.rs when Dart issues `NodeCommand::CallSendSignal`. Supports 14 signal types covering the full call lifecycle plus screen sharing.
+
+**Multi-device:** like WebRTC signaling above, the final send targets `pick_online_device(ws_room_peers, peer_id)` (the friend's master → ONE online device), not the bare master — else invite/accept/sdp/ice/state are silently dropped and the call never rings/connects. Already-live-device ids pass through unchanged (answer/ICE returns to the exact peer). **Incoming attribution is collapsed device→master on the Dart side:** `event_provider`'s `NetworkEvent_CallSignal` handler resolves the caller's device id via `deviceLinkProvider.identityOf` BEFORE `handleCallSignal`, so all `call.peerId == widget.peerId` checks match the DM master key (without it, a call from a multi-device friend showed under the raw device id = a "different DM", and the screen-share control gated OFF because `isCallWithThisPeer` was false). See memory `feedback_multidevice_targeting_sweep`. Signal types:
 
 ### Call lifecycle signals
 - `"invite"` -> `HavenMessage::CallInvite { call_id, video, sframe_key }` — initiates a call. `video` indicates if video was requested. `sframe_key` is the caller's SFrame encryption key (base64 string).

@@ -1805,34 +1805,15 @@ async fn run_event_loop(
                                         // FULL DM history across all conversations, both directions,
                                         // since our per-conversation high-water mark. Closes the
                                         // offline gap that live fan-out (Step 3) and the one-time
-                                        // link snapshot (Step 4) can't. Incremental + idempotent
-                                        // (message_id dedup), so it's cheap on every reconnect and a
-                                        // no-op when already in sync. A fresh device sends an empty
-                                        // list → the sibling serves everything from 0.
-                                        {
-                                            let per_convo_since: Vec<(String, i64)> =
-                                                match crate::storage::MessageStore::open(&db_path, &db_passphrase) {
-                                                    Ok(store) => store.get_dm_peer_ids()
-                                                        .into_iter()
-                                                        .map(|c| {
-                                                            let ts = store
-                                                                .get_latest_dm_timestamp_any(&c)
-                                                                .unwrap_or(None)
-                                                                .unwrap_or(0);
-                                                            (c, ts)
-                                                        })
-                                                        .collect(),
-                                                    Err(_) => Vec::new(),
-                                                };
-                                            hollow_log!(
-                                                "[HOLLOW-SYNC] Requesting sibling DM backfill from {peer_id} ({} known convo(s))",
-                                                per_convo_since.len()
-                                            );
-                                            send_message_to_peer(
-                                                &ws_cmd_tx, &ws_room_peers,
-                                                &peer_id, HavenMessage::DmSiblingSyncRequest { per_convo_since },
-                                            );
-                                        }
+                                        // link snapshot (Step 4) can't. Throttled per-sibling
+                                        // (Step 5.1) so this path + the device-list-ingest path +
+                                        // reconnect re-fires collapse into one request; incremental
+                                        // + idempotent (message_id dedup) so a skipped redundant
+                                        // request loses nothing.
+                                        super::crypto_handler::request_sibling_dm_backfill(
+                                            &ws_cmd_tx, &ws_room_peers, &peer_id,
+                                            &db_path, &db_passphrase,
+                                        );
 
                                         // Multi-device link (Step 4): if WE are essentially empty
                                         // (a fresh mnemonic import) and a populated sibling is now
@@ -1987,11 +1968,15 @@ async fn run_event_loop(
                                         }
                                     }
 
-                                    // DM sync.
+                                    // DM sync. High-water keyed by the friend's MASTER
+                                    // (the conversation key), not the raw device id the
+                                    // relay reported — else a multi-device friend's
+                                    // timestamp lookup misses and we mis-page the sync.
                                     {
                                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                            let convo = super::resolver::resolve(&peer_id);
                                             let since = store
-                                                .get_latest_dm_timestamp(&peer_id)
+                                                .get_latest_dm_timestamp(&convo)
                                                 .unwrap_or(None)
                                                 .unwrap_or(0);
                                             send_message_to_peer(
@@ -2388,10 +2373,13 @@ async fn run_event_loop(
                                     }
 
                                     // DM sync: ask this peer for messages we missed.
+                                    // High-water keyed by the peer's MASTER (conversation
+                                    // key), not the raw device id (multi-device).
                                     {
                                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                            let convo = super::resolver::resolve(pid_str);
                                             let since = store
-                                                .get_latest_dm_timestamp(pid_str)
+                                                .get_latest_dm_timestamp(&convo)
                                                 .unwrap_or(None)
                                                 .unwrap_or(0);
                                             send_message_to_peer(
@@ -4330,15 +4318,26 @@ async fn handle_incoming_request(
                         _ => super::resolver::resolve(&peer_str),
                     };
 
-                    // Verify DM signature if present. Context = OUR master identity
-                    // (the recipient the sender signed over); the signature is made by
-                    // the sender's MASTER key (verify resolves the claimed signer).
+                    // Verify DM signature if present. The signed payload's context is
+                    // the RECIPIENT master and the signer is the SENDER master:
+                    //   - Normal incoming DM (from a friend): recipient = OUR master,
+                    //     signer = the friend (`convo_peer`).
+                    //   - Self fan-out echo (`is_own_device`, our OWN sibling mirroring
+                    //     a message WE sent): WE were the signer and the FRIEND
+                    //     (`convo_peer`) was the recipient — so context/signer are
+                    //     SWAPPED. Verifying with the friend as signer (as for a normal
+                    //     DM) made every self-echo log a (cosmetic) sig FAIL.
                     if sig.is_some() {
+                        let (recipient_m, signer_m): (&str, &str) = if is_own_device {
+                            (&convo_peer, master_peer_str)
+                        } else {
+                            (master_peer_str, &convo_peer)
+                        };
                         let payload = message_signing_payload(
-                            "dm", master_peer_str, &convo_peer, ts, &msg_text,
+                            "dm", recipient_m, signer_m, ts, &msg_text,
                         );
-                        if !verify_message_signature(&convo_peer, sig.as_deref(), pk.as_deref(), &payload) {
-                            hollow_log!("[HOLLOW-CRYPTO] Signature verification FAILED for DM from {peer_str} (master {convo_peer})");
+                        if !verify_message_signature(signer_m, sig.as_deref(), pk.as_deref(), &payload) {
+                            hollow_log!("[HOLLOW-CRYPTO] Signature verification FAILED for DM from {peer_str} (signer {signer_m})");
                         }
                     }
 
@@ -4405,12 +4404,20 @@ async fn handle_incoming_request(
                             // Verify signature if present.
                             // Skip edited messages — sig was against original text.
                             if msg.sig.is_some() && msg.edited_at.is_none() {
-                                // Sender=them, recipient=us
+                                // Sender=them, recipient=us. CRITICAL (multi-device):
+                                // the signer is the sender's MASTER (`convo_peer`), NOT
+                                // the raw device id `peer_str` the relay reported — the
+                                // message was signed with the master key over
+                                // `dm:{my_master}:{their_master}:…`. Verifying against
+                                // the device id failed EVERY signature for a
+                                // multi-device friend (the "Sig verify FAILED for DM
+                                // sync msg" flood) — the same device-vs-master bug the
+                                // live DM path already resolves via `convo_peer`.
                                 let payload = message_signing_payload(
-                                    "dm", &local_peer, &peer_str, msg.ts, &msg.t,
+                                    "dm", &local_peer, &convo_peer, msg.ts, &msg.t,
                                 );
-                                if !verify_message_signature_cached(&peer_str, msg.sig.as_deref(), msg.pk.as_deref(), &payload, &mut pk_cache) {
-                                    hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for DM sync msg from {peer_str} ts={} text_len={} has_pk={}", msg.ts, msg.t.len(), msg.pk.is_some());
+                                if !verify_message_signature_cached(&convo_peer, msg.sig.as_deref(), msg.pk.as_deref(), &payload, &mut pk_cache) {
+                                    hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for DM sync msg from {peer_str} (master {convo_peer}) ts={} text_len={} has_pk={}", msg.ts, msg.t.len(), msg.pk.is_some());
                                 }
                             }
 
@@ -4503,11 +4510,14 @@ async fn handle_incoming_request(
                             }
 
                             // Insert file metadata and emit FileHeaderReceived for late joiners.
+                            // DM file context = the conversation MASTER (`convo_peer`),
+                            // NOT the raw device id, so it matches where the message row
+                            // is stored and `_reloadChatForFile` reloads the right thread.
                             if let Some(ref fm) = msg.file_meta {
                                 let _ = store.insert_file_metadata(
                                     &fm.fid, &fm.name, &fm.ext, &fm.mime,
                                     fm.size, 0, fm.img, fm.w, fm.h,
-                                    fm.mid.as_deref(), "dm", &peer_str,
+                                    fm.mid.as_deref(), "dm", &convo_peer,
                                     &fm.sender, false, fm.ts,
                                     fm.vthumb.as_ref(),
                                 );
@@ -4521,7 +4531,7 @@ async fn handle_incoming_request(
                                     message_id: fm.mid.clone().unwrap_or_default(),
                                     sender_id: fm.sender.clone(),
                                     server_id: String::new(),
-                                    channel_id: peer_str.to_string(),
+                                    channel_id: convo_peer.clone(),
                                     video_thumb: fm.vthumb.clone(),
                                     share_ref: None,
                                 }).await;
@@ -4648,18 +4658,19 @@ async fn handle_incoming_request(
                                         if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
                                             let _ = store.set_dm_message_edited_at(mid, edit_ts);
                                         }
-                                        // Live UI update for the freshly-inserted message.
-                                        let _ = event_tx.send(NetworkEvent::MessageReceived {
-                                            from_peer: convo_peer.clone(),
-                                            text: msg.t.clone(),
-                                            timestamp: msg.ts,
-                                            message_id: msg.mid.clone().unwrap_or_default(),
-                                            reply_to_mid: msg.reply_to.clone().unwrap_or_default(),
-                                            link_preview: None,
-                                            signature: msg.sig.clone(),
-                                            public_key: msg.pk.clone(),
-                                            is_own: msg.mine,
-                                        }).await;
+                                        // NOTE: deliberately do NOT emit a per-message
+                                        // MessageReceived here. That event drives the
+                                        // unread counter (`onDmMessage` INCREMENTS), so
+                                        // replaying a whole conversation's history as
+                                        // live MessageReceived events inflated the unread
+                                        // pill with already-seen messages (Home "Recent"
+                                        // + friends-bar pill regression). Instead the
+                                        // batch's terminal `DmSyncCompleted` triggers
+                                        // Dart `loadHistory` (shows the messages, sorted)
+                                        // + `recomputeDmUnread` (counts from the DB
+                                        // against the seen-pointer — idempotent, no
+                                        // over-count). This mirrors the friend
+                                        // `DmSyncBatch` path exactly.
                                     }
                                     _ => {}
                                 }
@@ -4992,9 +5003,17 @@ async fn handle_incoming_request(
                     }
 
                     let ctx_type = if sid.is_some() { "channel" } else { "dm" };
+                    // Multi-device: a DM file's conversation key MUST be the sender's
+                    // MASTER id (where the DM message row itself is stored), NOT the
+                    // raw sender DEVICE id. Otherwise the file metadata is filed under
+                    // the device id while the message is under the master, so
+                    // `_reloadChatForFile` (Dart) reloads the wrong/empty conversation
+                    // and the message renders its `[file:<id>]` placeholder until a
+                    // manual tab-switch reloads the right thread. No-op single-device.
+                    let dm_convo = super::resolver::resolve(&peer_str);
                     let ctx_id = match (&sid, &cid) {
                         (Some(s), Some(c)) => format!("{s}:{c}"),
-                        _ => peer_str.to_string(),
+                        _ => dm_convo.clone(),
                     };
 
                     // Save file metadata to DB.
@@ -5011,11 +5030,25 @@ async fn handle_incoming_request(
 
                     let mid_str = mid.unwrap_or_default();
                     let sid_str = sid.unwrap_or_default();
-                    let cid_str = cid.unwrap_or_else(|| peer_str.to_string());
+                    // For a DM, the FileHeaderReceived `channel_id` carries the
+                    // conversation key the Dart side reloads — use the MASTER (same as
+                    // ctx_id above), not the raw device id.
+                    let cid_str = cid.unwrap_or_else(|| dm_convo.clone());
 
                     // If aes_key is present and no share_ref, this is a streamed transfer — register for stream receive.
                     // Share-backed files skip this — Share handles delivery, no P2P binary data.
                     if share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
+                        // Preserve the retry counter across a re-registration. A DM
+                        // file is fanned out to several of the recipient's devices, so
+                        // the SAME file can produce MULTIPLE FileHeaders here — and the
+                        // decrypt-fail auto-retry also re-requests (which re-sends a
+                        // FileHeader). Resetting retry_count to 0 on every header made
+                        // the bounded "3 retries then give up" never fire → an infinite
+                        // FileHeader/stream/decrypt-fail loop (4.5k log lines, "stuck
+                        // loading forever"). Carry the existing count forward instead.
+                        let carried_retry = pending_file_streams.get(&fid)
+                            .map(|p| p.retry_count)
+                            .unwrap_or(0);
                         pending_file_streams.insert(fid.clone(), PendingFileStream {
                             aes_key: ak,
                             aes_nonce: an,
@@ -5028,7 +5061,7 @@ async fn handle_incoming_request(
                             is_image: img,
                             width: w,
                             height: h,
-                            retry_count: 0,
+                            retry_count: carried_retry,
                         });
                         hollow_log!("[HOLLOW-FILE] Registered pending stream for {fid} (streamed transfer)");
 
@@ -6906,11 +6939,21 @@ async fn handle_incoming_request(
 
         HavenMessage::DmSyncRequest { since_timestamp } => {
             hollow_log!("[HOLLOW-SYNC] DmSyncRequest from {peer_str} since {since_timestamp}");
-            
+
+            // Multi-device: the requester sends its DEVICE id, but our DM rows for
+            // that person are keyed by their MASTER id (the conversation key). A
+            // multi-device requester (e.g. a friend's 2nd device) therefore matched
+            // ZERO rows under the raw device id → we replied "Sending 0" and the
+            // catch-up sync silently delivered nothing (text limped through on live
+            // fan-out; a file whose live WebRTC stream failed was then lost entirely
+            // — no placeholder, no metadata). Resolve to the master for the lookup;
+            // the transport send still targets the raw device `peer_str`. No-op
+            // single-device (resolve returns the id unchanged).
+            let convo_peer = super::resolver::resolve(&peer_str);
 
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                if let Ok(messages) = store.get_dm_messages_since(&peer_str, since_timestamp, 200) {
-                        hollow_log!("[HOLLOW-SYNC] Sending {} DM sync messages to {peer_str}", messages.len());
+                if let Ok(messages) = store.get_dm_messages_since(&convo_peer, since_timestamp, 200) {
+                        hollow_log!("[HOLLOW-SYNC] Sending {} DM sync messages to {peer_str} (convo {convo_peer})", messages.len());
                         let items = build_dm_sync_items(&store, &messages);
 
                         if !items.is_empty() {
@@ -8428,7 +8471,20 @@ async fn handle_incoming_request(
                             if let Ok(file_data) = std::fs::read(disk_path) {
                                 // AES-encrypt and stream the file.
                                 if let Ok(enc) = crate::vault::pipeline::aes_encrypt(&file_data) {
-                                    let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}.tmp"));
+                                    // UNIQUE temp file per encryption (suffix = this
+                                    // request's random AES nonce). A fixed
+                                    // `.stream_send_{file_id}.tmp` was CLOBBERED when the
+                                    // receiver re-requested rapidly (the decrypt-fail
+                                    // retry / thread-open retry): request B's
+                                    // re-encryption (new key) overwrote the temp while
+                                    // request A's stream was still reading it, so A
+                                    // streamed B's ciphertext under A's header key →
+                                    // AES-GCM decrypt failed every time, fixed only by an
+                                    // app restart (which serializes a single clean
+                                    // request). Per-nonce path lets concurrent requests
+                                    // each stream their own matching ciphertext.
+                                    let nonce_hex = hex::encode(enc.nonce);
+                                    let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}_{nonce_hex}.tmp"));
                                     if let Ok(()) = std::fs::write(&temp_path, &enc.ciphertext) {
                                         // Extract server/channel IDs from context.
                                         let (resp_sid, resp_cid) = if file_meta.context_type == "channel" {

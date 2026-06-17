@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
+import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
@@ -257,6 +258,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         ? msgs.last.messageId
         : null;
     ref.read(unreadProvider.notifier).markDmSeen(widget.peerId, latestId);
+    // Re-request any file whose bytes never arrived (live WebRTC transfer failed)
+    // from the friend or an online sibling that has them — so an image stuck as a
+    // metadata-only bubble fills in when you open the thread.
+    ref.read(eventStreamProvider.notifier)
+        .requestMissingDmFilesOnOpen(widget.peerId);
   }
 
   void _resetOverlayTimer() {

@@ -70,6 +70,8 @@ Receives: `peer_id` (Some for DM), `server_id`+`channel_id` (Some for channel), 
 
 `file_handler.rs:handle_request_file()` -- Handles `NodeCommand::RequestFile`. Sends a `HavenMessage::FileRequest` to a specific peer asking them to send file data. Used when a file_id is known from a message but the binary data wasn't received (offline sync scenario).
 
+**Multi-device (CRITICAL):** `peer_id_str` is the conversation MASTER (the UI/friend key), which no socket authenticates as — sending the FileRequest to it directly is silently dropped, so the bytes never arrive (`[file:<id>]` placeholder, Download does nothing). Resolves to **exactly ONE online device** via `crypto_handler::online_devices_for` (deterministic lowest id; if `peer_id_str` is already a live device id, used as-is). NOT a fan-out: a DM file is fanned out at send time to several devices, each holding a copy encrypted with its OWN random AES key — requesting from all → multiple streams → only one header's key kept → the rest fail AES-GCM decrypt and loop. Single-device falls back to the raw id unchanged.
+
 ---
 
 ## stream_to_peer()
@@ -354,22 +356,15 @@ On WebRTC failure, `handle_webrtc_transfer_failed()` retries via WSS (sender) or
 
 ---
 
-## Early Arrival Race Condition
+## Early Arrival Race Condition (and the decrypt-loop fix)
 
-WebRTC binary data can arrive before the FileHeader (MLS decryption is slower). `early_file_streams: HashMap<String, (PathBuf, u64, String)>` stores the temp path, size, and sender peer ID. When the FileHeader later arrives, both `handle_envelope_file_header()` and the swarm.rs DM handler check for early arrivals and immediately process them via `handle_completed_stream()`.
+WebRTC binary data can arrive before the FileHeader (the key travels via Olm/relay, slower than the P2P data channel). `early_file_streams: HashMap<String, (PathBuf, u64, String)>` stores the temp path, size, and sender peer ID. When the FileHeader later arrives, both `handle_envelope_file_header()` and the swarm.rs DM handler re-insert the `PendingFileStream` (with the header's key) THEN check for early arrivals and process them via `handle_completed_stream()`.
 
----
+**THE DECRYPT-LOOP ROOT CAUSE (fixed 2026-06-17).** The bytes routinely BEAT the header (logs show `FileHeader received` the line AFTER `decrypt failed`). When bytes arrived, `handle_completed_stream()` popped whatever `pending_file_streams[fid]` was present — a STALE entry from a PRIOR request (wrong key) — so AES-GCM failed while the bytes' OWN header was still in flight. The old failure path **deleted the bytes and immediately re-requested**, which made the sender re-encrypt with a NEW key and stream again → ANOTHER crossed header/stream pair → an endless `decrypt failed` loop (the "stuck loading 16.2/16.2 KB, 4,500 log lines, only works after restart" bug; a restart serializes one clean pair). See memory `feedback_file_decrypt_header_race`.
 
-## Decrypt-failure auto-retry (concurrent multi-file robustness)
+**Fix — hold-and-reconcile, don't drop-and-redo.** On decrypt failure, `handle_completed_stream()` now **PRESERVES the assembled ciphertext as an `early_file_streams[fid]` entry and does NOT immediately re-request.** The header that was already in flight lands a moment later and its early-arrival path reprocesses those exact bytes against the CORRECT key → success, no loop. A bounded safety re-request (`retry_count < FILE_DECRYPT_MAX_RETRIES`) covers a genuinely-lost (not just late) header. Supporting fixes: the FileHeader handler now **carries `retry_count` forward** across re-registration (was hardcoded `0`, so the bounded retry never fired → infinite loop); and `handle_request_file` requests from ONE device (see above), so streams don't arrive with mismatched per-device keys.
 
-Under concurrent multi-file transfer, a file's bytes could be handed to AES-GCM decrypt before the receiver's Dart `IOSink` durably flushed the tail to disk — producing a ciphertext short its trailing 16-byte GCM auth tag → `aead::Error`. Previously `handle_completed_stream()` (`StreamKind::File` arm) emitted `FileFailed` and deleted the temp with **no retry**, leaving a dead placeholder until the user pressed Download.
-
-Now the decrypt path is failure-tolerant and self-healing:
-- `PendingFileStream` carries a `retry_count: u32` field (in-memory, reset on each fresh FileHeader).
-- On any failure (read error, bad key length, GCM auth failure), if `retry_count < FILE_DECRYPT_MAX_RETRIES` (3) and `pfs.sender` is reachable, the handler **re-inserts the `PendingFileStream`** (incremented) and sends `HavenMessage::FileRequest { offset: 0 }` to re-fetch. Only after exhausting retries does it emit `FileFailed`.
-- `handle_completed_stream()` gained `ws_cmd_tx` + `ws_room_peers` params (threaded from all 4 callers) to issue the re-request.
-
-**Dart side (`webrtc_service.dart::_completeIncomingTransfer`):** the receiver no longer trusts the byte counter alone — after `sink.close()` it re-stats the on-disk file length vs `totalSize` (`_verifyFlushedSize`, short backoff). If short, it calls `webrtcTransferFailed` (which triggers the same FileRequest retry) instead of signaling completion with a truncated buffer. This is the root fix; the Rust auto-retry is the safety net.
+NOTE: file caps (34 MB default, 64 MB relay payload) are unrelated — files transfer P2P over WebRTC, not through the relay.
 
 NOTE: file caps (34 MB default, 64 MB relay payload) are unrelated — files transfer P2P over WebRTC, not through the relay.
 

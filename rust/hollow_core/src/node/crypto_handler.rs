@@ -1,10 +1,73 @@
 use std::collections::HashMap;
+use std::sync::{OnceLock, Mutex};
+use std::time::Instant;
 
 use base64::Engine;
 use tokio::sync::mpsc;
 
 use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 use super::types::*;
+
+/// Per-sibling cooldown for multi-device DM backfill requests (Step 5.1).
+/// Sibling detection fires from TWO independent paths (the swarm.rs inbox-proof
+/// AND `ingest_sibling_device_list`), and each re-fires on reconnect — so without
+/// a cooldown one sibling-appearance triggers 2-4 full `DmSiblingSyncRequest`s,
+/// each making the responder sweep EVERY conversation. This collapses the burst:
+/// at most one request per sibling per `SIBLING_BACKFILL_COOLDOWN`. The pull is
+/// still incremental (per-convo high-water) + idempotent, so a skipped redundant
+/// request loses nothing — the next genuine reconnect past the cooldown re-syncs.
+static SIBLING_BACKFILL_LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+const SIBLING_BACKFILL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Send a `DmSiblingSyncRequest` to a sibling device, throttled per-sibling so the
+/// two detection paths + reconnect re-fires collapse into one. Shared by BOTH
+/// trigger sites (swarm.rs inbox-proof + `ingest_sibling_device_list`) so the
+/// cooldown can't be bypassed. Reads our per-conversation high-water marks from
+/// the DB and asks the sibling for anything newer across all conversations.
+pub(crate) fn request_sibling_dm_backfill(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    sibling_peer_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    {
+        let map = SIBLING_BACKFILL_LAST.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut guard = match map.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(), // poison-safe
+        };
+        if let Some(last) = guard.get(sibling_peer_id) {
+            if last.elapsed() < SIBLING_BACKFILL_COOLDOWN {
+                return; // within cooldown — the recent request still covers us
+            }
+        }
+        guard.insert(sibling_peer_id.to_string(), Instant::now());
+    }
+
+    let per_convo_since: Vec<(String, i64)> =
+        match crate::storage::MessageStore::open(db_path, db_passphrase) {
+            Ok(store) => store.get_dm_peer_ids()
+                .into_iter()
+                .map(|c| {
+                    let ts = store
+                        .get_latest_dm_timestamp_any(&c)
+                        .unwrap_or(None)
+                        .unwrap_or(0);
+                    (c, ts)
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+    hollow_log!(
+        "[HOLLOW-SYNC] Requesting sibling DM backfill from {sibling_peer_id} ({} known convo(s))",
+        per_convo_since.len()
+    );
+    send_message_to_peer(
+        ws_cmd_tx, ws_room_peers,
+        sibling_peer_id, HavenMessage::DmSiblingSyncRequest { per_convo_since },
+    );
+}
 
 // -- Per-message Ed25519 signing helpers --
 
@@ -503,25 +566,10 @@ async fn ingest_sibling_device_list(
         // ProfileUpdate carrying a device list). A sibling may be detected via
         // EITHER, so the DM-backfill request must fire from BOTH or it silently
         // never runs (e.g. when the device list arrives before/without an inbox
-        // join). Incremental via per-conversation high-water marks + idempotent
-        // (message_id dedup), so a redundant request from both paths is harmless.
-        let per_convo_since: Vec<(String, i64)> = store.get_dm_peer_ids()
-            .into_iter()
-            .map(|c| {
-                let ts = store
-                    .get_latest_dm_timestamp_any(&c)
-                    .unwrap_or(None)
-                    .unwrap_or(0);
-                (c, ts)
-            })
-            .collect();
-        hollow_log!(
-            "[HOLLOW-SYNC] Requesting sibling DM backfill from {sender_peer_id} ({} known convo(s))",
-            per_convo_since.len()
-        );
-        send_message_to_peer(
-            ws_cmd_tx, ws_room_peers,
-            sender_peer_id, HavenMessage::DmSiblingSyncRequest { per_convo_since },
+        // join). `request_sibling_dm_backfill` throttles per-sibling so the two
+        // paths + reconnect re-fires collapse into one request (Step 5.1).
+        request_sibling_dm_backfill(
+            ws_cmd_tx, ws_room_peers, sender_peer_id, db_path, db_passphrase,
         );
     }
 
@@ -670,6 +718,39 @@ pub(crate) fn peer_is_reachable(
     ws_room_peers.values().any(|peers| {
         peers.iter().any(|p| super::resolver::resolve(p) == target_master)
     })
+}
+
+/// Multi-device: the set of LIVE device peer_ids (currently in some WS room) that
+/// belong to the same identity as `peer_str`. `peer_str` may be a master id (the
+/// friend-list/UI key — no socket authenticates as it) or a device id; either way
+/// this returns the concrete online devices to actually send to.
+///
+/// Used by every TARGETED P2P-signaling send that the UI addresses by master id
+/// (call signaling, WebRTC offer/answer/ICE, file requests). Without it those
+/// sends hit the bare master, which no socket authenticates as, and are silently
+/// dropped — the whole class of "calls/files don't reach a multi-device peer" bug.
+///
+/// Single-device parity: if `peer_str` is itself online (the exact id is in a
+/// room) it's returned as-is, so a pre-multi-device peer (device == master) is
+/// handled identically to before. If NOTHING is online for the identity the vec
+/// is empty and the caller can fall back to the raw id (offline send / queue).
+pub(crate) fn online_devices_for(
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    peer_str: &str,
+) -> Vec<String> {
+    let master = super::resolver::resolve(peer_str);
+    let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for peers in ws_room_peers.values() {
+        for p in peers {
+            // Match the exact id OR any device that resolves to the same master.
+            if p == peer_str || super::resolver::resolve(p) == master {
+                set.insert(p.clone());
+            }
+        }
+    }
+    // Never include the bare master (no socket authenticates as it).
+    set.remove(&master);
+    set.into_iter().collect()
 }
 
 /// Deterministic MLS coordinator: lowest peer_id among online MLS group members.

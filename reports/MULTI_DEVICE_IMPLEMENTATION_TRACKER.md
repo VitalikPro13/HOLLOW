@@ -719,6 +719,83 @@ PREVIEW degrades. Push is the most fragile cross-cutting subsystem (FCM/APNs/NSE
 and single-device push works; patching the DM-fetch half now risks regressing the common case, and Step 6 (MLS)
 reshapes the fetch isolate's group-state handling anyway. Fix multi-device push holistically WITH Step 6.
 
+### Step 5.1 / 5.2 — Multi-device targeting sweep (files, calls, sync sig)  ✅ LIVE-VERIFIED 2026-06-17
+*Follow-up to Step 5: the live tests surfaced that the DM message/file SEND path got multi-device fan-out in
+Step 3, but EVERY OTHER targeted-send path still addressed the bare MASTER id — which no socket authenticates
+as, so the send was silently dropped. The unifying lesson: **the relay reports DEVICE ids; the UI keys on the
+MASTER; an outbound targeted send must resolve master→device, and an inbound attribution must collapse
+device→master.** See [[feedback_multidevice_targeting_sweep]].*
+
+**Efficiency + completeness (Step 5.1):**
+- [x] **Trigger cooldown** (`crypto_handler::request_sibling_dm_backfill`, 15s per-sibling): the two
+      detection paths + reconnects fired the full-conversation `DmSiblingSyncRequest` 2-4× per detect. One
+      shared throttled helper (both sites call it) collapses the burst. Logs went from 4 requests → 1.
+- [x] **Exclusive-boundary serve** (`get_dm_messages_for_sibling`): `timestamp > since` (was `>=`) so the
+      high-water-mark message isn't re-sent every reconnect; `updated_at >= since` still catches edits.
+- [x] **Sibling-sourced file fetch** (`event_provider._onlineSiblingDevices` + `requestMissingDmFilesOnOpen`,
+      wired into desktop `chat_pane` + mobile `mobile_chat_route` thread-open): missing file bytes are
+      re-requested from the friend AND our own online sibling devices, so an image syncs even when the friend
+      is offline + retries when you OPEN the thread (not only after a message-bearing `DmSyncCompleted`).
+
+**The big file-transfer fix chain (all DM-file decrypt symptoms — "stuck loading 16.2/16.2KB forever",
+4.5k-line loop, "only works after restart"):**
+- [x] **File-request resolves master→ONE device** (`file_handler::handle_request_file` via
+      `crypto_handler::online_devices_for`): the FileRequest was sent to the bare master (`JJU9`) → dropped →
+      bytes never arrived. NOT a fan-out: a DM file is fanned out at send time to several devices, so requesting
+      from all → multiple streams each with a DIFFERENT random AES key → only one header's key kept → decrypt
+      fail loop. Request from exactly one online device.
+- [x] **Retry counter preserved across re-registered FileHeader** (`swarm.rs` FileHeader handler): was
+      hardcoded `retry_count: 0`, so a re-request's new header reset it → the bounded "3 retries then give up"
+      NEVER fired → infinite loop (always "attempt 1/3"). Carry the count forward.
+- [x] **THE ROOT CAUSE — header/stream ordering off-by-one** (`file_handler::handle_completed_stream`): the
+      encrypted bytes (fast WebRTC P2P) routinely BEAT the FileHeader (slower Olm/relay) — logs show
+      `FileHeader received` the line AFTER `decrypt failed`. The bytes got matched to a STALE pending stream
+      (prior request's key) while their OWN header was still in flight. The old code deleted the bytes +
+      immediately re-requested → spawned ANOTHER crossed header/stream pair → endless loop, "fixed" only by a
+      restart (serializes one clean pair). **Fix:** on decrypt failure, PRESERVE the bytes as an early-arrival
+      and DO NOT immediately re-request — the in-flight header lands a moment later and its early-arrival path
+      reprocesses those exact bytes against the CORRECT key. Bounded safety re-request covers a genuinely-lost
+      header. **Files now decrypt on first arrival, no restart.**
+- [x] **DM file context_id keyed by MASTER** (3 receive sites: live FileHeader, friend `DmSyncBatch`, sibling
+      backfill — `swarm.rs`): used the raw sender DEVICE id for the file's `context_id`/`channel_id` while the
+      MESSAGE row is under the master → `_reloadChatForFile` reloaded the wrong/empty thread → `[file:<id>]`
+      placeholder until a manual tab-switch. Resolve to master so file + message land under the same key.
+
+**Signature / attribution fixes (the device-vs-master class):**
+- [x] **DmSyncRequest device→master** (`swarm.rs` responder + both requester send sites): the friend sync
+      lookup keyed on the requester's raw DEVICE id, but DM rows are under the master → `Sending 0` for a
+      multi-device requester → the whole catch-up sync silently delivered nothing (text limped through on live
+      fan-out; a file whose live transfer failed was lost). Resolve to master.
+- [x] **DmSyncBatch sig-verify device→master** (`swarm.rs` receiver): verified signatures against the sender
+      DEVICE id, but the sig was made by the MASTER key → EVERY synced message from a multi-device friend
+      logged `Sig verify FAILED` (the flood Vitalik spotted). Verify against `convo_peer` (the master).
+- [x] **Self-echo DM sig-verify context** (`swarm.rs` live DirectMessage): a sibling echoing OUR OWN sent
+      message was verified with recipient=our-master/signer=friend, but we signed it recipient=friend/signer=us
+      → cosmetic FAIL on every self-echo. Swap context/signer when `is_own_device`.
+- [x] **Unread pill over-count** (`swarm.rs` sibling `DmSiblingSyncBatch`): removed the per-message
+      `MessageReceived` emit — that event drives `onDmMessage` which INCREMENTS unread, so replaying a
+      conversation's history inflated the Home "Recent" + friends-bar pills. The terminal `DmSyncCompleted` →
+      Dart `loadHistory` + `recomputeDmUnread` (counts from the DB against the seen-pointer, idempotent) shows
+      the messages AND computes unread correctly — mirrors the friend `DmSyncBatch` path.
+
+**Calls / WebRTC signaling (Step 5.2):**
+- [x] **Targeted call + WebRTC signaling resolve master→device** (`voice_handler::pick_online_device` for
+      `handle_call_send_signal` + `handle_webrtc_send_signal`): a call/data-channel signal addressed to the
+      friend's master was dropped → call never rang, data channel never formed. Pick ONE online device
+      (deterministic lowest id) — NOT a fan-out (would ring every device / glare on the `conn_id`). **CRITICAL:**
+      if `peer_id` is ALREADY a live device id, use it UNCHANGED — so an ANSWER/ICE flows back to the EXACT
+      device that sent the offer (the master→device pick only kicks in for the outbound invite).
+- [x] **Incoming call attribution device→master** (`event_provider` `NetworkEvent_CallSignal`): the receiver
+      keyed call state on the caller's DEVICE id, but every UI `call.peerId == widget.peerId` check compares
+      against the DM MASTER key → call showed under a "different DM" + the screen-share control gated OFF
+      (`isCallWithThisPeer` false). Resolve to master at the single event boundary → all downstream
+      comparisons (chat_pane ×3, mobile_chat_route, active_call_bar, pills) match. **The wrong-DM pill AND
+      screen-share-disabled were the SAME bug.**
+- [x] **TEST: ✅ ALL LIVE-VERIFIED 2026-06-17 (Vitalik, AL↔VM, both call directions).** Files transfer
+      instantly over the WebRTC data channel; calls ring + connect + show under the correct DM on both sides;
+      screen share enables on the receiver; no sig-verify flood; unread pills correct. The whole DM/file/call
+      multi-device surface works.
+
 ### Step 6 — MLS per-device leaves  ▢ not started  ⚠ hardest slice
 *Goal: server messages reach all your devices. Do this LAST of the functional steps — servers limp along
 without it (a second device just won't see server messages until done).*

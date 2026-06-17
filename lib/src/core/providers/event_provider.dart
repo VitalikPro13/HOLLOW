@@ -971,8 +971,18 @@ class EventStreamNotifier extends Notifier<bool> {
       // -- Voice call events (Phase 5B) --
       case NetworkEvent_CallSignal(
             :final peerId, :final signalType, :final payload):
+        // Multi-device: the relay reports the caller's DEVICE id, but the call UI
+        // (the floating pill, the DM the call belongs to) keys on the MASTER —
+        // same as every other per-person view. Without collapsing, a call from a
+        // multi-device friend showed under the raw device id (a "different DM"
+        // than the conversation you're in). Resolve to the master so all call
+        // state is master-consistent; replies go to the master and the Rust
+        // `pick_online_device` routes them back to the caller's online device.
+        // Single-device → identityOf returns the id unchanged (no-op).
+        final callMaster =
+            ref.read(deviceLinkProvider).identityOf(peerId);
         ref.read(callProvider.notifier).handleCallSignal(
-              peerId, signalType, payload);
+              callMaster, signalType, payload);
 
       // -- Voice channel events (Phase 5C) --
       case NetworkEvent_VoiceChannelJoined(
@@ -1446,6 +1456,38 @@ class EventStreamNotifier extends Notifier<bool> {
     }
   }
 
+  /// The peer_ids of OUR OWN other (sibling) devices that are currently online
+  /// (multi-device, Phase 6 / Step 5.1). A sibling is a valid P2P source for any
+  /// file we're missing — it holds the same `file_id` on its own disk. Used as a
+  /// fallback/parallel source for missing DM files so an image syncs even when the
+  /// conversation peer (friend) is offline. Empty on a single-device install
+  /// (no device resolves to our master but ourselves) → byte-for-byte old
+  /// behavior.
+  List<String> _onlineSiblingDevices() {
+    final myMaster = ref.read(identityProvider).peerId ?? '';
+    if (myMaster.isEmpty) return const [];
+    final links = ref.read(deviceLinkProvider);
+    final peers = ref.read(peersProvider);
+    final out = <String>[];
+    for (final devicePeerId in peers.keys) {
+      // Online device that resolves to our master, but isn't *us*.
+      if (devicePeerId != myMaster &&
+          links.identityOf(devicePeerId) == myMaster) {
+        out.add(devicePeerId);
+      }
+    }
+    return out;
+  }
+
+  /// Public entry: re-request any missing DM file bytes for a conversation when
+  /// its thread is opened. Closes the gap where a file whose LIVE WebRTC transfer
+  /// failed (ICE glare, drop) is never retried — the post-sync retry only fires
+  /// after a message-bearing `DmSyncCompleted`, so a file with metadata-but-no-
+  /// bytes stayed an empty bubble until something else triggered a sync. Sourced
+  /// from the friend AND our own online sibling devices (multi-device).
+  Future<void> requestMissingDmFilesOnOpen(String peerId) =>
+      _requestMissingFilesForDm(peerId);
+
   /// Request missing files after DM sync completes.
   Future<void> _requestMissingFilesForDm(String peerId) async {
     await Future.delayed(const Duration(seconds: 1));
@@ -1458,15 +1500,24 @@ class EventStreamNotifier extends Notifier<bool> {
         return t == null || (!t.isDownloading && !t.isComplete);
       }).toList();
       if (toRequest.isEmpty) return;
-      debugPrint('[HOLLOW] ${toRequest.length} missing DM files, requesting from $peerId');
+      // Source candidates: the conversation peer (friend) FIRST — the canonical
+      // holder — then our own online sibling devices (Step 5.1). A sibling that
+      // backfilled the file's metadata also holds its bytes, so it can serve the
+      // image even when the friend is offline (the gap where a synced image card
+      // stayed a placeholder forever).
+      final sources = <String>[peerId, ..._onlineSiblingDevices()];
+      debugPrint('[HOLLOW] ${toRequest.length} missing DM files, '
+          'requesting from ${sources.length} source(s) (friend + siblings)');
       for (final fileId in toRequest) {
-        try {
-          await requestFileFromPeer(
-            fileId: fileId,
-            peerId: peerId,
-            chunks: [],
-          );
-        } catch (_) {}
+        for (final source in sources) {
+          try {
+            await requestFileFromPeer(
+              fileId: fileId,
+              peerId: source,
+              chunks: [],
+            );
+          } catch (_) {}
+        }
         await Future.delayed(const Duration(milliseconds: 100));
       }
     } catch (e) {

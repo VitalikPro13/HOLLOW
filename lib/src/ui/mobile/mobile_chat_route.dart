@@ -12,6 +12,7 @@ import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -123,6 +124,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           _markSeen();
         }
       });
+      // Re-request any file whose bytes never arrived (failed live transfer) from
+      // the friend or an online sibling — mirrors the desktop chat_pane behavior.
+      ref.read(eventStreamProvider.notifier)
+          .requestMissingDmFilesOnOpen(widget.peerId!);
     } else {
       // Opening the channel: clear its accumulated push lines + dismiss the
       // OS banner (and the channel group summary if it was the last one).

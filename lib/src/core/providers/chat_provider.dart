@@ -483,21 +483,16 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
         current.any((m) => m.messageId == message.messageId)) {
       return;
     }
-    // Insert keeping the list ordered by timestamp. The common case (a brand-new
-    // live message) is the newest, so the fast path appends in O(1); only an
-    // out-of-order arrival (e.g. a multi-device sibling backfill replaying an
-    // OLDER message, Step 5) walks back to find its slot. Without this, an older
-    // backfilled message appends at the END and renders in the wrong position.
-    var list = <ChatMessage>[...current];
-    if (list.isEmpty || !message.timestamp.isBefore(list.last.timestamp)) {
-      list.add(message);
-    } else {
-      var i = list.length - 1;
-      while (i >= 0 && message.timestamp.isBefore(list[i].timestamp)) {
-        i--;
-      }
-      list.insert(i + 1, message);
-    }
+    // Plain append in ARRIVAL order. We deliberately do NOT sort by timestamp
+    // here: timestamps are wall-clock values from the SENDER, and across machines
+    // with even slightly skewed clocks a sort reorders the live conversation
+    // (e.g. our own just-sent message, stamped with our local now(), jumping
+    // BEFORE a friend's image that carries the friend's slightly-later clock).
+    // Correct ordering for out-of-order arrivals (multi-device sibling backfill,
+    // Step 5) is handled by the `DmSyncCompleted` → `loadHistory()` resort, which
+    // reloads from the DB sorted by timestamp — so the per-message live event
+    // only needs to append.
+    var list = <ChatMessage>[...current, message];
     // Trim oldest messages to prevent unbounded memory growth.
     if (list.length > _maxMessages) {
       list = list.sublist(list.length - _maxMessages);

@@ -1125,13 +1125,18 @@ impl MessageStore {
         }
     }
 
-    /// Get DM messages in a conversation newer than (or equal to) a timestamp,
-    /// **in BOTH directions** (for multi-device sibling backfill). Unlike
+    /// Get DM messages in a conversation newer than a timestamp, **in BOTH
+    /// directions** (for multi-device sibling backfill). Unlike
     /// `get_dm_messages_since` (friend sync: `is_mine = 1` only), a sibling needs
     /// the friend's half of the conversation too. `is_mine` is carried through so
     /// the receiving sibling can render each message on the correct side.
-    /// Uses `>=` (inclusive) — `INSERT OR IGNORE` dedup handles overlap.
-    /// Includes hidden (deleted) messages — evidence must sync (Rat Files).
+    /// Uses `timestamp > since` (STRICT) for fresh messages so the requester's
+    /// high-water-mark message isn't re-sent on every reconnect (the
+    /// re-send-the-latest-every-sync waste), but `updated_at >= since`
+    /// (inclusive) so an EDIT/REACTION/DELETE stamped on an already-synced
+    /// message at/after the high-water still re-syncs it. `INSERT OR IGNORE`
+    /// dedup makes any overlap harmless. Includes hidden (deleted) messages —
+    /// evidence must sync (Rat Files).
     pub fn get_dm_messages_for_sibling(
         &self,
         peer_id: &str,
@@ -1143,7 +1148,7 @@ impl MessageStore {
             .prepare(
                 "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json
                  FROM messages
-                 WHERE peer_id = ?1 AND (timestamp >= ?2 OR updated_at >= ?2)
+                 WHERE peer_id = ?1 AND (timestamp > ?2 OR updated_at >= ?2)
                  ORDER BY timestamp ASC
                  LIMIT ?3",
             )

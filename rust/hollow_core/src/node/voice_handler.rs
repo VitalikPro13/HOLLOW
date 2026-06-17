@@ -77,7 +77,43 @@ pub(crate) fn handle_webrtc_send_signal(
             return;
         }
     };
-    send_message_to_peer(ws_cmd_tx, ws_room_peers, &peer_id, msg);
+    // Multi-device: `peer_id` may be the conversation MASTER (UI key), which no
+    // socket authenticates as → the signal would be silently dropped and the data
+    // channel (used for P2P file transfer) never forms. Target ONE concrete online
+    // device of that identity — NOT a fan-out: a duplicate SDP offer/answer to
+    // several devices would create competing peer connections / answer glare for a
+    // single `conn_id`. A deterministic pick (lowest device id) keeps both sides
+    // agreeing on the same target. Single-device falls back to the raw id.
+    let target = pick_online_device(ws_room_peers, &peer_id);
+    send_message_to_peer(ws_cmd_tx, ws_room_peers, &target, msg);
+}
+
+/// Pick ONE concrete online device for an identity addressed by `peer_id` (which
+/// may be a master id). Used by `conn_id`-keyed call/WebRTC signaling so a signal
+/// the UI addressed by master reaches a real device instead of being dropped.
+///
+/// CRITICAL — if `peer_id` is ALREADY a live device id (exact match in a room),
+/// return it UNCHANGED. This is what keeps a call/data-channel ANSWER and its ICE
+/// flowing back to the EXACT device that sent the offer: the receive path reports
+/// the sender's device id to Dart, Dart replies addressed to that device, and we
+/// must not re-pick a different sibling device (which would break the `conn_id`
+/// negotiation). The master→device pick only kicks in for an OUTBOUND
+/// invite/offer where the UI only knows the master; deterministic (lowest id) so
+/// both sides converge. Falls back to the raw id when nothing is online.
+fn pick_online_device(
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    peer_id: &str,
+) -> String {
+    // Already a live device → use it as-is (answer/ICE back to the exact peer).
+    if ws_room_peers.values().any(|peers| peers.contains(peer_id)) {
+        return peer_id.to_string();
+    }
+    let mut devices = super::crypto_handler::online_devices_for(ws_room_peers, peer_id);
+    if devices.is_empty() {
+        return peer_id.to_string();
+    }
+    devices.sort();
+    devices.into_iter().next().unwrap_or_else(|| peer_id.to_string())
 }
 
 // ── CallSendSignal ───────────────────────────────────────────────────
@@ -225,7 +261,17 @@ pub(crate) fn handle_call_send_signal(
             return;
         }
     };
-    send_message_to_peer(ws_cmd_tx, ws_room_peers, &peer_id, msg);
+    // Multi-device: `peer_id` is the friend's MASTER (the call UI keys on the
+    // friend, not a device), which no socket authenticates as → every call signal
+    // (invite/accept/sdp/ice/state) addressed to it is silently dropped and the
+    // call never rings / never connects. Target ONE concrete online device,
+    // deterministically (lowest device id) so both sides converge on the SAME
+    // target for the `call_id`-keyed negotiation — NOT a fan-out (ringing every
+    // device + competing answers). Full ring-all-answer-once is a later design;
+    // this v1 reaches the friend's (deterministically chosen) online device.
+    // Single-device falls back to the raw id (device == master), unchanged.
+    let target = pick_online_device(ws_room_peers, &peer_id);
+    send_message_to_peer(ws_cmd_tx, ws_room_peers, &target, msg);
 }
 
 // ── VoiceChannelJoin ─────────────────────────────────────────────────

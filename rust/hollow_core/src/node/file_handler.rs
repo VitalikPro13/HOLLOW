@@ -741,15 +741,39 @@ pub(crate) fn handle_request_file(
         hollow_log!("[HOLLOW-FILE] Requesting file {file_id} from peer {peer_id_str}");
     }
 
-    if peer_is_reachable(&ws_room_peers, &peer_id_str) {
-        send_message_to_peer(
-            &ws_cmd_tx, &ws_room_peers,
-            &peer_id_str, HavenMessage::FileRequest {
-                file_id,
-                chunks,
-                offset,
-            },
-        );
+    // Multi-device: `peer_id_str` is the conversation MASTER (the UI/friend key),
+    // which no socket authenticates as — sending the FileRequest directly would be
+    // silently dropped, so the file bytes never arrive (FileHeader synced but the
+    // image/Download stays broken). Resolve to EXACTLY ONE online device.
+    //
+    // CRITICAL — request from ONE device, NOT a fan-out. A DM file is fanned out
+    // at SEND time to the recipient's devices AND siblings, so MULTIPLE devices
+    // hold a copy — but each holder re-encrypts its stream with its OWN random
+    // AES key. Requesting from several → several streams arrive, but the receiver
+    // only kept ONE FileHeader's AES key → every other stream fails AES-GCM
+    // decrypt and auto-re-requests, an infinite FileHeader/stream/decrypt-fail
+    // loop (the "stuck loading forever, 16.2/16.2 KB" + 4.5k log lines bug).
+    // Deterministic single pick (lowest device id). If the requester already
+    // knows a live device id, use it as-is. Single-device → the raw id unchanged.
+    let target = if ws_room_peers.values().any(|peers| peers.contains(&peer_id_str)) {
+        // Already a live device id — request from it directly.
+        Some(peer_id_str.clone())
+    } else {
+        let mut devices = super::crypto_handler::online_devices_for(&ws_room_peers, &peer_id_str);
+        devices.sort();
+        devices.into_iter().next()
+            .or_else(|| peer_is_reachable(&ws_room_peers, &peer_id_str).then(|| peer_id_str.clone()))
+    };
+    match target {
+        Some(t) => {
+            send_message_to_peer(
+                &ws_cmd_tx, &ws_room_peers,
+                &t, HavenMessage::FileRequest { file_id, chunks, offset },
+            );
+        }
+        None => {
+            hollow_log!("[HOLLOW-FILE] No online device for {peer_id_str} — FileRequest for {file_id} not sent");
+        }
     }
 }
 
@@ -1023,43 +1047,57 @@ pub(crate) async fn handle_completed_stream(
                         fail_reason = "invalid AES key/nonce length".to_string();
                     }
                 }
-                // The assembled stream is consumed either way.
-                let _ = std::fs::remove_file(&request.temp_path);
-
                 match decrypted_path {
                     Some(disk_path) => {
+                        // Success — consume the assembled stream.
+                        let _ = std::fs::remove_file(&request.temp_path);
                         let _ = event_tx.send(NetworkEvent::FileCompleted { file_id, disk_path }).await;
                     }
                     None => {
-                        // Auto-retry: re-request from the sender, bounded. Re-insert the
-                        // PendingFileStream (incremented) so the re-arriving stream can
-                        // decrypt against the same key/nonce.
+                        // The ciphertext is intact (right size) but didn't decrypt
+                        // against THIS pending stream's key. ROOT CAUSE: the bytes
+                        // (fast WebRTC P2P) routinely BEAT the FileHeader (slower
+                        // Olm/relay) — the logs show `FileHeader received` the line
+                        // AFTER `decrypt failed`. So these bytes belong to a header
+                        // that hasn't landed yet; the `pfs` we just popped was a STALE
+                        // pending stream from a prior request (wrong key). Previously
+                        // we deleted the bytes + immediately re-requested, which spawned
+                        // ANOTHER crossed header/stream pair → an endless decrypt-fail
+                        // loop that only a restart (serializing one clean pair) fixed.
+                        //
+                        // FIX: PRESERVE the bytes as an early-arrival (keyed by file_id)
+                        // and DO NOT re-request. The header that was already in flight
+                        // arrives a moment later and its early-arrival path reprocesses
+                        // these exact bytes against the CORRECT key → success, no loop.
+                        // (`request.temp_path` is intentionally NOT removed here.)
+                        hollow_log!(
+                            "[HOLLOW-STREAM] File {file_id} {fail_reason} — bytes arrived before their header; holding as early-arrival for the matching key"
+                        );
+                        early_file_streams.insert(
+                            file_id.clone(),
+                            (request.temp_path.clone(), request.size, sender_peer.to_string()),
+                        );
+                        // Safety net: if NO matching header ever arrives (e.g. the Olm
+                        // header was genuinely lost, not just late), one bounded
+                        // re-request recovers it. Gated on retry_count so it can't loop.
                         if pfs.retry_count < FILE_DECRYPT_MAX_RETRIES
                             && peer_is_reachable(ws_room_peers, &pfs.sender)
                         {
                             let next = pfs.retry_count + 1;
-                            hollow_log!(
-                                "[HOLLOW-STREAM] File {file_id} {fail_reason} — auto re-requesting (attempt {next}/{FILE_DECRYPT_MAX_RETRIES}) from {}",
-                                pfs.sender
-                            );
                             let sender = pfs.sender.clone();
                             let mut retry_pfs = pfs;
                             retry_pfs.retry_count = next;
+                            // Keep the pending stream so a late header preserves the count.
                             pending_file_streams.insert(file_id.clone(), retry_pfs);
                             send_message_to_peer(
                                 ws_cmd_tx, ws_room_peers,
                                 &sender, HavenMessage::FileRequest {
-                                    file_id,
+                                    file_id: file_id.clone(),
                                     chunks: vec![],
                                     offset: 0,
                                 },
                             );
-                        } else {
-                            hollow_log!("[HOLLOW-STREAM] File {file_id} {fail_reason} — giving up after {} retries", pfs.retry_count);
-                            let _ = event_tx.send(NetworkEvent::FileFailed {
-                                file_id,
-                                error: fail_reason,
-                            }).await;
+                            hollow_log!("[HOLLOW-STREAM] File {file_id} — safety re-request {next}/{FILE_DECRYPT_MAX_RETRIES} from {sender}");
                         }
                     }
                 }
