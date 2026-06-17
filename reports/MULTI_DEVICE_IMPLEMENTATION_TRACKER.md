@@ -504,6 +504,37 @@ ORIGINAL in-place design and is partially superseded** — the live code is the 
 - **Transfer** (`ws_stream_transfer.rs`): `StreamKind::LinkSnapshot` (TYPE_LINK=3) reuses the chunked
   binary pipeline + the real-byte `stream_progress()` AtomicU64. Completion arm STASHES (no in-place
   import) → emits `LinkComplete` → UI auto-restarts.
+- **Push-completion is RECEIVER-ACKED (2026-06-17 UI fix).** The sender used to emit `LinkPushComplete`
+  the instant `ws_stream_send_bytes` returned — but that only means the chunks were QUEUED into the local
+  WS channel, not received. So Pixel flashed "Data sent" while VM was only just starting its progress bar.
+  Now: the sender stays on its "Sending your data" spinner; the receiver sends a new
+  `HavenMessage::LinkSnapshotAck { link_id }` right after it successfully stashes the blob (before emitting
+  its own `LinkComplete`, so it flushes well within the ~1.8s pre-restart window); the sender's dispatch
+  arm for that ack emits `LinkPushComplete` → `pushDone` ("Data sent. Your other device received
+  everything"). No codegen (internal wire variant + existing event). ALSO fixed: `onDisconnected()` no
+  longer tears down an in-flight `waiting/receiving/importing/sending` phase on a transient relay blip
+  (the link handshake churns the connection + the receiver restarts) — that was the "after entering the
+  code the 'Linking this device' dialog vanished and reverted to the enter-code screen" symptom.
+- **Enter-code error/back nav FIXED (2026-06-17).** Two more UI quirks: (a) a WRONG code then "Close"
+  popped the dialog with `null` (not the `true` the shell's go-back path checks) → Welcome was gone and
+  the user stuck on a blank screen. The `_failed` view on the enter-code flow now shows **"Try again"**
+  (resets phase→idle so the dialog re-renders the enter-code view IN PLACE — recoverable, no pop/restart)
+  + a **"Back"** ghost (pops `true` → Welcome). (b) Enter-code "Cancel"/"Back" discards the throwaway
+  identity and returns to Welcome, but the shell did a bare `exit(0)` after `deleteIdentity()` — the app
+  just DIED. Now it spawns a fresh process first (mirrors `_restartApp`), so the user lands back on
+  Welcome.
+- **Go-back must WIPE the data dir, not just delete identity.key (2026-06-17).** After (a)+(b), backing
+  out STILL broke Welcome (infinite loading: couldn't create new / link / import). Cause: `delete_identity()`
+  ran in-process while the live node held open SQLCipher handles (CrdtStore/CryptoStore actor threads +
+  WAL/-shm); on Windows `remove_file` on an open `messages.db` fails silently, so it survived — encrypted
+  with the throwaway passphrase — and the next identity's derived passphrase couldn't open it. **Fix
+  (stash-and-reboot, same window as the link import):** 3 new FFIs in `api/storage.rs` —
+  `stash_pending_wipe()` (writes `pending_wipe.marker`), `has_pending_wipe()`, `perform_pending_wipe()`
+  (reads the data dir and removes EVERY entry — `identity.*`, `messages.db*`, `device_lists`, `vault/`,
+  `files/`, stray `pending_link.*` — except the marker, removed last, + any `*.lock`). Go-back now calls
+  `stashPendingWipe()` + relaunch; `_bootstrap` runs `performPendingWipe()` BEFORE the pending-link check
+  and identity load (pre-node-start = no open handles). Codegen run, `cargo check` + `flutter analyze`
+  clean. All Step 4 link UI quirks now resolved; awaiting Vitalik live re-test.
 - **Orchestration** (`node/link_handler.rs`, NEW): rendezvous via `link:{code}` room; claim/resolve/
   push/pull. Code path: populated device claims code + joins room; empty device resolves + joins +
   `LinkSnapshotRequest`; populated device confirms → `AcceptLinkPush` exports `.hollow` (code as
@@ -511,20 +542,30 @@ ORIGINAL in-place design and is partially superseded** — the live code is the 
   `my_link_code`) so the deep `LinkSnapshotKey` handler can read it. Mnemonic path (B6): empty device
   auto-requests from an online sibling (passphrase = shared master id).
 
-- [ ] **OPEN FOLLOW-UP (fix tomorrow, before Step 5) — first VM→friend DM doesn't mirror to the
-      freshly-linked sibling.** Live test: AL↔VM/Pixel all sync EXCEPT the very FIRST message VM sends
-      to friend AL never echoes to sibling Pixel; every message after it does. Root cause (from VM log):
-      the sibling self-echo fan-out (`message_ops::fan_out_dm_envelope`) targets `devices_for(own_master)`
-      ∪ peers in the **DM-with-friend room**. On the FIRST send the freshly-linked Pixel is in
-      `inbox:{master}` (sibling rendezvous, immediate) but hasn't joined the DM-with-AL room yet, so the
-      union misses it and `devices_for` returns only a STALE GHOST id (Pixel's pre-relink device) →
-      echo goes to an offline ghost. **First fix attempt (union `inbox:{master}` peers into the sibling
-      set) DID NOT resolve it** — so the cause is likely deeper: stale/ghost device-list ids resolving
-      weirdly, OR the live sibling isn't yet resolver-linked to own_master at first-send time, OR the
-      inbox-room peer set is empty at that instant. Re-investigate: dump `devices_for(own_master)`,
-      `resolve(JQcW)`, and the inbox/DM room membership at the exact first-send tick. Same family as the
-      Step 3 live-room-union fixes. Cosmetic-ish (one message, self-heals after), so it does NOT block
-      the Step 4 win, but fix before moving to Step 5.
+- [x] **RESOLVED (2026-06-17) — first VM→friend DM doesn't mirror to the freshly-linked sibling.**
+      Symptom: AL↔VM/Pixel all sync EXCEPT the very FIRST message VM sends to friend AL never echoes to
+      sibling Pixel; every message after it does. **The earlier "fan-out targeting" / inbox-union
+      hypothesis was WRONG** — that's why the first fix attempt (union `inbox:{master}` peers) didn't
+      help; the targeting was already correct. **Actual root cause (proven from `third_debug.txt`):** an
+      **Olm session race during the link handshake.** The freshly-linked device and its source sibling
+      churn their Olm ratchet hard right after the snapshot transfer — `MAC mismatch — removing stale
+      session`, then `KeyRequest … peer lost theirs, re-keying`. At the instant of the FIRST user DM the
+      local side believes the sibling session is *confirmed bidirectional* (`has_confirmed_session` true,
+      a SessionAck cleared it), but the PEER has silently lost its half. `send_dm_to_device` takes the
+      **online branch** (`send_encrypted_message`) and encrypts on that doomed ratchet — undecryptable on
+      the sibling. The online branch **never queued into `pending_messages`**, so (the relay never ACKs)
+      that copy was lost forever. ~1s later the peer's `KeyRequest` re-keys cleanly, so message #2+ ride
+      a good ratchet and arrive. **Fix (`message_ops::send_dm_to_device`):** the online branch now ALSO
+      pushes the envelope into `pending_messages` (capped at 20/device). The existing re-key/decrypt-fail
+      drain (`swarm.rs:~3765`), PeerJoined drain (`~1837`), and KeyBundle drain all `.remove()`-drain it
+      on the FRESH session → the first echo self-heals; receiver dedups by `message_id` so the redundant
+      copy on a healthy session is harmless. This generalizes the offline-branch self-heal and also hardens
+      ALL DMs against the broader "peer silently lost session" desync (`feedback_olm_session_self_heal`),
+      not just the link case. `cargo check` clean (no FFI/codegen). Approach Vitalik-picked 2026-06-17.
+      **Observed-but-separate:** in the test log the freshly-linked device had `device_peer_id == master`
+      (legacy keystone NOT rotated after `import_pending_link`) — the retry-queue fix resolves the reported
+      symptom regardless, but the import path's keystone rotation should be re-verified (see memory).
+      **Awaiting live re-test (VM→AL first DM mirrors to Pixel).**
 - **Relay** (`relay-uws`): `linkcode_to_peer`/`peer_to_linkcode`/`linkcode_expiry` maps (clone of
   nicknames); `claim/resolve/release_link_code` verbs; `cleanup_peer` erasure; `sweep_link_codes`
   5-min TTL on the 300s timer; one-shot consume on resolve. **Deployed + active on VPS.**

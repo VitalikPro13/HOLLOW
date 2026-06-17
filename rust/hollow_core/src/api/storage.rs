@@ -1248,3 +1248,70 @@ pub fn import_pending_link() -> Result<(), String> {
     }
     result
 }
+
+// ── Pending data-dir wipe: next-boot clean slate ─────────────────────────────
+//
+// Used by the "Link a device" → Back/Cancel flow. That flow creates a THROWAWAY
+// identity to connect, so backing out must leave a truly clean data dir for the
+// next launch's Welcome (create new / import / link). We CAN'T reliably delete the
+// DB files in-process: the running node holds open SQLCipher handles (CrdtStore /
+// CryptoStore actor threads + WAL/-shm), and on Windows `remove_file` on an open
+// file fails — leaving `messages.db` behind, encrypted with the throwaway
+// passphrase, so the next identity can't open it → "infinite loading". So we mark a
+// pending wipe, relaunch, and nuke the dir on the NEXT launch BEFORE the node starts
+// (no open handles) — the exact same pre-node-start window as the link import above.
+
+fn pending_wipe_marker_path() -> Result<std::path::PathBuf, String> {
+    Ok(crate::identity::data_dir()?.join("pending_wipe.marker"))
+}
+
+/// Mark the data dir to be wiped clean on the next launch (pre-node-start). Call
+/// this, then relaunch — do NOT try to delete the DB in-process while the node runs.
+#[frb]
+pub fn stash_pending_wipe() -> Result<(), String> {
+    std::fs::write(pending_wipe_marker_path()?, b"1")
+        .map_err(|e| format!("Failed to stash wipe marker: {e}"))?;
+    Ok(())
+}
+
+/// True if a pending wipe is queued for this launch.
+#[frb]
+pub fn has_pending_wipe() -> Result<bool, String> {
+    Ok(pending_wipe_marker_path()?.exists())
+}
+
+/// (At launch, BEFORE start_node) Delete every file/dir in the data dir so the next
+/// Welcome starts from a truly clean slate. Preserves nothing identity-bearing:
+/// removes `identity.key`/`identity.device`, `messages.db*`, `device_lists`, any
+/// stashed `pending_link.*`, `vault/`, `files/`, etc. Keeps only the wipe marker
+/// itself (removed last) and any `*.lock` single-instance guard. Idempotent.
+#[frb]
+pub fn perform_pending_wipe() -> Result<(), String> {
+    let marker = pending_wipe_marker_path()?;
+    let data_dir = crate::identity::data_dir()?;
+    let marker_name = marker.file_name().map(|n| n.to_os_string());
+
+    let entries = std::fs::read_dir(&data_dir)
+        .map_err(|e| format!("Failed to read data dir for wipe: {e}"))?;
+    let mut removed = 0u32;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        // Keep the marker (removed last) + any single-instance lock file.
+        if Some(&name) == marker_name.as_ref() { continue; }
+        if name.to_string_lossy().ends_with(".lock") { continue; }
+        let res = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match res {
+            Ok(()) => removed += 1,
+            Err(e) => hollow_log!("[HOLLOW-WIPE] Failed to remove {}: {e}", path.display()),
+        }
+    }
+    // Remove the marker last so a crash mid-wipe re-runs the wipe next launch.
+    let _ = std::fs::remove_file(&marker);
+    hollow_log!("[HOLLOW-WIPE] Data dir wiped for clean Welcome ({removed} entries removed)");
+    Ok(())
+}

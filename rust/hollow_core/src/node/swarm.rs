@@ -7734,6 +7734,14 @@ async fn handle_incoming_request(
             }).await;
         }
 
+        HavenMessage::LinkSnapshotAck { link_id } => {
+            // (Sender side) The empty device confirmed it received + stashed the full
+            // snapshot. Only NOW flip the sender UI to "Data sent" — the prior
+            // queued-bytes-leaving-our-channel signal was premature.
+            hollow_log!("[HOLLOW-LINK] LinkSnapshotAck for {link_id} from {peer_str} — receiver has everything");
+            let _ = event_tx.send(NetworkEvent::LinkPushComplete { bytes: 0 }).await;
+        }
+
         HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview } => {
             if peer_str == local_peer_str { return; }
             message_ops::handle_envelope_channel_message(

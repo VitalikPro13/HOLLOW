@@ -272,8 +272,24 @@ class DeviceLinkSyncNotifier extends Notifier<DeviceLinkState> {
 
   void onDisconnected() {
     if (state.phase == LinkPhase.idle) return;
-    // Keep a completed/failed terminal state visible; only clear live phases.
+    // Keep a completed/failed terminal state visible.
     if (state.phase == LinkPhase.done || state.phase == LinkPhase.failed) return;
-    state = const DeviceLinkState();
+    // Do NOT tear down an in-flight transfer on a transient relay blip. The link
+    // handshake churns the connection (key exchange, WebRTC, the receiver's
+    // snapshot-triggered restart), so a brief RelayDisconnected is expected mid-link
+    // — and the populated device proceeds with the push regardless. Clearing here was
+    // the "after entering the code the 'Linking this device' dialog vanished and
+    // reverted to the enter-code screen even though the other device kept going" bug.
+    // These phases survive a reconnect; only the pre-transfer showingCode/confirmPush
+    // states (which depend on a live relay code claim) reset.
+    switch (state.phase) {
+      case LinkPhase.waiting:
+      case LinkPhase.receiving:
+      case LinkPhase.importing:
+      case LinkPhase.sending:
+        return;
+      default:
+        state = const DeviceLinkState();
+    }
   }
 }

@@ -286,6 +286,27 @@ async fn send_dm_to_device(
                 event_tx,
                 ws_cmd_tx, ws_room_peers,
             ).await;
+            // ALSO queue for re-delivery on the next session (re)establishment.
+            // The relay never ACKs a direct message, and a session we believe is
+            // confirmed bidirectional can be silently dead on the PEER's side —
+            // the classic "KeyRequest while we hold a session — peer lost theirs"
+            // desync, which is acute right after a device link (the freshly-linked
+            // sibling and its source churn their ratchet during the snapshot
+            // handshake). A DM encrypted on that doomed ratchet is undecryptable and,
+            // without this queue, lost forever (it was the "first sibling DM never
+            // mirrors, every later one does" bug). The re-key/decrypt-fail path
+            // (swarm.rs), PeerJoined, and KeyBundle all `.remove()`-drain this queue
+            // on a FRESH session, re-delivering the envelope; the receiver dedups by
+            // `message_id`, so the redundant copy on a healthy session is harmless.
+            // Cap per-device so a long-lived healthy session (no reconnect to drain
+            // it) can't grow the queue unbounded.
+            const RETRY_QUEUE_CAP: usize = 20;
+            let q = pending_messages.entry(device_peer.to_string()).or_default();
+            q.push(envelope_json.to_string());
+            if q.len() > RETRY_QUEUE_CAP {
+                let overflow = q.len() - RETRY_QUEUE_CAP;
+                q.drain(0..overflow);
+            }
         } else {
             // Session exists but device is offline — encrypt and send to DM room
             // anyway. The relay sees the target isn't in the room and triggers a

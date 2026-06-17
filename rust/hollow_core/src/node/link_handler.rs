@@ -199,12 +199,15 @@ pub(crate) async fn handle_accept_link_push(
         ws_cmd_tx, &room, target_peer,
         &StreamKind::LinkSnapshot, &link_id, &ciphertext,
     ).await;
-    // ws_stream_send_bytes queues every chunk into the WS command channel before
-    // returning, so the send is effectively complete here. Tell the sender UI so it
-    // can close its dialog (the sender gets no LinkProgress/LinkComplete — those are
-    // receiver-side). The sender does NOT restart; only the receiver replaced its DB.
-    hollow_log!("[HOLLOW-LINK] Snapshot {link_id} fully queued to {target_peer} ({total} bytes)");
-    let _ = event_tx.send(NetworkEvent::LinkPushComplete { bytes: total }).await;
+    // ws_stream_send_bytes only QUEUES every chunk into the local WS command channel —
+    // it returns long before those bytes reach the relay, let alone the target. So this
+    // is NOT proof of receipt: emitting LinkPushComplete here made the sender flash
+    // "Data sent" while the receiver was only just starting its progress bar. Instead
+    // we stay on the "sending" spinner and wait for the receiver to send back a
+    // `LinkSnapshotAck` (it does so right after it stashes the full blob); the dispatch
+    // arm for that ack emits LinkPushComplete. The sender does NOT restart; only the
+    // receiver replaced its DB.
+    hollow_log!("[HOLLOW-LINK] Snapshot {link_id} fully queued to {target_peer} ({total} bytes) — awaiting receiver ack");
 }
 
 /// (Empty device) The populated device announced the link_id. Register the pending

@@ -532,8 +532,10 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
   }
 
   // ── Sending (populated device pushing) ─────────────────────────────────────
-  // The sender pushes fire-and-forget (chunks queued into the WS channel), so there
-  // is no honest per-byte progress to show — an indeterminate spinner, not a bar.
+  // The sender streams chunks into the WS channel with no per-byte feedback, so this
+  // is an indeterminate spinner, not a bar. It stays up until the RECEIVER sends back
+  // a LinkSnapshotAck (→ LinkPushComplete → pushDone), so "Data sent" only appears
+  // once the other device truly has everything — not when our bytes merely left.
   Widget _sending(HollowTheme hollow) {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -646,6 +648,11 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
 
   // ── Failed ─────────────────────────────────────────────────────────────────
   Widget _failed(HollowTheme hollow, DeviceLinkState state) {
+    // A wrong/expired code is recoverable — don't drop the user into a dead screen.
+    // On the enter-code flow, "Try again" resets to idle so the dialog re-renders the
+    // enter-code view in place (no pop, no app restart). "Back" still goes to Welcome
+    // (pops `true` → shell discards the throwaway identity and relaunches).
+    final isEnterCode = widget.mode == DeviceLinkMode.enterCode;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -653,14 +660,31 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
         _header(hollow, LucideIcons.alertTriangle, 'Link failed',
             state.error ?? 'Something went wrong.'),
         const SizedBox(height: HollowSpacing.lg),
-        HollowButton.ghost(
-          onPressed: () {
-            ref.read(deviceLinkSyncProvider.notifier).reset();
-            Navigator.of(context).maybePop();
-          },
-          expand: true,
-          child: const Text('Close'),
-        ),
+        if (isEnterCode) ...[
+          HollowButton.filled(
+            onPressed: () {
+              // Back to the enter-code view in place (clears the typed code too).
+              _codeController.clear();
+              ref.read(deviceLinkSyncProvider.notifier).reset();
+            },
+            expand: true,
+            child: const Text('Try again'),
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          HollowButton.ghost(
+            onPressed: _close,
+            expand: true,
+            child: const Text('Back'),
+          ),
+        ] else
+          HollowButton.ghost(
+            onPressed: () {
+              ref.read(deviceLinkSyncProvider.notifier).reset();
+              Navigator.of(context).maybePop();
+            },
+            expand: true,
+            child: const Text('Close'),
+          ),
       ],
     );
   }

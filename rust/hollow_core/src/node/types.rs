@@ -891,6 +891,17 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "link_declined")]
     LinkDeclined,
 
+    /// (Empty → populated) The empty device received + stashed the full snapshot
+    /// successfully. The sender stays on its "sending" spinner until this lands, so
+    /// "Data sent" only shows once the OTHER device truly has everything (the queued
+    /// bytes leaving our WS channel is NOT proof of receipt). `link_id` matches the
+    /// stream id.
+    #[serde(rename = "link_snapshot_ack")]
+    LinkSnapshotAck {
+        #[serde(default)]
+        link_id: String,
+    },
+
     /// Lightweight notification hint for unsubscribed channels (topic routing).
     /// Sent via SendToRoom (0x03) so all room members receive it.
     #[serde(rename = "notif_hint")]

@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'network.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `derive_db_key_public`, `derive_db_key`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `pending_link_blob_path`, `pending_link_code_path`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`
+// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `derive_db_key_public`, `derive_db_key`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `pending_link_blob_path`, `pending_link_code_path`, `pending_wipe_marker_path`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`
 
 /// Open the encrypted message database. Must be called after identity is loaded.
 /// Typically called once at app start (after `load_or_create_identity`).
@@ -343,6 +343,23 @@ Future<bool> hasPendingLink() =>
 /// stash. After this the bootstrap proceeds as a normal restored-backup launch.
 Future<void> importPendingLink() =>
     RustLib.instance.api.crateApiStorageImportPendingLink();
+
+/// Mark the data dir to be wiped clean on the next launch (pre-node-start). Call
+/// this, then relaunch — do NOT try to delete the DB in-process while the node runs.
+Future<void> stashPendingWipe() =>
+    RustLib.instance.api.crateApiStorageStashPendingWipe();
+
+/// True if a pending wipe is queued for this launch.
+Future<bool> hasPendingWipe() =>
+    RustLib.instance.api.crateApiStorageHasPendingWipe();
+
+/// (At launch, BEFORE start_node) Delete every file/dir in the data dir so the next
+/// Welcome starts from a truly clean slate. Preserves nothing identity-bearing:
+/// removes `identity.key`/`identity.device`, `messages.db*`, `device_lists`, any
+/// stashed `pending_link.*`, `vault/`, `files/`, etc. Keeps only the wipe marker
+/// itself (removed last) and any `*.lock` single-instance guard. Idempotent.
+Future<void> performPendingWipe() =>
+    RustLib.instance.api.crateApiStoragePerformPendingWipe();
 
 /// A friend entry returned to Dart.
 class FriendFfi {

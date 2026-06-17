@@ -627,6 +627,20 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (_initialized) return;
     _initialized = true;
 
+    // Multi-device: the user backed out of "Link a device" (throwaway identity).
+    // Wipe the data dir to a clean slate NOW — pre-node-start, no open SQLCipher
+    // handles — so Welcome can create/import/link fresh. Must run BEFORE the pending
+    // link import and identity load. (Deleting the DB in-process before relaunch
+    // failed on Windows — open handles — leaving messages.db behind → infinite
+    // loading on the next identity.)
+    try {
+      if (await storage_api.hasPendingWipe()) {
+        await storage_api.performPendingWipe();
+      }
+    } catch (e) {
+      debugPrint('[HOLLOW] Pending data-dir wipe failed: $e');
+    }
+
     // Multi-device: a link transfer stashed an encrypted .hollow blob for us to
     // import. Do it FIRST — pre-node-start, the same known-good window as a manual
     // "Restore from backup" — then fall through as a normal restored launch.
@@ -837,12 +851,31 @@ class _HollowShellState extends ConsumerState<HollowShell>
       // Dismiss the "Connecting…" placeholder now that the node is up.
       dismissConnectingDialog();
       final wentBack = await showDeviceLinkDialog(context, mode: DeviceLinkMode.enterCode);
-      // Cancel = "go back to Welcome". The throwaway identity we just created has
-      // no real data, so discard it and restart — the next launch sees no identity
+      // Cancel/Back = "go back to Welcome". The throwaway identity we just created has
+      // no real data, so discard it and RELAUNCH — the next launch sees no identity
       // and shows the Welcome dialog fresh (the running node still holds the old DB
-      // handle, so we can't just re-show Welcome in place).
+      // handle, so we can't just re-show Welcome in place). A bare exit(0) here just
+      // killed the app and left the user staring at nothing — spawn a fresh copy of
+      // ourselves first (mirrors the dialog's _restartApp / "Apply & Restart" pattern).
+      //
+      // We MARK a wipe rather than deleting now: the live node holds open SQLCipher
+      // handles (CrdtStore/CryptoStore + WAL/-shm), and on Windows deleting an open
+      // messages.db fails silently — it survives, encrypted with the throwaway
+      // passphrase, and the next identity can't open it → infinite loading. The
+      // next launch's _bootstrap runs performPendingWipe() BEFORE the node starts.
       if (wentBack == true) {
-        await storage_api.deleteIdentity();
+        await storage_api.stashPendingWipe();
+        try {
+          await network_api.notifyShutdown();
+          await Future.delayed(const Duration(milliseconds: 200));
+        } catch (_) {}
+        try {
+          if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+            await Process.start(Platform.resolvedExecutable, const [],
+                mode: ProcessStartMode.detached);
+            await Future.delayed(const Duration(milliseconds: 100));
+          }
+        } catch (_) {}
         exit(0);
       }
     }

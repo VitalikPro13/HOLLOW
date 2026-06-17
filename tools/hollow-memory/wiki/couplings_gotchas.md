@@ -636,6 +636,14 @@ let _ = state.apply_op(&op);
 
 **Where:** `rust/hollow_core/src/api/storage.rs` (`export_backup_bytes`/`import_backup_bytes`/`stash_pending_link`/`has_pending_link`/`import_pending_link`), `node/link_handler.rs`, `node/file_handler.rs` (completion→stash), `lib/src/ui/shell/hollow_shell.dart` (`_bootstrap` pending-import). See memory `feedback_link_import_identity_device`.
 
+### Device linking: deleting the DB in-process while the node runs leaves messages.db behind (Windows)
+
+**Rule:** backing out of "Link a device" (which created a THROWAWAY identity) must NOT delete the data files in-process. The live node holds open SQLCipher handles (CrdtStore/CryptoStore actor threads + `messages.db-wal`/`-shm`); on Windows `remove_file` on an open `messages.db` fails silently, so it SURVIVES — encrypted with the throwaway passphrase — and the next identity's derived passphrase can't open it → **infinite loading on the next Welcome**. Same family as the in-place-import trap above. Fix = stash-and-reboot: `stash_pending_wipe()` (writes `pending_wipe.marker`) + relaunch (spawn fresh process, NOT bare `exit(0)`); `_bootstrap` runs `perform_pending_wipe()` BEFORE node start (no open handles), removing every data-dir entry except the marker (removed LAST so a mid-wipe crash re-runs) + any `*.lock`.
+
+**Also:** device-link push completion is RECEIVER-ACKED, not queue-drained. The sender stays on its spinner until the receiver sends `HavenMessage::LinkSnapshotAck` (after a successful stash) → `LinkPushComplete`; emitting it when `ws_stream_send_bytes` merely returned flashed "Data sent" while the receiver was still receiving. And `device_link_sync_provider.onDisconnected()` preserves in-flight `waiting/receiving/sending` phases across a transient relay blip (the handshake churns the connection).
+
+**Where:** `rust/hollow_core/src/api/storage.rs` (`stash_pending_wipe`/`has_pending_wipe`/`perform_pending_wipe`), `node/file_handler.rs` (`LinkSnapshotAck` send), `node/swarm.rs` (ack dispatch arm), `node/types.rs` (`HavenMessage::LinkSnapshotAck`), `lib/src/ui/shell/hollow_shell.dart` (`_bootstrap`, go-back relaunch), `lib/src/ui/dialogs/device_link_dialog.dart` (`_failed` Try-again/Back), `lib/src/core/providers/device_link_sync_provider.dart` (`onDisconnected`). See memories `feedback_device_link_push_ack`, `feedback_dm_online_branch_retry_queue`.
+
 ### SOLVED: WS/relay presence churn was GHOST-CONNECTION EVICTION (relay-side)
 
 **Symptom (was):** A friend showed offline for stretches even though DMs flowed; the observer saw the peer LEAVE all shared rooms for ~14 min with NO reconnect line in the peer's log. Surfaced — not caused — by multi-device.

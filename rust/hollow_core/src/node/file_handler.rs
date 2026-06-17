@@ -965,6 +965,13 @@ pub(crate) async fn handle_completed_stream(
             match outcome {
                 Ok(()) => {
                     hollow_log!("[HOLLOW-LINK] Snapshot {link_id} stashed ({} bytes) — restart to import", request.size);
+                    // Tell the SENDER we truly have everything, so its spinner flips to
+                    // "Data sent" only now (not when it merely finished queuing bytes).
+                    super::crypto_handler::send_message_to_peer(
+                        ws_cmd_tx, ws_room_peers, sender_peer,
+                        super::types::HavenMessage::LinkSnapshotAck { link_id: link_id.clone() },
+                    );
+                    hollow_log!("[HOLLOW-LINK] Sent LinkSnapshotAck for {link_id} to {sender_peer}");
                     let _ = event_tx.send(NetworkEvent::LinkComplete {
                         link_id: bare_id,
                         msg_count: 0,
