@@ -715,6 +715,45 @@ incremental via per-conversation since-timestamps. Reuses the friend `DmSyncRequ
 - [x] **TEST: ✅ LIVE-VERIFIED 2026-06-17 (Vitalik, Pixel↔VM↔AL).** Backfill "literally almost instant."
       Logs show both detection paths firing, bidirectional serve, `0 new messages` on the dedup re-pull (correct),
       siblings converge. Step 5 DONE.
+- [x] **PEER-FALLBACK (the second half of the step title) — built 2026-06-18, awaiting live test.** Step 5 only
+      shipped the **device-first** half (sibling→sibling). The **peer-fallback** half was missing: when your other
+      device sent DMs to a friend while you were offline, then that device goes OFFLINE before you come online, your
+      OWN sends (stored on the friend as `is_mine=0`) were STRANDED — the sibling can't serve them (it's offline) and
+      the friend `DmSyncRequest` responder filters `is_mine=1` only ("I never re-serve messages you sent me"). Scenario
+      that exposed it (Vitalik): VM(subdevice)↔AL(outsider friend) exchange 6 msgs while Pixel(master) offline; Pixel
+      online + VM offline → Pixel got only AL's 3, not its own 3 VM→AL sends. **Fix (4 DM touches, all internal wire —
+      NO FFI/codegen):** (1) new `#[serde(default)] both_directions: bool` on `HavenMessage::DmSyncRequest`; (2) the
+      `DmSyncRequest` responder serves `get_dm_messages_for_sibling` (both directions, the Step-5 fn) instead of
+      `get_dm_messages_since` when the flag is set; (3) the `DmSyncBatch` receiver honors `msg.mine` (insert side +
+      direction-aware sig-verify context mirrored from the sibling receiver — `mine=true`→signer=our master, else
+      signer=convo); (4) all THREE DM-sync trigger sites (PeerJoined, RoomMembers, **pagination follow-up**) set the
+      flag + use `get_latest_dm_timestamp_any` (both-way high-water) **iff WE are multi-device**
+      (`!resolver::devices_for(local_master).is_empty()` — race-free, the resolver is warmed from `device_links` +
+      `seed_self` BEFORE the event loop). Decision lives on the REQUESTER (always knows it's multi-device) not the
+      responder (may not have ingested the requester's device list — cold-start race). **Single-device + normal
+      single-device friends stay byte-for-byte** (flag never set → cheap one-directional path). 2 new storage unit
+      tests lock the branch (`sibling_serve_returns_both_directions_unlike_friend_serve`,
+      `latest_any_spans_both_directions`); 337 lib tests pass, clippy clean.
+- [x] **FIRST LIVE TEST (2026-06-18) FOUND THE `mine`-INVERSION BUG → fixed.** Recovery WORKED but every
+      backfilled message rendered on the WRONG SIDE and the conversation order looked inverted (AL appeared to
+      have written first when VM actually did), plus a "Sig verify FAILED" flood on all items. **Root cause:**
+      `DmSyncItem.mine` is **RESPONDER-relative** — it's `is_mine` as stored in the SENDER's (AL's) DB. A FRIEND's
+      perspective is the OPPOSITE of ours: AL's `is_mine=1` (AL sent) = our `is_mine=false` (we received); AL's
+      `is_mine=0` (AL received from us) = our `is_mine=true` (WE sent). The receiver inserted `msg.mine` verbatim,
+      so our own VM→AL sends were stored as RECEIVED (and the sig context picked the wrong signer/recipient →
+      verify failed on every item). The OLD one-directional path accidentally worked because it hardcoded the
+      insert to `false` and AL only ever served its own sends (implicitly `!mine` for that single case). **Fix
+      (`swarm.rs` DmSyncBatch receiver):** compute an effective `is_mine = if from_sibling { msg.mine } else
+      { !msg.mine }` (invert on the friend path, keep as-is from a same_identity sibling — siblings share is_mine
+      meaning) and use it for BOTH the insert AND the sig-verify direction context. Proven from the logs (Pixel got
+      6 items: earliest 3 `mine=false`/latest 3 `mine=true`, but VM wrote the earliest — so they had to flip).
+      Confirmed shared (VM↔Pixel both invert). Diag log gained `wire_mine=` vs `is_mine=`. cargo check + clippy
+      clean; 338 lib tests pass.
+- [x] **LIVE-VERIFIED 2026-06-18 (Pixel↔VM↔AL).** Fresh logs after the inversion fix: AL serves both directions
+      (`both_directions=true`); Pixel's diag shows correct flip (`wire_mine=true→is_mine=false`,
+      `wire_mine=false→is_mine=true`); **ZERO post-fix sig-verify failures** (all the FAILED lines are from
+      pre-fix builds). Pixel recovers its own stranded VM→AL sends on the CORRECT sides + order. DM peer-fallback
+      DONE.
 
 **KNOWN LIMITATION → tracked in Step 9 (multi-device push):** when the phone is FULLY QUIT, the Tier 2
 background-fetch DM push degrades to the generic banner (the message itself still arrives in full via live
@@ -1064,10 +1103,17 @@ decided to stop and ship the working state — fix in a focused polish pass, NOT
       very first channel broadcast that lands races the group-join completion. Likely fix: queue/retry the
       first post-link channel message, or have the joiner request an immediate channel sync once its leaf is
       merged. Self-heals on next sync today, so low severity.
-- [ ] **Sibling↔sibling SERVER-message backfill** (the server analog of Step 5 DM backfill): two devices of
-      one identity should fill each other's gaps of missed *server channel* history, not just rely on
-      live-delivery + the friend/coordinator sync. Live mesh works; cross-sibling server history sync is the
-      remaining completeness piece.
+- [~] **Sibling↔sibling SERVER-message backfill** (the server analog of Step 5 DM backfill): **likely NO code
+      needed — VERIFY BY TEST (2026-06-18).** Unlike DMs, the channel-sync responder (`ChannelSyncRequest` →
+      `get_channel_messages_since_per_sender`, `storage/messages.rs`) has **NO `is_mine` filter** and serves ALL
+      senders (an unknown sender → all their messages), and the reconnect trigger (`SyncCoordinator::collect_ready`,
+      registered on PeerJoined + RoomMembers) already fires a `ChannelSyncRequest` per channel **unconditionally** —
+      so a reconnecting device should already recover its OWN channel messages (sent from another device) from any
+      present member, even when no sibling overlaps. This is the same "own data stranded" class as the DM
+      peer-fallback above, but the server rails already cover it. **Test:** offline/online the same way as the DM
+      scenario for a server channel; if Pixel recovers its own VM-sent channel messages from AL/coordinator after
+      reconnect with VM offline, tick this. Only add code if the test shows a gap (e.g. the coordinator-side
+      post-batch-add sync at swarm.rs:~3090 not covering a plain reconnect).
 
 - [ ] Overall, proper syncing on kick/bans etc., make the master-subdevice relationship be fully synced between each ohter in terms of actions and features.
 - [ ] Fix "sync-import" when using 24-wod phrase on Welcome dialog (either remove or change to reuse the same pipeline as Link Device)

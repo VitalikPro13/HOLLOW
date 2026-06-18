@@ -2048,14 +2048,25 @@ async fn run_event_loop(
                                     {
                                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                             let convo = super::resolver::resolve(&peer_id);
-                                            let since = store
-                                                .get_latest_dm_timestamp(&convo)
-                                                .unwrap_or(None)
-                                                .unwrap_or(0);
+                                            // Multi-device peer-fallback: if WE have a
+                                            // sibling, ask for BOTH directions from our
+                                            // high-water-mark across both directions —
+                                            // so a friend re-serves the messages we sent
+                                            // from another (possibly-offline) device.
+                                            let multi_device =
+                                                !super::resolver::devices_for(&master_peer_str).is_empty();
+                                            let since = if multi_device {
+                                                store.get_latest_dm_timestamp_any(&convo)
+                                            } else {
+                                                store.get_latest_dm_timestamp(&convo)
+                                            }
+                                            .unwrap_or(None)
+                                            .unwrap_or(0);
                                             send_message_to_peer(
                                                 &ws_cmd_tx, &ws_room_peers,
                                                 &peer_id, HavenMessage::DmSyncRequest {
                                                     since_timestamp: since,
+                                                    both_directions: multi_device,
                                                 },
                                             );
                                         }
@@ -2453,14 +2464,23 @@ async fn run_event_loop(
                                     {
                                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                             let convo = super::resolver::resolve(pid_str);
-                                            let since = store
-                                                .get_latest_dm_timestamp(&convo)
-                                                .unwrap_or(None)
-                                                .unwrap_or(0);
+                                            // Multi-device peer-fallback (see PeerJoined
+                                            // site): both directions from our both-way
+                                            // high-water iff we have a sibling.
+                                            let multi_device =
+                                                !super::resolver::devices_for(&master_peer_str).is_empty();
+                                            let since = if multi_device {
+                                                store.get_latest_dm_timestamp_any(&convo)
+                                            } else {
+                                                store.get_latest_dm_timestamp(&convo)
+                                            }
+                                            .unwrap_or(None)
+                                            .unwrap_or(0);
                                             send_message_to_peer(
                                                 &ws_cmd_tx, &ws_room_peers,
                                                 pid_str, HavenMessage::DmSyncRequest {
                                                     since_timestamp: since,
+                                                    both_directions: multi_device,
                                                 },
                                             );
                                         }
@@ -4546,33 +4566,52 @@ async fn handle_incoming_request(
                     // Multi-device: the DM conversation key is the sender's MASTER id
                     // (transport target stays raw `peer_str`). No-op on single-device.
                     let convo_peer = super::resolver::resolve(&peer_str);
+                    // CRITICAL — `DmSyncItem.mine` is RESPONDER-relative (it's
+                    // `is_mine` as stored in the SENDER's DB). A FRIEND's perspective is
+                    // the OPPOSITE of ours: a message the friend SENT (their is_mine=1)
+                    // is one WE RECEIVED (our is_mine=false), and a message the friend
+                    // RECEIVED from us (their is_mine=0) is one WE SENT (our is_mine=
+                    // true). So on the friend path we INVERT. From our own SIBLING
+                    // (same_identity) is_mine already means the same on both our devices
+                    // — keep as-is. (The pre-both-directions one-directional path served
+                    // only the friend's own sends and hardcoded the insert to `false`,
+                    // i.e. it was implicitly `!mine` for that single case — this
+                    // generalizes it correctly to both directions.)
+                    let from_sibling = super::resolver::same_identity(&peer_str, &local_peer);
                     let mut new_count = 0u32;
 
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         let _ = store.begin_transaction();
                         let mut pk_cache: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
                         for msg in &messages {
-                            // All sync items are messages the peer SENT to us
-                            // (get_dm_messages_since only returns is_mine=1 from their DB).
-                            // From our perspective, these are received messages (is_mine=false).
+                            // Effective direction from OUR perspective (see the
+                            // responder-relative note above): invert on the friend
+                            // path, keep as-is from a sibling.
+                            let is_mine = if from_sibling { msg.mine } else { !msg.mine };
 
                             // Verify signature if present.
                             // Skip edited messages — sig was against original text.
                             if msg.sig.is_some() && msg.edited_at.is_none() {
-                                // Sender=them, recipient=us. CRITICAL (multi-device):
-                                // the signer is the sender's MASTER (`convo_peer`), NOT
-                                // the raw device id `peer_str` the relay reported — the
-                                // message was signed with the master key over
-                                // `dm:{my_master}:{their_master}:…`. Verifying against
-                                // the device id failed EVERY signature for a
-                                // multi-device friend (the "Sig verify FAILED for DM
-                                // sync msg" flood) — the same device-vs-master bug the
-                                // live DM path already resolves via `convo_peer`.
+                                // CRITICAL (multi-device): the signer is always a
+                                // MASTER id, never the raw device id `peer_str` the
+                                // relay reported. The original sig context is the
+                                // FRIEND conversation, direction-dependent on OUR
+                                // effective `is_mine`:
+                                //   is_mine=true  → sender = our master, recipient = convo
+                                //   is_mine=false → sender = convo,      recipient = our master
+                                // (mirrors the sibling-batch receiver below). Verifying
+                                // against the wrong end failed EVERY signature for a
+                                // multi-device friend (the "Sig verify FAILED" flood).
+                                let (sender_m, recipient_m): (&str, &str) = if is_mine {
+                                    (&local_peer, &convo_peer)
+                                } else {
+                                    (&convo_peer, &local_peer)
+                                };
                                 let payload = message_signing_payload(
-                                    "dm", &local_peer, &convo_peer, msg.ts, &msg.t,
+                                    "dm", recipient_m, sender_m, msg.ts, &msg.t,
                                 );
-                                if !verify_message_signature_cached(&convo_peer, msg.sig.as_deref(), msg.pk.as_deref(), &payload, &mut pk_cache) {
-                                    hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for DM sync msg from {peer_str} (master {convo_peer}) ts={} text_len={} has_pk={}", msg.ts, msg.t.len(), msg.pk.is_some());
+                                if !verify_message_signature_cached(sender_m, msg.sig.as_deref(), msg.pk.as_deref(), &payload, &mut pk_cache) {
+                                    hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for DM sync msg from {peer_str} (master {convo_peer}, is_mine={is_mine}) ts={} text_len={} has_pk={}", msg.ts, msg.t.len(), msg.pk.is_some());
                                 }
                             }
 
@@ -4580,8 +4619,8 @@ async fn handle_incoming_request(
                                 .map(|mid| store.dm_message_exists(mid))
                                 .unwrap_or(false);
                             hollow_log!(
-                                "[HOLLOW-SYNC] dm item mid={:?} ts={} edited_at={:?} exists={} text_len={}",
-                                msg.mid, msg.ts, msg.edited_at, already_exists, msg.t.len()
+                                "[HOLLOW-SYNC] dm item mid={:?} ts={} wire_mine={} is_mine={is_mine} edited_at={:?} exists={} text_len={}",
+                                msg.mid, msg.ts, msg.mine, msg.edited_at, already_exists, msg.t.len()
                             );
 
                             // Reconcile against a row delivered via another path
@@ -4616,7 +4655,7 @@ async fn handle_incoming_request(
 
                             if !already_exists && !reconciled {
                                 match store.insert(
-                                    &convo_peer, &msg.t, false, msg.ts,
+                                    &convo_peer, &msg.t, is_mine, msg.ts,
                                     msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
                                     msg.reply_to.as_deref(), msg.file_id.as_deref(),
                                 ) {
@@ -4705,16 +4744,25 @@ async fn handle_incoming_request(
                         let _ = store.commit_transaction();
 
                         // Pagination: if has_more, send follow-up DmSyncRequest.
+                        // Carry the multi-device both-direction mode forward — else
+                        // the next page reverts to is_mine=0-only and re-strands our
+                        // own sends past message 200.
                         if has_more == Some(true) {
-                            let since = store
-                                .get_latest_dm_timestamp(&convo_peer)
-                                .unwrap_or(None)
-                                .unwrap_or(0);
-                            hollow_log!("[HOLLOW-SYNC] Requesting next DM page from {peer_str} since {since}");
+                            let multi_device =
+                                !super::resolver::devices_for(master_peer_str).is_empty();
+                            let since = if multi_device {
+                                store.get_latest_dm_timestamp_any(&convo_peer)
+                            } else {
+                                store.get_latest_dm_timestamp(&convo_peer)
+                            }
+                            .unwrap_or(None)
+                            .unwrap_or(0);
+                            hollow_log!("[HOLLOW-SYNC] Requesting next DM page from {peer_str} since {since} (both_directions={multi_device})");
                             send_message_to_peer(
                                 ws_cmd_tx, ws_room_peers,
                                 peer_str, HavenMessage::DmSyncRequest {
                                     since_timestamp: since,
+                                    both_directions: multi_device,
                                 },
                             );
                         }
@@ -7128,8 +7176,8 @@ async fn handle_incoming_request(
             }
         }
 
-        HavenMessage::DmSyncRequest { since_timestamp } => {
-            hollow_log!("[HOLLOW-SYNC] DmSyncRequest from {peer_str} since {since_timestamp}");
+        HavenMessage::DmSyncRequest { since_timestamp, both_directions } => {
+            hollow_log!("[HOLLOW-SYNC] DmSyncRequest from {peer_str} since {since_timestamp} (both_directions={both_directions})");
 
             // Multi-device: the requester sends its DEVICE id, but our DM rows for
             // that person are keyed by their MASTER id (the conversation key). A
@@ -7143,8 +7191,19 @@ async fn handle_incoming_request(
             let convo_peer = super::resolver::resolve(&peer_str);
 
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                if let Ok(messages) = store.get_dm_messages_since(&convo_peer, since_timestamp, 200) {
-                        hollow_log!("[HOLLOW-SYNC] Sending {} DM sync messages to {peer_str} (convo {convo_peer})", messages.len());
+                // Multi-device peer-fallback: a multi-device requester sets
+                // `both_directions` so we re-serve the requester's OWN messages
+                // (sent from another of their devices, stored here as is_mine=0)
+                // alongside our own — otherwise those are stranded when that
+                // other device is offline. A single-device requester omits the
+                // flag → the cheap is_mine=1-only path, byte-for-byte as before.
+                let messages_result = if both_directions {
+                    store.get_dm_messages_for_sibling(&convo_peer, since_timestamp, 200)
+                } else {
+                    store.get_dm_messages_since(&convo_peer, since_timestamp, 200)
+                };
+                if let Ok(messages) = messages_result {
+                        hollow_log!("[HOLLOW-SYNC] Sending {} DM sync messages to {peer_str} (convo {convo_peer}, both_directions={both_directions})", messages.len());
                         let items = build_dm_sync_items(&store, &messages);
 
                         if !items.is_empty() {

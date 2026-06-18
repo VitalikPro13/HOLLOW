@@ -754,6 +754,14 @@ pub(crate) enum HavenMessage {
     DmSyncRequest {
         /// Latest DM timestamp the requester has from this peer.
         since_timestamp: i64,
+        /// Multi-device peer-fallback: when set, the responder serves BOTH
+        /// directions of the conversation (not just `is_mine = 1`). A
+        /// multi-device requester sets this so a friend re-serves the
+        /// requester's OWN messages sent from another device — which would
+        /// otherwise be stranded if that other device is offline. Single-device
+        /// requesters omit it (default false → unchanged one-directional path).
+        #[serde(default)]
+        both_directions: bool,
     },
 
     /// Multi-device sibling DM backfill (Phase 6 / Step 5): a sibling device asks

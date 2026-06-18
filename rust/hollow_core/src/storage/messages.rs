@@ -4135,3 +4135,60 @@ fn stored_share_from_row(row: &rusqlite::Row<'_>) -> Result<StoredShare, String>
         context_type:   row.get::<_, Option<String>>(18).unwrap_or(None),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// In-memory SQLCipher store for tests. The passphrase must be valid hex
+    /// (interpolated as `x'…'`); a fresh `:memory:` db is created per call.
+    fn mem_store() -> MessageStore {
+        MessageStore::open(":memory:", &"ab".repeat(32)).expect("open in-memory store")
+    }
+
+    /// Locks the multi-device peer-fallback responder branch: a friend serving a
+    /// SINGLE-device requester via `get_dm_messages_since` returns ONLY our own
+    /// sends (is_mine=1), while serving a MULTI-device requester via
+    /// `get_dm_messages_for_sibling` returns BOTH directions — so the requester
+    /// recovers its own messages sent from another (offline) device.
+    #[test]
+    fn sibling_serve_returns_both_directions_unlike_friend_serve() {
+        let store = mem_store();
+        let convo = "friend_master";
+        // Three messages WE sent to the friend, three the friend sent to us.
+        store.insert(convo, "mine 1", true, 100, None, None, Some("m1"), None, None).unwrap();
+        store.insert(convo, "theirs 1", false, 110, None, None, Some("t1"), None, None).unwrap();
+        store.insert(convo, "mine 2", true, 120, None, None, Some("m2"), None, None).unwrap();
+        store.insert(convo, "theirs 2", false, 130, None, None, Some("t2"), None, None).unwrap();
+        store.insert(convo, "mine 3", true, 140, None, None, Some("m3"), None, None).unwrap();
+        store.insert(convo, "theirs 3", false, 150, None, None, Some("t3"), None, None).unwrap();
+
+        // Friend path (one-directional): only the messages WE sent.
+        let friend = store.get_dm_messages_since(convo, 0, 200).unwrap();
+        assert_eq!(friend.len(), 3, "friend serve must return only is_mine=1");
+        assert!(friend.iter().all(|m| m.is_mine), "friend serve leaked received msgs");
+
+        // Sibling/peer-fallback path: BOTH directions.
+        let both = store.get_dm_messages_for_sibling(convo, 0, 200).unwrap();
+        assert_eq!(both.len(), 6, "peer-fallback serve must return both directions");
+        assert_eq!(both.iter().filter(|m| m.is_mine).count(), 3);
+        assert_eq!(both.iter().filter(|m| !m.is_mine).count(), 3);
+    }
+
+    /// `get_latest_dm_timestamp` (friend high-water) ignores our own sends, so a
+    /// multi-device requester must use `get_latest_dm_timestamp_any` to ask for
+    /// the gap in its OWN outgoing messages too.
+    #[test]
+    fn latest_any_spans_both_directions() {
+        let store = mem_store();
+        let convo = "friend_master";
+        // Our latest OUTGOING is newer than the latest INCOMING.
+        store.insert(convo, "theirs", false, 100, None, None, Some("t1"), None, None).unwrap();
+        store.insert(convo, "mine newer", true, 200, None, None, Some("m1"), None, None).unwrap();
+
+        // is_mine=0-only high-water stops at the incoming message.
+        assert_eq!(store.get_latest_dm_timestamp(convo).unwrap(), Some(100));
+        // both-direction high-water sees our newer outgoing message.
+        assert_eq!(store.get_latest_dm_timestamp_any(convo).unwrap(), Some(200));
+    }
+}
