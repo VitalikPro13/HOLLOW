@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -93,6 +94,62 @@ class EventStreamNotifier extends Notifier<bool> {
     PushHintsCache.scheduleWrite(friends.keys);
   }
 
+  bool _selfNuking = false;
+
+  /// Step 7 self-nuke: this device was revoked. Wipe the data dir + relaunch to a
+  /// clean Welcome. Mirrors the link "go back" flow (hollow_shell): we MARK a wipe
+  /// (the live node holds open SQLCipher handles, so deleting in-process fails on
+  /// Windows) and relaunch — the next launch's _bootstrap runs performPendingWipe()
+  /// BEFORE the node starts. Idempotent (guarded) since the event could repeat.
+  Future<void> _selfNuke() async {
+    if (_selfNuking) return;
+    _selfNuking = true;
+
+    // CRITICAL — stash the wipe FIRST, before anything that can throw. A previous
+    // version showed the toast first via the plain `HollowToast.show(ctx, …)` form,
+    // which calls `Overlay.of(navKey.currentContext)` → throws "Null check operator
+    // used on a null value" (the Navigator's own context has no Overlay ANCESTOR;
+    // the Overlay is its CHILD). That exception aborted _selfNuke before the wipe was
+    // ever stashed, so the device never reset. Teardown is now unconditional and the
+    // toast is best-effort. See feedback_toast_from_nonwidget_overlaystate.
+    try {
+      await storage_api.stashPendingWipe();
+    } catch (e) {
+      debugPrint('[HOLLOW] self-nuke stash failed: $e');
+    }
+
+    // Best-effort toast — must NEVER abort the nuke. Insert directly into the root
+    // navigator's Overlay via `overlayState:` (the positional context is unused then).
+    try {
+      final overlay = hollowNavigatorKey.currentState?.overlay;
+      if (overlay != null) {
+        HollowToast.show(
+          overlay.context,
+          'This device was removed from your account. Resetting…',
+          type: HollowToastType.error,
+          overlayState: overlay,
+        );
+      }
+    } catch (e) {
+      debugPrint('[HOLLOW] self-nuke toast failed (non-fatal): $e');
+    }
+
+    // Give the toast a beat, then shut the node down and relaunch.
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
+    try {
+      await notifyShutdown();
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    } catch (_) {}
+    try {
+      if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+        await Process.start(Platform.resolvedExecutable, const [],
+            mode: ProcessStartMode.detached);
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    } catch (_) {}
+    exit(0);
+  }
+
   void start() {
     if (_subscription != null) return;
     final networkService = ref.read(networkServiceProvider);
@@ -111,6 +168,8 @@ class EventStreamNotifier extends Notifier<bool> {
     // Warm the device→identity map from the node's resolver (persisted links +
     // our own devices) so attribution is correct before the first profile sync.
     ref.read(deviceLinkProvider.notifier).refresh();
+    // Warm local device labels (Step 8 Devices panel).
+    ref.read(deviceLabelProvider.notifier).refresh();
   }
 
   void stop() {
@@ -177,6 +236,15 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Listening: $address');
 
       case NetworkEvent_MessageReceived(:final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final isOwn):
+        // MULTI-DEVICE: a DM's `fromPeer` is the sender's DEVICE id, but unread
+        // counts, the "seen" pointer, mute settings, and notifications all key on
+        // the MASTER identity (a conversation is with a person, not a device).
+        // Keying unread on the raw device id created a `dmUnreadCounts[<deviceId>]`
+        // entry that `markDmSeen(master)` never cleared → a permanently-stuck pill
+        // that even counted a since-disconnected device; the notification likewise
+        // showed a raw peer id instead of the name. Resolve to master first. Single-
+        // device senders resolve to themselves (no-op).
+        final dmMaster = ref.read(deviceLinkProvider).identityOf(fromPeer);
         ref.read(chatProvider.notifier).receiveMessage(
               fromPeer, text, timestamp, messageId, replyToMid,
               linkPreview: linkPreview,
@@ -190,9 +258,9 @@ class EventStreamNotifier extends Notifier<bool> {
         if (isOwn) {
           // Our own send clears any lingering "friend is typing" + marks the DM
           // read up to here (we just participated in it from another device).
-          ref.read(typingProvider.notifier).clearTyping(fromPeer, fromPeer);
+          ref.read(typingProvider.notifier).clearTyping(dmMaster, dmMaster);
           ref.read(unreadProvider.notifier).markDmSeen(
-              fromPeer, messageId.isNotEmpty ? messageId : null);
+              dmMaster, messageId.isNotEmpty ? messageId : null);
           break;
         }
         ref.read(typingProvider.notifier).clearTyping(fromPeer, fromPeer);
@@ -200,20 +268,20 @@ class EventStreamNotifier extends Notifier<bool> {
         // Window must be visible AND viewing this DM to count as "viewing".
         final windowVisible = ref.read(windowVisibleProvider);
         final isViewingDm = windowVisible &&
-            ref.read(selectedPeerProvider) == fromPeer &&
+            ref.read(selectedPeerProvider) == dmMaster &&
             ref.read(selectedServerProvider) == null &&
             ref.read(chatAtBottomProvider);
         final isDmMuted = !ref
             .read(notificationSettingsProvider.notifier)
-            .isDmEnabled(fromPeer);
+            .isDmEnabled(dmMaster);
         if (!isDmMuted) {
           ref.read(unreadProvider.notifier).onDmMessage(
-              fromPeer, messageId, isViewingDm);
+              dmMaster, messageId, isViewingDm);
         }
         // System notification for DM.
         if (!isViewingDm && !isDmMuted) {
           ref.read(systemNotificationProvider.notifier).notifyDm(
-                fromPeerId: fromPeer,
+                fromPeerId: dmMaster,
                 text: text,
                 replyToMid: replyToMid,
               );
@@ -566,6 +634,15 @@ class EventStreamNotifier extends Notifier<bool> {
         // device→identity map so attribution/presence collapse picks it up.
         debugPrint('[HOLLOW] Device list updated: $masterPeerId');
         ref.read(deviceLinkProvider.notifier).refresh();
+        ref.read(deviceLabelProvider.notifier).refresh();
+
+      case NetworkEvent_SelfRevoked():
+        // Step 7: THIS device was revoked by the identity. Self-nuke — wipe the
+        // data dir + relaunch to a clean Welcome (mirrors the link "go back" flow
+        // in hollow_shell). The cryptographic cutoff already happened elsewhere;
+        // this is the honest teardown so no half-baked identity lingers.
+        debugPrint('[HOLLOW] This device was REVOKED — self-nuking');
+        _selfNuke();
 
       case NetworkEvent_ChannelMessageEdited(
             :final serverId, :final channelId, :final messageId, :final newText, :final editedAt, :final signature, :final publicKey):

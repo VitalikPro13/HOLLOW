@@ -6,6 +6,7 @@ use crate::storage::MessageStore;
 pub(crate) enum CryptoStoreCmd {
     SaveAccount(String),
     SaveSession { peer_id: String, pickle: String },
+    DeleteSession { peer_id: String },
     SaveMlsIdentity { signer: Vec<u8>, credential: Vec<u8>, storage: Vec<u8> },
 }
 
@@ -47,6 +48,11 @@ impl CryptoStore {
                             hollow_log!("CryptoStore: failed to save session for {peer_id}: {e}");
                         }
                     }
+                    CryptoStoreCmd::DeleteSession { peer_id } => {
+                        if let Err(e) = store.delete_olm_session(&peer_id) {
+                            hollow_log!("CryptoStore: failed to delete session for {peer_id}: {e}");
+                        }
+                    }
                     CryptoStoreCmd::SaveMlsIdentity { signer, credential, storage } => {
                         if let Err(e) = store.save_mls_identity(&signer, &credential, &storage) {
                             hollow_log!("CryptoStore: failed to save MLS identity: {e}");
@@ -70,6 +76,11 @@ impl CryptoStore {
             peer_id,
             pickle: pickle_json,
         });
+    }
+
+    /// Fire-and-forget: delete a persisted Olm session (Step 7 revocation).
+    pub fn delete_session(&self, peer_id: String) {
+        let _ = self.cmd_tx.send(CryptoStoreCmd::DeleteSession { peer_id });
     }
 
     /// Fire-and-forget: persist MLS identity (signer, credential, storage).

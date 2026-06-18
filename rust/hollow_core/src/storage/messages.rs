@@ -738,6 +738,17 @@ impl MessageStore {
         )
         .map_err(|e| format!("Failed to create device_links index: {e}"))?;
 
+        // Local-only, unsigned human labels for devices (Step 8 Devices panel). NOT
+        // synced or master-signed — each device names its own view of the device set.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS device_labels (
+                device_peer_id TEXT PRIMARY KEY,
+                label          TEXT NOT NULL DEFAULT ''
+            )",
+            [],
+        )
+        .map_err(|e| format!("Failed to create device_labels table: {e}"))?;
+
         Ok(MessageStore { conn })
     }
 
@@ -965,6 +976,15 @@ impl MessageStore {
             Some(Err(e)) => Err(format!("Failed to read olm_sessions row: {e}")),
             None => Ok(None),
         }
+    }
+
+    /// Delete a persisted Olm session (Step 7 device revocation — so a revoked
+    /// device's session is not resurrected from the DB on restart). Idempotent.
+    pub fn delete_olm_session(&self, peer_id: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM olm_sessions WHERE peer_id = ?1", params![peer_id])
+            .map_err(|e| format!("Failed to delete olm session: {e}"))?;
+        Ok(())
     }
 
     /// Load all Olm session pickles (peer_id, pickle_json) pairs.
@@ -2138,6 +2158,45 @@ impl MessageStore {
             .execute("DELETE FROM device_lists", [])
             .map_err(|e| format!("Failed to clear device_lists: {e}"))?;
         Ok(())
+    }
+
+    // ── Device labels (Step 8 Devices panel — local-only, unsigned) ──
+
+    /// Set (or clear, when empty) the local human label for a device peer_id.
+    pub fn set_device_label(&self, device_peer_id: &str, label: &str) -> Result<(), String> {
+        if label.is_empty() {
+            self.conn
+                .execute(
+                    "DELETE FROM device_labels WHERE device_peer_id = ?1",
+                    params![device_peer_id],
+                )
+                .map_err(|e| format!("Failed to clear device label: {e}"))?;
+        } else {
+            self.conn
+                .execute(
+                    "INSERT INTO device_labels (device_peer_id, label) VALUES (?1, ?2)
+                     ON CONFLICT(device_peer_id) DO UPDATE SET label = excluded.label",
+                    params![device_peer_id, label],
+                )
+                .map_err(|e| format!("Failed to save device label: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Load all local device labels (device_peer_id, label).
+    pub fn get_all_device_labels(&self) -> Result<Vec<(String, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT device_peer_id, label FROM device_labels")
+            .map_err(|e| format!("Failed to prepare device_labels query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("Failed to query device_labels: {e}"))?;
+        let mut result = Vec::new();
+        for r in rows {
+            result.push(r.map_err(|e| format!("Failed to read device_labels row: {e}"))?);
+        }
+        Ok(result)
     }
 
     // ── User Profile Persistence (Phase 3.5) ──

@@ -88,37 +88,53 @@ pub(crate) fn message_signing_payload(
 // -- Multi-device signed device list (Phase 6) --
 
 /// Canonical payload for signing a device list.
-/// Format: "hollow-devices:{master_peer_id}:{version}:{sorted_device_ids_csv}".
-/// `devices` MUST be sorted before calling so the payload is deterministic.
+/// Format:
+/// "hollow-devices:{master_peer_id}:{version}:{sorted_device_csv}:{sorted_revoked_csv}".
+/// Both `devices` and `revoked` MUST be sorted before calling so the payload is
+/// deterministic. The trailing `:{revoked_csv}` segment is present even when
+/// `revoked` is empty (Step 7) — one signature thus covers adds AND removes under
+/// one version. NOTE: this means a pre-Step-7 4-segment signature will not verify
+/// under this code; safe because lists are verified ONLY at receive time and stored
+/// lists keep their incoming sig (never re-verified), so both ends ship together.
 pub(crate) fn device_list_signing_payload(
     master_peer_id: &str,
     version: u64,
     devices: &[String],
+    revoked: &[String],
 ) -> String {
     format!(
-        "hollow-devices:{master_peer_id}:{version}:{}",
-        devices.join(",")
+        "hollow-devices:{master_peer_id}:{version}:{}:{}",
+        devices.join(","),
+        revoked.join(",")
     )
 }
 
-/// Build a master-signed [`SignedDeviceList`] for the given device peer_ids.
-/// `master` is the master keypair (the cross-device identity). `devices` is
-/// sorted internally so the signed payload is canonical.
+/// Build a master-signed [`SignedDeviceList`] for the given device peer_ids and
+/// revoked tombstones. `master` is the master keypair (the cross-device identity).
+/// Both `devices` and `revoked` are sorted/deduped internally so the signed payload
+/// is canonical. Any id present in `revoked` is removed from `devices` (a revoked id
+/// can never coexist as an active device).
 pub(crate) fn build_signed_device_list(
     master: &crate::identity::native_identity::NativeKeypair,
     version: u64,
     mut devices: Vec<String>,
+    mut revoked: Vec<String>,
 ) -> SignedDeviceList {
     use base64::engine::general_purpose::STANDARD as B64;
+    revoked.sort();
+    revoked.dedup();
+    // A revoked id is never an active device.
+    devices.retain(|d| !revoked.iter().any(|r| r == d));
     devices.sort();
     devices.dedup();
     let master_peer_id = master.peer_id();
-    let payload = device_list_signing_payload(&master_peer_id, version, &devices);
+    let payload = device_list_signing_payload(&master_peer_id, version, &devices, &revoked);
     let sig = master.sign(payload.as_bytes());
     SignedDeviceList {
         master_pubkey_b64: B64.encode(master.public_key_protobuf()),
         master_peer_id,
         devices,
+        revoked,
         version,
         sig_b64: B64.encode(sig),
     }
@@ -143,11 +159,15 @@ pub(crate) fn verify_device_list(list: &SignedDeviceList) -> bool {
     let Ok(sig_bytes) = B64.decode(&list.sig_b64) else {
         return false;
     };
-    // Devices must be sorted as signed; verify over the canonical payload using a
-    // sorted copy so an attacker can't reorder the array post-signing.
+    // Devices AND revoked must be sorted as signed; verify over the canonical
+    // payload using sorted copies so an attacker can't reorder/strip either array
+    // post-signing.
     let mut devices = list.devices.clone();
     devices.sort();
-    let payload = device_list_signing_payload(&list.master_peer_id, list.version, &devices);
+    let mut revoked = list.revoked.clone();
+    revoked.sort();
+    let payload =
+        device_list_signing_payload(&list.master_peer_id, list.version, &devices, &revoked);
     NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, payload.as_bytes())
         .unwrap_or(false)
 }
@@ -171,24 +191,30 @@ pub(crate) fn build_local_device_list(
     let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
     let master_peer_id = master.peer_id();
 
-    // Load whatever we've persisted for ourselves (devices + version). Absent =
-    // first run → seed version 1 with just this device.
-    let (devices, version) = match store.load_device_list(&master_peer_id) {
+    // Load whatever we've persisted for ourselves (devices + revoked + version).
+    // Absent = first run → seed version 1 with just this device, no revocations.
+    let (devices, revoked, version) = match store.load_device_list(&master_peer_id) {
         Ok(Some(list)) => {
-            // Ensure THIS device is in the set (migration/first-publish safety).
+            // Ensure THIS device is in the set (migration/first-publish safety) and
+            // never tombstoned (we can't revoke the device we're running on).
+            let mut revoked = list.revoked.clone();
+            revoked.retain(|r| r != device_peer_id);
             let mut devs = list.devices.clone();
-            if !devs.iter().any(|d| d == device_peer_id) {
+            let self_added = !devs.iter().any(|d| d == device_peer_id);
+            if self_added {
                 devs.push(device_peer_id.to_string());
-                // Membership changed → bump version so peers accept the update.
-                (devs, list.version.saturating_add(1))
+            }
+            // Membership changed → bump version so peers accept the update.
+            if self_added || revoked.len() != list.revoked.len() {
+                (devs, revoked, list.version.saturating_add(1))
             } else {
-                (devs, list.version.max(1))
+                (devs, revoked, list.version.max(1))
             }
         }
-        _ => (vec![device_peer_id.to_string()], 1),
+        _ => (vec![device_peer_id.to_string()], Vec::new(), 1),
     };
 
-    let signed = build_signed_device_list(master, version, devices);
+    let signed = build_signed_device_list(master, version, devices, revoked);
 
     // Persist our own list so device_list_version() stays monotonic across
     // restarts and the resolver warms our own devices on next boot.
@@ -204,6 +230,82 @@ pub(crate) fn build_local_device_list(
     // Keep the resolver in sync with our own devices immediately.
     super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
 
+    Some(signed)
+}
+
+/// Revoke one of OUR OWN devices (Step 7). Mutates our master-signed device list:
+/// removes `target_device` from `devices`, adds it to `revoked` (tombstone), bumps
+/// the version, re-signs with the master key, persists, prunes the resolver. Returns
+/// the freshly re-signed list (`None` on a guard failure or DB error).
+///
+/// Guards: refuses to revoke the device we're running on (`local_device_peer_id`),
+/// and refuses an id that does not currently belong to us (not in our `devices` and
+/// not already a resolver-known device of our master). Idempotent for an id already
+/// revoked (returns the current signed list unchanged in `revoked`).
+pub(crate) fn revoke_own_device(
+    master: &crate::identity::native_identity::NativeKeypair,
+    local_device_peer_id: &str,
+    target_device: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<SignedDeviceList> {
+    if target_device == local_device_peer_id {
+        hollow_log!("[HOLLOW-REVOKE] Refused to revoke the device we are running on");
+        return None;
+    }
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let master_peer_id = master.peer_id();
+    let (mut devices, mut revoked, version): (Vec<String>, Vec<String>, u64) =
+        match store.load_device_list(&master_peer_id) {
+            Ok(Some(list)) => (list.devices.clone(), list.revoked.clone(), list.version),
+            _ => (vec![local_device_peer_id.to_string()], Vec::new(), 0),
+        };
+    // Ensure THIS device stays present (never tombstoned).
+    if !devices.iter().any(|d| d == local_device_peer_id) {
+        devices.push(local_device_peer_id.to_string());
+    }
+    // The target must be one of OUR devices (in the active set, or a resolver-known
+    // device of our master — covers a live device id not yet folded into the list).
+    let belongs = devices.iter().any(|d| d == target_device)
+        || super::resolver::resolve(target_device) == master_peer_id;
+    if !belongs {
+        hollow_log!("[HOLLOW-REVOKE] Refused to revoke {target_device}: not one of our devices");
+        return None;
+    }
+    if revoked.iter().any(|r| r == target_device) && !devices.iter().any(|d| d == target_device) {
+        // Already revoked and not active — nothing to change. Re-sign current state
+        // so the caller still has a list to re-announce (idempotent).
+        let signed = build_signed_device_list(master, version.max(1), devices, revoked);
+        super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
+        return Some(signed);
+    }
+    devices.retain(|d| d != target_device);
+    if !revoked.iter().any(|r| r == target_device) {
+        revoked.push(target_device.to_string());
+    }
+    let next_version = version.saturating_add(1).max(1);
+    let signed = build_signed_device_list(master, next_version, devices, revoked);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let json = serde_json::to_string(&signed).ok()?;
+    if let Err(e) = store.save_device_list(
+        &signed.master_peer_id, &json, signed.version, &signed.devices, now,
+    ) {
+        hollow_log!("[HOLLOW-REVOKE] Failed to persist revocation: {e}");
+        return None;
+    }
+    // Drop the revoked device from the in-memory resolver, then re-seed our survivors.
+    super::resolver::forget(target_device);
+    // Phantom-chat guard on the revoker too: drop any lingering DMs/typing from the
+    // device we just revoked until it self-nukes / disconnects.
+    super::resolver::mark_revoked(std::slice::from_ref(&target_device.to_string()));
+    super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
+    hollow_log!(
+        "[HOLLOW-REVOKE] Revoked own device {target_device} → list now {} devices, {} revoked (v{})",
+        signed.devices.len(), signed.revoked.len(), signed.version
+    );
     Some(signed)
 }
 
@@ -227,12 +329,20 @@ pub(crate) fn merge_sibling_device_id(
         return false;
     };
     let master_peer_id = master.peer_id();
-    let (mut devices, version): (Vec<String>, u64) = match store.load_device_list(&master_peer_id) {
-        Ok(Some(list)) => (list.devices.clone(), list.version),
-        _ => (vec![local_device_peer_id.to_string()], 0),
-    };
+    let (mut devices, revoked, version): (Vec<String>, Vec<String>, u64) =
+        match store.load_device_list(&master_peer_id) {
+            Ok(Some(list)) => (list.devices.clone(), list.revoked.clone(), list.version),
+            _ => (vec![local_device_peer_id.to_string()], Vec::new(), 0),
+        };
     if !devices.iter().any(|d| d == local_device_peer_id) {
         devices.push(local_device_peer_id.to_string());
+    }
+    // A revoked sibling id must never be re-admitted by the inbox proof — this is
+    // the same-peer-id resurrection guard. A reinstalled phone comes back with a
+    // FRESH random device id and so is not blocked here.
+    if revoked.iter().any(|r| r == sibling_device_peer_id) {
+        super::resolver::seed_self(&master_peer_id, &devices);
+        return false;
     }
     if devices.iter().any(|d| d == sibling_device_peer_id) {
         // Already known — keep the resolver warm, but nothing to re-announce.
@@ -241,7 +351,7 @@ pub(crate) fn merge_sibling_device_id(
     }
     devices.push(sibling_device_peer_id.to_string());
     let next_version = version.saturating_add(1).max(1);
-    let signed = build_signed_device_list(master, next_version, devices);
+    let signed = build_signed_device_list(master, next_version, devices, revoked);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -259,13 +369,28 @@ pub(crate) fn merge_sibling_device_id(
     true
 }
 
+/// Outcome of ingesting a device list. The swarm call site consumes this to drive
+/// crypto enforcement (Step 7) and self-re-announce.
+/// - `our_devices_grew`: a sibling merge added one of OUR OWN device ids (caller
+///   re-announces our profile so friends converge — the historical `bool` return).
+/// - `newly_revoked`: device ids that became tombstoned THIS ingest. The caller
+///   (which holds `&mut olm`/`&mut mls`) drops the Olm session to each and, if it
+///   is the MLS coordinator for a shared server, enqueues the single leaf for
+///   removal. Empty on every pre-Step-7 / single-device path.
+#[derive(Default)]
+pub(crate) struct IngestOutcome {
+    pub our_devices_grew: bool,
+    pub newly_revoked: Vec<String>,
+}
+
 /// Ingest a device list received on a peer's profile sync.
 ///
-/// Verifies the signature, enforces monotonic version (replay protection), and
-/// on success persists it + updates the resolver + emits `DeviceListUpdated`.
-/// A `None` list (old client, or a self-profile we sent) is a no-op. Our OWN
-/// master is skipped — we are the authority for our own list, a peer can't
-/// rewrite it.
+/// Verifies the signature, unions devices (replay-safe — see body), applies
+/// revocation tombstones (Step 7, max-version-wins), and on a change persists it +
+/// updates the resolver + emits `DeviceListUpdated`. A `None` list (old client, or
+/// a self-profile we sent) is a no-op. A list for our OWN master goes to the
+/// sibling-merge path (we are the authority for our own list, a friend can't
+/// rewrite it — but a sibling can union into it).
 pub(crate) async fn ingest_device_list(
     event_tx: &mpsc::Sender<NetworkEvent>,
     local_master_peer_id: &str,
@@ -277,10 +402,10 @@ pub(crate) async fn ingest_device_list(
     list: Option<SignedDeviceList>,
     db_path: &str,
     db_passphrase: &str,
-) -> bool {
-    let Some(list) = list else { return false };
+) -> IngestOutcome {
+    let Some(list) = list else { return IngestOutcome::default() };
     if list.master_peer_id.is_empty() || list.devices.is_empty() {
-        return false;
+        return IngestOutcome::default();
     }
     // Multi-device: a list for OUR OWN master came from one of our other devices
     // (a sibling, same imported mnemonic → same master key, so it is validly
@@ -292,58 +417,87 @@ pub(crate) async fn ingest_device_list(
     // friends converge on the full set, and (if the sibling is new) hand it our
     // friend list so it can join their DM rooms.
     if list.master_peer_id == local_master_peer_id {
-        return ingest_sibling_device_list(
+        let (grew, newly_revoked) = ingest_sibling_device_list(
             event_tx, local_master_peer_id, local_device_peer_id, master_keypair,
             sender_peer_id, ws_cmd_tx, ws_room_peers, list, db_path, db_passphrase,
         ).await;
+        return IngestOutcome { our_devices_grew: grew, newly_revoked };
     }
     if !verify_device_list(&list) {
         hollow_log!(
             "[HOLLOW-DEVICES] Rejected device list for {}: bad signature",
             list.master_peer_id
         );
-        return false;
+        return IngestOutcome::default();
     }
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return IngestOutcome::default();
+    };
+    // Load what we already hold for this master (devices + revoked + version).
+    let (prev_devices, prev_revoked, prev_version): (Vec<String>, Vec<String>, u64) =
+        match store.load_device_list(&list.master_peer_id) {
+            Ok(Some(cur)) => (cur.devices.clone(), cur.revoked.clone(), cur.version),
+            _ => (Vec::new(), Vec::new(), 0),
+        };
+    // TOMBSTONES — max-version-wins (Step 7). A higher-version list is the latest
+    // master word and may both add AND un-revoke; a replay (version <= prev) keeps
+    // our prev revoked set, so it can never shrink the tombstones (can't un-revoke).
+    let new_revoked: Vec<String> = if list.version > prev_version {
+        let mut r = list.revoked.clone();
+        r.sort();
+        r.dedup();
+        r
+    } else {
+        prev_revoked.clone()
+    };
+    let is_revoked = |id: &str| new_revoked.iter().any(|r| r == id);
+    // SELF-NUKE (Step 7): if THIS device appears in the revoked set, the identity has
+    // cut us off. Tear ourselves down (Dart wipes the data dir + relaunches to a clean
+    // Welcome). Defensive here — a friend's list is for a different master so this
+    // normally never matches; the real path is the sibling merge below.
+    if is_revoked(local_device_peer_id) {
+        hollow_log!("[HOLLOW-REVOKE] This device was revoked (friend list) — self-nuking");
+        let _ = event_tx.send(NetworkEvent::SelfRevoked).await;
+        return IngestOutcome::default();
+    }
+    // Guard the DM/typing receive path against a just-revoked-but-still-alive device
+    // (phantom-chat guard): mark every revoked id of this master so inbound messages
+    // from it are dropped until it self-nukes / disconnects.
+    if !new_revoked.is_empty() {
+        super::resolver::mark_revoked(&new_revoked);
+    }
+    // Ids that became tombstoned THIS ingest (drive Olm/MLS enforcement at the caller).
+    let newly_revoked: Vec<String> = new_revoked
+        .iter()
+        .filter(|r| !prev_revoked.iter().any(|p| &p == r))
+        .cloned()
+        .collect();
     // Register the SENDER device → master link. The list is master-signed and
     // arrived over this device's authenticated socket in the master's room, so
     // the delivering device provably belongs to that master EVEN IF it is not
-    // (yet) listed in `list.devices` — the common case when the stored list is
-    // stale/polluted (old wipe+reimport ghosts) or the sender's id rotated. This
-    // is what lets presence collapse the LIVE device and the DM fan-out target it
-    // by `resolve(sender) == master`, instead of chasing a dead ghost id.
-    if sender_peer_id != list.master_peer_id {
+    // (yet) listed in `list.devices`. SKIP if the sender is revoked (a revoked
+    // device must not re-register itself by delivering a stale list).
+    if sender_peer_id != list.master_peer_id && !is_revoked(sender_peer_id) {
         super::resolver::update(sender_peer_id, &list.master_peer_id);
     }
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
-        return false;
-    };
     // Fold the live sender device into the merge set too, so it's persisted and
-    // surfaced to Dart (presence) — not just held in the volatile resolver. A
-    // device that delivered a master-signed list IS a member of that identity.
+    // surfaced to Dart (presence). A device that delivered a master-signed list IS
+    // a member of that identity — unless it has been revoked.
     let sender_is_new_member = sender_peer_id != list.master_peer_id
-        && store.load_device_list(&list.master_peer_id)
-            .ok().flatten()
-            .map(|cur| !cur.devices.iter().any(|d| d == sender_peer_id))
-            .unwrap_or(true);
+        && !is_revoked(sender_peer_id)
+        && !prev_devices.iter().any(|d| d == sender_peer_id);
 
-    // UNION-merge, do NOT reject-on-stale. Two devices of one identity each start
-    // their list at version 1, so a naive `version <= current` guard makes the
-    // SECOND device's list look like a replay and drops it — the friend then only
-    // ever learns ONE device and the other device's presence is never attributed
-    // (exactly the "offline when the other device is up" bug). Adding device ids
-    // is always safe (you cannot un-revoke by adding; removal/revocation is a
-    // separate signed statement — Step 7). So we union the incoming devices into
-    // whatever we already have for this master and keep the highest version seen.
-    let (prev_devices, prev_version): (Vec<String>, u64) =
-        match store.load_device_list(&list.master_peer_id) {
-            Ok(Some(cur)) => (cur.devices.clone(), cur.version),
-            _ => (Vec::new(), 0),
-        };
-    let mut merged: Vec<String> = prev_devices.clone();
-    let mut known: std::collections::HashSet<String> = prev_devices.iter().cloned().collect();
+    // UNION-merge MINUS tombstones, do NOT reject-on-stale. Two devices of one
+    // identity each start their list at version 1, so a naive `version <= current`
+    // guard makes the SECOND device's list look like a replay and drops it — the
+    // friend then only ever learns ONE device (the "offline when the other device
+    // is up" bug). Adding device ids is safe; REMOVAL is the signed `revoked` set.
+    // So: union(prev, incoming) − new_revoked, keeping the highest version seen.
+    let mut merged: Vec<String> = prev_devices.iter().filter(|d| !is_revoked(d)).cloned().collect();
+    let mut known: std::collections::HashSet<String> = merged.iter().cloned().collect();
     let mut added = 0u32;
     for d in &list.devices {
-        if !known.contains(d) {
+        if !is_revoked(d) && !known.contains(d) {
             merged.push(d.clone());
             known.insert(d.clone());
             added += 1;
@@ -355,7 +509,11 @@ pub(crate) async fn ingest_device_list(
         merged.push(sender_peer_id.to_string());
         added += 1;
     }
-    let nothing_new = added == 0 && list.version <= prev_version;
+    // A revocation removed one or more of our previously-known devices.
+    let removed_any = prev_devices.iter().any(|d| is_revoked(d));
+    let revoked_changed = new_revoked.len() != prev_revoked.len();
+    let nothing_new = added == 0 && !removed_any && !revoked_changed
+        && list.version <= prev_version;
     if nothing_new {
         // Truly redundant on the RUST side (same/older list, no new devices) — skip
         // the DB write, but STILL re-warm the resolver AND emit DeviceListUpdated.
@@ -377,21 +535,20 @@ pub(crate) async fn ingest_device_list(
         let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
             master_peer_id: list.master_peer_id.clone(),
         }).await;
-        return false;
+        return IngestOutcome::default();
     }
 
-    // Persist the union. Re-sign so the stored list stays self-consistent and any
-    // onward re-publish carries a valid signature. The list claims `master_peer_id`
-    // and we are NOT that master here (self lists go through the sibling path), so
-    // we cannot re-sign with the master key — store the union under the higher
-    // version with the INCOMING signature/pubkey (the membership is the union; the
-    // sig still proves the incoming subset was master-authorized). Verification on
-    // re-broadcast is sender-side; observers trust the per-device profile sig path.
+    // Persist the union-minus-tombstones. We are NOT this master (self lists go
+    // through the sibling path), so we cannot re-sign — store under the higher
+    // version with the INCOMING signature/pubkey AND the resolved `new_revoked`
+    // set. Verification on re-broadcast is sender-side; observers trust the
+    // per-device profile sig path.
     let version = prev_version.max(list.version).max(1);
     let stored = SignedDeviceList {
         master_pubkey_b64: list.master_pubkey_b64.clone(),
         master_peer_id: list.master_peer_id.clone(),
         devices: merged.clone(),
+        revoked: new_revoked.clone(),
         version,
         sig_b64: list.sig_b64.clone(),
     };
@@ -401,29 +558,38 @@ pub(crate) async fn ingest_device_list(
         .as_millis() as i64;
     let json = match serde_json::to_string(&stored) {
         Ok(j) => j,
-        Err(_) => return false,
+        Err(_) => return IngestOutcome::default(),
     };
+    // save_device_list rebuilds the device_links reverse index from `devices`, so a
+    // revoked id (now absent from `merged`) is dropped from device_links for free.
     if let Err(e) = store.save_device_list(
         &stored.master_peer_id, &json, stored.version, &stored.devices, now,
     ) {
         hollow_log!("[HOLLOW-DEVICES] Failed to save device list: {e}");
-        return false;
+        return IngestOutcome::default();
     }
-    // Update the in-memory resolver so attribution/self-checks pick it up at once.
+    // Prune the in-memory resolver for revoked ids (the map is insert-only; without
+    // this a revoked device keeps resolving to its master until restart), then warm
+    // the surviving devices so attribution/self-checks pick them up at once.
+    if !new_revoked.is_empty() {
+        super::resolver::forget_many(&new_revoked);
+    }
     super::resolver::update_many(
         &stored.master_peer_id,
         stored.devices.iter().map(|s| s.as_str()),
     );
     hollow_log!(
-        "[HOLLOW-DEVICES] Ingested device list for {} (v{}, {} devices, +{} new)",
-        stored.master_peer_id, stored.version, stored.devices.len(), added
+        "[HOLLOW-DEVICES] Ingested device list for {} (v{}, {} devices, {} revoked, +{} new)",
+        stored.master_peer_id, stored.version, stored.devices.len(),
+        stored.revoked.len(), added
     );
     let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
         master_peer_id: stored.master_peer_id,
     }).await;
-    // A FRIEND's device set grew — no self re-broadcast needed (that's for our
-    // OWN sibling merges, handled on the self path above).
-    false
+    // A FRIEND's device set changed — no self re-broadcast needed (that's for our
+    // OWN sibling merges, handled on the self path above). Surface any freshly
+    // revoked ids so the caller drops Olm sessions + removes MLS leaves.
+    IngestOutcome { our_devices_grew: false, newly_revoked }
 }
 
 /// Merge a sibling device's list (for our OWN master) into ours.
@@ -436,11 +602,10 @@ pub(crate) async fn ingest_device_list(
 /// learned ONE of two devices). When the merge reveals a brand-new sibling
 /// device, we also hand it our accepted-friend list so it can join their DM
 /// rooms (presence on-ramp, Step 2.5).
-/// Returns `true` if OUR OWN device set grew as a result of this merge (i.e. we
-/// learned a new sibling device id). Callers use this to re-broadcast our profile
-/// to friends so they converge on the full device set WHILE we're still online —
-/// without it, a friend only learns the union when our substitute device joins
-/// their DM room later (racy), and shows us offline if our original device quits.
+/// Returns `(our_devices_grew_or_revoked, newly_revoked)`. The first is `true` if
+/// OUR OWN list changed (device added OR a tombstone applied) so callers re-broadcast
+/// our profile to friends; the second is device ids freshly tombstoned this merge so
+/// the caller drops their Olm sessions + removes MLS leaves.
 #[allow(clippy::too_many_arguments)]
 async fn ingest_sibling_device_list(
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -453,51 +618,94 @@ async fn ingest_sibling_device_list(
     list: SignedDeviceList,
     db_path: &str,
     db_passphrase: &str,
-) -> bool {
+) -> (bool, Vec<String>) {
     // The list claims our master — verify it's actually signed by our master key
     // (a forgery would fail; only a real sibling holding the mnemonic can sign).
     if !verify_device_list(&list) {
         hollow_log!(
             "[HOLLOW-DEVICES] Rejected sibling device list from {sender_peer_id}: bad signature"
         );
-        return false;
+        return (false, Vec::new());
     }
     let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
-        return false;
+        return (false, Vec::new());
     };
 
-    // Our currently-known device set (+ version) for our master.
-    let (mut devices, our_version): (Vec<String>, u64) =
+    // Our currently-known device set (+ revoked + version) for our master.
+    let (mut devices, our_revoked, our_version): (Vec<String>, Vec<String>, u64) =
         match store.load_device_list(local_master_peer_id) {
-            Ok(Some(cur)) => (cur.devices.clone(), cur.version),
-            _ => (vec![local_device_peer_id.to_string()], 0),
+            Ok(Some(cur)) => (cur.devices.clone(), cur.revoked.clone(), cur.version),
+            _ => (vec![local_device_peer_id.to_string()], Vec::new(), 0),
         };
     // Always include ourselves.
     if !devices.iter().any(|d| d == local_device_peer_id) {
         devices.push(local_device_peer_id.to_string());
     }
 
-    // Union in the sibling's devices.
+    // TOMBSTONES — max-version-wins (Step 7). A sibling's higher-version list is the
+    // latest master word (it holds the same master key, all our devices are equal):
+    // adopt its revoked set; otherwise keep ours (replay can't un-revoke). We never
+    // revoke the device we're running on.
+    // SELF-NUKE (Step 7): a sibling (same master key, equal authority) revoked THIS
+    // device — our own id is in a HIGHER-version signed revoked set. The identity has
+    // cut us off; tear ourselves down (Dart wipes the data dir + relaunches to a clean
+    // Welcome). Check the INCOMING revoked set BEFORE we strip self below — we never
+    // tombstone ourselves in our OWN published list, but we DO obey a sibling's order.
+    if list.version > our_version && list.revoked.iter().any(|r| r == local_device_peer_id) {
+        hollow_log!("[HOLLOW-REVOKE] This device was revoked by a sibling (v{} > v{}) — self-nuking", list.version, our_version);
+        let _ = event_tx.send(NetworkEvent::SelfRevoked).await;
+        return (false, Vec::new());
+    }
+
+    let mut merged_revoked: Vec<String> = if list.version > our_version {
+        list.revoked.clone()
+    } else {
+        our_revoked.clone()
+    };
+    merged_revoked.retain(|r| r != local_device_peer_id);
+    merged_revoked.sort();
+    merged_revoked.dedup();
+    // Phantom-chat guard: mark revoked ids so inbound DMs/typing from a still-alive
+    // revoked sibling are dropped until it self-nukes / disconnects.
+    if !merged_revoked.is_empty() {
+        super::resolver::mark_revoked(&merged_revoked);
+    }
+    let is_revoked = |id: &str| merged_revoked.iter().any(|r| r == id);
+    let newly_revoked: Vec<String> = merged_revoked
+        .iter()
+        .filter(|r| !our_revoked.iter().any(|p| &p == r))
+        .cloned()
+        .collect();
+
+    // Union in the sibling's devices, MINUS tombstones; also drop any of our own
+    // previously-known devices that are now revoked.
+    devices.retain(|d| !is_revoked(d));
     let before: std::collections::HashSet<String> = devices.iter().cloned().collect();
     for d in &list.devices {
-        if !before.contains(d) {
+        if !is_revoked(d) && !before.contains(d) {
             devices.push(d.clone());
         }
     }
 
-    // Resolver must learn the union NOW (even if nothing changed, this is cheap
-    // and keeps same_identity correct after a restart).
+    // Prune the resolver for revoked ids, then learn the surviving union NOW (cheap,
+    // keeps same_identity correct after a restart even when nothing changed).
+    if !merged_revoked.is_empty() {
+        super::resolver::forget_many(&merged_revoked);
+    }
     super::resolver::update_many(
         local_master_peer_id,
         devices.iter().map(|s| s.as_str()),
     );
 
-    let changed = devices.len() != before.len();
+    let removed_any = our_revoked.len() != merged_revoked.len();
+    let changed = devices.len() != before.len() || removed_any;
     if changed {
         // Re-sign the merged set with a version strictly greater than both ours
         // and the sibling's, so every observer (and the sibling) accepts it.
         let next_version = our_version.max(list.version).saturating_add(1);
-        let signed = build_signed_device_list(master_keypair, next_version, devices);
+        let signed = build_signed_device_list(
+            master_keypair, next_version, devices, merged_revoked.clone(),
+        );
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -509,8 +717,8 @@ async fn ingest_sibling_device_list(
         }
         super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
         hollow_log!(
-            "[HOLLOW-MULTIDEV] Merged sibling {sender_peer_id} → device set now {} (v{})",
-            signed.devices.len(), signed.version
+            "[HOLLOW-MULTIDEV] Merged sibling {sender_peer_id} → device set now {} ({} revoked, v{})",
+            signed.devices.len(), signed.revoked.len(), signed.version
         );
 
         // The merged list is now persisted. We RETURN `changed=true` so the caller
@@ -530,9 +738,10 @@ async fn ingest_sibling_device_list(
     // already be "known" → no send → the fresh device never gets the friends.
     // The connected sender is the device that actually needs them right now, and
     // the receiver is idempotent (skips friends it already has), so an
-    // occasional redundant send is harmless. Skip only if the sender is OUR own
-    // device id (shouldn't happen — self lists don't reach here).
-    if sender_peer_id != local_device_peer_id {
+    // occasional redundant send is harmless. Skip if the sender is OUR own device
+    // id (shouldn't happen — self lists don't reach here) OR if it is revoked (a
+    // revoked sibling must not be handed our friend list / pulled from).
+    if sender_peer_id != local_device_peer_id && !is_revoked(sender_peer_id) {
         if let Ok(friends) = store.load_friends(Some("accepted")) {
             if !friends.is_empty() {
                 let entries: Vec<FriendListEntry> = friends
@@ -573,7 +782,7 @@ async fn ingest_sibling_device_list(
         );
     }
 
-    changed
+    (changed, newly_revoked)
 }
 
 /// Sign a message payload with the local keypair.
@@ -1275,6 +1484,7 @@ mod tests {
             &master,
             1,
             vec!["12D3KooWdevA".into(), "12D3KooWdevB".into()],
+            vec![],
         );
         assert_eq!(list.master_peer_id, master.peer_id());
         assert!(verify_device_list(&list));
@@ -1287,6 +1497,7 @@ mod tests {
             &master,
             3,
             vec!["zzz".into(), "aaa".into(), "aaa".into(), "mmm".into()],
+            vec![],
         );
         assert_eq!(list.devices, vec!["aaa", "mmm", "zzz"]);
         assert!(verify_device_list(&list));
@@ -1295,7 +1506,7 @@ mod tests {
     #[test]
     fn device_list_tampered_devices_fail() {
         let master = test_master();
-        let mut list = build_signed_device_list(&master, 1, vec!["aaa".into()]);
+        let mut list = build_signed_device_list(&master, 1, vec!["aaa".into()], vec![]);
         // Inject a device the master never signed.
         list.devices.push("evil".into());
         assert!(!verify_device_list(&list), "tampered device list must not verify");
@@ -1304,7 +1515,7 @@ mod tests {
     #[test]
     fn device_list_wrong_master_peer_id_fails() {
         let master = test_master();
-        let mut list = build_signed_device_list(&master, 1, vec!["aaa".into()]);
+        let mut list = build_signed_device_list(&master, 1, vec!["aaa".into()], vec![]);
         // Claim a different identity than the pubkey derives to.
         list.master_peer_id = "12D3KooWnotme".into();
         assert!(!verify_device_list(&list));
@@ -1313,10 +1524,59 @@ mod tests {
     #[test]
     fn device_list_bumped_version_changes_signature() {
         let master = test_master();
-        let v1 = build_signed_device_list(&master, 1, vec!["aaa".into()]);
-        let v2 = build_signed_device_list(&master, 2, vec!["aaa".into()]);
+        let v1 = build_signed_device_list(&master, 1, vec!["aaa".into()], vec![]);
+        let v2 = build_signed_device_list(&master, 2, vec!["aaa".into()], vec![]);
         assert_ne!(v1.sig_b64, v2.sig_b64, "version is part of the signed payload");
         assert!(verify_device_list(&v1));
         assert!(verify_device_list(&v2));
+    }
+
+    // ---- Step 7: revocation tombstones ----
+
+    #[test]
+    fn revoked_device_removed_from_devices_and_signed() {
+        let master = test_master();
+        // Build with b also present in devices — it must be stripped because it's revoked.
+        let list = build_signed_device_list(
+            &master, 2,
+            vec!["aaa".into(), "bbb".into()],
+            vec!["bbb".into()],
+        );
+        assert_eq!(list.devices, vec!["aaa"], "revoked id stripped from active devices");
+        assert_eq!(list.revoked, vec!["bbb"]);
+        assert!(verify_device_list(&list), "signature covers devices+revoked");
+    }
+
+    #[test]
+    fn revoked_set_is_sorted_and_signature_covers_it() {
+        let master = test_master();
+        let list = build_signed_device_list(
+            &master, 5,
+            vec!["aaa".into()],
+            vec!["zzz".into(), "ccc".into(), "ccc".into()],
+        );
+        assert_eq!(list.revoked, vec!["ccc", "zzz"], "revoked sorted + deduped");
+        assert!(verify_device_list(&list));
+    }
+
+    #[test]
+    fn tampered_revoked_set_fails_verify() {
+        let master = test_master();
+        let mut list = build_signed_device_list(
+            &master, 2, vec!["aaa".into()], vec!["bbb".into()],
+        );
+        // Attacker strips the tombstone post-signing to try to un-revoke bbb.
+        list.revoked.clear();
+        assert!(!verify_device_list(&list), "stripping the revoked array must fail verify");
+    }
+
+    #[test]
+    fn revocation_changes_signature_vs_plain_list() {
+        let master = test_master();
+        let plain = build_signed_device_list(&master, 2, vec!["aaa".into()], vec![]);
+        let revoking = build_signed_device_list(&master, 2, vec!["aaa".into()], vec!["bbb".into()]);
+        assert_ne!(plain.sig_b64, revoking.sig_b64, "revoked set is part of the signed payload");
+        assert!(verify_device_list(&plain));
+        assert!(verify_device_list(&revoking));
     }
 }

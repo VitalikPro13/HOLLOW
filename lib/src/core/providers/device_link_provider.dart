@@ -93,3 +93,111 @@ final onlineIdentitiesProvider = Provider<Set<String>>((ref) {
 /// peers resolve to themselves, so this is correct in both worlds.
 bool identityIsOnline(WidgetRef ref, String masterPeerId) =>
     ref.watch(onlineIdentitiesProvider).contains(masterPeerId);
+
+// ── Step 8: Devices panel ──────────────────────────────────────────────
+
+/// The transport peer_id of the device this app is RUNNING on (distinct from the
+/// master identity in `get_local_peer_id`). Used to mark "This device" + hide its
+/// Remove button. `null` until the node has loaded an identity.
+final localDevicePeerIdProvider = FutureProvider<String?>((ref) async {
+  try {
+    return await network_api.getLocalDevicePeerId();
+  } catch (_) {
+    return null;
+  }
+});
+
+/// Local human labels for devices (Step 8). device_peer_id → label. Refreshed on
+/// `DeviceListUpdated`, same as [deviceLinkProvider].
+class DeviceLabelNotifier extends Notifier<Map<String, String>> {
+  @override
+  Map<String, String> build() => const {};
+
+  Future<void> refresh() async {
+    try {
+      final rows = await network_api.getDeviceLabels();
+      state = {for (final l in rows) l.devicePeerId: l.label};
+    } catch (e) {
+      debugPrint('[HOLLOW] Device label refresh failed: $e');
+    }
+  }
+
+  /// Optimistically set the label, then persist (fire-and-forget — the local
+  /// table write is cheap but we don't block the UI on it).
+  Future<void> setLabel(String devicePeerId, String label) async {
+    state = {...state}..[devicePeerId] = label;
+    try {
+      await network_api.setDeviceLabel(devicePeerId: devicePeerId, label: label);
+    } catch (e) {
+      debugPrint('[HOLLOW] setDeviceLabel failed: $e');
+    }
+  }
+}
+
+final deviceLabelProvider =
+    NotifierProvider<DeviceLabelNotifier, Map<String, String>>(
+  DeviceLabelNotifier.new,
+);
+
+/// One of MY OWN devices, for the Devices panel.
+class MyDevice {
+  final String peerId;
+  final bool isThisDevice;
+  final bool online;
+  final String label;
+
+  const MyDevice({
+    required this.peerId,
+    required this.isThisDevice,
+    required this.online,
+    required this.label,
+  });
+}
+
+/// My own devices (every device peer_id that resolves to MY master), with live
+/// online status + local label. Empty / single-entry on a single-device install.
+///
+/// Sourced from the resolver mirror (`deviceLinkProvider.links`) inverted against
+/// my master id: `seed_self` puts my own devices in that map. The running device
+/// is always included even if the resolver hasn't folded it in yet.
+final myDevicesProvider = Provider<List<MyDevice>>((ref) {
+  final links = ref.watch(deviceLinkProvider);
+  final labels = ref.watch(deviceLabelProvider);
+  final peers = ref.watch(peersProvider);
+  final invisible = ref.watch(invisiblePeersProvider);
+  final myDeviceId = ref.watch(localDevicePeerIdProvider).valueOrNull;
+
+  // My master = what my own device resolves to. Falls back to the device id
+  // itself (single-device / keystone install → device == master).
+  final myMaster = myDeviceId == null ? null : links.identityOf(myDeviceId);
+
+  final ids = <String>{};
+  if (myMaster != null) {
+    // Every device whose master is mine (excludes the bare master, which is not a
+    // real device — it never appears as a transport peer).
+    for (final entry in links.links.entries) {
+      if (entry.value == myMaster && entry.key != myMaster) ids.add(entry.key);
+    }
+  }
+  if (myDeviceId != null) ids.add(myDeviceId); // always list the running device
+
+  final list = ids.map((id) {
+    final isThis = id == myDeviceId;
+    // The running device is online by definition; others via presence maps.
+    final online = isThis ||
+        (peers.containsKey(id) && !invisible.contains(id));
+    return MyDevice(
+      peerId: id,
+      isThisDevice: isThis,
+      online: online,
+      label: labels[id] ?? '',
+    );
+  }).toList()
+    // This device first, then online, then by id for stability.
+    ..sort((a, b) {
+      if (a.isThisDevice != b.isThisDevice) return a.isThisDevice ? -1 : 1;
+      if (a.online != b.online) return a.online ? -1 : 1;
+      return a.peerId.compareTo(b.peerId);
+    });
+  return list;
+});

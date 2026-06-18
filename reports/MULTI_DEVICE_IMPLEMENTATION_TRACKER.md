@@ -1,15 +1,13 @@
 # Multi-Device Identity & Sync — Implementation Tracker
 
-**Status:** In progress. Steps 1, 2, 2.5, 3, **4, 5 DONE and live-verified** (2026-06-17, Pixel↔VM↔AL):
-DM sibling backfill closes the offline gap (near-instant). **Step 6 — MLS per-device leaves CODE-COMPLETE**
-(2026-06-17) — server channel messages now reach all of a person's devices. First live test exposed the
-SERVER mesh was split-brain (members went master-keyed but ~24 lookups, ~34 sends, and the server UI still
-used device ids; the load-bearing miss was the `swarm.rs:1897` PeerJoined gate → no KeyPackage → no MLS join).
-Fixed via an agent audit + a `crdt` resolver-hook chokepoint (`ServerState` accessors collapse device→master),
-per-device send fan-out (`send_raw_to_identity`), and `onlineIdentitiesProvider` in the server UI. 326 lib +
-21 widget tests pass (incl. new multi-device presence harness); clippy/analyze clean. Awaiting two-device
-re-test. Remaining: **Step 7 (revocation)**, **Step 8 (Sync Health / Devices panel)**, and **Step 9 (epic
-closing point: multi-device push + app-wide test suite, done LAST)**. Step 5 detail in its section below;
+**Status:** In progress. Steps 1, 2, 2.5, 3, 4, 5, **6 (MLS per-device leaves), 7 (revocation), 8 (Devices
+panel) ALL DONE and live-verified** (latest 2026-06-18, Pixel↔VM↔AL). A revoked device is cut off
+everywhere AND self-nukes (wipe + relaunch to Welcome) from any online path; the Devices panel lists/labels/
+removes devices. 335 lib + 21 widget tests pass; clippy/analyze clean. Step 7's live test surfaced a chain of
+multi-device send/attribution bugs (ghost-device fan-out → phantom chats + stuck pills; tombstone never
+reaching the revoked device; self-nuke toast crashing the wipe) — all fixed, see [[feedback_ghost_device_fanout]].
+Remaining: **Step 9 (epic closing point: multi-device push + app-wide test suite, done LAST)** + the minor
+**9C server-UX polish** items. Step 5 detail in its section below;
 earlier baseline:
 Steps 1, 2, 2.5, **3 DONE and live-verified** (host+phone+VM, commit `bbf91aa`):
 per-device identity, presence collapse, profile sync, sibling friend-list sync, and Olm sender-side DM
@@ -862,21 +860,93 @@ a member fans master→online devices (the master has no socket — `send_raw_to
 is still master-keyed. The LIVE channel path (MLS room broadcast → both devices in the room decrypt) works
 without it; only the offline push preview is affected. Rolled into the end-of-epic push step. See **Step 9**.
 
-### Step 7 — Revocation (the sharp edge)  ▢ not started
-*Goal: a lost/stolen device can be cut off everywhere.*
+### Step 7 — Revocation (the sharp edge)  ✅ LIVE-VERIFIED 2026-06-18 (Pixel↔VM↔AL)
+*Goal: a lost/stolen device can be cut off everywhere. Built WITH Step 8 as one unit (2026-06-18).*
+*Live test took THREE rounds of fixes after the first build (all in [[feedback_ghost_device_fanout]]):
+(1) DM/file fan-out was addressing dead GHOST device ids (stale session, offline) → relay offline-buffer
+→ spurious "random peer id" notifications + a stuck mobile unread pill → fixed by filtering the fan-out
+to devices CURRENTLY IN A ROOM + resolving fromPeer→master for unread/notif keys; (2) self-nuke never
+fired because `handle_revoke_device` EXPLICITLY skipped sending the tombstone to the device being revoked
+→ it never learned + kept running as a phantom standalone chat on the friend → fixed by sending the
+tombstone TO THE REVOKED DEVICE FIRST + a `resolver::is_revoked` receive-path drop guard; (3) self-nuke
+fired but CRASHED before the wipe because the toast used the plain `HollowToast.show(ctx)` form
+(`Overlay.of` null-check throw from a navigator-key context) → fixed by stashing the wipe FIRST, toast
+best-effort via `overlayState:`. After all three: nuke fires from any online path (revoker direct /
+sibling / friend re-broadcast — decentralized, no relay), no phantom chats, no spurious notifications,
+pill clears. Confirmed by Vitalik.*
+*Locked design: **manual-only** (any device-you-control revokes another; all devices hold the master key,
+so there is no "promotion" — a lost-only-device is recovered via the 24-word mnemonic). **Tombstones inside
+the signed list**: one `version` + one `sig` govern adds AND removes; a revoked id never re-enters the union.
+**Resurrection:** a reinstalled phone gets a FRESH peer_id → links cleanly (old tombstone stays dead); a
+falsely-revoked SAME-peer_id device can be un-revoked ONLY by a future higher-version master list
+(max-version-wins) — a replayed lower-version list can never un-revoke. Single-device installs byte-for-byte
+unchanged (empty `revoked` = no-op).*
 
-- [ ] Master-signed revocation `{ revoke device_pubkey, effective_at, version=N+1, sig }`, propagated on the
-      profile channel with bumped monotonic version.
-- [ ] On receipt: drop Olm session to revoked device + MLS Remove its leaf (coordinator).
-- [ ] **Test:** revoke device → friends stop encrypting to it; its MLS leaf removed; old device list rejected.
+- [x] **Tombstones in `SignedDeviceList`** — new `#[serde(default)] revoked: Vec<String>` (`types.rs`). Folded
+      into the canonical signing payload (`device_list_signing_payload` gains a `:{sorted_revoked_csv}` segment;
+      `build_signed_device_list`/`verify_device_list` cover it; a revoked id is stripped from `devices`).
+      `build_local_device_list`/`merge_sibling_device_id` thread `revoked` + never tombstone the running device.
+- [x] **Tombstone-aware merge** (`crypto_handler::ingest_device_list` + `ingest_sibling_device_list`):
+      max-version-wins revoked set, union MINUS tombstones, sender re-link guard skips a revoked sender, prunes
+      the resolver. Returns `IngestOutcome { our_devices_grew, newly_revoked }` so the swarm caller enforces.
+- [x] **`resolver::forget`/`forget_many`** (the map was insert-only; without this a revoked device kept
+      resolving to its master until restart). 3 unit tests.
+- [x] **Enforcement** (`swarm::enforce_device_revocations`, called at BOTH device-list ingest sites — plaintext
+      inbox `swarm.rs:~8475` and MLS-envelope `social::handle_envelope_profile_update`→swarm `~7350`): drop the
+      Olm session (`olm.remove_session` + `persist_crypto_state` + new `CryptoStore::delete_session` so the DB
+      row is erased) AND, where we are the elected coordinator, enqueue the revoked device's SINGLE leaf into
+      `pending_mls_removals` (the `mls_batch_timer` issues `remove_members_batch` + `MlsCommit`). Removes ONLY
+      that leaf — the device's master stays a valid member (not the kick path's `identity_credential_ids`).
+- [x] **`NodeCommand::RevokeDevice` + `handle_revoke_device`** (sync_handler, modeled on `handle_kick_member`):
+      self-revoke guard, own-device-only guard (`crypto_handler::revoke_own_device` bumps the list + tombstones +
+      re-signs + persists + `resolver::forget`), re-broadcasts the profile so friends converge, then the dispatch
+      arm runs `enforce_device_revocations` on the revoking device too. FFI `revoke_device` (`api/network.rs`).
+- [x] 5 new crypto-handler unit tests (sign/verify covers revoked, strip-on-build, tamper-fail, sig-differs);
+      335 lib tests pass; clippy clean; analyze clean.
+- [x] **SELF-NUKE (decentralized, 2026-06-18).** When a device ingests any signed list (sibling OR friend
+      re-broadcast) where ITS OWN device id is in a HIGHER-version `revoked` set, Rust emits new
+      `NetworkEvent::SelfRevoked` (both ingest paths in `crypto_handler`; sibling path checks the INCOMING
+      `list.revoked` BEFORE the "never tombstone self" strip). Dart `event_provider._selfNuke()` mirrors the
+      link "go back" flow — `stash_pending_wipe()` + `notifyShutdown` + relaunch → clean Welcome (guarded
+      idempotent; toast "This device was removed…"). So a revoked-but-honest device tears itself down instead
+      of lingering as a frozen-out zombie. (A stolen/offline device that never reconnects is still contained by
+      the crypto cutoff above — self-nuke only fires when it comes online to a peer holding the tombstone.) No
+      relay changes (rejected relay-ban — keeps the relay identity-agnostic). Codegen run.
+- [ ] **Test (Vitalik, two devices A+B + friend AL):** revoke B from A → A panel drops B, version bumps
+      `revoked=[B]`; AL ingests → B removed from devices, Olm session to B dropped, B no longer a DM fan-out
+      target, coordinator issues a single-leaf MLS Remove for B only (A/master unaffected, A's channel messages
+      keep flowing); B gets `MlsCommit` (can't decrypt new channel traffic) + sees itself revoked (can't re-add
+      at equal/lower version); B replays its OLD list → AL rejects the un-revoke. Revoke-while-offline → tombstone
+      persists, MLS removal when the coordinator next processes it. Single-device install unchanged.
 
-### Step 8 — Sync Health / Devices panel (Settings)  ▢ not started
-*Goal: honest visibility + management.*
+### Step 8 — Devices panel (Settings)  ✅ LIVE-VERIFIED 2026-06-18
+*Goal: honest visibility + management. Scope NOW = devices list + local label + Remove button; DB-health
+comparison + manual Sync deferred to a later pass (need new health-query FFI + whole-account sync trigger).*
 
-- [ ] Linked devices list (label, last-seen, online/offline).
-- [ ] Per-conversation DB-health comparison across devices (counts / latest-op timestamps; in-sync/behind/unreachable).
-- [ ] Manual "Sync" button (drives Step 5 on demand).
-- [ ] "Remove device" → triggers Step 7 revocation.
+- [x] **Linked devices list** — `myDevicesProvider` (`device_link_provider.dart`) inverts the resolver mirror
+      against the running device's master; per-device online via raw `peersProvider`/`invisiblePeersProvider`
+      (NOT collapsed); "This device" marked via new FFI `get_local_device_peer_id`. Desktop `_DevicesSection`
+      in `user_settings_dialog.dart` (Security tab, "YOUR DEVICES" above the existing Link/Reset controls) +
+      mobile twin `_DevicesSectionMobile` in `mobile_settings_tab.dart`. Each row: shortened id (`12D3…JQcW`),
+      online/offline, editable **local** label (new `device_labels` table + `set_device_label`/`get_device_labels`
+      FFI + `deviceLabelProvider`, refreshed on `DeviceListUpdated`), "This device" badge.
+- [x] **"Remove device" → Step 7 revocation** — `HollowButton.danger` (hidden on the running device) → confirm
+      dialog → `revoke_device` FFI.
+- [x] **GHOST-DEVICE filter (2026-06-18).** Repeated re-link test cycles legitimately mint a NEW device id each
+      time (union-merge accumulates them — first live test showed **13 devices** on Pixel, all real but mostly
+      dead). Light fix (chosen over schema+last-seen auto-prune): the panel shows only "active" devices by
+      default (online / this device / labeled); offline+unlabeled ghosts fold behind a **"Show all (N offline)"**
+      toggle and each is revocable from there (real tombstone). `_DevicesSection`/`_DevicesSectionMobile` are now
+      stateful for the toggle. Diagnosed via adb pull of Pixel `hollow_debug.log` — confirmed NOT id-churn-per-
+      reconnect and NOT a Step-7 bug; the device-key logic is correct (export omits `identity.device`, import
+      mints a fresh stable one). Heavier last-seen auto-prune deferred.
+- [ ] Per-conversation DB-health comparison across devices (counts / latest-op timestamps). **DEFERRED.**
+- [ ] Manual "Sync" button (drives Step 5 on demand). **DEFERRED.**
+- [ ] Cross-device device MODEL string (each device knows only its own; local-label-only for now). **DEFERRED.**
+- [ ] True per-device last-seen (only the relay has it today; local approximation for now). **DEFERRED.**
+- [ ] **Test (Vitalik):** panel lists both devices with correct online state + "This device" marker; rename a
+      device (local label persists); Remove fires the revocation (see Step 7 test); single-device shows only
+      "This device" with no Remove button.
 
 ### Step 9 — Epic closing point: multi-device push + app-wide test suite  ▢ not started  ⚠ do LAST
 
@@ -998,6 +1068,10 @@ decided to stop and ship the working state — fix in a focused polish pass, NOT
       one identity should fill each other's gaps of missed *server channel* history, not just rely on
       live-delivery + the friend/coordinator sync. Live mesh works; cross-sibling server history sync is the
       remaining completeness piece.
+
+- [ ] Overall, proper syncing on kick/bans etc., make the master-subdevice relationship be fully synced between each ohter in terms of actions and features.
+- [ ] Fix "sync-import" when using 24-wod phrase on Welcome dialog (either remove or change to reuse the same pipeline as Link Device)
+- [ ] Fill the "Youre devices" list on the newly synced device.
 
 ---
 

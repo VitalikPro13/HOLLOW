@@ -11,6 +11,7 @@ import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/news_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -2086,6 +2087,12 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         const SizedBox(height: HollowSpacing.sm),
         const _BackupExportButton(),
 
+        // Your devices (Step 8).
+        const SizedBox(height: HollowSpacing.xl),
+        _SectionLabel(label: 'Your Devices'),
+        const SizedBox(height: HollowSpacing.sm),
+        const _DevicesSectionMobile(),
+
         // Multi-device (Phase 6 / Step 4): link another device, + reset the
         // accumulated device list.
         const SizedBox(height: HollowSpacing.xl),
@@ -2652,6 +2659,216 @@ Future<String?> _askBackupPassphrase(
 /// Opens the multi-device link flow in show-code mode (this device has the data;
 /// an empty device enters the code to pull a full snapshot). Mirrors the desktop
 /// Settings → Security entry.
+/// Step 8 — the "Your Devices" list (mobile twin of `_DevicesSection`).
+String _shortenPeerIdMobile(String id) =>
+    id.length <= 12 ? id : '${id.substring(0, 6)}…${id.substring(id.length - 4)}';
+
+/// Whether a device is "active" — worth showing by default (online / this device /
+/// labeled). Offline+unlabeled ghosts from re-link cycles fold behind "Show all".
+bool _deviceIsActiveMobile(MyDevice d) =>
+    d.online || d.isThisDevice || d.label.isNotEmpty;
+
+class _DevicesSectionMobile extends ConsumerStatefulWidget {
+  const _DevicesSectionMobile();
+  @override
+  ConsumerState<_DevicesSectionMobile> createState() => _DevicesSectionMobileState();
+}
+
+class _DevicesSectionMobileState extends ConsumerState<_DevicesSectionMobile> {
+  bool _showAll = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final devices = ref.watch(myDevicesProvider);
+
+    if (devices.length <= 1) {
+      return Text(
+        'Only this device is linked to your account. Link another below to sync '
+        'your messages, friends and profile across devices.',
+        style: HollowTypography.body.copyWith(color: hollow.textSecondary, fontSize: 12),
+      );
+    }
+
+    final ghosts = devices.where((d) => !_deviceIsActiveMobile(d)).toList();
+    final shown = _showAll
+        ? devices
+        : devices.where(_deviceIsActiveMobile).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Devices linked to your account. Remove a device you no longer use or '
+          'have lost — it can no longer read your messages once removed.',
+          style: HollowTypography.body.copyWith(color: hollow.textSecondary, fontSize: 12),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        for (final d in shown)
+          Padding(
+            padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+            child: _DeviceRowMobile(device: d),
+          ),
+        if (ghosts.isNotEmpty)
+          HollowButton.ghost(
+            compact: true,
+            onPressed: () => setState(() => _showAll = !_showAll),
+            child: Text(_showAll
+                ? 'Hide old devices'
+                : 'Show all (${ghosts.length} offline)'),
+          ),
+      ],
+    );
+  }
+}
+
+class _DeviceRowMobile extends ConsumerWidget {
+  final MyDevice device;
+  const _DeviceRowMobile({required this.device});
+
+  Future<void> _rename(BuildContext context, WidgetRef ref) async {
+    final controller = TextEditingController(text: device.label);
+    final saved = await showHollowDialog<bool>(
+      context: context,
+      builder: (ctx) => HollowDialog(
+        title: 'Rename device',
+        content: HollowTextField(
+          controller: controller,
+          hintText: 'e.g. My Pixel',
+          autofocus: true,
+        ),
+        actions: [
+          HollowButton.ghost(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          HollowButton.filled(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (saved == true) {
+      await ref
+          .read(deviceLabelProvider.notifier)
+          .setLabel(device.peerId, controller.text.trim());
+    }
+  }
+
+  Future<void> _remove(BuildContext context, WidgetRef ref) async {
+    final name = device.label.isNotEmpty ? device.label : _shortenPeerIdMobile(device.peerId);
+    final confirmed = await showHollowDialog<bool>(
+      context: context,
+      builder: (ctx) => HollowDialog(
+        title: 'Remove this device?',
+        content: Text(
+          'This permanently removes "$name" from your account. It will stop '
+          'receiving your messages and is removed from your servers. This cannot '
+          'be undone from the removed device.',
+          style: HollowTypography.body.copyWith(color: HollowTheme.of(ctx).textSecondary),
+        ),
+        actions: [
+          HollowButton.ghost(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          HollowButton.danger(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Remove device'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await network_api.revokeDevice(devicePeerId: device.peerId);
+      if (context.mounted) {
+        HollowToast.show(context, 'Device removed', type: HollowToastType.success);
+      }
+    } catch (e) {
+      if (context.mounted) {
+        HollowToast.show(context, 'Failed to remove: $e', type: HollowToastType.error);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final title = device.label.isNotEmpty ? device.label : _shortenPeerIdMobile(device.peerId);
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.md,
+        vertical: HollowSpacing.sm,
+      ),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        border: Border.all(color: hollow.border.withValues(alpha: 0.5)),
+      ),
+      child: Row(
+        children: [
+          Icon(LucideIcons.smartphone, size: 18, color: hollow.textSecondary),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        title,
+                        overflow: TextOverflow.ellipsis,
+                        style: HollowTypography.body.copyWith(
+                            color: hollow.textPrimary, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    if (device.isThisDevice) ...[
+                      const SizedBox(width: HollowSpacing.xs),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: hollow.accent.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          'This device',
+                          style: HollowTypography.caption.copyWith(
+                            color: hollow.accent,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                Text(
+                  '${_shortenPeerIdMobile(device.peerId)} · ${device.online ? "online" : "offline"}',
+                  style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            onPressed: () => _rename(context, ref),
+            icon: Icon(LucideIcons.pencil, size: 16, color: hollow.textSecondary),
+          ),
+          if (!device.isThisDevice)
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              onPressed: () => _remove(context, ref),
+              icon: Icon(LucideIcons.trash2, size: 16, color: hollow.error),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _LinkDeviceButton extends StatelessWidget {
   const _LinkDeviceButton();
 

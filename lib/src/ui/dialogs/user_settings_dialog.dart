@@ -18,6 +18,7 @@ import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -2182,6 +2183,12 @@ class _SecurityTabState extends State<_SecurityTab> {
 
           const SizedBox(height: HollowSpacing.xl),
 
+          // ── Your devices (Step 8) ──
+          _SectionLabel(label: 'YOUR DEVICES'),
+          const SizedBox(height: HollowSpacing.sm),
+          const _DevicesSection(),
+          const SizedBox(height: HollowSpacing.xl),
+
           // ── Multi-device maintenance ──
           _SectionLabel(label: 'MULTI-DEVICE'),
           const SizedBox(height: HollowSpacing.sm),
@@ -2961,6 +2968,233 @@ class _SectionLabel extends StatelessWidget {
           letterSpacing: 0.5,
           fontSize: 10,
         ),
+    );
+  }
+}
+
+/// Helper: shorten a peer_id for display (`12D3…JQcW`).
+String shortenPeerId(String id) =>
+    id.length <= 12 ? id : '${id.substring(0, 6)}…${id.substring(id.length - 4)}';
+
+/// Whether a device is "active" — worth showing by default. Online now, the device
+/// we're running on, or one the user has labeled (i.e. cares about). Ghosts from
+/// past re-link test cycles are offline + unlabeled and get folded behind "Show all".
+bool _deviceIsActive(MyDevice d) => d.online || d.isThisDevice || d.label.isNotEmpty;
+
+/// Step 8 — the "Your Devices" list inside the Security tab. Stateful for the
+/// "Show all" toggle that reveals offline/unlabeled ghost devices.
+class _DevicesSection extends ConsumerStatefulWidget {
+  const _DevicesSection();
+  @override
+  ConsumerState<_DevicesSection> createState() => _DevicesSectionState();
+}
+
+class _DevicesSectionState extends ConsumerState<_DevicesSection> {
+  bool _showAll = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final devices = ref.watch(myDevicesProvider);
+
+    if (devices.length <= 1) {
+      return Text(
+        'Only this device is linked to your account. Link another below to sync '
+        'your messages, friends and profile across devices.',
+        style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
+      );
+    }
+
+    final active = devices.where(_deviceIsActive).toList();
+    final ghosts = devices.where((d) => !_deviceIsActive(d)).toList();
+    final shown = _showAll ? devices : active;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Devices linked to your account. Remove a device you no longer use or '
+          'have lost — it can no longer read your messages once removed.',
+          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        for (final d in shown)
+          Padding(
+            padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+            child: _DeviceRow(device: d),
+          ),
+        if (ghosts.isNotEmpty)
+          HollowButton.ghost(
+            compact: true,
+            onPressed: () => setState(() => _showAll = !_showAll),
+            child: Text(_showAll
+                ? 'Hide old devices'
+                : 'Show all (${ghosts.length} offline)'),
+          ),
+      ],
+    );
+  }
+}
+
+class _DeviceRow extends ConsumerWidget {
+  final MyDevice device;
+  const _DeviceRow({required this.device});
+
+  Future<void> _rename(BuildContext context, WidgetRef ref) async {
+    final controller = TextEditingController(text: device.label);
+    final saved = await showHollowDialog<bool>(
+      context: context,
+      builder: (ctx) => HollowDialog(
+        title: 'Rename device',
+        content: HollowTextField(
+          controller: controller,
+          hintText: "e.g. My Pixel",
+          autofocus: true,
+        ),
+        actions: [
+          HollowButton.ghost(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          HollowButton.filled(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (saved == true) {
+      await ref
+          .read(deviceLabelProvider.notifier)
+          .setLabel(device.peerId, controller.text.trim());
+    }
+  }
+
+  Future<void> _remove(BuildContext context, WidgetRef ref) async {
+    final confirmed = await showHollowDialog<bool>(
+      context: context,
+      builder: (ctx) => HollowDialog(
+        title: 'Remove this device?',
+        content: Text(
+          'This permanently removes "${device.label.isNotEmpty ? device.label : shortenPeerId(device.peerId)}" '
+          'from your account. It will stop receiving your messages and is removed '
+          'from your servers. This cannot be undone from the removed device.',
+          style: HollowTypography.body
+              .copyWith(color: HollowTheme.of(ctx).textSecondary),
+        ),
+        actions: [
+          HollowButton.ghost(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          HollowButton.danger(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Remove device'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await network_api.revokeDevice(devicePeerId: device.peerId);
+      if (context.mounted) {
+        HollowToast.show(context, 'Device removed', type: HollowToastType.success);
+      }
+    } catch (e) {
+      if (context.mounted) {
+        HollowToast.show(context, 'Failed to remove: $e',
+            type: HollowToastType.error);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final title = device.label.isNotEmpty ? device.label : shortenPeerId(device.peerId);
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.md,
+        vertical: HollowSpacing.sm,
+      ),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        border: Border.all(color: hollow.border.withValues(alpha: 0.5)),
+      ),
+      child: Row(
+        children: [
+          Icon(LucideIcons.smartphone, size: 18, color: hollow.textSecondary),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        title,
+                        overflow: TextOverflow.ellipsis,
+                        style: HollowTypography.body
+                            .copyWith(color: hollow.textPrimary, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    if (device.isThisDevice) ...[
+                      const SizedBox(width: HollowSpacing.xs),
+                      _DeviceBadge(text: 'This device', color: hollow.accent),
+                    ],
+                  ],
+                ),
+                Text(
+                  '${shortenPeerId(device.peerId)} · ${device.online ? "online" : "offline"}',
+                  style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
+                ),
+              ],
+            ),
+          ),
+          // Rename (any device).
+          HollowButton.ghost(
+            compact: true,
+            onPressed: () => _rename(context, ref),
+            icon: Icon(LucideIcons.pencil, size: 15),
+            child: const SizedBox.shrink(),
+          ),
+          // Remove — hidden for the device we're running on (can't revoke self).
+          if (!device.isThisDevice)
+            HollowButton.ghost(
+              compact: true,
+              onPressed: () => _remove(context, ref),
+              icon: Icon(LucideIcons.trash2, size: 15, color: hollow.error),
+              child: const SizedBox.shrink(),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DeviceBadge extends StatelessWidget {
+  final String text;
+  final Color color;
+  const _DeviceBadge({required this.text, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        text,
+        style: HollowTypography.caption.copyWith(
+          color: color,
+          fontSize: 9,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
     );
   }
 }

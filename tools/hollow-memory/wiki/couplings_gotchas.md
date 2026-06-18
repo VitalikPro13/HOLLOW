@@ -632,13 +632,23 @@ let _ = state.apply_op(&op);
 
 **Where:** `rust/hollow_core/src/node/types.rs` (`dm_room_code`), `message_ops.rs` + `file_handler.rs` (per-device sends pass the master-pair room).
 
-### DM send fan-out: live-room union, not just the stored device list
+### DM send fan-out: only devices CURRENTLY IN A ROOM (kills ghost-fanout)
 
-**Rule:** `message_ops::collect_target_devices` builds the fan-out target set as `resolver::devices_for(master)` UNIONed with every peer currently in the DM room that resolves to that master. Never rely on the persisted device list alone.
+**Rule:** `message_ops::collect_target_devices` (and the `file_handler` DM file fan-out) build the target set as `resolver::devices_for(master)` **filtered to ids currently in a room** (`ws_room_for_peer(...).is_some()`), UNIONed with every peer currently in the DM room that resolves to that master. The single-device `fallback_self` (no device links → send to the master id → offline buffer → FCM push) preserves offline push for the common case.
 
-**Why:** The persisted device list pollutes across wipe+reimport cycles (ghost device ids accumulate; union-merge never removes — that's Step 7 revocation) and can lag a rotated device id. Targeting the stored list alone sends to a dead ghost (offline → push buffer) and SKIPS the connected device → "first message lost, friend shows offline." The live room is authoritative. Companion fix: `crypto_handler::ingest_device_list` registers the SENDER device→master link (a device that delivered a master-signed list belongs to that master even if absent from the stored `devices`).
+**Why:** The persisted device list accumulates dead ghost ids across re-link cycles (each re-link mints a NEW device peer_id; union-merge never removes them). A ghost keeps a STALE Olm session, so a `has_session` filter is NOT enough — it would still room-send "Sent encrypted DM to offline <ghost>" → relay offline-buffer → a phantom push + a stuck unread pill on the receiver (and the notification shows a raw peer id). Room-presence is the unambiguous liveness test: a ghost is in no room → dropped entirely. A genuinely-offline REAL sibling also isn't in a room now, but its queued copy drains on reconnect (`pending_messages`) + Step 5 backfill, so the message still arrives — just not via the instant offline-buffer path. The live room is authoritative; `ingest_device_list` also registers the SENDER device→master link.
 
-**Where:** `rust/hollow_core/src/node/message_ops.rs` (`collect_target_devices`, `fan_out_dm_envelope`), `file_handler.rs` (DM branch), `crypto_handler.rs` (`ingest_device_list`).
+**Companion (Dart):** DM unread counts + notifications MUST resolve `fromPeer`→master (`deviceLinkProvider.identityOf`) before keying — `event_provider` `MessageReceived`. Keying unread on the raw device id made a `dmUnreadCounts[<deviceId>]` entry `markDmSeen(master)` never cleared → a permanently-stuck nav pill that counted a disconnected device.
+
+**Where:** `rust/hollow_core/src/node/message_ops.rs` (`collect_target_devices`, `fan_out_dm_envelope`), `file_handler.rs` (DM branch), `crypto_handler.rs` (`ingest_device_list`), `lib/src/core/providers/event_provider.dart` (`MessageReceived` → resolve to master). See memory `feedback_ghost_device_fanout`.
+
+### Device revocation (Step 7): tombstone the revoked device must REACH it + observers guard against the lingering device
+
+**Rule:** Revocation (`handle_revoke_device` → `revoke_own_device`) tombstones a device in the master-signed list (`revoked` array, version+1) and sends the new list **TO THE REVOKED DEVICE FIRST**, then to everyone else. The revoked device's own ingest fires `NetworkEvent::SelfRevoked` → `event_provider._selfNuke()` wipes the data dir + relaunches to Welcome. Observers (friends/siblings) that ingest the tombstone call `resolver::forget` (drop the device→master link) + `mark_revoked`, and the DM/typing receive paths DROP messages from a `resolver::is_revoked` id.
+
+**Why:** Two traps, both hit live. (1) The revoke handler originally SKIPPED sending the tombstone to the device being revoked ("why message a device we're removing?") — so the revoked device never learned it was revoked, never self-nuked, and kept running/talking as the master. (2) Once a friend `forget`s the link, the still-alive revoked device's id resolves-to-self → its messages spawn a standalone "unknown peer" phantom conversation. The `is_revoked` receive-path guard suppresses that until the device self-nukes/disconnects. (3) The self-nuke itself must `stash_pending_wipe()` FIRST, then show a best-effort `overlayState:` toast — the plain `HollowToast.show(ctx)` form throws from a navigator-key context (`Overlay.of` null check) and aborted the wipe.
+
+**Where:** `rust/hollow_core/src/node/sync_handler.rs` (`handle_revoke_device`), `crypto_handler.rs` (`revoke_own_device`, `ingest_device_list`/`ingest_sibling_device_list` self-nuke + `mark_revoked`), `swarm.rs` (`enforce_device_revocations`, DM/typing `is_revoked` drop), `resolver.rs` (`forget`/`mark_revoked`/`is_revoked`), `lib/src/core/providers/event_provider.dart` (`SelfRevoked` → `_selfNuke`). Manual-only; no relay change. See memory `feedback_ghost_device_fanout`.
 
 ### Device linking (Step 4): import the snapshot at NEXT BOOT, never in-place
 

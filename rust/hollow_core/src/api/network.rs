@@ -158,6 +158,8 @@ pub enum NetworkEvent {
     ProfileUpdated { peer_id: String },
     /// A device list was ingested for `master_peer_id` (multi-device, Phase 6).
     DeviceListUpdated { master_peer_id: String },
+    /// THIS device was revoked (Step 7) — Dart self-nukes (wipe + relaunch).
+    SelfRevoked,
     // -- Message editing events (Phase 3.5) --
     ChannelMessageEdited { server_id: String, channel_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
     DmMessageEdited { peer_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
@@ -712,6 +714,7 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::ProfileUpdated { peer_id } => {
             NetworkEvent::ProfileUpdated { peer_id }
         }
+        node::NetworkEvent::SelfRevoked => NetworkEvent::SelfRevoked,
         node::NetworkEvent::DeviceListUpdated { master_peer_id } => {
             NetworkEvent::DeviceListUpdated { master_peer_id }
         }
@@ -1321,6 +1324,71 @@ pub fn reset_device_lists() -> Result<(), String> {
     crate::node::resolver::clear_all();
     hollow_log!("[HOLLOW-MULTIDEV] Device lists + resolver reset (manual)");
     Ok(())
+}
+
+/// The transport peer_id of the device this app is RUNNING on (Step 8). Distinct
+/// from `get_local_peer_id`, which returns the MASTER identity. Dart uses this to
+/// mark "This device" in the Devices panel and to hide its "Remove" button (a
+/// device can't revoke itself). Returns `None` if no device key exists yet.
+#[frb]
+pub fn get_local_device_peer_id() -> Option<String> {
+    crate::identity::load_existing_identity()
+        .ok()
+        .flatten()
+        .map(|id| id.device_keypair.peer_id())
+}
+
+/// Revoke one of OUR OWN devices (Step 7, lost/stolen). Bumps our master-signed
+/// device list with the device tombstoned + drops the Olm session + (where we
+/// coordinate) removes its MLS leaf from shared servers. Manual-only; rejected for
+/// the device we're running on or an id that isn't ours. Friends converge via the
+/// re-broadcast device list and can never un-revoke it with a stale (lower-version)
+/// list. The node must be running.
+#[frb]
+pub fn revoke_device(device_peer_id: String) -> Result<(), String> {
+    send_node_command(node::NodeCommand::RevokeDevice { device_peer_id })
+}
+
+/// A local human label for a device (Step 8 Devices panel).
+pub struct DeviceLabel {
+    pub device_peer_id: String,
+    pub label: String,
+}
+
+/// Open the local message store with the master-derived passphrase (shared by the
+/// device-label FFIs below — same derivation as `reset_device_lists`).
+fn open_local_store() -> Result<MessageStore, String> {
+    let id = identity::load_or_create_identity()?;
+    let proto = id
+        .keypair
+        .to_protobuf_encoding()
+        .map_err(|e| format!("Failed to encode keypair: {e}"))?;
+    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+    let db_path = crate::identity::data_dir()?
+        .join("messages.db")
+        .to_str()
+        .ok_or("Invalid path encoding")?
+        .to_string();
+    MessageStore::open(&db_path, &passphrase)
+}
+
+/// Set (or clear, when `label` is empty) the local human label for a device.
+/// Local-only — not synced or signed, so a person's two devices may show different
+/// labels for the same third device.
+#[frb]
+pub fn set_device_label(device_peer_id: String, label: String) -> Result<(), String> {
+    let label = if label.len() > 48 { label[..48].to_string() } else { label };
+    open_local_store()?.set_device_label(&device_peer_id, &label)
+}
+
+/// All local device labels for the Devices panel.
+#[frb]
+pub fn get_device_labels() -> Result<Vec<DeviceLabel>, String> {
+    Ok(open_local_store()?
+        .get_all_device_labels()?
+        .into_iter()
+        .map(|(device_peer_id, label)| DeviceLabel { device_peer_id, label })
+        .collect())
 }
 
 /// Verify an Ed25519 message signature against a canonical payload.

@@ -318,11 +318,22 @@ pub(crate) async fn handle_send_file(
         // a stale/polluted stored list must not hide the connected device).
         let recipient_master = crate::node::resolver::resolve(&peer_str);
         let dm_room_f = crate::node::types::dm_room_code(local_peer_str, &recipient_master);
+        // LIVENESS-FILTERED (Step 7 ghost fix, mirrors message_ops::collect_target_devices):
+        // only target stored devices CURRENTLY IN A ROOM. A dead ghost id (from a
+        // re-link cycle) has a stale session but is in no room, so without this it
+        // would hit the offline room-send path → spurious push + unread on a phantom
+        // device. The live-room union below still catches any real online device the
+        // stored list missed; the single-device fallback preserves offline push.
         let mut file_set: std::collections::HashSet<String> =
-            crate::node::resolver::devices_for(&recipient_master).into_iter().collect();
+            crate::node::resolver::devices_for(&recipient_master)
+                .into_iter()
+                .filter(|d| ws_room_for_peer(&ws_room_peers, d).is_some())
+                .collect();
         let own_master_f = crate::node::resolver::resolve(local_peer_str);
         for sib in crate::node::resolver::devices_for(&own_master_f) {
-            file_set.insert(sib);
+            if ws_room_for_peer(&ws_room_peers, &sib).is_some() {
+                file_set.insert(sib);
+            }
         }
         if let Some(peers) = ws_room_peers.get(&dm_room_f) {
             for p in peers {

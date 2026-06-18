@@ -511,6 +511,12 @@ impl MlsManager {
         self.groups.contains_key(server_id)
     }
 
+    /// All server_ids we currently hold an MLS group for (Step 7 revocation sweeps
+    /// every shared server to remove a revoked device's leaf where we coordinate).
+    pub fn group_ids(&self) -> Vec<String> {
+        self.groups.keys().cloned().collect()
+    }
+
     /// Get the number of members in the MLS group.
     pub fn member_count(&self, server_id: &str) -> usize {
         self.groups

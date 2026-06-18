@@ -801,6 +801,73 @@ pub(crate) async fn handle_kick_member(
     false
 }
 
+// ── 10a. RevokeDevice (Step 7) ────────────────────────────────────────
+
+/// Revoke one of OUR OWN devices (manual, lost/stolen). Bumps our master-signed
+/// device list with the target tombstoned, re-broadcasts it to friends so they
+/// converge (and stop encrypting to the revoked device), emits `DeviceListUpdated`,
+/// and returns the revoked device id so the caller (which holds olm/mls/pending_mls
+/// state) drops the Olm session + removes the MLS leaf where it coordinates.
+/// Returns `None` if the revocation was rejected (self, or not our device).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_revoke_device(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    master_peer_str: &str,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    is_invisible: bool,
+    target_device: String,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<String> {
+    let signed = super::crypto_handler::revoke_own_device(
+        master_keypair, device_peer_id, &target_device, db_path, db_passphrase,
+    );
+    if signed.is_none() {
+        let _ = event_tx.send(NetworkEvent::Error {
+            message: "Cannot remove that device".to_string(),
+        }).await;
+        return None;
+    }
+
+    // CRITICAL — send the tombstone TO THE REVOKED DEVICE FIRST. It is the one peer
+    // that most needs the v+1 list naming itself revoked: its ingest fires
+    // `SelfRevoked` → wipe + relaunch (the honest self-teardown). We send it first,
+    // before the relay drops it from our shared rooms as a side effect of the MLS
+    // leaf removal, so the message still routes. (Previously we SKIPPED the target
+    // entirely — "why message a device we're removing?" — which meant the revoked
+    // device NEVER learned it was revoked, kept running as the master, and kept
+    // talking to friends as a phantom peer. That was the whole bug.)
+    super::social::send_own_profile_to_peer(
+        ws_cmd_tx, ws_room_peers,
+        local_peer_str, master_keypair, device_peer_id, &target_device,
+        is_invisible, db_path, db_passphrase,
+    );
+
+    // Then re-announce to every other peer we share a room with — friends converge
+    // immediately and drop the revoked device. Skip ourselves and the target (just
+    // sent above); siblings get it via their own ingest.
+    let peers: Vec<String> = ws_room_peers.values().flat_map(|p| p.iter().cloned()).collect();
+    for pid in peers {
+        if pid == local_peer_str || pid == device_peer_id || pid == target_device {
+            continue;
+        }
+        super::social::send_own_profile_to_peer(
+            ws_cmd_tx, ws_room_peers,
+            local_peer_str, master_keypair, device_peer_id, &pid,
+            is_invisible, db_path, db_passphrase,
+        );
+    }
+
+    let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
+        master_peer_id: master_peer_str.to_string(),
+    }).await;
+    Some(target_device)
+}
+
 // ── 10b. LeaveServer ─────────────────────────────────────────────────
 
 pub(crate) async fn handle_leave_server(

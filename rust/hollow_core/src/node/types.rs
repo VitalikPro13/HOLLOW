@@ -68,6 +68,11 @@ pub(crate) struct DiscoveredPeer {
 ///   base64). `peer_id_from_pubkey_protobuf(master_pubkey)` MUST equal
 ///   `master_peer_id` (binds pubkey → identity).
 /// - `devices`: sorted device peer_ids (sorted so the signed payload is canonical).
+/// - `revoked`: sorted device peer_ids that have been REVOKED (Step 7). Tombstones:
+///   a revoked id is removed from `devices` and can never re-enter the union (see
+///   `ingest_device_list`). One `version` + one `sig_b64` governs adds AND removes;
+///   a revoked id is un-revoked ONLY by a future higher-version master-signed list
+///   that drops it from `revoked`. A replayed lower-version list cannot un-revoke.
 /// - `version`: monotonic; clients reject a list whose version is not greater
 ///   than the highest already seen for that master (replay protection).
 /// - `sig_b64`: master's Ed25519 signature over `device_list_signing_payload`.
@@ -79,6 +84,10 @@ pub(crate) struct SignedDeviceList {
     pub master_peer_id: String,
     #[serde(default)]
     pub devices: Vec<String>,
+    /// Revoked device peer_ids (sorted). Step 7 tombstones — empty on every
+    /// pre-Step-7 / single-device list (`#[serde(default)]` keeps old data valid).
+    #[serde(default)]
+    pub revoked: Vec<String>,
     #[serde(default)]
     pub version: u64,
     #[serde(default)]
@@ -144,6 +153,11 @@ pub(crate) enum NetworkEvent {
     /// A device list was ingested for `master_peer_id` (multi-device, Phase 6).
     /// Dart invalidates its device→identity map so attribution updates.
     DeviceListUpdated { master_peer_id: String },
+    /// THIS device has been revoked by the identity (Step 7) — it appears in the
+    /// signed `revoked` tombstone set. Dart self-nukes: `stash_pending_wipe()` +
+    /// relaunch → clean Welcome. The cryptographic cutoff already happened on
+    /// everyone else; this is the revoked device honestly tearing itself down.
+    SelfRevoked,
     // -- Message editing events (Phase 3.5) --
     ChannelMessageEdited { server_id: String, channel_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
     DmMessageEdited { peer_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
@@ -532,6 +546,10 @@ pub(crate) enum NodeCommand {
     AcceptLinkPush { target_peer: String, include_vault: bool, include_files: bool },
     /// (Populated device) Decline an inbound link request.
     DeclineLinkPush { target_peer: String },
+    /// (Step 7) Revoke one of OUR OWN devices (lost/stolen). Bumps our master-signed
+    /// device list with the device tombstoned, drops our Olm session to it, and (where
+    /// we coordinate) removes its MLS leaf from shared servers. Manual-only.
+    RevokeDevice { device_peer_id: String },
     // -- Push notifications --
     RegisterPushToken { token: String, platform: String },
     /// Register per-server/channel push notification prefs with the relay

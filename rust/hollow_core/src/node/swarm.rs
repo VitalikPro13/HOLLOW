@@ -702,6 +702,22 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
+                    NodeCommand::RevokeDevice { device_peer_id: target } => {
+                        if let Some(revoked) = sync_handler::handle_revoke_device(
+                            &event_tx, &ws_cmd_tx, &ws_room_peers, &master_keypair,
+                            &master_peer_str, &local_peer_str, &device_peer_id,
+                            is_invisible, target, &db_path, &db_passphrase,
+                        ).await {
+                            // Drop our Olm session to the revoked device + (coordinator)
+                            // remove its MLS leaf from shared servers — same enforcement
+                            // path a friend runs when it ingests the tombstoned list.
+                            enforce_device_revocations(
+                                &[revoked], &mut olm, &crypto_store, mls.as_ref(),
+                                &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
+                            );
+                        }
+                    }
+
                     NodeCommand::LeaveServer { server_id } => {
                         if sync_handler::handle_leave_server(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
@@ -3782,6 +3798,63 @@ fn build_dm_sync_items(
     }).collect()
 }
 
+/// Enforce device revocations (Step 7) that were just learned from an ingested
+/// device list. For each freshly-revoked device id:
+/// - **Olm (every node):** drop the in-RAM session AND delete the persisted pickle
+///   so a friend never encrypts a DM to the revoked device, and a restart can't
+///   resurrect it. (Olm has no coordinator — each holder of a session drops it.)
+/// - **MLS (coordinator only, single leaf):** for each server where we are the
+///   elected coordinator and the revoked id still holds a leaf, enqueue that ONE
+///   leaf into `pending_mls_removals` — the existing `mls_batch_timer` issues a
+///   single `remove_members_batch` commit + `MlsCommit` broadcast. We remove ONLY
+///   that device's leaf; the device's MASTER is still a valid member.
+fn enforce_device_revocations(
+    newly_revoked: &[String],
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    mls: Option<&MlsManager>,
+    local_peer_str: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    pending_mls_removals: &mut HashMap<String, Vec<String>>,
+) {
+    if newly_revoked.is_empty() {
+        return;
+    }
+    for id in newly_revoked {
+        // Olm — drop + erase. Never drop a session to OURSELVES (defensive).
+        if id != local_peer_str {
+            if olm.has_session(id) {
+                olm.remove_session(id);
+                crate::node::crypto_handler::persist_crypto_state(olm, crypto_store, id);
+            }
+            crypto_store.delete_session(id.to_string());
+        }
+        hollow_log!("[HOLLOW-REVOKE] Dropped Olm session to revoked device {id}");
+    }
+    // MLS single-leaf removal, coordinator-only.
+    if let Some(mls_mgr) = mls {
+        for id in newly_revoked {
+            for server_id in mls_mgr.group_ids() {
+                if !mls_mgr.group_members(&server_id).iter().any(|m| m == id) {
+                    continue;
+                }
+                if !super::crypto_handler::is_mls_coordinator(
+                    mls_mgr, &server_id, local_peer_str, ws_room_peers,
+                ) {
+                    continue;
+                }
+                let queue = pending_mls_removals.entry(server_id.clone()).or_default();
+                if !queue.iter().any(|q| q == id) {
+                    queue.push(id.clone());
+                    hollow_log!(
+                        "[HOLLOW-REVOKE] Coordinator queued MLS leaf removal for revoked device {id} in {server_id}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Handle an incoming request from a peer.
 async fn handle_incoming_request(
     olm: &mut OlmManager,
@@ -4384,6 +4457,17 @@ async fn handle_incoming_request(
                     // `convo` = the OTHER party's master, so we file it under the real
                     // conversation rather than resolving it to ourselves (the sender).
                     // For a normal DM from a friend, `convo` is None → resolve the sender.
+                    // PHANTOM-CHAT GUARD (Step 7): drop a DM from a device we just
+                    // revoked but that is still alive and talking. Without this, a
+                    // revoked device that hasn't yet self-nuked keeps sending DMs;
+                    // since we `forget`-ed its device→master link, `resolve` returns
+                    // its own id → the message spawns a standalone "unknown peer"
+                    // conversation (the phantom chat). Drop it; it stops for good once
+                    // the device self-nukes / disconnects.
+                    if super::resolver::is_revoked(&peer_str) {
+                        hollow_log!("[HOLLOW-REVOKE] Dropped DM from revoked-but-alive device {peer_str}");
+                        return;
+                    }
                     let convo_peer = match (is_own_device, convo.as_deref()) {
                         (true, Some(c)) => c.to_string(),
                         _ => super::resolver::resolve(&peer_str),
@@ -5106,9 +5190,43 @@ async fn handle_incoming_request(
                     // ctx_id above), not the raw device id.
                     let cid_str = cid.unwrap_or_else(|| dm_convo.clone());
 
+                    // LOOP BREAKER: if this file is ALREADY complete on disk, ignore the
+                    // FileHeader entirely — do NOT register a pending stream or re-process
+                    // early arrivals. A DM file fans out to several of the recipient's
+                    // devices and the decrypt-fail safety re-request also re-sends a
+                    // FileHeader, so the SAME completed file can keep producing headers.
+                    // Each one used to re-register a pending stream (resetting retry_count
+                    // since the prior entry was removed on success) → another crossed
+                    // header/stream pair → an endless re-download of one already-saved file
+                    // (22k log lines, wasted bandwidth re-fetching e.g. a 10KB banner
+                    // thousands of times). Once it's on disk we're done — drop the header.
+                    let already_complete = {
+                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                            match store.get_file_metadata(&fid) {
+                                Ok(Some(meta)) => meta.completed_at.is_some()
+                                    && meta.disk_path.as_ref()
+                                        .map(|p| std::path::Path::new(p).exists())
+                                        .unwrap_or(false),
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        }
+                    };
+                    if already_complete {
+                        // Clear any stale pending stream / early-arrival bytes for it and
+                        // stop — no re-request, no re-register. Still emit FileHeaderReceived
+                        // below so the sender-side UI/late-joiner stays consistent.
+                        pending_file_streams.remove(&fid);
+                        if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
+                            let _ = std::fs::remove_file(&temp_path);
+                        }
+                        hollow_log!("[HOLLOW-FILE] FileHeader for {fid} ignored — already complete on disk");
+                    }
+
                     // If aes_key is present and no share_ref, this is a streamed transfer — register for stream receive.
                     // Share-backed files skip this — Share handles delivery, no P2P binary data.
-                    if share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
+                    if !already_complete && share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
                         // Preserve the retry counter across a re-registration. A DM
                         // file is fanned out to several of the recipient's devices, so
                         // the SAME file can produce MULTIPLE FileHeaders here — and the
@@ -7290,13 +7408,20 @@ async fn handle_incoming_request(
                                         status: "invisible".to_string(),
                                     }).await;
                                 }
-                                super::social::handle_envelope_profile_update(
+                                let envelope_revoked = super::social::handle_envelope_profile_update(
                                     event_tx, server_states, master_peer_str,
                                     device_peer_id, master_keypair, ws_cmd_tx, ws_room_peers,
                                     sender_peer_id, display_name, status, about_me,
                                     updated_at, avatar_b64, banner_b64, twitch_username,
                                     device_list, db_path, db_passphrase,
                                 ).await;
+                                // Step 7: enforce revocations learned via the MLS
+                                // server-member profile path too (Olm drop + single
+                                // leaf removal where we coordinate).
+                                enforce_device_revocations(
+                                    &envelope_revoked, olm, crypto_store, Some(&*mls_mgr),
+                                    local_peer_str, ws_room_peers, pending_mls_removals,
+                                );
                             }
 
                             MessageEnvelope::SyncReq { sid, state_vector_json, .. } => {
@@ -8428,6 +8553,12 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::TypingIndicator { server_id, channel_id } => {
+            // Phantom-chat guard (Step 7): ignore typing from a just-revoked-but-still-
+            // alive device (same reason we drop its DMs — it would spawn/feed a phantom
+            // conversation). Stops once the device self-nukes / disconnects.
+            if super::resolver::is_revoked(peer_str) {
+                return;
+            }
             // Attribute typing to the sender's MASTER identity (server members and
             // DM threads are master-keyed). The raw `peer_str` is a device id, which
             // would never match the master-keyed member/thread → indicator never
@@ -8466,10 +8597,17 @@ async fn handle_incoming_request(
             // monotonic + persist + resolver update + DeviceListUpdated). A list
             // for our OWN master is a sibling device → merged (union) + friend
             // list shared (see ingest_sibling_device_list).
-            let our_devices_grew = super::crypto_handler::ingest_device_list(
+            let ingest_outcome = super::crypto_handler::ingest_device_list(
                 event_tx, master_peer_str, device_peer_id, master_keypair, peer_str,
                 ws_cmd_tx, ws_room_peers, device_list, db_path, db_passphrase,
             ).await;
+            let our_devices_grew = ingest_outcome.our_devices_grew;
+            // Step 7: enforce any device revocations learned from this list — drop
+            // Olm sessions + (coordinator) remove the revoked leaf from shared servers.
+            enforce_device_revocations(
+                &ingest_outcome.newly_revoked, olm, crypto_store, mls.as_ref(),
+                local_peer_str, ws_room_peers, pending_mls_removals,
+            );
             // If a sibling merge added one of OUR device ids, re-announce our
             // profile (now carrying the merged device list) to every peer we share
             // a room with — friends converge on the full device set immediately,

@@ -42,6 +42,17 @@ fn links() -> &'static RwLock<HashMap<String, String>> {
     LINKS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+/// Device peer_ids we've seen REVOKED in a signed tombstone (Step 7). Kept process-
+/// global so the DM/typing receive path can DROP messages from a just-revoked device
+/// that is still alive and talking (a phantom-chat guard) until it self-nukes or
+/// disconnects. Cleared on `clear_all`. We never tombstone our own running device id
+/// here (the caller filters that).
+static REVOKED: OnceLock<RwLock<std::collections::HashSet<String>>> = OnceLock::new();
+
+fn revoked() -> &'static RwLock<std::collections::HashSet<String>> {
+    REVOKED.get_or_init(|| RwLock::new(std::collections::HashSet::new()))
+}
+
 /// Resolve a device peer_id to its master identity. Unknown peers resolve to
 /// themselves (backward-compat). Never panics; a poisoned lock degrades to
 /// identity-passthrough rather than crashing a message handler.
@@ -136,10 +147,53 @@ pub(crate) fn devices_for(master_peer_id: &str) -> Vec<String> {
     }
 }
 
+/// Forget a single device → master link (Step 7 revocation). The map is otherwise
+/// insert-only; without this a revoked device keeps resolving to its master (and so
+/// stays a fan-out / presence-collapse target) until the next restart. After this,
+/// `resolve(device)` returns the device id itself again (unknown → self). Safe to
+/// call for an id that isn't present.
+pub(crate) fn forget(device_peer_id: &str) {
+    if let Ok(mut map) = links().write() {
+        map.remove(device_peer_id);
+    }
+}
+
+/// Forget many device → master links at once (Step 7 revocation).
+pub(crate) fn forget_many(device_peer_ids: &[String]) {
+    if let Ok(mut map) = links().write() {
+        for d in device_peer_ids {
+            map.remove(d);
+        }
+    }
+}
+
+/// Mark device ids as revoked (Step 7) so the DM/typing receive path can drop
+/// messages from a just-revoked device that's still alive (phantom-chat guard).
+pub(crate) fn mark_revoked(device_peer_ids: &[String]) {
+    if let Ok(mut set) = revoked().write() {
+        for d in device_peer_ids {
+            set.insert(d.clone());
+        }
+    }
+}
+
+/// True iff this device id has been seen revoked in a signed tombstone — callers
+/// drop inbound DMs/typing from it (it's a forgotten device that hasn't yet
+/// self-nuked / disconnected). Unknown ids return false (normal peers unaffected).
+pub(crate) fn is_revoked(device_peer_id: &str) -> bool {
+    revoked()
+        .read()
+        .map(|s| s.contains(device_peer_id))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 pub(crate) fn clear_for_test() {
     if let Ok(mut map) = links().write() {
         map.clear();
+    }
+    if let Ok(mut set) = revoked().write() {
+        set.clear();
     }
 }
 
@@ -149,6 +203,9 @@ pub(crate) fn clear_for_test() {
 pub(crate) fn clear_all() {
     if let Ok(mut map) = links().write() {
         map.clear();
+    }
+    if let Ok(mut set) = revoked().write() {
+        set.clear();
     }
 }
 
@@ -227,5 +284,48 @@ mod tests {
         let devs = devices_for("M");
         // The bare master must NOT appear (no device authenticates as it).
         assert_eq!(devs, vec!["devB".to_string()]);
+    }
+
+    #[test]
+    fn forget_drops_a_device_back_to_self() {
+        let _g = guarded();
+        update_many("M", ["devA", "devB"]);
+        forget("devA");
+        // The forgotten device resolves to itself again, no longer same-identity.
+        assert_eq!(resolve("devA"), "devA");
+        assert!(!same_identity("devA", "devB"));
+        // The surviving device is untouched.
+        assert_eq!(resolve("devB"), "M");
+        assert_eq!(devices_for("M"), vec!["devB".to_string()]);
+    }
+
+    #[test]
+    fn forget_many_drops_a_revoked_set() {
+        let _g = guarded();
+        update_many("M", ["devA", "devB", "devC"]);
+        forget_many(&["devA".into(), "devC".into()]);
+        assert_eq!(resolve("devA"), "devA");
+        assert_eq!(resolve("devC"), "devC");
+        assert_eq!(devices_for("M"), vec!["devB".to_string()]);
+    }
+
+    #[test]
+    fn forget_is_idempotent_for_unknown_id() {
+        let _g = guarded();
+        update_many("M", ["devA"]);
+        forget("never-seen"); // no panic, no effect
+        assert_eq!(resolve("devA"), "M");
+    }
+
+    #[test]
+    fn revoked_guard_marks_and_clears() {
+        let _g = guarded();
+        assert!(!is_revoked("devX"));
+        mark_revoked(&["devX".into(), "devY".into()]);
+        assert!(is_revoked("devX"));
+        assert!(is_revoked("devY"));
+        assert!(!is_revoked("devZ")); // unrelated id unaffected
+        clear_all();
+        assert!(!is_revoked("devX")); // cleared with the resolver
     }
 }

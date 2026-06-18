@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'network.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `send_node_command`, `to_ffi_event`
+// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `open_local_store`, `send_node_command`, `to_ffi_event`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NodeState`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`
 
@@ -74,6 +74,39 @@ Future<List<DeviceLink>> getDeviceLinks() =>
 /// revocation, not this blunt reset.
 Future<void> resetDeviceLists() =>
     RustLib.instance.api.crateApiNetworkResetDeviceLists();
+
+/// The transport peer_id of the device this app is RUNNING on (Step 8). Distinct
+/// from `get_local_peer_id`, which returns the MASTER identity. Dart uses this to
+/// mark "This device" in the Devices panel and to hide its "Remove" button (a
+/// device can't revoke itself). Returns `None` if no device key exists yet.
+Future<String?> getLocalDevicePeerId() =>
+    RustLib.instance.api.crateApiNetworkGetLocalDevicePeerId();
+
+/// Revoke one of OUR OWN devices (Step 7, lost/stolen). Bumps our master-signed
+/// device list with the device tombstoned + drops the Olm session + (where we
+/// coordinate) removes its MLS leaf from shared servers. Manual-only; rejected for
+/// the device we're running on or an id that isn't ours. Friends converge via the
+/// re-broadcast device list and can never un-revoke it with a stale (lower-version)
+/// list. The node must be running.
+Future<void> revokeDevice({required String devicePeerId}) => RustLib
+    .instance
+    .api
+    .crateApiNetworkRevokeDevice(devicePeerId: devicePeerId);
+
+/// Set (or clear, when `label` is empty) the local human label for a device.
+/// Local-only — not synced or signed, so a person's two devices may show different
+/// labels for the same third device.
+Future<void> setDeviceLabel({
+  required String devicePeerId,
+  required String label,
+}) => RustLib.instance.api.crateApiNetworkSetDeviceLabel(
+  devicePeerId: devicePeerId,
+  label: label,
+);
+
+/// All local device labels for the Devices panel.
+Future<List<DeviceLabel>> getDeviceLabels() =>
+    RustLib.instance.api.crateApiNetworkGetDeviceLabels();
 
 /// Verify an Ed25519 message signature against a canonical payload.
 ///
@@ -656,6 +689,25 @@ Future<void> webrtcBroadcastReceived({
   shardIndex: shardIndex,
 );
 
+/// A local human label for a device (Step 8 Devices panel).
+class DeviceLabel {
+  final String devicePeerId;
+  final String label;
+
+  const DeviceLabel({required this.devicePeerId, required this.label});
+
+  @override
+  int get hashCode => devicePeerId.hashCode ^ label.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DeviceLabel &&
+          runtimeType == other.runtimeType &&
+          devicePeerId == other.devicePeerId &&
+          label == other.label;
+}
+
 /// A learned device → master identity link (multi-device, Phase 6).
 class DeviceLink {
   /// A device's transport peer_id (`12D3KooW…`).
@@ -1036,6 +1088,9 @@ sealed class NetworkEvent with _$NetworkEvent {
   /// A device list was ingested for `master_peer_id` (multi-device, Phase 6).
   const factory NetworkEvent.deviceListUpdated({required String masterPeerId}) =
       NetworkEvent_DeviceListUpdated;
+
+  /// THIS device was revoked (Step 7) — Dart self-nukes (wipe + relaunch).
+  const factory NetworkEvent.selfRevoked() = NetworkEvent_SelfRevoked;
   const factory NetworkEvent.channelMessageEdited({
     required String serverId,
     required String channelId,

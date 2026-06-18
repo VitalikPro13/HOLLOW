@@ -569,7 +569,7 @@ pub(crate) async fn handle_envelope_profile_update(
     device_list: Option<SignedDeviceList>,
     db_path: &str,
     db_passphrase: &str,
-) {
+) -> Vec<String> {
     // Multi-device: ingest the sender's signed device list (verify + monotonic +
     // persist + resolver update + DeviceListUpdated). A list for our OWN master
     // is a sibling device → merged (union). No-op for old clients.
@@ -579,10 +579,13 @@ pub(crate) async fn handle_envelope_profile_update(
     // profile to friends on a sibling merge. Siblings meet in the inbox room via
     // that plaintext path, not this MLS server-member envelope, so we don't
     // re-broadcast here (a sibling is not an MLS co-member in the DM/inbox case).
-    let _our_devices_grew = super::crypto_handler::ingest_device_list(
+    // Step 7: we DO surface `newly_revoked` so the swarm caller (which holds olm/mls)
+    // drops Olm sessions + removes MLS leaves for a device revoked via this path.
+    let outcome = super::crypto_handler::ingest_device_list(
         event_tx, local_master_peer_id, local_device_peer_id, master_keypair,
         &sender_peer_id, ws_cmd_tx, ws_room_peers, device_list, db_path, db_passphrase,
     ).await;
+    let newly_revoked = outcome.newly_revoked;
 
     // Decode avatar/banner base64 (same logic as HavenMessage::ProfileUpdate handler).
     let avatar_bytes: Option<Vec<u8>> = if avatar_b64.is_empty() {
@@ -620,6 +623,7 @@ pub(crate) async fn handle_envelope_profile_update(
     let _ = event_tx.send(NetworkEvent::ProfileUpdated {
         peer_id: profile_master,
     }).await;
+    newly_revoked
 }
 
 /// Handle `ProfileRequestFor` — look up the target peer's profile in our DB

@@ -114,6 +114,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ChannelFfi dco_decode_channel_ffi(dynamic raw);
 
   @protected
+  DeviceLabel dco_decode_device_label(dynamic raw);
+
+  @protected
   DeviceLink dco_decode_device_link(dynamic raw);
 
   @protected
@@ -185,6 +188,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ChannelFfi> dco_decode_list_channel_ffi(dynamic raw);
+
+  @protected
+  List<DeviceLabel> dco_decode_list_device_label(dynamic raw);
 
   @protected
   List<DeviceLink> dco_decode_list_device_link(dynamic raw);
@@ -494,6 +500,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ChannelFfi sse_decode_channel_ffi(SseDeserializer deserializer);
 
   @protected
+  DeviceLabel sse_decode_device_label(SseDeserializer deserializer);
+
+  @protected
   DeviceLink sse_decode_device_link(SseDeserializer deserializer);
 
   @protected
@@ -579,6 +588,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ChannelFfi> sse_decode_list_channel_ffi(SseDeserializer deserializer);
+
+  @protected
+  List<DeviceLabel> sse_decode_list_device_label(SseDeserializer deserializer);
 
   @protected
   List<DeviceLink> sse_decode_list_device_link(SseDeserializer deserializer);
@@ -973,6 +985,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_channel_ffi(ChannelFfi self, SseSerializer serializer);
 
   @protected
+  void sse_encode_device_label(DeviceLabel self, SseSerializer serializer);
+
+  @protected
   void sse_encode_device_link(DeviceLink self, SseSerializer serializer);
 
   @protected
@@ -1083,6 +1098,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_channel_ffi(
     List<ChannelFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_device_label(
+    List<DeviceLabel> self,
     SseSerializer serializer,
   );
 
