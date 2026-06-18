@@ -511,15 +511,16 @@ pub(crate) async fn handle_send_channel_message(
                     hollow_log!("[HOLLOW-MLS] Encrypt failed, falling back to Olm: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                     for member_peer_str in server.members.keys() {
-                        if member_peer_str == &local_peer { continue; }
-                            if peer_is_reachable(ws_room_peers, member_peer_str) {
-                                send_encrypted_message(
-                                    olm, crypto_store,
-                                    member_peer_str, &envelope_json,
-                                    event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-                                ).await;
-                            }
+                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        // Olm is per-device: encrypt to EACH online device of the member.
+                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                            send_encrypted_message(
+                                olm, crypto_store,
+                                &dev, &envelope_json,
+                                event_tx,
+                                ws_cmd_tx, ws_room_peers,
+                            ).await;
+                        }
                     }
                 }
             }
@@ -527,16 +528,17 @@ pub(crate) async fn handle_send_channel_message(
             // Legacy Olm fan-out path.
             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
             for member_peer_str in server.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_encrypted_message(
-                                    olm, crypto_store,
-                                    member_peer_str, &envelope_json,
-                            event_tx,
-                                                                ws_cmd_tx, ws_room_peers,
-                        ).await;
+                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        // Olm is per-device: encrypt to EACH online device of the member.
+                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                            send_encrypted_message(
+                                olm, crypto_store,
+                                &dev, &envelope_json,
+                                event_tx,
+                                ws_cmd_tx, ws_room_peers,
+                            ).await;
+                        }
                     }
-            }
         }
     }
 
@@ -724,31 +726,33 @@ pub(crate) async fn handle_edit_channel_message(
                     hollow_log!("[HOLLOW-MLS] Edit encrypt failed, falling back to Olm: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                     for member_peer_str in server.members.keys() {
-                        if member_peer_str == &local_peer { continue; }
-                            if peer_is_reachable(ws_room_peers, member_peer_str) {
-                                send_encrypted_message(
-                                    olm, crypto_store,
-                                    member_peer_str, &envelope_json,
-                                    event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-                                ).await;
-                            }
+                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        // Olm is per-device: encrypt to EACH online device of the member.
+                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                            send_encrypted_message(
+                                olm, crypto_store,
+                                &dev, &envelope_json,
+                                event_tx,
+                                ws_cmd_tx, ws_room_peers,
+                            ).await;
+                        }
                     }
                 }
             }
         } else {
             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
             for member_peer_str in server.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_encrypted_message(
-                            olm, crypto_store,
-                            member_peer_str, &envelope_json,
-                            event_tx,
-                            ws_cmd_tx, ws_room_peers,
-                        ).await;
+                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        // Olm is per-device: encrypt to EACH online device of the member.
+                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                            send_encrypted_message(
+                                olm, crypto_store,
+                                &dev, &envelope_json,
+                                event_tx,
+                                ws_cmd_tx, ws_room_peers,
+                            ).await;
+                        }
                     }
-            }
         }
     }
 
@@ -979,31 +983,33 @@ pub(crate) async fn handle_delete_channel_message(
                     hollow_log!("[HOLLOW-MLS] Delete encrypt failed, falling back to Olm: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                     for member_peer_str in server.members.keys() {
-                        if member_peer_str == &local_peer { continue; }
-                            if peer_is_reachable(ws_room_peers, member_peer_str) {
-                                send_encrypted_message(
-                                    olm, crypto_store,
-                                    member_peer_str, &envelope_json,
-                                    event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-                                ).await;
-                            }
+                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        // Olm is per-device: encrypt to EACH online device of the member.
+                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                            send_encrypted_message(
+                                olm, crypto_store,
+                                &dev, &envelope_json,
+                                event_tx,
+                                ws_cmd_tx, ws_room_peers,
+                            ).await;
+                        }
                     }
                 }
             }
         } else {
             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
             for member_peer_str in server.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_encrypted_message(
-                            olm, crypto_store,
-                            member_peer_str, &envelope_json,
-                            event_tx,
-                            ws_cmd_tx, ws_room_peers,
-                        ).await;
+                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        // Olm is per-device: encrypt to EACH online device of the member.
+                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                            send_encrypted_message(
+                                olm, crypto_store,
+                                &dev, &envelope_json,
+                                event_tx,
+                                ws_cmd_tx, ws_room_peers,
+                            ).await;
+                        }
                     }
-            }
         }
     }
 
@@ -1182,31 +1188,33 @@ pub(crate) async fn handle_add_channel_reaction(
                     hollow_log!("[HOLLOW-MLS] Reaction encrypt failed, falling back to Olm: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                     for member_peer_str in server.members.keys() {
-                        if member_peer_str == &local_peer { continue; }
-                            if peer_is_reachable(ws_room_peers, member_peer_str) {
-                                send_encrypted_message(
-                                    olm, crypto_store,
-                                    member_peer_str, &envelope_json,
-                                    event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-                                ).await;
-                            }
+                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        // Olm is per-device: encrypt to EACH online device of the member.
+                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                            send_encrypted_message(
+                                olm, crypto_store,
+                                &dev, &envelope_json,
+                                event_tx,
+                                ws_cmd_tx, ws_room_peers,
+                            ).await;
+                        }
                     }
                 }
             }
         } else {
             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
             for member_peer_str in server.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_encrypted_message(
-                            olm, crypto_store,
-                            member_peer_str, &envelope_json,
-                            event_tx,
-                            ws_cmd_tx, ws_room_peers,
-                        ).await;
+                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        // Olm is per-device: encrypt to EACH online device of the member.
+                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                            send_encrypted_message(
+                                olm, crypto_store,
+                                &dev, &envelope_json,
+                                event_tx,
+                                ws_cmd_tx, ws_room_peers,
+                            ).await;
+                        }
                     }
-            }
         }
     }
 
@@ -1378,31 +1386,33 @@ pub(crate) async fn handle_remove_channel_reaction(
                     hollow_log!("[HOLLOW-MLS] Remove reaction encrypt failed, Olm fallback: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                     for member_peer_str in server.members.keys() {
-                        if member_peer_str == &local_peer { continue; }
-                            if peer_is_reachable(ws_room_peers, member_peer_str) {
-                                send_encrypted_message(
-                                    olm, crypto_store,
-                                    member_peer_str, &envelope_json,
-                                    event_tx,
-                                    ws_cmd_tx, ws_room_peers,
-                                ).await;
-                            }
+                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        // Olm is per-device: encrypt to EACH online device of the member.
+                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                            send_encrypted_message(
+                                olm, crypto_store,
+                                &dev, &envelope_json,
+                                event_tx,
+                                ws_cmd_tx, ws_room_peers,
+                            ).await;
+                        }
                     }
                 }
             }
         } else {
             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
             for member_peer_str in server.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_encrypted_message(
-                            olm, crypto_store,
-                            member_peer_str, &envelope_json,
-                            event_tx,
-                            ws_cmd_tx, ws_room_peers,
-                        ).await;
+                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        // Olm is per-device: encrypt to EACH online device of the member.
+                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                            send_encrypted_message(
+                                olm, crypto_store,
+                                &dev, &envelope_json,
+                                event_tx,
+                                ws_cmd_tx, ws_room_peers,
+                            ).await;
+                        }
                     }
-            }
         }
     }
 

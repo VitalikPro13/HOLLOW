@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
-import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
@@ -15,7 +15,6 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/core/brand_icons.dart';
-import 'package:hollow/src/core/models/peer_info.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -74,7 +73,7 @@ class _MemberPanelContent extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final membersAsync = ref.watch(serverMembersProvider(serverId));
-    final peers = ref.watch(peersProvider);
+    final onlineIdentities = ref.watch(onlineIdentitiesProvider);
     final myPeerId = ref.watch(identityProvider).peerId ?? '';
 
     return Column(
@@ -119,7 +118,7 @@ class _MemberPanelContent extends ConsumerWidget {
                   style: HollowTypography.body.copyWith(color: hollow.textSecondary)),
             ),
             data: (members) {
-              final entries = _buildEntries(members, peers, myPeerId);
+              final entries = _buildEntries(members, onlineIdentities, myPeerId);
               return ListView.builder(
                 controller: scrollController,
                 padding: EdgeInsets.only(
@@ -152,14 +151,15 @@ class _MemberPanelContent extends ConsumerWidget {
 
   List<_MemberEntry> _buildEntries(
     List<crdt_api.MemberFfi> members,
-    Map<String, PeerInfo> peers,
+    Set<String> onlineIdentities,
     String myPeerId,
   ) {
     final online = <crdt_api.MemberFfi>[];
     final offline = <crdt_api.MemberFfi>[];
 
+    // Multi-device: a member is online if ANY of their devices is visible.
     for (final m in members) {
-      if (peers.containsKey(m.peerId) || m.peerId == myPeerId) {
+      if (onlineIdentities.contains(m.peerId) || m.peerId == myPeerId) {
         online.add(m);
       } else {
         offline.add(m);

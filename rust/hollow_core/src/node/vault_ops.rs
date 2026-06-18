@@ -372,14 +372,17 @@ pub(crate) async fn handle_vault_upload_file(
                 } else {
                     let manifest_env_json = serde_json::to_string(&manifest_envelope).unwrap_or_default();
                     for member_peer_str in state.members.keys() {
-                        if member_peer_str == &local_peer { continue; }
-                            if peer_is_reachable(&ws_room_peers, member_peer_str) && olm.has_session(member_peer_str) {
+                        if super::resolver::same_identity(member_peer_str, &local_peer) { continue; }
+                        // Olm is per-device: send to each online device of the member.
+                        for dev in super::crypto_handler::online_devices_for(&ws_room_peers, member_peer_str) {
+                            if olm.has_session(&dev) {
                                 send_encrypted_message(
-                            &mut *olm, crypto_store,
-                            member_peer_str, &manifest_env_json, &event_tx,
+                                    &mut *olm, crypto_store,
+                                    &dev, &manifest_env_json, &event_tx,
                                     &ws_cmd_tx, &ws_room_peers,
                                 ).await;
                             }
+                        }
                     }
                 }
             }
@@ -446,14 +449,16 @@ pub(crate) async fn handle_delete_vault_content(
         } else {
             let delete_json = serde_json::to_string(&delete_envelope).unwrap_or_default();
             for member_peer_str in state.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(&ws_room_peers, member_peer_str) && olm.has_session(member_peer_str) {
+                if super::resolver::same_identity(member_peer_str, &local_peer) { continue; }
+                for dev in super::crypto_handler::online_devices_for(&ws_room_peers, member_peer_str) {
+                    if olm.has_session(&dev) {
                         send_encrypted_message(
-                                &mut *olm, crypto_store,
-                                member_peer_str, &delete_json, &event_tx,
+                            &mut *olm, crypto_store,
+                            &dev, &delete_json, &event_tx,
                             &ws_cmd_tx, &ws_room_peers,
                         ).await;
                     }
+                }
             }
         }
 
@@ -739,7 +744,7 @@ pub(crate) async fn handle_envelope_shard_store(
     db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-MLS-VAULT] ShardStore: cid={cid} si={si} from {sender_peer_id}");
-    let is_member = server_states.get(&sid).map(|s| s.members.contains_key(&sender_peer_id)).unwrap_or(false);
+    let is_member = server_states.get(&sid).map(|s| s.is_member(&sender_peer_id)).unwrap_or(false);
     if !is_member { return; }
     if chunks == 0 && data.is_empty() {
         // Streamed shard — data arrives via binary WS stream.
@@ -849,7 +854,7 @@ pub(crate) async fn handle_envelope_shard_request(
     db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-MLS-VAULT] ShardRequest: cid={cid} si={si} from {sender_peer_id}");
-    let is_member = server_states.get(&sid).map(|s| s.members.contains_key(&sender_peer_id)).unwrap_or(false);
+    let is_member = server_states.get(&sid).map(|s| s.is_member(&sender_peer_id)).unwrap_or(false);
     if !is_member { return; }
     let data_dir = crate::identity::data_dir().unwrap_or_default();
     let vault_dir = data_dir.join("vault");
@@ -932,7 +937,7 @@ pub(crate) async fn handle_envelope_shard_probe(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let is_member = server_states.get(&sid).map(|s| s.members.contains_key(&sender_peer_id)).unwrap_or(false);
+    let is_member = server_states.get(&sid).map(|s| s.is_member(&sender_peer_id)).unwrap_or(false);
     if !is_member { return; }
     let data_dir = crate::identity::data_dir().unwrap_or_default();
     let vault_dir = data_dir.join("vault");
@@ -996,7 +1001,7 @@ pub(crate) async fn handle_envelope_shard_migrate(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let is_member = server_states.get(&sid).map(|s| s.members.contains_key(sender_peer_id)).unwrap_or(false);
+    let is_member = server_states.get(&sid).map(|s| s.is_member(sender_peer_id)).unwrap_or(false);
     if !is_member { return; }
     if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
         let data_dir = crate::identity::data_dir().unwrap_or_default();

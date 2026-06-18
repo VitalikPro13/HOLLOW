@@ -753,26 +753,43 @@ pub(crate) fn online_devices_for(
     set.into_iter().collect()
 }
 
-/// Deterministic MLS coordinator: lowest peer_id among online MLS group members.
-/// Returns true if local peer should be the coordinator for this server.
-/// Security: only MLS group members participate — non-members can't become coordinator.
-/// Pure coordinator election: lowest peer_id among online members wins.
-/// Testable without MlsManager dependency.
-pub(crate) fn elect_coordinator<'a>(
-    mls_members: &'a [String],
-    local_peer: &'a str,
+/// Collapse a list of online MLS leaf credential ids (device ids, post-Step-6;
+/// or master ids for legacy leaves) into the SORTED, deduped set of distinct
+/// MASTER identities that are online. `local_peer` (the master) is always
+/// treated as online. A member is online if it (or any sibling device) is
+/// reachable. Used by the coordinator elections so a human with N leaves counts
+/// ONCE and the election is stable per-identity rather than per-device.
+fn online_master_identities(
+    mls_members: &[String],
+    local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-) -> Option<&'a str> {
-    let mut online: Vec<&str> = mls_members
+) -> Vec<String> {
+    let mut masters: Vec<String> = mls_members
         .iter()
         .filter(|p| p.as_str() == local_peer || peer_is_reachable(ws_room_peers, p))
-        .map(|p| p.as_str())
+        .map(|p| super::resolver::resolve(p))
         .collect();
-    if online.is_empty() {
-        return None;
-    }
-    online.sort();
-    Some(online[0])
+    // `local_peer` is the master and always counts as online (it may not appear
+    // in `mls_members` if our own leaf is device-credentialed — group_members
+    // returns the device id, which resolves back to us, but be explicit).
+    masters.push(local_peer.to_string());
+    masters.sort();
+    masters.dedup();
+    masters
+}
+
+/// Deterministic MLS coordinator: lowest MASTER identity among online MLS group
+/// members (multi-device: device leaves collapse to their master, so one human
+/// = one candidate). Returns the elected master id.
+/// Security: only MLS group members participate — non-members can't become coordinator.
+/// Testable without MlsManager dependency.
+pub(crate) fn elect_coordinator(
+    mls_members: &[String],
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> Option<String> {
+    let masters = online_master_identities(mls_members, local_peer, ws_room_peers);
+    masters.into_iter().next()
 }
 
 pub(crate) fn is_mls_coordinator(
@@ -785,26 +802,25 @@ pub(crate) fn is_mls_coordinator(
         return false;
     }
     let members = mls.group_members(server_id);
-    elect_coordinator(&members, local_peer, ws_room_peers) == Some(local_peer)
+    elect_coordinator(&members, local_peer, ws_room_peers).as_deref() == Some(local_peer)
 }
 
-/// Vault coordinator: 2nd-lowest online peer_id (distributes work away from MLS coordinator).
-/// Falls back to lowest if only one peer is online.
-pub(crate) fn elect_vault_coordinator<'a>(
-    mls_members: &'a [String],
-    local_peer: &'a str,
+/// Vault coordinator: 2nd-lowest online MASTER identity (distributes work away
+/// from the MLS coordinator). Falls back to lowest if only one identity is online.
+pub(crate) fn elect_vault_coordinator(
+    mls_members: &[String],
+    local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-) -> Option<&'a str> {
-    let mut online: Vec<&str> = mls_members
-        .iter()
-        .filter(|p| p.as_str() == local_peer || peer_is_reachable(ws_room_peers, p))
-        .map(|p| p.as_str())
-        .collect();
-    if online.is_empty() {
+) -> Option<String> {
+    let masters = online_master_identities(mls_members, local_peer, ws_room_peers);
+    if masters.is_empty() {
         return None;
     }
-    online.sort();
-    if online.len() >= 2 { Some(online[1]) } else { Some(online[0]) }
+    if masters.len() >= 2 {
+        Some(masters[1].clone())
+    } else {
+        Some(masters[0].clone())
+    }
 }
 
 pub(crate) fn is_vault_coordinator(
@@ -817,7 +833,7 @@ pub(crate) fn is_vault_coordinator(
         return false;
     }
     let members = mls.group_members(server_id);
-    elect_vault_coordinator(&members, local_peer, ws_room_peers) == Some(local_peer)
+    elect_vault_coordinator(&members, local_peer, ws_room_peers).as_deref() == Some(local_peer)
 }
 
 /// Find a WS room containing the given peer.
@@ -884,6 +900,7 @@ pub(crate) fn send_mls_broadcast_topic(
         body: body_b64,
     };
     let data = serde_json::to_vec(&msg).map_err(|e| format!("serialize msg: {e}"))?;
+    hollow_log!("[HOLLOW-TOPIC] Broadcast room={server_id} topic={topic} ({} bytes)", data.len());
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoomTopic {
         room_code: server_id.to_string(),
         topic: topic.to_string(),
@@ -1138,6 +1155,41 @@ pub(crate) fn send_raw_to_peer(
     }
 }
 
+/// Send pre-serialized bytes to EVERY online device of an identity.
+///
+/// Multi-device (Step 6): server members are keyed by MASTER, but no socket
+/// authenticates as the bare master — a `send_raw_to_peer(master)` is silently
+/// dropped (the master is in no room). This fans the same bytes out to each
+/// online device of `member_id`'s identity. If `member_id` is itself a live
+/// device id (single-device, or a non-collapsed id) it is reached directly.
+/// No-op if the identity has no online device. Returns the number of devices
+/// the bytes were dispatched to.
+pub(crate) fn send_raw_to_identity(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    member_id: &str,
+    data: Vec<u8>,
+) -> usize {
+    let mut devices = online_devices_for(ws_room_peers, member_id);
+    // online_devices_for excludes the bare master; if member_id is itself a live
+    // device (no link known) include it directly.
+    if devices.is_empty() && ws_room_for_peer(ws_room_peers, member_id).is_some() {
+        devices.push(member_id.to_string());
+    }
+    let mut sent = 0;
+    for dev in &devices {
+        if let Some(room) = ws_room_for_peer(ws_room_peers, dev) {
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                room_code: room,
+                target_peer: dev.clone(),
+                data: data.clone(),
+            });
+            sent += 1;
+        }
+    }
+    sent
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1154,16 +1206,16 @@ mod tests {
         let members = vec!["peer_c".into(), "peer_a".into(), "peer_b".into()];
         let rooms = make_room_peers(&[("srv1", &["peer_a", "peer_b", "peer_c"])]);
         // peer_a is lowest → coordinator
-        assert_eq!(elect_coordinator(&members, "peer_a", &rooms), Some("peer_a"));
-        assert_eq!(elect_coordinator(&members, "peer_b", &rooms), Some("peer_a"));
-        assert_eq!(elect_coordinator(&members, "peer_c", &rooms), Some("peer_a"));
+        assert_eq!(elect_coordinator(&members, "peer_a", &rooms).as_deref(), Some("peer_a"));
+        assert_eq!(elect_coordinator(&members, "peer_b", &rooms).as_deref(), Some("peer_a"));
+        assert_eq!(elect_coordinator(&members, "peer_c", &rooms).as_deref(), Some("peer_a"));
     }
 
     #[test]
     fn coordinator_election_single_member() {
         let members = vec!["peer_x".into()];
         let rooms = HashMap::new(); // no room peers, but local peer is always "online"
-        assert_eq!(elect_coordinator(&members, "peer_x", &rooms), Some("peer_x"));
+        assert_eq!(elect_coordinator(&members, "peer_x", &rooms).as_deref(), Some("peer_x"));
     }
 
     #[test]
@@ -1171,17 +1223,43 @@ mod tests {
         let members = vec!["peer_a".into(), "peer_b".into(), "peer_c".into()];
         // peer_a is offline (not in any room), peer_b is lowest online
         let rooms = make_room_peers(&[("srv1", &["peer_b", "peer_c"])]);
-        assert_eq!(elect_coordinator(&members, "peer_b", &rooms), Some("peer_b"));
-        assert_eq!(elect_coordinator(&members, "peer_c", &rooms), Some("peer_b"));
+        assert_eq!(elect_coordinator(&members, "peer_b", &rooms).as_deref(), Some("peer_b"));
+        assert_eq!(elect_coordinator(&members, "peer_c", &rooms).as_deref(), Some("peer_b"));
         // peer_a calls elect but is not in rooms — however local_peer is always included
-        assert_eq!(elect_coordinator(&members, "peer_a", &rooms), Some("peer_a"));
+        assert_eq!(elect_coordinator(&members, "peer_a", &rooms).as_deref(), Some("peer_a"));
     }
 
     #[test]
     fn coordinator_election_empty_members() {
         let members: Vec<String> = vec![];
         let rooms = HashMap::new();
-        assert_eq!(elect_coordinator(&members, "peer_x", &rooms), None);
+        // local_peer is always counted as online → it wins alone (never None when
+        // local_peer is present; None only if local_peer were filtered, which it
+        // can't be). With an empty member list, local wins.
+        assert_eq!(elect_coordinator(&members, "peer_x", &rooms).as_deref(), Some("peer_x"));
+    }
+
+    #[test]
+    fn coordinator_election_collapses_devices_to_master() {
+        // Multi-device: master M1 has two online device leaves (D1a, D1b); master
+        // M2 has one (D2). The MLS group lists DEVICE ids. Election must collapse
+        // to masters and pick the lowest MASTER — counting M1 once, not twice.
+        super::super::resolver::clear_all();
+        super::super::resolver::update("dev_m1_a", "master1");
+        super::super::resolver::update("dev_m1_b", "master1");
+        super::super::resolver::update("dev_m2", "master2");
+
+        let members = vec!["dev_m1_a".into(), "dev_m1_b".into(), "dev_m2".into()];
+        let rooms = make_room_peers(&[("srv1", &["dev_m1_a", "dev_m1_b", "dev_m2"])]);
+
+        // master1 < master2 → master1 is coordinator regardless of which device queries.
+        assert_eq!(elect_coordinator(&members, "master1", &rooms).as_deref(), Some("master1"));
+        assert_eq!(elect_coordinator(&members, "master2", &rooms).as_deref(), Some("master1"));
+
+        // Vault coordinator = 2nd master (master2), NOT a 2nd device of master1.
+        assert_eq!(elect_vault_coordinator(&members, "master1", &rooms).as_deref(), Some("master2"));
+
+        super::super::resolver::clear_all();
     }
 
     fn test_master() -> crate::identity::native_identity::NativeKeypair {

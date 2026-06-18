@@ -1,9 +1,9 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/node_status.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
-import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/room_budget_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -56,14 +56,15 @@ class UserBar extends ConsumerWidget {
     } else if (selectedServerId != null) {
       final syncStatus =
           ref.watch(serverSyncStatusProvider(selectedServerId));
-      final peerIds = ref.watch(peersProvider.select((p) => p.keys.toSet()));
+      // Multi-device: count members online via ANY of their devices.
+      final onlineIdentities = ref.watch(onlineIdentitiesProvider);
       final membersAsync =
           ref.watch(serverMembersProvider(selectedServerId));
       final onlineCount = membersAsync.when(
         data: (members) => members
             .where((m) =>
                 m.peerId != localPeerId &&
-                peerIds.contains(m.peerId))
+                onlineIdentities.contains(m.peerId))
             .length,
         loading: () => 0,
         error: (_, _) => 0,

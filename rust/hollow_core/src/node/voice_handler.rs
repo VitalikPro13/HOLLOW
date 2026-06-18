@@ -7,7 +7,7 @@ use crate::crypto::{MlsManager, OlmManager, CryptoStore};
 use crate::identity::native_identity::NativeKeypair;
 use super::crypto_handler::{
     peer_is_reachable, send_mls_broadcast,
-    send_encrypted_message, send_message_to_peer, send_raw_to_peer,
+    send_encrypted_message, send_message_to_peer, send_raw_to_peer, send_raw_to_identity,
 };
 use super::types::*;
 
@@ -302,14 +302,12 @@ pub(crate) async fn handle_voice_channel_join(
         let _ = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store);
     }
     if let Some(state) = server_states.get(&server_id) {
-        let local_peer = local_peer_str.to_string();
+        let data = serde_json::to_vec(&HavenMessage::VoiceChannelJoin {
+            server_id: server_id.clone(), channel_id: channel_id.clone(),
+        }).unwrap_or_default();
         for member in state.members.keys() {
-            if member == &local_peer { continue; }
-            if peer_is_reachable(ws_room_peers, member) {
-                send_message_to_peer(ws_cmd_tx, ws_room_peers, member, HavenMessage::VoiceChannelJoin {
-                    server_id: server_id.clone(), channel_id: channel_id.clone(),
-                });
-            }
+            if super::resolver::same_identity(member, local_peer_str) { continue; }
+            send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data.clone());
         }
     }
     // Track participant.
@@ -378,14 +376,12 @@ pub(crate) async fn handle_voice_channel_leave(
         let _ = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store);
     }
     if let Some(state) = server_states.get(&server_id) {
-        let local_peer = local_peer_str.to_string();
+        let data = serde_json::to_vec(&HavenMessage::VoiceChannelLeave {
+            server_id: server_id.clone(), channel_id: channel_id.clone(),
+        }).unwrap_or_default();
         for member in state.members.keys() {
-            if member == &local_peer { continue; }
-            if peer_is_reachable(ws_room_peers, member) {
-                send_message_to_peer(ws_cmd_tx, ws_room_peers, member, HavenMessage::VoiceChannelLeave {
-                    server_id: server_id.clone(), channel_id: channel_id.clone(),
-                });
-            }
+            if super::resolver::same_identity(member, local_peer_str) { continue; }
+            send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data.clone());
         }
     }
     // Untrack participant.
@@ -592,13 +588,10 @@ pub(crate) async fn handle_voice_channel_send_signal(
             if let Some(msg) = plaintext_msg
                 && let Some(state) = server_states.get(&server_id)
             {
-                let local_peer = local_peer_str.to_string();
                 let data = serde_json::to_vec(&msg).unwrap_or_default();
                 for member in state.members.keys() {
-                    if member == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member) {
-                        send_raw_to_peer(ws_cmd_tx, ws_room_peers, member, data.clone());
-                    }
+                    if super::resolver::same_identity(member, local_peer_str) { continue; }
+                    send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data.clone());
                 }
             }
         }
@@ -751,7 +744,7 @@ pub(crate) async fn handle_envelope_voice_channel_join(
 ) {
     if sender_peer_id == local_peer_str { return; }
     let is_member = server_states.get(&sid)
-        .map(|s| s.members.contains_key(&sender_peer_id))
+        .map(|s| s.is_member(&sender_peer_id))
         .unwrap_or(false);
     let is_voice_channel = server_states.get(&sid)
         .and_then(|s| s.channels.get(&cid))

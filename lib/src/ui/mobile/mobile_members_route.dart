@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
-import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
@@ -174,7 +174,8 @@ class _MemberList extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final peers = ref.watch(peersProvider);
+    // Multi-device: online if any of the member's devices is visible.
+    final onlineIdentities = ref.watch(onlineIdentitiesProvider);
     final myPeerId = ref.watch(identityProvider).peerId ?? '';
 
     return ListView(
@@ -184,7 +185,7 @@ class _MemberList extends ConsumerWidget {
           _MemberRow(
             member: m,
             serverId: serverId,
-            isOnline: peers.containsKey(m.peerId) || m.peerId == myPeerId,
+            isOnline: onlineIdentities.contains(m.peerId) || m.peerId == myPeerId,
             isMe: m.peerId == myPeerId,
             myRole: myRole,
             canKick: canKick,

@@ -1242,6 +1242,32 @@ pub fn import_pending_link() -> Result<(), String> {
     let _ = std::fs::remove_file(&blob_path);
     let _ = std::fs::remove_file(&code_path);
 
+    // Multi-device (Step 6): the imported DB contains the SOURCE device's MLS
+    // identity (signer + credential + group leaves). A linked sibling MUST NOT
+    // reuse them — two devices sharing one MLS signature key can't both be group
+    // leaves (`DuplicateSignatureKey` on add, `CannotDecryptOwnMessage` on
+    // receive). Wipe the inherited MLS identity here so the node mints a FRESH,
+    // distinct one on first start and re-joins each server's group as its own
+    // leaf. (The master-key comparison at startup can't catch this case: a
+    // sibling's master EQUALS the source's, so the inherited credential looks
+    // legitimate there.) Best-effort: open the just-imported DB with its
+    // master-derived passphrase and clear the table.
+    if result.is_ok() {
+        if let Ok(passphrase) = derive_db_key() {
+            let db_path = data_dir.join("messages.db");
+            if let Ok(store) = crate::storage::MessageStore::open(
+                db_path.to_str().unwrap_or_default(), &passphrase,
+            ) {
+                match store.clear_mls_identity() {
+                    Ok(()) => hollow_log!("[HOLLOW-LINK] Cleared inherited MLS identity — fresh one will be minted on start"),
+                    Err(e) => hollow_log!("[HOLLOW-LINK] Failed to clear inherited MLS identity: {e} (startup will still mint if absent)"),
+                }
+            } else {
+                hollow_log!("[HOLLOW-LINK] Could not open imported DB to clear MLS identity (will rely on startup)");
+            }
+        }
+    }
+
     match &result {
         Ok(()) => hollow_log!("[HOLLOW-LINK] Pending link imported via backup pipeline ({} bytes)", blob.len()),
         Err(e) => hollow_log!("[HOLLOW-LINK] Pending link import FAILED: {e}"),

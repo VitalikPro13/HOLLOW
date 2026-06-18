@@ -132,6 +132,22 @@ class _HollowShellState extends ConsumerState<HollowShell>
   late final Animation<double> _bottomBarReveal;
   late final Animation<double> _dockChatReveal;
 
+  /// Subscribe the node to a channel's relay topic so live MLS topic-broadcasts
+  /// are delivered (the relay only routes a topic message to subscribed sockets).
+  /// Includes any unread channels of the same server so @mentions still arrive
+  /// on channels you haven't opened. Idempotent — safe to call on every
+  /// channel/server activation (sidebar click, auto-select, startup, switch).
+  void _subscribeActiveChannel(String serverId, String channelId) {
+    final unread = ref.read(unreadProvider);
+    final prefix = '$serverId:';
+    final unreadChannels = unread.channelUnreadCounts.entries
+        .where((e) => e.key.startsWith(prefix) && e.value > 0)
+        .map((e) => e.key.substring(prefix.length))
+        .toList();
+    final topics = <String>{channelId, ...unreadChannels}.toList();
+    network_api.subscribeChannels(serverId: serverId, channelIds: topics);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1092,15 +1108,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
           ref.read(unreadProvider.notifier)
               .markChannelSeen(serverId, channelId, latestId);
           // Subscribe to this channel for topic-based relay routing.
-          // Include channels with unread messages so @mentions still arrive.
-          final unread = ref.read(unreadProvider);
-          final prefix = '$serverId:';
-          final unreadChannels = unread.channelUnreadCounts.entries
-              .where((e) => e.key.startsWith(prefix) && e.value > 0)
-              .map((e) => e.key.substring(prefix.length))
-              .toList();
-          final topics = <String>{channelId, ...unreadChannels}.toList();
-          network_api.subscribeChannels(serverId: serverId, channelIds: topics);
+          _subscribeActiveChannel(serverId, channelId);
         }
         // On mobile, switch to chat tab when channel is selected.
         ref.read(mobileTabProvider.notifier).state = 1;
@@ -1311,6 +1319,17 @@ class _HollowShellState extends ConsumerState<HollowShell>
           mounted) {
         showDeviceLinkDialog(context, mode: DeviceLinkMode.showCode);
       }
+    });
+
+    // Subscribe to the active channel's relay topic whenever it changes — NOT
+    // only on an explicit sidebar click. A server's first channel is
+    // auto-selected (no click), and on startup a server may already be selected;
+    // without this the node never subscribes, so live MLS topic-broadcasts never
+    // arrive and messages only appear on the next ChannelSyncRequest (tab-switch).
+    ref.listen<String?>(selectedChannelProvider, (prev, next) {
+      if (next == null || next == prev) return;
+      final serverId = ref.read(selectedServerProvider);
+      if (serverId != null) _subscribeActiveChannel(serverId, next);
     });
 
     final hollow = HollowTheme.of(context);

@@ -38,9 +38,9 @@ use super::types::*;
 use super::crypto_handler::{
     message_signing_payload, sign_message, verify_message_signature, verify_message_signature_cached,
     persist_mls_state, persist_crypto_state, persist_olm_session,
-    peer_is_reachable, is_mls_coordinator, is_vault_coordinator, ws_room_for_peer,
+    peer_is_reachable, is_mls_coordinator, is_vault_coordinator, elect_coordinator, ws_room_for_peer,
     send_mls_broadcast, send_encrypted_message,
-    send_message_to_peer, send_raw_to_peer,
+    send_message_to_peer, send_raw_to_peer, send_raw_to_identity,
 };
 use super::file_handler;
 use super::link_handler;
@@ -266,6 +266,10 @@ async fn run_event_loop(
             }
         }
     }
+    // Multi-device (Step 6): install the device→master resolver into the `crdt`
+    // module so ServerState's role/ban/permission/membership accessors collapse a
+    // device id to its master internally (one chokepoint for dozens of call sites).
+    crate::crdt::set_identity_resolver(super::resolver::resolve);
 
     // -- CRDT state (Phase 3) --
     // Server states keyed by server_id. Reload from DB so servers survive restarts.
@@ -283,6 +287,15 @@ async fn run_event_loop(
                                     if let Ok(ops) = store.load_ops_for_server(&server_id) {
                                         state.restore_op_log(ops);
                                     }
+                                }
+                                // Multi-device (Step 6): fold any legacy device-keyed
+                                // member entries into their master identity (resolver
+                                // warmed just above). No-op for single-device.
+                                if state.canonicalize_members(|id| super::resolver::resolve(id)) {
+                                    if let Ok(json) = serde_json::to_string(&state) {
+                                        let _ = store.save_server_state(&server_id, &json);
+                                    }
+                                    hollow_log!("[HOLLOW-MULTIDEV] Canonicalized device-keyed members → master for server {server_id}");
                                 }
                                 server_states.insert(server_id.clone(), state);
                                 // Join the WS relay room for this server.
@@ -319,8 +332,42 @@ async fn run_event_loop(
                         &server_ids,
                     ) {
                         Ok(mgr) => {
-                            hollow_log!("[HOLLOW-MLS] Restored MLS identity from DB");
-                            Some(mgr)
+                            // Multi-device (Step 6): a linked sibling imported the
+                            // SOURCE device's whole DB — including its MLS signer +
+                            // credential. Two devices sharing one MLS signature key
+                            // can't both be leaves (OpenMLS `DuplicateSignatureKey` on
+                            // add; `CannotDecryptOwnMessage` on receive). Detect an
+                            // inherited credential (belongs to neither THIS device nor
+                            // our master) and discard it so a FRESH, distinct MLS
+                            // identity is minted below. Legacy single-device installs
+                            // (credential == master) are kept untouched — no re-key.
+                            // Detect an MLS credential that doesn't belong to THIS
+                            // device and must be regenerated (a linked sibling reused
+                            // the source device's MLS identity → DuplicateSignatureKey
+                            // on add / CannotDecryptOwnMessage on receive). Two cases:
+                            //  (a) credential is some OTHER device's id → clearly foreign.
+                            //  (b) credential is our MASTER, but we are a multi-device
+                            //      identity (we know sibling devices) → it's the
+                            //      inherited keystone-master leaf shared with a sibling;
+                            //      regenerate to a distinct device-id leaf. A LEGACY
+                            //      SOLE single-device install (no known siblings) keeps
+                            //      its master-credentialed leaf untouched — re-keying it
+                            //      would orphan servers it owns (no peer can re-add it).
+                            let cred_id = mgr.credential_identity();
+                            let siblings = super::resolver::devices_for(&master_peer_str);
+                            let has_sibling = siblings.iter().any(|d| d != &device_peer_id);
+                            let foreign = cred_id != device_peer_id
+                                && (cred_id != master_peer_str || has_sibling);
+                            if foreign {
+                                hollow_log!("[HOLLOW-MLS] MLS credential {cred_id} not ours (device={device_peer_id}, has_sibling={has_sibling}); discarding inherited identity + groups, will mint fresh");
+                                if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                    let _ = store.clear_mls_identity();
+                                }
+                                None
+                            } else {
+                                hollow_log!("[HOLLOW-MLS] Restored MLS identity from DB (credential {cred_id})");
+                                Some(mgr)
+                            }
                         }
                         Err(e) => {
                             hollow_log!("[HOLLOW-MLS] Failed to restore MLS identity: {e}");
@@ -339,8 +386,14 @@ async fn run_event_loop(
         }
     };
     // Create MLS identity if none exists.
+    // Multi-device (Step 6): a FRESH MLS identity is credentialed by THIS
+    // device's transport peer_id, so two devices of one human hold two leaves
+    // with two distinct credentials. Existing installs took the `from_persisted`
+    // branch above and keep their old (master) credential untouched — no re-key.
+    // A never-rotated single-device install has no siblings, so the device id
+    // resolves to itself and everything stays self-consistent.
     if mls.is_none() {
-        match MlsManager::new(&local_peer_str) {
+        match MlsManager::new(&device_peer_id) {
             Ok(mgr) => {
                 hollow_log!("[HOLLOW-MLS] Created new MLS identity");
                 // Persist immediately.
@@ -1108,6 +1161,7 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::SubscribeChannels { server_id, channel_ids } => {
+                        hollow_log!("[HOLLOW-TOPIC] Subscribe room={server_id} topics={channel_ids:?}");
                         subscribed_channels.insert(server_id.clone(), channel_ids.clone());
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::Subscribe {
                             room_code: server_id,
@@ -1878,8 +1932,11 @@ async fn run_event_loop(
                                     }
 
                                     // CRDT sync + message sync for shared servers.
+                                    // Members are master-keyed; `peer_id` is a DEVICE —
+                                    // match by identity so a multi-device member's device
+                                    // still triggers sync + MLS bootstrap.
                                     for (sid, state) in server_states.iter() {
-                                        if state.members.contains_key(&peer_id) {
+                                        if state.members.keys().any(|k| super::resolver::same_identity(&peer_id, k)) {
                                             // CRDT state sync via MLS.
                                             let our_vector = StateVector::from_server_state(state);
                                             if let Ok(sv_json) = serde_json::to_string(&our_vector) {
@@ -2234,7 +2291,7 @@ async fn run_event_loop(
                                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                             let mut proxy_count = 0u32;
                                             for (_sid, state) in server_states.iter() {
-                                                if !state.members.contains_key(pid_str) { continue; }
+                                                if !state.is_member(pid_str) { continue; }
                                                 for (member_id, _) in state.members.iter() {
                                                     if proxy_count >= 10 { break; }
                                                     if member_id == pid_str { continue; }
@@ -2263,7 +2320,7 @@ async fn run_event_loop(
 
                                     // Send CRDT SyncReq + channel message sync for servers shared with this peer.
                                     for (sid, state) in server_states.iter() {
-                                        if state.members.contains_key(pid_str) {
+                                        if state.is_member(pid_str) {
                                             if let Some(sv_json) = sv_cache.get(sid.as_str()) {
                                                 send_message_to_peer(
                                                     &ws_cmd_tx, &ws_room_peers,
@@ -2296,9 +2353,11 @@ async fn run_event_loop(
 
                                     // MLS: if we lost our group for any shared server,
                                     // send KeyPackage to this peer for re-bootstrap.
+                                    // Multi-device (Step 6): members are master-keyed;
+                                    // `pid_str` is a device — match by identity.
                                     if let Some(ref mls_mgr) = mls {
                                         for (sid, srv_state) in server_states.iter() {
-                                            if !srv_state.members.contains_key(pid_str) { continue; }
+                                            if !srv_state.members.keys().any(|k| super::resolver::same_identity(pid_str, k)) { continue; }
                                             if mls_mgr.has_group(sid) { continue; }
                                             if mls_bootstrap_requested.get(sid.as_str()).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) { continue; }
                                             hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {pid_str} for bootstrap (RoomMembers)");
@@ -2912,11 +2971,16 @@ async fn run_event_loop(
                                     if let Some(state) = server_states.get(&server_id) {
                                         let commit_msg = HavenMessage::MlsCommit { server_id: server_id.clone(), commit: commit_b64.clone() };
                                         let commit_data = serde_json::to_vec(&commit_msg).unwrap_or_default();
+                                        // Per-device fan-out; skip self and the exact
+                                        // removed device ids (members are master-keyed).
+                                        let removed: std::collections::HashSet<&str> = unique.iter().map(|s| s.as_str()).collect();
+                                        let mut sent_devices: std::collections::HashSet<String> = std::collections::HashSet::new();
                                         for member_peer in state.members.keys() {
-                                            if member_peer == &local_peer_str { continue; }
-                                            if unique.contains(member_peer) { continue; }
-                                            if peer_is_reachable(&ws_room_peers, member_peer) {
-                                                send_raw_to_peer(&ws_cmd_tx, &ws_room_peers, member_peer, commit_data.clone());
+                                            if super::resolver::same_identity(member_peer, &local_peer_str) { continue; }
+                                            for dev in crate::node::crypto_handler::online_devices_for(&ws_room_peers, member_peer) {
+                                                if removed.contains(dev.as_str()) { continue; }
+                                                if !sent_devices.insert(dev.clone()) { continue; }
+                                                send_raw_to_peer(&ws_cmd_tx, &ws_room_peers, &dev, commit_data.clone());
                                             }
                                         }
                                     }
@@ -2974,22 +3038,29 @@ async fn run_event_loop(
                                             }
                                     }
 
-                                    // Broadcast single Commit to all existing members.
+                                    // Broadcast single Commit to all EXISTING leaves
+                                    // (fanned out per-DEVICE — members are master-keyed
+                                    // and the master has no socket). The skip is
+                                    // per-DEVICE, not per-identity: a member may hold
+                                    // several leaves where only ONE was just added
+                                    // (the new sibling B); its already-joined sibling A
+                                    // still needs this Commit for the new epoch. So we
+                                    // send to every online device of every member EXCEPT
+                                    // the exact just-added device ids (they get the
+                                    // Welcome) and our own devices.
                                     if let Some(state) = server_states.get(&server_id) {
-                                        let local_peer = local_peer_str.to_string();
                                         let commit_data = serde_json::to_vec(&HavenMessage::MlsCommit {
                                             server_id: server_id.clone(),
                                             commit: commit_b64,
                                         }).unwrap_or_default();
+                                        let mut sent_devices: std::collections::HashSet<String> = std::collections::HashSet::new();
                                         for member_peer_str in state.members.keys() {
-                                            if member_peer_str == &local_peer { continue; }
-                                            if added_peers.contains(member_peer_str) { continue; }
-                                                if peer_is_reachable(&ws_room_peers, member_peer_str) {
-                                                    send_raw_to_peer(
-                                                        &ws_cmd_tx, &ws_room_peers,
-                                                        member_peer_str, commit_data.clone(),
-                                                    );
-                                                }
+                                            if super::resolver::same_identity(member_peer_str, &local_peer_str) { continue; }
+                                            for dev in crate::node::crypto_handler::online_devices_for(&ws_room_peers, member_peer_str) {
+                                                if added_peers.contains(&dev) { continue; }   // gets the Welcome instead
+                                                if !sent_devices.insert(dev.clone()) { continue; } // already sent
+                                                send_raw_to_peer(&ws_cmd_tx, &ws_room_peers, &dev, commit_data.clone());
+                                            }
                                         }
                                     }
 
@@ -3099,7 +3170,7 @@ async fn run_event_loop(
                         // half-built (unconfirmed) session. Avoids spamming co-room
                         // strangers (e.g. public-channel guests we never DM).
                         let is_member = server_states.values()
-                            .any(|s| s.members.contains_key(peer));
+                            .any(|s| s.is_member(peer));
                         let has_pending = pending_messages.contains_key(peer);
                         let half_session = olm.has_unconfirmed_session(peer);
                         if !(is_member || has_pending || half_session) {
@@ -4067,7 +4138,7 @@ async fn handle_incoming_request(
                             // Emit MessageSyncFailed for any servers where this peer is a member
                             // so the UI doesn't stay stuck on "Syncing...".
                             for (sid, state) in server_states.iter() {
-                                if state.members.contains_key(peer_str) {
+                                if state.is_member(peer_str) {
                                     let _ = event_tx.send(NetworkEvent::MessageSyncFailed {
                                         server_id: sid.clone(),
                                         error: format!("Decrypt failed with {peer_str}, re-keying"),
@@ -4100,7 +4171,7 @@ async fn handle_incoming_request(
                     let ChannelMessagePayload { sid, cid, text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview } = *inner;
                     // SECURITY: Verify sender is a member of the claimed server.
                     if let Some(state) = server_states.get(&sid) {
-                        if !state.members.contains_key(peer_str) {
+                        if !state.is_member(peer_str) {
                             hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelMessage from {peer_str} — not a member of server {sid}");
                             return;
                         }
@@ -5165,7 +5236,7 @@ async fn handle_incoming_request(
 
                     // Verify sender is a member of the server
                     let is_member = server_states.get(&sid)
-                        .map(|s| s.members.contains_key(peer_str))
+                        .map(|s| s.is_member(peer_str))
                         .unwrap_or(false);
                     if !is_member {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED ShardStore from {peer_str} — not a member of {sid}");
@@ -5361,7 +5432,7 @@ async fn handle_incoming_request(
                     // Verify sender is a member with MANAGE_SERVER permission
                     let allowed = server_states.get(&sid)
                         .map(|s| {
-                            s.members.contains_key(peer_str) &&
+                            s.is_member(peer_str) &&
                             s.has_permission(&peer_str, crate::crdt::operations::Permission::MANAGE_SERVER)
                         })
                         .unwrap_or(false);
@@ -5387,7 +5458,7 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::ShardRequest { sid, cid, si, sk, .. }) => {
                     hollow_log!("[HOLLOW-VAULT] ShardRequest: cid={cid} si={si} from {peer_str}");
                     let is_member = server_states.get(&sid)
-                        .map(|s| s.members.contains_key(peer_str))
+                        .map(|s| s.is_member(peer_str))
                         .unwrap_or(false);
                     if !is_member {
                         hollow_log!("[HOLLOW-SECURITY] REJECTED ShardRequest from {peer_str} — not a member of {sid}");
@@ -5503,7 +5574,7 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::ShardProbe { sid, cid, .. }) => {
                     hollow_log!("[HOLLOW-VAULT] ShardProbe: cid={cid} from {peer_str}");
                     let is_member = server_states.get(&sid)
-                        .map(|s| s.members.contains_key(peer_str))
+                        .map(|s| s.is_member(peer_str))
                         .unwrap_or(false);
                     if is_member {
                         let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
@@ -5553,7 +5624,7 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-VAULT] ShardMigrate received: cid={cid} si={si} from {peer_str}");
                     // Same logic as ShardStore inline — verify membership, store shard
                     let is_member = server_states.get(&sid)
-                        .map(|s| s.members.contains_key(peer_str))
+                        .map(|s| s.is_member(peer_str))
                         .unwrap_or(false);
                     if is_member {
                         if let Ok(shard_bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
@@ -5897,6 +5968,9 @@ async fn handle_incoming_request(
                         return;
                     }
                     snap.set_hlc(Hlc::new(local_peer_str.to_string()));
+                    // Multi-device (Step 6): a snapshot from a not-yet-upgraded
+                    // member may carry device-keyed joiners — fold to master.
+                    snap.canonicalize_members(|id| super::resolver::resolve(id));
                     hollow_log!("[HOLLOW-CRDT] Adopted state snapshot for {server_id} from {peer_str} ({} channels, {} members, {} layout items)",
                         snap.channels.len(), snap.members.len(), snap.channel_layout.len());
                     // Persist now — the SyncResponse that follows re-persists
@@ -5969,6 +6043,10 @@ async fn handle_incoming_request(
                     // join must still complete.
                     Ok(applied) if applied > 0 || pending_server_joins.contains_key(&server_id) => {
                         hollow_log!("[HOLLOW-CRDT] Applied {applied} ops for server {server_id}");
+
+                        // Multi-device (Step 6): fold any device-keyed members a
+                        // not-yet-upgraded peer's ops introduced into their master.
+                        state.canonicalize_members(|id| super::resolver::resolve(id));
 
                         // Persist
                         if let Ok(json) = serde_json::to_string(&state) {
@@ -6066,12 +6144,7 @@ async fn handle_incoming_request(
                                             }).unwrap_or_default();
                                             for member in state.members_list() {
                                                 if member.peer_id == local_peer { continue; }
-                                                    if peer_is_reachable(ws_room_peers, &member.peer_id) {
-                                                        send_raw_to_peer(
-                                                            ws_cmd_tx, ws_room_peers,
-                                                            &member.peer_id, pledge_data.clone(),
-                                                        );
-                                                    }
+                                                send_raw_to_identity(ws_cmd_tx, ws_room_peers, &member.peer_id, pledge_data.clone());
                                             }
                                         }
                                     }
@@ -6080,56 +6153,48 @@ async fn handle_incoming_request(
 
                             // Establish Olm session with all server members we're
                             // connected to but don't have sessions with yet.
-                            // Also emit PeerDiscovered so they show as online.
+                            // Members are master-keyed → bootstrap a session with each
+                            // online DEVICE of every member (Olm is per-device).
                             for member in state.members_list() {
-                                let local_id = local_peer_str.to_string();
-                                if member.peer_id != local_id {
-                                        if peer_is_reachable(ws_room_peers, &member.peer_id) {
-                                            // Ensure member shows as online in UI.
-                                            let _ = event_tx.send(NetworkEvent::PeerDiscovered {
-                                                peer: DiscoveredPeer {
-                                                    peer_id: member.peer_id.clone(),
-                                                    addresses: vec![],
-                                                },
-                                            }).await;
-
-                                            if !olm.has_confirmed_session(&member.peer_id)
-                                                && !key_request_is_fresh(key_request_in_flight, &member.peer_id)
-                                            {
-                                                hollow_log!("[HOLLOW-SWARM] No confirmed Olm session with server member {}, sending KeyRequest", member.peer_id);
-                                                send_message_to_peer(
-                                                    ws_cmd_tx, ws_room_peers,
-                                                    &member.peer_id, HavenMessage::KeyRequest,
-                                                );
-                                                key_request_in_flight.insert(member.peer_id.clone(), std::time::Instant::now());
-                                            }
-                                        }
+                                if super::resolver::same_identity(&member.peer_id, &local_peer_str) { continue; }
+                                for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, &member.peer_id) {
+                                    // Ensure the device shows as online in UI.
+                                    let _ = event_tx.send(NetworkEvent::PeerDiscovered {
+                                        peer: DiscoveredPeer { peer_id: dev.clone(), addresses: vec![] },
+                                    }).await;
+                                    if !olm.has_confirmed_session(&dev)
+                                        && !key_request_is_fresh(key_request_in_flight, &dev)
+                                    {
+                                        hollow_log!("[HOLLOW-SWARM] No confirmed Olm session with server member device {dev}, sending KeyRequest");
+                                        send_message_to_peer(ws_cmd_tx, ws_room_peers, &dev, HavenMessage::KeyRequest);
+                                        key_request_in_flight.insert(dev.clone(), std::time::Instant::now());
+                                    }
                                 }
                             }
 
-                            // MLS: if we don't have the MLS group after joining,
-                            // send our KeyPackage to the coordinator for MLS bootstrap.
+                            // MLS: if we don't have the MLS group after joining, send
+                            // our KeyPackage to the JOIN RESPONDER (`peer_str`) — the
+                            // device that just served us the SyncResponse. It is the
+                            // online member we synced from (the owner, or the
+                            // coordinator the owner delegated to), is provably in the
+                            // room (it just messaged us), and reaching it directly
+                            // avoids depending on a resolver link we may not have warmed
+                            // yet for a freshly-joined server. The responder's
+                            // MlsKeyPackage handler re-elects the real committer if it
+                            // isn't the right one. This mirrors the RoomMembers /
+                            // PeerJoined recovery paths, which send to the raw device id.
                             if let Some(mls_mgr) = mls.as_ref() {
                                 if !mls_mgr.has_group(&server_id) {
-                                    hollow_log!("[HOLLOW-MLS] No MLS group after join, sending KeyPackage to coordinator for MLS bootstrap");
-                                    let local_id = local_peer_str.to_string();
-                                    let mut online_members: Vec<&String> = state.members.keys()
-                                        .filter(|p| p.as_str() != local_id && peer_is_reachable(ws_room_peers, p))
-                                        .collect();
-                                    online_members.sort();
-
-                                    if let Some(coordinator) = online_members.first() {
-                                        if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
-                                            let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                            send_message_to_peer(
-                                                ws_cmd_tx, ws_room_peers,
-                                                coordinator, HavenMessage::MlsKeyPackage {
-                                                    server_id: server_id.clone(),
-                                                    key_package: kp_b64,
-                                                },
-                                            );
-                                            hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to coordinator {} for {server_id}", coordinator);
-                                        }
+                                    if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                        let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                        send_message_to_peer(
+                                            ws_cmd_tx, ws_room_peers,
+                                            peer_str, HavenMessage::MlsKeyPackage {
+                                                server_id: server_id.clone(),
+                                                key_package: kp_b64,
+                                            },
+                                        );
+                                        hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to join responder {peer_str} for {server_id}");
                                     }
                                 }
                             }
@@ -6275,20 +6340,19 @@ async fn handle_incoming_request(
                     }
 
                     // Forward to other connected server members (simple gossip).
-                    let local_peer = local_peer_str.to_string();
+                    // Members are master-keyed → fan to each member's devices; skip
+                    // our own identity and the exact device that sent this to us.
                     let crdt_msg = HavenMessage::CrdtOpBroadcast {
                         server_id: server_id.clone(),
                         op_json: op_json.clone(),
                     };
                     let crdt_data = serde_json::to_vec(&crdt_msg).unwrap_or_default();
                     for member_peer_str in state.members.keys() {
-                        if member_peer_str == &local_peer || member_peer_str == peer_str { continue; }
-                            if peer_is_reachable(ws_room_peers, member_peer_str) {
-                                send_raw_to_peer(
-                                    ws_cmd_tx, ws_room_peers,
-                                    member_peer_str, crdt_data.clone(),
-                                );
-                            }
+                        if super::resolver::same_identity(member_peer_str, &local_peer_str) { continue; }
+                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                            if dev == peer_str { continue; } // don't echo back to the sender device
+                            send_raw_to_peer(ws_cmd_tx, ws_room_peers, &dev, crdt_data.clone());
+                        }
                     }
 
                     // Emit specific events based on op payload so Dart UI updates correctly.
@@ -6503,8 +6567,16 @@ async fn handle_incoming_request(
                     }
                 }
 
-                // Check if peer is already a member
-                let already_member = state.members_list().iter().any(|m| m.peer_id == peer_str);
+                // Multi-device (Step 6): server membership is keyed by the MASTER
+                // identity, never a device id. Resolve the joining device to its
+                // master so one human = one member entry (the owner is already
+                // master-keyed). Unknown device (guest / no device list yet) →
+                // resolves to itself = byte-for-byte pre-multi-device.
+                let member_master = super::resolver::resolve(peer_str);
+
+                // Check if this identity is already a member (by master).
+                let already_member = state.members_list().iter()
+                    .any(|m| super::resolver::same_identity(&m.peer_id, &member_master));
 
                 if !already_member {
                     // Private-server gate: an invite-only server rejects all new
@@ -6538,10 +6610,11 @@ async fn handle_incoming_request(
                         }
                     }
 
-                    // Add the new member via CRDT op
-                    let display_name = format!("{}...{}", &peer_str[..4.min(peer_str.len())], &peer_str[peer_str.len().saturating_sub(4)..]);
+                    // Add the new member via CRDT op, keyed by the MASTER identity.
+                    // The short display label is derived from the master id.
+                    let display_name = format!("{}...{}", &member_master[..4.min(member_master.len())], &member_master[member_master.len().saturating_sub(4)..]);
                     let op = state.create_op(CrdtPayload::MemberAdded {
-                        peer_id: peer_str.to_string(),
+                        peer_id: member_master.clone(),
                         display_name,
                     });
                     let _ = state.apply_op(&op);
@@ -6551,7 +6624,7 @@ async fn handle_incoming_request(
                         if let Ok(proof) = serde_json::from_str::<crate::node::twitch::TwitchProof>(proof_json) {
                             if !proof.twitch_username.is_empty() {
                                 let tw_op = state.create_op(CrdtPayload::TwitchUsernameChanged {
-                                    peer_id: peer_str.to_string(),
+                                    peer_id: member_master.clone(),
                                     twitch_username: proof.twitch_username.clone(),
                                 });
                                 let _ = state.apply_op(&tw_op);
@@ -6595,7 +6668,7 @@ async fn handle_incoming_request(
 
                     let _ = event_tx.send(NetworkEvent::MemberJoined {
                         server_id: server_id.clone(),
-                        peer_id: peer_str.to_string(),
+                        peer_id: member_master.clone(),
                     }).await;
 
                     // Emit PeerDiscovered so the new member shows as online
@@ -7040,7 +7113,8 @@ async fn handle_incoming_request(
         // -- MLS message handlers --
 
         HavenMessage::MlsChannelMessage { server_id, body } => {
-            
+            hollow_log!("[HOLLOW-TOPIC] RECV MlsChannelMessage from {peer_str} for {server_id} ({} b64 bytes)", body.len());
+
 
             if let Some(mls_mgr) = mls {
                 if !mls_mgr.has_group(&server_id) {
@@ -7052,23 +7126,24 @@ async fn handle_incoming_request(
                     // Only do this once per server to avoid spamming (expires after 60s).
                     if !mls_bootstrap_requested.get(&server_id).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
                         if let Some(state) = server_states.get(&server_id) {
-                            let local_peer = local_peer_str.to_string();
-                            let mut online_members: Vec<&String> = state.members.keys()
-                                .filter(|p| p.as_str() != local_peer && peer_is_reachable(ws_room_peers, p))
-                                .collect();
-                            online_members.sort();
-                            if let Some(coordinator) = online_members.first() {
-                                hollow_log!("[HOLLOW-MLS] Sending KeyPackage to coordinator {} for MLS bootstrap (triggered by message)", coordinator);
+                            // Coordinator = lowest online MASTER (excluding us). Send
+                            // our KeyPackage to one of that master's online DEVICES
+                            // (the master itself has no socket).
+                            let members: Vec<String> = state.members.keys().cloned().collect();
+                            let coordinator = elect_coordinator(&members, &local_peer_str, ws_room_peers)
+                                .filter(|c| c != &local_peer_str);
+                            if let Some(coordinator) = coordinator {
                                 if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
                                     let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                    send_message_to_peer(
-                                        ws_cmd_tx, ws_room_peers,
-                                        coordinator, HavenMessage::MlsKeyPackage {
-                                            server_id: server_id.clone(),
-                                            key_package: kp_b64,
-                                        },
-                                    );
-                                    mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
+                                    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+                                        server_id: server_id.clone(),
+                                        key_package: kp_b64,
+                                    }).unwrap_or_default();
+                                    let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &coordinator, data);
+                                    if sent > 0 {
+                                        hollow_log!("[HOLLOW-MLS] Sent KeyPackage to coordinator {coordinator} ({sent} device(s)) for MLS bootstrap (triggered by message)");
+                                        mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
+                                    }
                                 }
                             }
                         }
@@ -7086,6 +7161,7 @@ async fn handle_incoming_request(
                     Ok((plaintext, sender_peer_id)) => {
                         *mls_dirty = true;
                         mls_decrypt_failures.remove(&server_id); // Reset failure counter on success.
+                        hollow_log!("[HOLLOW-TOPIC] DECRYPT ok for {server_id}, sender(leaf)={sender_peer_id}");
 
                         // Parse the plaintext as a MessageEnvelope.
                         let envelope_str = String::from_utf8_lossy(&plaintext);
@@ -7106,40 +7182,48 @@ async fn handle_incoming_request(
                             }
                         }
 
+                        // Multi-device (Step 6): the MLS leaf credential is the
+                        // sender's DEVICE id, but channel messages/edits/reactions
+                        // are signed by — and attributed to — the sender's MASTER.
+                        // Resolve once: `sender_master` for attribution + signature
+                        // verification, `sender_peer_id` (device) kept for Olm
+                        // reply/transport sites (sync responders, file re-requests).
+                        let sender_master = super::resolver::resolve(&sender_peer_id);
+
                         match envelope {
                             MessageEnvelope::ChannelMessage { inner } => {
                                 let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview } = *inner;
                                 message_ops::handle_envelope_channel_message(
                                     event_tx, bundle_keypair, &local_peer,
-                                    sender_peer_id, sid, cid, text, ts,
+                                    sender_master.clone(), sid, cid, text, ts,
                                     sig, pk, mid, reply_to, file_id, link_preview,
                                     db_path, db_passphrase,
                                 ).await;
                             }
                             MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, sid, cid } => {
                                 message_ops::handle_envelope_edit_message(
-                                    event_tx, bundle_keypair, peer_str,
+                                    event_tx, bundle_keypair, &sender_master,
                                     mid, new_text, ts, sig, pk, sid, cid,
                                     db_path, db_passphrase,
                                 ).await;
                             }
                             MessageEnvelope::DeleteMessage { mid, ts, sig, pk, sid, cid } => {
                                 message_ops::handle_envelope_delete_message(
-                                    event_tx, bundle_keypair, &sender_peer_id,
+                                    event_tx, bundle_keypair, &sender_master,
                                     mid, ts, sig, pk, sid, cid,
                                     db_path, db_passphrase,
                                 ).await;
                             }
                             MessageEnvelope::AddReaction { mid, emoji, ts, sig, pk, sid, cid } => {
                                 message_ops::handle_envelope_add_reaction(
-                                    event_tx, bundle_keypair, peer_str,
+                                    event_tx, bundle_keypair, &sender_master,
                                     mid, emoji, ts, sig, pk, sid, cid,
                                     db_path, db_passphrase,
                                 ).await;
                             }
                             MessageEnvelope::RemoveReaction { mid, emoji, ts, sig, pk, sid, cid } => {
                                 message_ops::handle_envelope_remove_reaction(
-                                    event_tx, bundle_keypair, peer_str,
+                                    event_tx, bundle_keypair, &sender_master,
                                     mid, emoji, ts, sig, pk, sid, cid,
                                     db_path, db_passphrase,
                                 ).await;
@@ -7175,24 +7259,27 @@ async fn handle_incoming_request(
                             }
 
                             MessageEnvelope::ServerDelete { sid } => {
+                                // Author permission check is by MASTER identity.
                                 sync_handler::handle_envelope_server_delete(
                                     server_states, mls, bundle_keypair, event_tx,
-                                    &sender_peer_id, sid,
+                                    &sender_master, sid,
                                     crypto_store, crdt_store,
                                 ).await;
                             }
 
                             MessageEnvelope::MemberKick { sid } => {
+                                // Kick author permission check is by MASTER identity.
                                 sync_handler::handle_envelope_member_kick(
                                     server_states, mls, bundle_keypair, event_tx,
-                                    &local_peer, &sender_peer_id, sid,
+                                    &local_peer, &sender_master, sid,
                                     crypto_store, crdt_store,
                                 ).await;
                             }
 
                             MessageEnvelope::Typing { sid, cid } => {
+                                // Typing indicator is keyed on the MASTER identity.
                                 super::social::handle_envelope_typing(
-                                    event_tx, sender_peer_id, sid, cid,
+                                    event_tx, sender_master.clone(), sid, cid,
                                 ).await;
                             }
 
@@ -7525,26 +7612,26 @@ async fn handle_incoming_request(
                             if let Some(state) = server_states.get(&server_id) {
                                 let local_peer = local_peer_str.to_string();
                                 // Only attempt recovery if we're still a member (skip if banned/removed).
+                                // Members are master-keyed; our master is the key.
                                 if !state.members.contains_key(&local_peer) {
                                     hollow_log!("[HOLLOW-MLS] Skipping recovery for {server_id} — no longer a member");
-                                } else if let Some(coordinator) = {
-                                    let mut online_members: Vec<&String> = state.members.keys()
-                                        .filter(|p| p.as_str() != local_peer && peer_is_reachable(ws_room_peers, p))
-                                        .collect();
-                                    online_members.sort();
-                                    online_members.first().copied()
-                                } {
-                                    if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
-                                        let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                        send_message_to_peer(
-                                            ws_cmd_tx, ws_room_peers,
-                                            coordinator, HavenMessage::MlsKeyPackage {
+                                } else {
+                                    // Coordinator = lowest online MASTER (excluding us);
+                                    // send to one of its online DEVICES.
+                                    let members: Vec<String> = state.members.keys().cloned().collect();
+                                    let coordinator = elect_coordinator(&members, &local_peer, ws_room_peers)
+                                        .filter(|c| c != &local_peer);
+                                    if let Some(coordinator) = coordinator {
+                                        if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                            let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                            let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
                                                 server_id: server_id.clone(),
                                                 key_package: kp_b64,
-                                            },
-                                        );
-                                        mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
-                                        hollow_log!("[HOLLOW-MLS] Sent recovery KeyPackage to coordinator {} for {server_id}", coordinator);
+                                            }).unwrap_or_default();
+                                            let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &coordinator, data);
+                                            mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
+                                            hollow_log!("[HOLLOW-MLS] Sent recovery KeyPackage to coordinator {coordinator} ({sent} device(s)) for {server_id}");
+                                        }
                                     }
                                 }
                             }
@@ -7558,8 +7645,15 @@ async fn handle_incoming_request(
             hollow_log!("[HOLLOW-MLS] MlsKeyPackage from {peer_str} for server {server_id}");
 
             // L6: Reject KeyPackage from non-members (prevents unauthorized MLS group joins).
+            // Multi-device (Step 6): members are keyed by MASTER; the sender is a
+            // DEVICE. Accept if the sending device's IDENTITY is a member — this is
+            // what lets a SIBLING of an existing member get its own leaf added
+            // without first being its own CRDT member. Unknown device → resolves to
+            // itself → falls back to plain membership (single-device unchanged).
             if let Some(state) = server_states.get(&server_id) {
-                if !state.members.contains_key(peer_str) {
+                let is_member = state.members.keys()
+                    .any(|k| super::resolver::same_identity(peer_str, k));
+                if !is_member {
                     hollow_log!("[HOLLOW-SECURITY] REJECTED MlsKeyPackage from non-member {peer_str} for {server_id}");
                     return;
                 }
@@ -7568,20 +7662,20 @@ async fn handle_incoming_request(
                 return;
             }
 
-            // Distributed committer: lowest online MLS member processes KeyPackages.
-            // The sender is excluded from coordinator election — they sent the
-            // KeyPackage because they lost their group, so they can't be coordinator.
+            // Distributed committer: lowest online MLS member (by MASTER identity)
+            // processes KeyPackages. The sender's IDENTITY is excluded from the
+            // election — they sent the KeyPackage because they (or a sibling) lost
+            // their group, so neither the sending device nor its siblings can be
+            // the coordinator that processes it.
             if let Some(mls_mgr) = mls.as_ref() {
                 if mls_mgr.has_group(&server_id) {
-                    let members = mls_mgr.group_members(&server_id);
-                    let mut online: Vec<&str> = members.iter()
-                        .filter(|p| p.as_str() != peer_str)
-                        .filter(|p| p.as_str() == local_peer_str || peer_is_reachable(ws_room_peers, p))
-                        .map(|p| p.as_str())
+                    let members: Vec<String> = mls_mgr.group_members(&server_id)
+                        .into_iter()
+                        .filter(|p| !super::resolver::same_identity(p, peer_str))
                         .collect();
-                    online.sort();
-                    if online.first().copied() != Some(local_peer_str) {
-                        hollow_log!("[HOLLOW-MLS] Not MLS coordinator for {server_id} (excluding sender), skipping KeyPackage");
+                    let coordinator = elect_coordinator(&members, local_peer_str, &ws_room_peers);
+                    if coordinator.as_deref() != Some(local_peer_str) {
+                        hollow_log!("[HOLLOW-MLS] Not MLS coordinator for {server_id} (excluding sender identity), skipping KeyPackage");
                         return;
                     }
                 } else {
@@ -7611,22 +7705,29 @@ async fn handle_incoming_request(
                     }
                 }
 
-                // Step 1: Queue stale MLS members (not in CRDT) for batch removal.
+                // Step 1: Queue stale MLS members (whose IDENTITY isn't in the CRDT)
+                // for batch removal. Multi-device (Step 6): MLS leaves are device
+                // ids, CRDT members are masters — a leaf is stale iff NO CRDT member
+                // shares its identity. Never sweep our own device's leaf
+                // (same_identity to our master).
                 if let Some(state) = server_states.get(&server_id) {
-                    let crdt_members: std::collections::HashSet<&String> = state.members.keys().collect();
                     let mls_members = mls_mgr.group_members(&server_id);
                     for stale_peer in &mls_members {
-                        if stale_peer == local_peer_str { continue; }
-                        if !crdt_members.contains(stale_peer) {
+                        if super::resolver::same_identity(stale_peer, local_peer_str) { continue; }
+                        let has_member = state.members.keys()
+                            .any(|k| super::resolver::same_identity(stale_peer, k));
+                        if !has_member {
                             hollow_log!("[HOLLOW-MLS] Queuing stale MLS member {stale_peer} for batch removal from {server_id}");
                             pending_mls_removals.entry(server_id.clone()).or_default().push(stale_peer.clone());
                         }
                     }
                 }
 
-                // Step 2: If sender is already in MLS group, queue them for batch removal (recovery re-add).
+                // Step 2: If the SENDING DEVICE already has a leaf, queue THAT exact
+                // leaf for batch removal + re-add (recovery). Match the exact device
+                // id — never a sibling's live leaf (siblings have distinct ids).
                 if mls_mgr.group_members(&server_id).contains(&peer_str.to_string()) {
-                    hollow_log!("[HOLLOW-MLS] Peer {peer_str} already in MLS group for {server_id} — queuing for batch removal + re-add");
+                    hollow_log!("[HOLLOW-MLS] Device {peer_str} already in MLS group for {server_id} — queuing for batch removal + re-add");
                     pending_mls_removals.entry(server_id.clone()).or_default().push(peer_str.to_string());
                 }
 
@@ -7741,17 +7842,18 @@ async fn handle_incoming_request(
                                         .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
                                         .unwrap_or(false);
                                     if is_owner {
-                                            if peer_is_reachable(ws_room_peers, &member.peer_id) {
-                                                if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
-                                                    let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                                    send_message_to_peer(
-                                                        ws_cmd_tx, ws_room_peers,
-                                                        &member.peer_id, HavenMessage::MlsKeyPackage {
-                                                            server_id: server_id.clone(),
-                                                            key_package: kp_b64,
-                                                        },
-                                                    );
+                                            // member.peer_id is the owner's MASTER — fan
+                                            // the KeyPackage to its online device(s).
+                                            if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                                let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                                let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+                                                    server_id: server_id.clone(),
+                                                    key_package: kp_b64,
+                                                }).unwrap_or_default();
+                                                let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &member.peer_id, data);
+                                                if sent > 0 {
                                                     mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
+                                                    hollow_log!("[HOLLOW-MLS] Sent re-bootstrap KeyPackage to owner {} ({sent} device(s)) for {server_id}", member.peer_id);
                                                 }
                                             }
                                         break;
@@ -8326,13 +8428,17 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::TypingIndicator { server_id, channel_id } => {
+            // Attribute typing to the sender's MASTER identity (server members and
+            // DM threads are master-keyed). The raw `peer_str` is a device id, which
+            // would never match the master-keyed member/thread → indicator never
+            // shows for a multi-device (or keystone-rotated) sender.
+            let typist_master = super::resolver::resolve(peer_str);
             hollow_log!(
-                "[HOLLOW-TYPING] Received from {peer_str} (server={}, resolves to master {})",
-                if server_id.is_empty() { "DM" } else { &server_id },
-                super::resolver::resolve(peer_str)
+                "[HOLLOW-TYPING] Received from {peer_str} (server={}, master {typist_master})",
+                if server_id.is_empty() { "DM" } else { &server_id }
             );
             let _ = event_tx.send(NetworkEvent::TypingStarted {
-                peer_id: peer_str.to_string(),
+                peer_id: typist_master,
                 server_id,
                 channel_id,
             }).await;
@@ -8437,17 +8543,11 @@ async fn handle_incoming_request(
             );
 
             // Update display_name in server member lists (local-only, not a CRDT
-            // op). Match BOTH the raw sender device id and the resolved master, so
-            // a member listed under either key gets the rename.
+            // op). Members are master-keyed (multi-device); update under the master.
             for (_, state) in server_states.iter_mut() {
                 if !display_name.is_empty() {
-                    if let Some(member) = state.members.get_mut(peer_str) {
+                    if let Some(member) = state.members.get_mut(&profile_master) {
                         member.display_name = display_name.clone();
-                    }
-                    if profile_master != peer_str {
-                        if let Some(member) = state.members.get_mut(&profile_master) {
-                            member.display_name = display_name.clone();
-                        }
                     }
                 }
             }
@@ -8852,7 +8952,7 @@ async fn handle_incoming_request(
         HavenMessage::VoiceChannelJoin { server_id, channel_id } => {
             if peer_str == local_peer_str { return; }
             let is_member = server_states.get(&server_id)
-                .map(|s| s.members.contains_key(peer_str))
+                .map(|s| s.is_member(peer_str))
                 .unwrap_or(false);
             let is_voice_channel = server_states.get(&server_id)
                 .and_then(|s| s.channels.get(&channel_id))

@@ -1986,6 +1986,16 @@ impl MessageStore {
         Ok(())
     }
 
+    /// Delete the persisted MLS identity (signer + credential + group storage).
+    /// Multi-device: used when a linked sibling detects it inherited the source
+    /// device's MLS identity and must mint a fresh, distinct one.
+    pub fn clear_mls_identity(&self) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM mls_identity WHERE id = 1", [])
+            .map_err(|e| format!("Failed to clear MLS identity: {e}"))?;
+        Ok(())
+    }
+
     /// Load MLS identity. Returns (signer_data, credential_data, storage_data) if exists.
     pub fn load_mls_identity(&self) -> Result<Option<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)>, String> {
         let mut stmt = self

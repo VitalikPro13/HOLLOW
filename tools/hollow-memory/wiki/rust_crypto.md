@@ -329,14 +329,20 @@ One MLS group per server. DMs use Olm, not MLS. The credential identity is the r
 
 #### New MLS Identity
 
-`MlsManager:new(peer_id) -> Result<Self, String>`
+`MlsManager:new(identity_id) -> Result<Self, String>`
 
 Creates a fresh MLS identity:
 1. Create `OpenMlsRustCrypto` provider (default).
-2. Generate Ed25519 `SignatureKeyPair` for the MLS ciphersuite.
+2. Generate Ed25519 `SignatureKeyPair` for the MLS ciphersuite (FRESH each call → distinct devices get distinct signature keys).
 3. Store the signer in the provider's storage (OpenMLS requires this).
-4. Create `BasicCredential` with `peer_id.as_bytes()` as identity.
+4. Create `BasicCredential` with `identity_id.as_bytes()` as identity.
 5. Combine into `CredentialWithKey` (credential + public signature key).
+
+**Multi-device (Step 6):** the caller seeds with the **`device_peer_id`** (NOT the master), so each of a person's devices holds its own distinct leaf credential and can be a separate MLS group member. `MlsManager::credential_identity()` reads the id baked into the leaf credential — used at startup to detect a credential inherited from ANOTHER device (a linked sibling that imported the source device's DB) which must be regenerated (else `DuplicateSignatureKey` on add / `CannotDecryptOwnMessage` on receive). See `feedback_mls_sibling_identity_collision`.
+
+#### Remove leaves by identity (multi-device)
+
+`MlsManager:remove_identity_leaves(server_id, credential_ids: &[&str]) -> Result<Vec<u8>, String>` — removes EVERY leaf whose credential is in `credential_ids`, in a single commit. The canonical multi-device removal: the caller passes `{master} ∪ devices_for(master)` so all of a kicked/banned human's leaves drop at once. `remove_member`/`remove_members_batch` delegate to it. Skips ids with no matching leaf (idempotent).
 
 #### Restore from Persistence
 
@@ -567,6 +573,8 @@ MLS state is persisted via the CryptoStore fire-and-forget actor from `crypto_ha
 - **storage_blob** — binary serialization of the OpenMLS MemoryStorage HashMap
 
 On startup, `MlsManager::from_persisted()` restores from these blobs and loads MLS groups from the provider storage by server_id.
+
+**Multi-device regeneration (Step 6, swarm.rs MLS load block):** after restoring, the node checks `mgr.credential_identity()`. If the credential isn't ours — `cred != device_peer_id && (cred != master_peer_str || has_sibling)` where `has_sibling = devices_for(master).any(!= our device)` — it `clear_mls_identity()`s and mints a FRESH one (a linked sibling inherited the source device's identity). A LEGACY SOLE single-device install (no siblings, cred == master) is kept untouched — re-keying its leaf would orphan servers it owns. `import_pending_link` (api/storage.rs) ALSO clears the inherited MLS identity right after a link import (deterministic, primary path). `MessageStore::clear_mls_identity()` deletes the singleton row. See `feedback_mls_sibling_identity_collision`.
 
 ---
 

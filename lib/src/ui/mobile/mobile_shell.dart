@@ -9,6 +9,7 @@ import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/mobile/mobile_active_call_pill.dart';
@@ -37,6 +38,20 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     MobileArchiveTab(),
     MobileSettingsTab(),
   ];
+
+  /// Subscribe the node to a channel's relay topic so live MLS topic-broadcasts
+  /// are delivered (the relay only routes a topic message to subscribed sockets).
+  /// Includes unread channels of the same server so @mentions still arrive.
+  void _subscribeActiveChannel(String serverId, String channelId) {
+    final unread = ref.read(unreadProvider);
+    final prefix = '$serverId:';
+    final unreadChannels = unread.channelUnreadCounts.entries
+        .where((e) => e.key.startsWith(prefix) && e.value > 0)
+        .map((e) => e.key.substring(prefix.length))
+        .toList();
+    final topics = <String>{channelId, ...unreadChannels}.toList();
+    network_api.subscribeChannels(serverId: serverId, channelIds: topics);
+  }
 
   @override
   void initState() {
@@ -84,6 +99,9 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     if (!mounted) return;
     ref.read(selectedServerProvider.notifier).state = serverId;
     ref.read(selectedChannelProvider.notifier).state = channelId;
+    // Subscribe to the channel's relay topic so live MLS topic-broadcasts arrive
+    // (without this the channel only fetched messages on open, never real-time).
+    _subscribeActiveChannel(serverId, channelId);
     Navigator.of(context, rootNavigator: true)
         .push(MaterialPageRoute(
       builder: (_) => MobileChatRoute(

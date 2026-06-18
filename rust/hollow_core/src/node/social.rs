@@ -262,23 +262,22 @@ pub(crate) fn handle_send_typing_indicator(
     } else {
         // Channel typing: MLS broadcast first, plaintext fallback.
         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+        hollow_log!("[HOLLOW-TYPING] Channel typing send for {server_id}/{channel_id} (mls={mls_ok})");
         if mls_ok {
             let envelope = MessageEnvelope::Typing { sid: server_id.clone(), cid: channel_id.clone() };
             if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &server_id, &envelope, crypto_store) {
                 hollow_log!("[HOLLOW-MLS] Typing broadcast failed: {e}");
             }
         } else {
-            let local_peer = local_peer_str.to_string();
+            // Plaintext fallback: members are MASTER-keyed and the master has no
+            // socket — fan each out to its online devices (was dropping before).
             if let Some(server) = server_states.get(&server_id) {
                 let data = serde_json::to_vec(&msg).unwrap_or_default();
                 for member_peer_str in server.members.keys() {
-                    if member_peer_str == &local_peer { continue; }
-                        if peer_is_reachable(&ws_room_peers, member_peer_str) {
-                            send_raw_to_peer(
-                                &ws_cmd_tx, &ws_room_peers,
-                                member_peer_str, data.clone(),
-                            );
-                        }
+                    if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                    super::crypto_handler::send_raw_to_identity(
+                        &ws_cmd_tx, &ws_room_peers, member_peer_str, data.clone(),
+                    );
                 }
             }
         }
@@ -610,16 +609,11 @@ pub(crate) async fn handle_envelope_profile_update(
         db_path, db_passphrase,
     );
     // Update display_name in server member lists (local-only, not a CRDT op).
-    // Match both the raw sender device id and the resolved master.
+    // Members are master-keyed (multi-device); update under the resolved master.
     for (_, state) in server_states.iter_mut() {
         if !display_name.is_empty() {
-            if let Some(member) = state.members.get_mut(&sender_peer_id) {
+            if let Some(member) = state.members.get_mut(&profile_master) {
                 member.display_name = display_name.clone();
-            }
-            if profile_master != sender_peer_id {
-                if let Some(member) = state.members.get_mut(&profile_master) {
-                    member.display_name = display_name.clone();
-                }
             }
         }
     }
@@ -710,9 +704,10 @@ pub(crate) async fn handle_profile_relay(
         }
     }
 
-    // Update display_name in server member lists.
+    // Update display_name in server member lists (master-keyed).
+    let source_master = super::resolver::resolve(&source_peer_id);
     for (_, state) in server_states.iter_mut() {
-        if let Some(member) = state.members.get_mut(&source_peer_id) {
+        if let Some(member) = state.members.get_mut(&source_master) {
             if !display_name.is_empty() {
                 member.display_name = display_name.clone();
             }

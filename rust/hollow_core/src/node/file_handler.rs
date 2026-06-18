@@ -561,14 +561,10 @@ pub(crate) async fn handle_send_file(
                     body: base64::engine::general_purpose::STANDARD.encode(&ct),
                 };
                 if let Some(state) = server_states.get(&sid) {
+                    let mls_data = serde_json::to_vec(&mls_msg).unwrap_or_default();
                     for member_peer_str in state.members.keys() {
-                        if member_peer_str == &local_peer { continue; }
-                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
-                                send_message_to_peer(
-                                    &ws_cmd_tx, &ws_room_peers,
-                                    member_peer_str, mls_msg.clone(),
-                                );
-                            }
+                        if super::resolver::same_identity(member_peer_str, &local_peer) { continue; }
+                        super::crypto_handler::send_raw_to_identity(&ws_cmd_tx, &ws_room_peers, member_peer_str, mls_data.clone());
                     }
                 }
             }
@@ -654,16 +650,18 @@ pub(crate) async fn handle_send_file(
                         hollow_log!("[HOLLOW-MLS] FileHeader broadcast failed: {e}");
                     }
                 } else {
-                    // Olm fallback: send FileHeader to each member individually.
+                    // Olm fallback: send FileHeader to each ONLINE DEVICE of each member.
                     for member_peer_str in state.members.keys() {
-                        if member_peer_str == &local_peer { continue; }
-                            if peer_is_reachable(&ws_room_peers, member_peer_str) && olm.has_session(member_peer_str) {
+                        if super::resolver::same_identity(member_peer_str, &local_peer) { continue; }
+                        for dev in super::crypto_handler::online_devices_for(&ws_room_peers, member_peer_str) {
+                            if olm.has_session(&dev) {
                                 send_encrypted_message(
-                                olm, crypto_store,
-                                member_peer_str, &header_json, event_tx,
+                                    olm, crypto_store,
+                                    &dev, &header_json, event_tx,
                                     &ws_cmd_tx, &ws_room_peers,
                                 ).await;
                             }
+                        }
                     }
                 }
 
@@ -700,17 +698,18 @@ pub(crate) async fn handle_send_file(
 
                     hollow_log!("[HOLLOW-GOSSIP] File {file_id} broadcast initiated (bid={broadcast_id})");
                 } else {
-                    // Small server (<6 members, no gossip overlay): full replication.
+                    // Small server (<6 members, no gossip overlay): full replication
+                    // to each ONLINE DEVICE of each member.
                     for member_peer_str in state.members.keys() {
-                        if member_peer_str == &local_peer { continue; }
-                            if peer_is_reachable(&ws_room_peers, member_peer_str) {
-                                stream_to_peer(
-                                    &ws_cmd_tx, &ws_room_peers,
-                                    &webrtc_peers, pending_webrtc_sends, &event_tx,
-                                    member_peer_str, &ws_stream_transfer::StreamKind::File,
-                                    &file_id, &temp_path, ct_size,
-                                ).await;
-                            }
+                        if super::resolver::same_identity(member_peer_str, &local_peer) { continue; }
+                        for dev in super::crypto_handler::online_devices_for(&ws_room_peers, member_peer_str) {
+                            stream_to_peer(
+                                &ws_cmd_tx, &ws_room_peers,
+                                &webrtc_peers, pending_webrtc_sends, &event_tx,
+                                &dev, &ws_stream_transfer::StreamKind::File,
+                                &file_id, &temp_path, ct_size,
+                            ).await;
+                        }
                     }
                 }
             }

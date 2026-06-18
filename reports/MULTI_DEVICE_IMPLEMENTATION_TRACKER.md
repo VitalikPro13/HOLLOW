@@ -1,8 +1,16 @@
 # Multi-Device Identity & Sync — Implementation Tracker
 
 **Status:** In progress. Steps 1, 2, 2.5, 3, **4, 5 DONE and live-verified** (2026-06-17, Pixel↔VM↔AL):
-DM sibling backfill closes the offline gap (near-instant). Next is **Step 6 — MLS per-device leaves** (the
-hardest slice; server messages to all devices). Step 5 detail in its section below; earlier baseline:
+DM sibling backfill closes the offline gap (near-instant). **Step 6 — MLS per-device leaves CODE-COMPLETE**
+(2026-06-17) — server channel messages now reach all of a person's devices. First live test exposed the
+SERVER mesh was split-brain (members went master-keyed but ~24 lookups, ~34 sends, and the server UI still
+used device ids; the load-bearing miss was the `swarm.rs:1897` PeerJoined gate → no KeyPackage → no MLS join).
+Fixed via an agent audit + a `crdt` resolver-hook chokepoint (`ServerState` accessors collapse device→master),
+per-device send fan-out (`send_raw_to_identity`), and `onlineIdentitiesProvider` in the server UI. 326 lib +
+21 widget tests pass (incl. new multi-device presence harness); clippy/analyze clean. Awaiting two-device
+re-test. Remaining: **Step 7 (revocation)**, **Step 8 (Sync Health / Devices panel)**, and **Step 9 (epic
+closing point: multi-device push + app-wide test suite, done LAST)**. Step 5 detail in its section below;
+earlier baseline:
 Steps 1, 2, 2.5, **3 DONE and live-verified** (host+phone+VM, commit `bbf91aa`):
 per-device identity, presence collapse, profile sync, sibling friend-list sync, and Olm sender-side DM
 fan-out all work — a friend sees one online identity with the right name/avatar via any device, and DMs
@@ -710,14 +718,10 @@ incremental via per-conversation since-timestamps. Reuses the friend `DmSyncRequ
       Logs show both detection paths firing, bidirectional serve, `0 new messages` on the dedup re-pull (correct),
       siblings converge. Step 5 DONE.
 
-**KNOWN LIMITATION (deferred to Step 6, Vitalik-decided NOT to fix now):** when the phone is FULLY QUIT, the
-Tier 2 background-fetch push falls back to the generic "AL sent you a message" banner instead of the decrypted
-text. Cause: the relay-buffered ciphertext was sealed to a specific device's Olm ratchet; the background fetch
-isolate (subdevice / rotated device id) can't line up that ratchet, so decrypt fails → generic banner. The
-message itself is NOT lost (live delivery + Step 5 backfill bring it in full on app open) — only the rich push
-PREVIEW degrades. Push is the most fragile cross-cutting subsystem (FCM/APNs/NSE/App-Group/ratchet-slot rules)
-and single-device push works; patching the DM-fetch half now risks regressing the common case, and Step 6 (MLS)
-reshapes the fetch isolate's group-state handling anyway. Fix multi-device push holistically WITH Step 6.
+**KNOWN LIMITATION → tracked in Step 9 (multi-device push):** when the phone is FULLY QUIT, the Tier 2
+background-fetch DM push degrades to the generic banner (the message itself still arrives in full via live
+delivery + Step 5 backfill — only the rich preview degrades). Not fixed here; rolled into the end-of-epic
+push step. See **Step 9**.
 
 ### Step 5.1 / 5.2 — Multi-device targeting sweep (files, calls, sync sig)  ✅ LIVE-VERIFIED 2026-06-17
 *Follow-up to Step 5: the live tests surfaced that the DM message/file SEND path got multi-device fan-out in
@@ -796,15 +800,67 @@ device→master.** See [[feedback_multidevice_targeting_sweep]].*
       screen share enables on the receiver; no sig-verify flood; unread pills correct. The whole DM/file/call
       multi-device surface works.
 
-### Step 6 — MLS per-device leaves  ▢ not started  ⚠ hardest slice
-*Goal: server messages reach all your devices. Do this LAST of the functional steps — servers limp along
-without it (a second device just won't see server messages until done).*
+### Step 6 — MLS per-device leaves  ✅ code-complete (pending real-device test)  ⚠ hardest slice
+*Goal: server messages reach all your devices. Built 2026-06-17; 325 lib tests pass (incl. new multi-leaf
+removal/SFrame/canonicalize tests), clippy clean. Awaiting two-device live test.*
 
-- [ ] Credential becomes `peer_id:device_id` (was bare `peer_id`) so one human can hold multiple leaves.
-- [ ] Each device generates its own KeyPackage / leaf; a new device joining = Remove/Add via coordinator.
-- [ ] Coordinator election moves to `{peer_id}:{device_id}` deterministic tiebreaker (fact #6).
-- [ ] Re-audit all 8 MLS rules in `feedback_mls_patterns.md` against multi-leaf-per-human.
-- [ ] **Test:** both your devices in a server → both decrypt channel messages; epoch/SFrame keys correct.
+**LOCKED DECISIONS (this session, both Vitalik-picked):**
+- **MLS credential = the BARE `device_peer_id`** (NOT the `peer_id:device_id` composite floated below —
+  the device id is already globally unique, so the composite buys nothing). Each device's own `MlsManager`
+  seeds its credential with its device id → N devices = N distinct-credential leaves naturally.
+- **CRDT `ServerState.members` key = MASTER** for every member (owner + joiners). The investigation found
+  membership was already SPLIT-BRAIN (owner master-keyed, joiners device-keyed post-rotation); canonicalizing
+  to master fixes that latent bug at the root. **One human = one member entry; N leaves live only in the MLS
+  group.** The member↔leaf bridge is the resolver.
+- **Migration = in-place, no re-key.** Existing persisted MLS identities keep their old (master) credential
+  via `from_persisted`; only NEW identities (fresh installs / linked devices) seed with the device id. Live
+  groups are never re-keyed.
+
+**THE SPINE (one invariant):** `state.members` is master-keyed; `mls.group_members()` returns device ids;
+every MLS↔CRDT comparison bridges through `resolver::resolve()`/`same_identity()`, and every targeted SEND to
+a member fans master→online devices (the master has no socket — `send_raw_to_identity`).
+
+**What landed:**
+- [x] **Credential = device id** — `MlsManager::new(&device_peer_id)` (`swarm.rs:343`); `from_persisted`
+      untouched (no-rekey). Single-device with no siblings stays self-consistent (`resolve(x)==x`).
+- [x] **Identity-tolerant removal** (`mls_manager.rs`): new `remove_identity_leaves(server_id, &[ids])`
+      removes EVERY leaf whose credential is in the id set; `remove_member`/`remove_members_batch` delegate
+      to it. Kick/ban/leave pass `{master} ∪ devices_for(master)` so all of a human's leaves drop in one
+      commit. 2 new unit tests.
+- [x] **Coordinator election collapses device→master** (`crypto_handler.rs` `elect_coordinator`/
+      `elect_vault_coordinator`/`is_*` now return the lowest online MASTER; sender-exclusion via
+      `same_identity`; vault = 2nd master). Inline elections in the MlsKeyPackage handler + 3 recovery paths
+      all route through it. New device-collapse unit test.
+- [x] **CRDT member key → master** (`swarm.rs` ServerJoinRequest resolves joiner device→master for
+      `MemberAdded`/`TwitchUsernameChanged`/`MemberJoined`) + `ServerState::canonicalize_members(resolve)`
+      (folds legacy device-keyed members/roles/nicknames/twitch/pledges/bans/labels into the master, merging
+      roles by priority) called after state load + snapshot adopt + sync-merge. 3 new unit tests.
+- [x] **MlsKeyPackage gate/sweep/re-add identity-aware** (`swarm.rs:7588+`): gate accepts a SIBLING of an
+      existing member (`same_identity`); stale-sweep is identity-based; sender-already-in-group re-add removes
+      only the exact sender device (sibling-safe).
+- [x] **3 recovery paths + decrypt-sender resolve** (`swarm.rs`): PeerJoined per-device leaf check (a sibling
+      with no leaf triggers `MlsKeyPackageRequest`); RoomMembers + unknown-group + post-join + decrypt-fail
+      recoveries elect a master coordinator and send to its DEVICES (`send_raw_to_identity`). Decrypted
+      `sender_peer_id` (device credential) is resolved to `sender_master` for ALL attribution + signature
+      verification (channel msg/edit/delete/reaction signed by master; kick/server-delete author perms;
+      typing) while Olm-reply/file sites keep the device id.
+- [x] **Per-device SEND fan-out** — new `crypto_handler::send_raw_to_identity` (fans bytes to every online
+      device of a master). All MLS Commit / Welcome-peer / kick-ban-leave CRDT+notification / plaintext
+      CRDT-gossip / pledge / Olm-bootstrap broadcasts over master-keyed members now fan per-device (the
+      master authenticates as no socket — a bare `send_raw_to_peer(master)` was silently dropped). Commit
+      skips are per-DEVICE (a member's already-joined sibling A still gets the Commit when sibling B is added).
+- [x] **Re-audited the 8 MLS rules** (`feedback_mls_patterns.md`): rules 5 (rejoin cleanup), 6 (coordinator
+      excludes sender), 7 (auto-recovery for any peer) became identity-aware; 3 (decrypt-fail sync) gained the
+      sender resolve; 1/2/4/8 unaffected. R1 grep-audit of every `group_members()` consumer done — all are
+      resolver-aware or count-only.
+- [ ] **Test (Vitalik, two devices of one identity):** both devices in a server → both decrypt channel
+      messages (coordinator `MlsKeyPackageRequest`→sibling `MlsKeyPackage`→batch add→Welcome to B, Commit to
+      A); epoch + SFrame key identical on both (clear voice); kick/ban removes BOTH leaves (survivors decrypt,
+      kicked devices cannot); single-device + existing live groups byte-for-byte unchanged.
+
+**DEFERRED → tracked in Step 9 (multi-device push):** CHANNEL PUSH (0x09 offline fan-out) target-selection
+is still master-keyed. The LIVE channel path (MLS room broadcast → both devices in the room decrypt) works
+without it; only the offline push preview is affected. Rolled into the end-of-epic push step. See **Step 9**.
 
 ### Step 7 — Revocation (the sharp edge)  ▢ not started
 *Goal: a lost/stolen device can be cut off everywhere.*
@@ -821,6 +877,127 @@ without it (a second device just won't see server messages until done).*
 - [ ] Per-conversation DB-health comparison across devices (counts / latest-op timestamps; in-sync/behind/unreachable).
 - [ ] Manual "Sync" button (drives Step 5 on demand).
 - [ ] "Remove device" → triggers Step 7 revocation.
+
+### Step 9 — Epic closing point: multi-device push + app-wide test suite  ▢ not started  ⚠ do LAST
+
+#### 9A — Multi-device push notifications
+*Goal: make the FCM/APNs + relay-fetch push subsystem multi-device-aware for BOTH DMs and server channels.
+Deliberately the FINAL step — push is the most fragile cross-cutting subsystem (FCM/APNs/NSE/App-Group/
+Olm-ratchet-slot/MLS-epoch rules), single-device push works today, and every functional path (live delivery
++ backfill) already brings messages in FULL without it. Only the rich push PREVIEW degrades on a fully-quit
+phone. Fixing it holistically at the end avoids regressing the single-device common case while the rest of
+multi-device churns.*
+
+**What's broken / missing today (both rolled here from Steps 5 & 6):**
+- **DM push (fetch mode + background isolate).** When the phone is FULLY QUIT, the Tier 2 background-fetch
+  push degrades to the generic "X sent you a message" banner. Cause: the relay-buffered ciphertext is sealed
+  to ONE device's Olm ratchet; the background-fetch isolate (a sibling / rotated device id) can't line up
+  that ratchet → decrypt fails → generic banner. Message itself is NOT lost (live + Step 5 backfill).
+  The fetch isolate also predates the device→master model (`load_existing_identity`, ratchet selection).
+- **Channel push (0x09 offline fan-out).** The sender picks OFFLINE-member targets from its CRDT and fires
+  one 0x09 per target with a per-target mention flag. With members now MASTER-keyed (Step 6), target
+  selection + offline detection must resolve master→device, and the NSE/fetch group-state decrypt must pick
+  the right device leaf for the current MLS epoch.
+
+**Scope when we get here:**
+- [ ] DM fetch isolate: device→master aware identity load; pick a ratchet/device the buffered ciphertext was
+      actually sealed to (or have the SENDER target a deterministic device for the offline buffer), so the
+      background fetch can decrypt → rich preview restored on a fully-quit phone.
+- [ ] Channel push 0x09: resolve member master→online/offline devices for target selection; per-target
+      mention flag still computed sender-side; NSE/`hollow_push_fetch_and_decrypt` picks the correct device
+      leaf + tolerates stale-epoch with the content-free fallback.
+- [ ] Re-validate the whole push UX (per-peer/per-channel grouping, collapse-ids, App-Group cache, iOS NSE
+      footprint) on multi-device — without regressing single-device, which is the common case.
+- [ ] **Test:** fully-quit phone (sibling/rotated device) receives a DECRYPTED DM preview AND a decrypted
+      "Server • #channel" channel preview; single-device push unchanged; no double-notify across siblings.
+
+**Cross-refs:** `feedback_fcm_image_invisible_bubble.md`, `project_push_notification_implementation.md`,
+`project_channel_push_notifications.md`, `project_ios_push_tier_b_disposable_nse.md`,
+`feedback_app_group_path_match.md`, `feedback_ios_appgroup_sqlite_wal_crash.md`.
+
+#### 9B — App-wide test suite (the harness we kept deferring)
+*Goal: stop shipping regressions that only a human catches. The whole multi-device epic has been
+"fix → live test on 3 devices → find a missed master-vs-device site → repeat." Each missed site
+(e.g. `swarm.rs:1897` PeerJoined gate, the member-panel offline bug) was a one-line check that a
+test would have caught instantly. Build the suite AT THE END so it pins the FINAL behavior, not a
+moving target — but build it before declaring the epic done.*
+
+**The three test layers (what we have, what each is for):**
+1. **Widget tests — `test/`, run with `flutter test`.** No device, FFI mocked
+   (`test/helpers/mock_rust_lib.dart` + `test_app.dart`). Fast (~6s for the whole suite), run on
+   every change. Tests **Dart logic + UI in isolation**: given provider values, does the UI/render/
+   selection behave? **This is the workhorse — 90% of useful tests live here.** Today: 21 tests
+   (`widget/`, `widget_test.dart`, `multi_device_presence_test.dart`).
+2. **Integration tests — `integration_test/`, real `RustLib.init()` + real `HollowApp`.** Runs the
+   genuine node (SQLCipher, providers, FFI) on a device/emulator. Catches wiring/FFI/end-to-end
+   breaks a mock can't. Today: just `integration_test/simple_test.dart` (an "App launches" smoke
+   test). Worth a HANDFUL (launch, create-server, send-DM, restart-persists) — not hundreds.
+3. **`test_driver/integration_test.dart` — NOT a third kind of test.** A 3-line `integrationDriver()`
+   shim that runs the `integration_test/` tests via `flutter drive` (needed for screenshots, physical-
+   device CI, perf traces). Test logic always lives in `integration_test/`; this is just the runner.
+
+**The multi-device reality (be honest in scope):** a TRUE two-device test needs two running nodes +
+a relay — beyond one in-process `integration_test`. So the split is:
+   - **Deterministic logic** (device→master collapse, resolver, `is_member`/`get_role` resolution,
+     coordinator election, canonicalize) → unit/widget tests (already started: Rust
+     `accessors_resolve_device_to_master_via_hook`, `coordinator_election_collapses_devices_to_master`,
+     `remove_identity_leaves_*`, `canonicalize_*`; Dart `multi_device_presence_test.dart`).
+   - **Actual two-device mesh** → stays a documented MANUAL live-test checklist (Pixel↔VM↔AL) UNLESS
+     we invest in a two-in-process-node harness (a stretch goal — spawn two `spawn_node`s against a
+     local relay, assert a channel msg crosses). Decide cost/value when we get here.
+
+**Scope when we build it:**
+- [ ] **Rust:** keep growing `#[cfg(test)]` coverage for every cross-cutting invariant — the
+      master↔device boundary rules ([[feedback_multidevice_targeting_sweep]]), MLS multi-leaf,
+      CRDT merge/dedup, sig payload parity. These are pure + fast; aim them at the bug SHAPES that
+      recurred (wrong-id routing, stale-state).
+- [ ] **Dart widget:** a multi-device fixture in `test/helpers/` (master + N device peer_ids, a
+      stub `deviceLinkProvider`, helpers to push peers online/offline) so any server/DM/friend UI
+      can assert "shows one row per person / online via any device / right name" without FFI.
+      Convert each past UI regression into a guard test (member panel, user bar, mobile panels,
+      typing, chat-header Encrypted, Home network column).
+- [ ] **Integration:** flesh out `integration_test/` with the real-node smoke flows (launch,
+      create+join server, send/receive DM, channel message, restart-persists, app-lock unlock).
+      Run them via `flutter test integration_test/` (headless) and document the `flutter drive`
+      path for screenshots/CI.
+- [ ] **CI:** wire `flutter test` + `cargo test` into the existing GitHub Actions
+      (`project_ci_setup`) as a required gate; integration tests as a separate (manual or nightly)
+      job since they need an emulator.
+- [ ] **Manual checklist:** write the canonical two-device live-test runbook (the steps Vitalik
+      already does by hand) into `reports/` so it's repeatable, not improvised each session.
+
+**Why 9B is bundled with the epic (not skipped):** the suite's first real job is to lock the
+multi-device behavior we just built so Step 7 (revocation) and future work can't silently re-break
+it. A broader whole-app suite grows from this foundation afterward.
+
+**Cross-refs:** `test/helpers/test_app.dart`, `test/helpers/mock_rust_lib.dart`,
+`test/multi_device_presence_test.dart`, `integration_test/simple_test.dart`, `project_ci_setup.md`,
+`feedback_use_agents.md` (parallel audit pattern that found the sweep).
+
+#### 9C — Server multi-device UX polish (minor; deferred 2026-06-18)
+*The Step 6 server MLS mesh is LIVE and working end-to-end (channel messages + typing + chat grouping all
+flow real-time across master+sibling+friend). These are the two small cosmetic/edge quirks left when Vitalik
+decided to stop and ship the working state — fix in a focused polish pass, NOT blocking.*
+
+- [ ] **Subdevice sees its OWN identity "typing".** When a sibling device types in a channel, the typing
+      event resolves to the shared master, and the OTHER sibling (e.g. master Pixel) displays "you are
+      typing" — a self-leak. Added a self-filter in `channel_chat_pane.dart` (exclude `myMaster` from the
+      typing names) but Vitalik confirmed Pixel STILL sees itself typing after that — so the filter isn't
+      catching this path (likely the typist arrives as a DEVICE id that `identityOf` doesn't collapse to
+      `myMaster` because the resolver link for the sibling's exact typing-sender id isn't warm, OR a second
+      typing render path. Re-trace: log the raw typist id vs `myMaster` at the display site). Channel-typing
+      plaintext-fallback fan-out (`social.rs`, was sending to bare master → dropped) and a `[HOLLOW-TYPING]
+      Channel typing send` diag log already landed this session.
+- [ ] **First channel message after a fresh device-link relaunch is lost** (the rest arrive fine; a
+      tab-switch surfaces it). Same shape as the DM `feedback_dm_online_branch_retry_queue` race — right after
+      `import_pending_link` + relaunch, the freshly-minted MLS leaf / Olm sessions are still settling, so the
+      very first channel broadcast that lands races the group-join completion. Likely fix: queue/retry the
+      first post-link channel message, or have the joiner request an immediate channel sync once its leaf is
+      merged. Self-heals on next sync today, so low severity.
+- [ ] **Sibling↔sibling SERVER-message backfill** (the server analog of Step 5 DM backfill): two devices of
+      one identity should fill each other's gaps of missed *server channel* history, not just rely on
+      live-delivery + the friend/coordinator sync. Live mesh works; cross-sibling server history sync is the
+      remaining completeness piece.
 
 ---
 

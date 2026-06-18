@@ -10,7 +10,7 @@ use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 use super::crdt_store::CrdtStore;
 use super::crypto_handler::{
     peer_is_reachable, send_message_to_peer, send_mls_broadcast,
-    persist_mls_state, send_encrypted_message,
+    persist_mls_state, send_encrypted_message, send_raw_to_identity, online_devices_for,
 };
 use super::signaling::SignalingCmd;
 use super::types::*;
@@ -18,6 +18,52 @@ use super::types::*;
 /// Serialize ServerState for persistence.
 fn serialize_state_lean(state: &ServerState) -> Result<String, serde_json::Error> {
     serde_json::to_string(state)
+}
+
+/// Multi-device (Step 6): fan pre-serialized bytes out to EVERY online device of
+/// EVERY server member except our own identity. Members are master-keyed and the
+/// master has no socket, so a direct `send_message_to_peer(master)` is dropped —
+/// every member-broadcast loop must go through this. Single-device collapses to
+/// one device per member (or the member id itself if no link is known).
+fn broadcast_raw_to_members(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    state: &ServerState,
+    local_peer_str: &str,
+    data: Vec<u8>,
+) {
+    for member_peer_str in state.members.keys() {
+        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+        send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
+    }
+}
+
+/// Convenience: broadcast a `CrdtOpBroadcast` (plaintext fallback) to all members'
+/// devices. Used by every sync-handler CRDT op whose MLS broadcast failed/absent.
+fn broadcast_crdt_op_to_members(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    state: &ServerState,
+    local_peer_str: &str,
+    server_id: &str,
+    op_json: &str,
+) {
+    let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+        server_id: server_id.to_string(),
+        op_json: op_json.to_string(),
+    }).unwrap_or_default();
+    broadcast_raw_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, data);
+}
+
+/// Multi-device (Step 6): all MLS-credential ids belonging to one identity —
+/// the master plus every known device id. Used to remove EVERY leaf of a kicked/
+/// banned human in one commit (a leaf may be an offline device, so we can't rely
+/// on live-room presence here). `master` resolves to itself for single-device.
+fn identity_credential_ids(master: &str) -> Vec<String> {
+    let m = super::resolver::resolve(master); // normalize if a device id slipped in
+    let mut ids = super::resolver::devices_for(&m);
+    ids.push(m);
+    ids
 }
 
 // ── 1. CreateServer ───────────────────────────────────────────────────
@@ -172,18 +218,9 @@ pub(crate) async fn handle_create_channel(
             }
             if !sent_via_mls {
                 let local_peer = local_peer_str.to_string();
-                for member_peer_str in state.members.keys() {
-                    if member_peer_str == &local_peer { continue; }
-                        if peer_is_reachable(ws_room_peers, member_peer_str) {
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                    server_id: server_id.clone(),
-                                    op_json: op_json.clone(),
-                                },
-                            );
-                        }
-                }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
             }
         }
     } else {
@@ -251,18 +288,9 @@ pub(crate) async fn handle_remove_channel(
             }
             if !sent_via_mls {
                 let local_peer = local_peer_str.to_string();
-                for member_peer_str in state.members.keys() {
-                    if member_peer_str == &local_peer { continue; }
-                        if peer_is_reachable(ws_room_peers, member_peer_str) {
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                    server_id: server_id.clone(),
-                                    op_json: op_json.clone(),
-                                },
-                            );
-                        }
-                }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
             }
         }
     }
@@ -325,18 +353,9 @@ pub(crate) async fn handle_rename_server(
             }
             if !sent_via_mls {
                 let local_peer = local_peer_str.to_string();
-                for member_peer_str in state.members.keys() {
-                    if member_peer_str == &local_peer { continue; }
-                        if peer_is_reachable(ws_room_peers, member_peer_str) {
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                    server_id: server_id.clone(),
-                                    op_json: op_json.clone(),
-                                },
-                            );
-                        }
-                }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
             }
         }
     }
@@ -403,18 +422,9 @@ pub(crate) async fn handle_rename_channel(
             }
             if !sent_via_mls {
                 let local_peer = local_peer_str.to_string();
-                for member_peer_str in state.members.keys() {
-                    if member_peer_str == &local_peer { continue; }
-                        if peer_is_reachable(ws_room_peers, member_peer_str) {
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                    server_id: server_id.clone(),
-                                    op_json: op_json.clone(),
-                                },
-                            );
-                        }
-                }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
             }
         }
     }
@@ -470,18 +480,9 @@ pub(crate) async fn handle_update_server_setting(
             }
             if !sent_via_mls {
                 let local_peer = local_peer_str.to_string();
-                for member_peer_str in state.members.keys() {
-                    if member_peer_str == &local_peer { continue; }
-                        if peer_is_reachable(ws_room_peers, member_peer_str) {
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                    server_id: server_id.clone(),
-                                    op_json: op_json.clone(),
-                                },
-                            );
-                        }
-                }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
             }
         }
     }
@@ -525,16 +526,11 @@ pub(crate) async fn handle_delete_server(
         }
     } else if let Some(state) = server_states.get(&server_id) {
         let local_peer = local_peer_str.to_string();
-        for member_peer_str in state.members.keys() {
-            if member_peer_str == &local_peer { continue; }
-                if peer_is_reachable(ws_room_peers, member_peer_str) {
-                    send_message_to_peer(
-                        ws_cmd_tx, ws_room_peers,
-                        member_peer_str, HavenMessage::ServerDeleteBroadcast {
-                            server_id: server_id.clone(),
-                        },
-                    );
-                }
+{
+            let data = serde_json::to_vec(&HavenMessage::ServerDeleteBroadcast {
+                server_id: server_id.clone(),
+            }).unwrap_or_default();
+            broadcast_raw_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, data);
         }
     }
 
@@ -678,18 +674,9 @@ pub(crate) async fn handle_change_role(
 
         // Broadcast to connected server members only.
         if let Ok(op_json) = serde_json::to_string(&op) {
-            for member_peer_str in state.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
-            }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
         }
     }
     false
@@ -748,38 +735,38 @@ pub(crate) async fn handle_kick_member(
         }).await;
 
         // Broadcast CRDT op to remaining members (collected before removal).
+        // Members are master-keyed → fan each out to its online device(s).
         if let Ok(op_json) = serde_json::to_string(&op) {
+            let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+                server_id: server_id.clone(),
+                op_json: op_json.clone(),
+            }).unwrap_or_default();
             for member_peer_str in &broadcast_targets {
                 if member_peer_str == &peer_id { continue; } // Kicked peer gets MemberKickBroadcast instead
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
+                send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
             }
         }
 
-        // Send kick notification to the kicked peer via Olm (targeted) + plaintext broadcast.
+        // Send kick notification to EVERY online device of the kicked identity
+        // via Olm (targeted) + plaintext broadcast.
+        let kicked_devices = online_devices_for(ws_room_peers, &peer_id);
         let envelope = MessageEnvelope::MemberKick { sid: server_id.clone() };
         let kick_json = serde_json::to_string(&envelope).unwrap_or_default();
-        send_encrypted_message(olm, crypto_store, &peer_id, &kick_json, event_tx, ws_cmd_tx, ws_room_peers).await;
-        if peer_is_reachable(ws_room_peers, &peer_id) {
-            send_message_to_peer(
-                ws_cmd_tx, ws_room_peers,
-                &peer_id, HavenMessage::MemberKickBroadcast {
-                    server_id: server_id.clone(),
-                },
-            );
+        let kick_bcast = serde_json::to_vec(&HavenMessage::MemberKickBroadcast {
+            server_id: server_id.clone(),
+        }).unwrap_or_default();
+        for dev in &kicked_devices {
+            send_encrypted_message(olm, crypto_store, dev, &kick_json, event_tx, ws_cmd_tx, ws_room_peers).await;
         }
+        send_raw_to_identity(ws_cmd_tx, ws_room_peers, &peer_id, kick_bcast);
 
-        // MLS: remove member from group (epoch rotation for forward secrecy).
+        // MLS: remove EVERY leaf of the kicked identity (epoch rotation for
+        // forward secrecy). credential ids = {master} ∪ all its known devices.
         if let Some(mls_mgr) = mls {
             if mls_mgr.has_group(&server_id) {
-                match mls_mgr.remove_member(&server_id, &peer_id) {
+                let id_set = identity_credential_ids(&peer_id);
+                let owned: Vec<&str> = id_set.iter().map(|s| s.as_str()).collect();
+                match mls_mgr.remove_identity_leaves(&server_id, &owned) {
                     Ok(commit_bytes) => {
                         match mls_mgr.merge_pending_commit(&server_id) {
                             Ok(()) => {
@@ -792,20 +779,16 @@ pub(crate) async fn handle_kick_member(
                                     }).await;
                                 }
                                 let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
-                                // Broadcast MLS commit to remaining members.
+                                // Broadcast MLS commit to remaining members (per-device).
+                                let data = serde_json::to_vec(&HavenMessage::MlsCommit {
+                                    server_id: server_id.clone(),
+                                    commit: commit_b64.clone(),
+                                }).unwrap_or_default();
                                 for member_peer_str in &broadcast_targets {
                                     if member_peer_str == &peer_id { continue; }
-                                        if peer_is_reachable(ws_room_peers, member_peer_str) {
-                                            send_message_to_peer(
-                                                ws_cmd_tx, ws_room_peers,
-                                                member_peer_str, HavenMessage::MlsCommit {
-                                                    server_id: server_id.clone(),
-                                                    commit: commit_b64.clone(),
-                                                },
-                                            );
-                                        }
+                                    send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
                                 }
-                                hollow_log!("[HOLLOW-MLS] Removed {peer_id} from MLS group, epoch rotated");
+                                hollow_log!("[HOLLOW-MLS] Removed all leaves of {peer_id} from MLS group, epoch rotated");
                             }
                             Err(e) => hollow_log!("[HOLLOW-MLS] Failed to merge remove commit: {e}"),
                         }
@@ -864,40 +847,35 @@ pub(crate) async fn handle_leave_server(
             crdt_store.save_state(server_id.clone(), json);
         }
 
-        // Broadcast CRDT op to remaining members.
+        // Broadcast CRDT op to remaining members (per-device fan-out).
         if let Ok(op_json) = serde_json::to_string(&op) {
+            let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+                server_id: server_id.clone(),
+                op_json: op_json.clone(),
+            }).unwrap_or_default();
             for member_peer_str in &broadcast_targets {
-                if peer_is_reachable(ws_room_peers, member_peer_str) {
-                    send_message_to_peer(
-                        ws_cmd_tx, ws_room_peers,
-                        member_peer_str, HavenMessage::CrdtOpBroadcast {
-                            server_id: server_id.clone(),
-                            op_json: op_json.clone(),
-                        },
-                    );
-                }
+                send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
             }
         }
 
-        // MLS: remove self from group.
+        // MLS: remove ALL of OUR leaves from the group (this device + any sibling
+        // device's leaf — leaving the server means none of our devices stay).
         if let Some(mls_mgr) = mls {
             if mls_mgr.has_group(&server_id) {
-                match mls_mgr.remove_member(&server_id, &local_peer) {
+                let id_set = identity_credential_ids(&local_peer);
+                let owned: Vec<&str> = id_set.iter().map(|s| s.as_str()).collect();
+                match mls_mgr.remove_identity_leaves(&server_id, &owned) {
                     Ok(commit_bytes) => {
                         match mls_mgr.merge_pending_commit(&server_id) {
                             Ok(()) => {
                                 persist_mls_state(mls_mgr, crypto_store);
                                 let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
+                                let data = serde_json::to_vec(&HavenMessage::MlsCommit {
+                                    server_id: server_id.clone(),
+                                    commit: commit_b64.clone(),
+                                }).unwrap_or_default();
                                 for member_peer_str in &broadcast_targets {
-                                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                                        send_message_to_peer(
-                                            ws_cmd_tx, ws_room_peers,
-                                            member_peer_str, HavenMessage::MlsCommit {
-                                                server_id: server_id.clone(),
-                                                commit: commit_b64.clone(),
-                                            },
-                                        );
-                                    }
+                                    send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
                                 }
                                 hollow_log!("[HOLLOW-MLS] Left MLS group for {server_id}");
                             }
@@ -986,36 +964,30 @@ pub(crate) async fn handle_ban_member(
             peer_id: peer_id.clone(),
         }).await;
 
-        // Broadcast CRDT op to remaining members.
+        // Broadcast CRDT op to remaining members (per-device fan-out).
         if let Ok(op_json) = serde_json::to_string(&op) {
+            let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+                server_id: server_id.clone(),
+                op_json: op_json.clone(),
+            }).unwrap_or_default();
             for member_peer_str in &broadcast_targets {
                 if member_peer_str == &peer_id { continue; }
-                if peer_is_reachable(ws_room_peers, member_peer_str) {
-                    send_message_to_peer(
-                        ws_cmd_tx, ws_room_peers,
-                        member_peer_str, HavenMessage::CrdtOpBroadcast {
-                            server_id: server_id.clone(),
-                            op_json: op_json.clone(),
-                        },
-                    );
-                }
+                send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
             }
         }
 
-        // Send kick notification to the banned peer.
-        if peer_is_reachable(ws_room_peers, &peer_id) {
-            send_message_to_peer(
-                ws_cmd_tx, ws_room_peers,
-                &peer_id, HavenMessage::MemberKickBroadcast {
-                    server_id: server_id.clone(),
-                },
-            );
-        }
+        // Send kick notification to every device of the banned identity.
+        let ban_bcast = serde_json::to_vec(&HavenMessage::MemberKickBroadcast {
+            server_id: server_id.clone(),
+        }).unwrap_or_default();
+        send_raw_to_identity(ws_cmd_tx, ws_room_peers, &peer_id, ban_bcast);
 
-        // MLS: remove member from group (epoch rotation).
+        // MLS: remove EVERY leaf of the banned identity (epoch rotation).
         if let Some(mls_mgr) = mls {
             if mls_mgr.has_group(&server_id) {
-                match mls_mgr.remove_member(&server_id, &peer_id) {
+                let id_set = identity_credential_ids(&peer_id);
+                let owned: Vec<&str> = id_set.iter().map(|s| s.as_str()).collect();
+                match mls_mgr.remove_identity_leaves(&server_id, &owned) {
                     Ok(commit_bytes) => {
                         match mls_mgr.merge_pending_commit(&server_id) {
                             Ok(()) => {
@@ -1027,19 +999,15 @@ pub(crate) async fn handle_ban_member(
                                     }).await;
                                 }
                                 let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
+                                let data = serde_json::to_vec(&HavenMessage::MlsCommit {
+                                    server_id: server_id.clone(),
+                                    commit: commit_b64.clone(),
+                                }).unwrap_or_default();
                                 for member_peer_str in &broadcast_targets {
                                     if member_peer_str == &peer_id { continue; }
-                                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                                        send_message_to_peer(
-                                            ws_cmd_tx, ws_room_peers,
-                                            member_peer_str, HavenMessage::MlsCommit {
-                                                server_id: server_id.clone(),
-                                                commit: commit_b64.clone(),
-                                            },
-                                        );
-                                    }
+                                    send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
                                 }
-                                hollow_log!("[HOLLOW-MLS] Removed banned {peer_id} from MLS group");
+                                hollow_log!("[HOLLOW-MLS] Removed all leaves of banned {peer_id} from MLS group");
                             }
                             Err(e) => hollow_log!("[HOLLOW-MLS] Failed to merge ban remove commit: {e}"),
                         }
@@ -1108,18 +1076,9 @@ pub(crate) async fn handle_unban_member(
                 }
             }
             if !sent_via_mls {
-                for member_peer_str in state.members.keys() {
-                    if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
-                }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
             }
         }
     }
@@ -1185,18 +1144,9 @@ pub(crate) async fn handle_label_op(
                 }
             }
             if !sent_via_mls {
-                for member_peer_str in state.members.keys() {
-                    if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
-                }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
             }
         }
     }
@@ -1258,18 +1208,9 @@ pub(crate) async fn handle_set_channel_visibility(
                 }
             }
             if !sent_via_mls {
-                for member_peer_str in state.members.keys() {
-                    if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
-                }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
             }
         }
     }
@@ -1331,18 +1272,9 @@ pub(crate) async fn handle_set_channel_posting(
                 }
             }
             if !sent_via_mls {
-                for member_peer_str in state.members.keys() {
-                    if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
-                }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
             }
         }
     }
@@ -1404,18 +1336,9 @@ pub(crate) async fn handle_set_channel_public(
                 }
             }
             if !sent_via_mls {
-                for member_peer_str in state.members.keys() {
-                    if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
-                }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
             }
         }
 
@@ -1508,18 +1431,9 @@ pub(crate) async fn handle_change_role_permissions(
                 }
             }
             if !sent_via_mls {
-                for member_peer_str in state.members.keys() {
-                    if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
-                }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
             }
         }
     }
@@ -1570,18 +1484,9 @@ pub(crate) async fn handle_set_nickname(
 
         // Broadcast to connected server members
         if let Ok(op_json) = serde_json::to_string(&op) {
-            for member_peer_str in state.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
-            }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
         }
     }
     false
@@ -1625,18 +1530,9 @@ pub(crate) async fn handle_set_twitch_username(
         }).await;
 
         if let Ok(op_json) = serde_json::to_string(&op) {
-            for member_peer_str in state.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
-            }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
         }
     }
     false
@@ -1675,20 +1571,14 @@ pub(crate) async fn handle_request_channel_sync(
                 .get_per_sender_timestamps(&server_id, &channel_id)
                 .unwrap_or_default();
             let local_peer = local_peer_str.to_string();
-            for member_peer_str in state.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::ChannelSyncRequest {
-                                server_id: server_id.clone(),
-                                channel_id: channel_id.clone(),
-                                since_timestamp: since,
-                                sender_timestamps: sender_ts.clone(),
-                            },
-                        );
-                    }
-            }
+            let sync_data = serde_json::to_vec(&HavenMessage::ChannelSyncRequest {
+                server_id: server_id.clone(),
+                channel_id: channel_id.clone(),
+                since_timestamp: since,
+                sender_timestamps: sender_ts.clone(),
+            }).unwrap_or_default();
+            let _ = local_peer;
+            broadcast_raw_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, sync_data);
         }
     }
     false
@@ -1734,18 +1624,9 @@ pub(crate) async fn handle_update_channel_layout(
         }).await;
 
         if let Ok(op_json) = serde_json::to_string(&op) {
-            for member_peer_str in state.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
-            }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
         }
     }
     false
@@ -1792,18 +1673,9 @@ pub(crate) async fn handle_pin_message(
         }).await;
 
         if let Ok(op_json) = serde_json::to_string(&op) {
-            for member_peer_str in state.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
-            }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
         }
     }
     false
@@ -1850,18 +1722,9 @@ pub(crate) async fn handle_unpin_message(
         }).await;
 
         if let Ok(op_json) = serde_json::to_string(&op) {
-            for member_peer_str in state.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
-            }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
         }
     }
     false
@@ -1900,18 +1763,9 @@ pub(crate) async fn handle_set_storage_pledge(
         }).await;
 
         if let Ok(op_json) = serde_json::to_string(&op) {
-            for member_peer_str in state.members.keys() {
-                if member_peer_str == &local_peer { continue; }
-                    if peer_is_reachable(ws_room_peers, member_peer_str) {
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            member_peer_str, HavenMessage::CrdtOpBroadcast {
-                                server_id: server_id.clone(),
-                                op_json: op_json.clone(),
-                            },
-                        );
-                    }
-            }
+broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+            )
         }
     }
 }

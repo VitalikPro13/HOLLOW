@@ -200,6 +200,91 @@ impl ServerState {
         self.hlc = Some(hlc);
     }
 
+    /// Multi-device (Step 6): fold any per-member entry that is keyed by a DEVICE
+    /// id into its MASTER identity, so one human appears once. `resolve` maps a
+    /// peer_id to its master (identity-passthrough for unknowns — single-device
+    /// is a no-op). This is a LOCAL cleanup (emits no CRDT op): legacy servers
+    /// recorded joiners under their device id before membership was canonicalized
+    /// to master; this drains those without a re-key. Future ops are already
+    /// master-keyed at the source. Returns true if anything was re-keyed.
+    ///
+    /// Conflict resolution: LWW registers fold via `AdminLwwReg::merge` (priority
+    /// then HLC — so the higher role survives). Plain entries keep the existing
+    /// master entry if present, else adopt the device entry's value under the
+    /// master key.
+    pub fn canonicalize_members(&mut self, resolve: impl Fn(&str) -> String) -> bool {
+        let mut changed = false;
+
+        // Helper: re-key an AdminLwwReg map device→master, merging on collision.
+        fn fold_lww<V: Clone>(
+            map: &mut HashMap<String, AdminLwwReg<V>>,
+            resolve: &impl Fn(&str) -> String,
+        ) -> bool {
+            let mut changed = false;
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for k in keys {
+                let master = resolve(&k);
+                if master == k {
+                    continue; // already canonical (or unknown → self)
+                }
+                if let Some(dev_reg) = map.remove(&k) {
+                    match map.get_mut(&master) {
+                        Some(existing) => existing.merge(&dev_reg),
+                        None => {
+                            map.insert(master, dev_reg);
+                        }
+                    }
+                    changed = true;
+                }
+            }
+            changed
+        }
+
+        // members: keep existing master entry; else adopt device entry under master.
+        {
+            let keys: Vec<String> = self.members.keys().cloned().collect();
+            for k in keys {
+                let master = resolve(&k);
+                if master == k {
+                    continue;
+                }
+                if let Some(mut info) = self.members.remove(&k) {
+                    info.peer_id = master.clone();
+                    self.members.entry(master).or_insert(info);
+                    changed = true;
+                }
+            }
+        }
+
+        changed |= fold_lww(&mut self.roles, &resolve);
+        changed |= fold_lww(&mut self.nicknames, &resolve);
+        changed |= fold_lww(&mut self.twitch_usernames, &resolve);
+        changed |= fold_lww(&mut self.storage_pledges, &resolve);
+        changed |= fold_lww(&mut self.banned_members, &resolve);
+
+        // label_assignments: Vec<label_id> per member — union under master.
+        {
+            let keys: Vec<String> = self.label_assignments.keys().cloned().collect();
+            for k in keys {
+                let master = resolve(&k);
+                if master == k {
+                    continue;
+                }
+                if let Some(labels) = self.label_assignments.remove(&k) {
+                    let entry = self.label_assignments.entry(master).or_default();
+                    for l in labels {
+                        if !entry.contains(&l) {
+                            entry.push(l);
+                        }
+                    }
+                    changed = true;
+                }
+            }
+        }
+
+        changed
+    }
+
     /// Restore op_log from DB-persisted ops (called at startup when op_log
     /// is no longer serialized in the state JSON).
     pub fn restore_op_log(&mut self, ops: Vec<CrdtOp>) {
@@ -567,8 +652,11 @@ impl ServerState {
 
     /// Get a member's role.
     pub fn get_role(&self, peer_id: &str) -> MemberRole {
+        // Multi-device: collapse a device id to its master before the keyed lookup
+        // (roles are master-keyed). Identity-passthrough for unknowns / single-device.
+        let key = super::resolve_identity(peer_id);
         self.roles
-            .get(peer_id)
+            .get(&key)
             .map(|reg| reg.read().clone())
             .unwrap_or(MemberRole::Member)
     }
@@ -720,10 +808,20 @@ impl ServerState {
 
     /// Check if a peer is currently banned.
     pub fn is_banned(&self, peer_id: &str) -> bool {
+        // Multi-device: bans are master-keyed; collapse a device id first.
+        let key = super::resolve_identity(peer_id);
         self.banned_members
-            .get(peer_id)
+            .get(&key)
             .map(|reg| *reg.read())
             .unwrap_or(false)
+    }
+
+    /// Multi-device-safe membership check: is `peer_id` (device OR master) a member?
+    /// Collapses to master before the keyed lookup. Use this instead of
+    /// `members.contains_key(...)` anywhere the arg may be a device id.
+    pub fn is_member(&self, peer_id: &str) -> bool {
+        let key = super::resolve_identity(peer_id);
+        self.members.contains_key(&key)
     }
 
     /// Check if `actor` can ban `target`. Same hierarchy as kick.
@@ -806,6 +904,119 @@ fn short_name(peer_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonicalize_folds_device_keyed_member_to_master() {
+        // Owner is master-keyed; a joiner was recorded under a DEVICE id (legacy).
+        let mut state = ServerState::new("s1".into(), "S".into(), "owner_master".into());
+
+        // Simulate a legacy joiner added under a device id with a Member role.
+        let op = state.create_op(CrdtPayload::MemberAdded {
+            peer_id: "joiner_device".into(),
+            display_name: "joiner".into(),
+        });
+        let _ = state.apply_op(&op);
+        assert!(state.members.contains_key("joiner_device"));
+        assert_eq!(state.members.len(), 2);
+
+        // Resolver: joiner_device → joiner_master; everything else maps to self.
+        let resolve = |id: &str| -> String {
+            if id == "joiner_device" { "joiner_master".to_string() } else { id.to_string() }
+        };
+        let changed = state.canonicalize_members(resolve);
+        assert!(changed);
+
+        // Device key gone, master key present, owner untouched.
+        assert!(!state.members.contains_key("joiner_device"));
+        assert!(state.members.contains_key("joiner_master"));
+        assert!(state.members.contains_key("owner_master"));
+        assert_eq!(state.members.len(), 2);
+        assert_eq!(state.get_role("joiner_master"), MemberRole::Member);
+        assert_eq!(state.get_role("owner_master"), MemberRole::Owner);
+
+        // Idempotent: a second pass changes nothing.
+        assert!(!state.canonicalize_members(|id| id.to_string()));
+    }
+
+    #[test]
+    fn canonicalize_single_device_is_noop() {
+        // Identity resolver (single-device) → no change at all.
+        let mut state = ServerState::new("s1".into(), "S".into(), "owner".into());
+        let op = state.create_op(CrdtPayload::MemberAdded {
+            peer_id: "bob".into(),
+            display_name: "bob".into(),
+        });
+        let _ = state.apply_op(&op);
+        assert!(!state.canonicalize_members(|id| id.to_string()));
+        assert!(state.members.contains_key("bob"));
+        assert!(state.members.contains_key("owner"));
+    }
+
+    #[test]
+    fn canonicalize_merges_roles_keeping_higher() {
+        // A human's device leaf holds Admin while the master entry is Member —
+        // folding must keep the higher role (Admin).
+        let mut state = ServerState::new("s1".into(), "S".into(), "owner".into());
+
+        // master entry as Member.
+        let op1 = state.create_op(CrdtPayload::MemberAdded {
+            peer_id: "x_master".into(),
+            display_name: "x".into(),
+        });
+        let _ = state.apply_op(&op1);
+
+        // device entry, then promote it to Admin.
+        let op2 = state.create_op(CrdtPayload::MemberAdded {
+            peer_id: "x_device".into(),
+            display_name: "x".into(),
+        });
+        let _ = state.apply_op(&op2);
+        let op3 = state.create_op(CrdtPayload::RoleChanged {
+            peer_id: "x_device".into(),
+            role: MemberRole::Admin,
+            priority: MemberRole::Owner.priority(),
+        });
+        let _ = state.apply_op(&op3);
+
+        let resolve = |id: &str| -> String {
+            if id == "x_device" { "x_master".to_string() } else { id.to_string() }
+        };
+        assert!(state.canonicalize_members(resolve));
+        assert!(!state.members.contains_key("x_device"));
+        assert_eq!(state.get_role("x_master"), MemberRole::Admin);
+    }
+
+    #[test]
+    fn accessors_resolve_device_to_master_via_hook() {
+        // The chokepoint: ServerState accessors must collapse a DEVICE id to its
+        // master before the keyed lookup, via the installed resolver hook.
+        // Drive it through the real process-global node::resolver.
+        crate::node::resolver::clear_all();
+        crate::node::resolver::update("dev_owner", "owner_master");
+        crate::node::resolver::update("dev_bob", "bob_master");
+        crate::crdt::set_identity_resolver(crate::node::resolver::resolve);
+
+        let mut state = ServerState::new("s1".into(), "S".into(), "owner_master".into());
+        // Add Bob (master-keyed) + promote him to Admin, and ban a third identity.
+        let add = state.create_op(CrdtPayload::MemberAdded {
+            peer_id: "bob_master".into(), display_name: "bob".into(),
+        });
+        let _ = state.apply_op(&add);
+        let role = state.create_op(CrdtPayload::RoleChanged {
+            peer_id: "bob_master".into(), role: MemberRole::Admin,
+            priority: MemberRole::Owner.priority(),
+        });
+        let _ = state.apply_op(&role);
+
+        // Lookups by DEVICE id resolve to the master entry.
+        assert!(state.is_member("dev_bob"), "device id should resolve to member master");
+        assert_eq!(state.get_role("dev_bob"), MemberRole::Admin, "role via device id");
+        assert!(state.has_permission("dev_owner", Permission::MANAGE_SERVER), "owner perms via device id");
+        // Unknown device (no link) resolves to itself → not a member.
+        assert!(!state.is_member("dev_stranger"));
+
+        crate::node::resolver::clear_all();
+    }
 
     #[test]
     fn create_server_has_general_channel_and_owner() {

@@ -8,6 +8,7 @@ import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
@@ -1599,15 +1600,23 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                         return const SizedBox.shrink();
                       }
                       final msg = messages[index];
-                      // Grouping: compare with the previous message in chronological order.
+                      // Grouping: compare with the previous message in chronological
+                      // order. Multi-device: collapse each sender to its MASTER so a
+                      // person's messages from different devices (e.g. our own master
+                      // + sibling) group as ONE sender — otherwise a subdevice sees
+                      // two "Pixel" blocks for the same identity. `isMe` is folded
+                      // into the same-master test (own master == own sibling = us).
+                      final links = ref.watch(deviceLinkProvider);
+                      final curSender = links.identityOf(msg.senderId);
                       final showHeader = index == 0 ||
                           !shouldGroup(
-                            currentIsMe: msg.isMe,
-                            previousIsMe: messages[index - 1].isMe,
+                            currentIsMe: false,
+                            previousIsMe: false,
                             currentTime: msg.timestamp,
                             previousTime: messages[index - 1].timestamp,
-                            currentSenderId: msg.senderId,
-                            previousSenderId: messages[index - 1].senderId,
+                            currentSenderId: curSender,
+                            previousSenderId:
+                                links.identityOf(messages[index - 1].senderId),
                           );
                       final wrapper = MessageHoverWrapper(
                         isMe: msg.isMe,
@@ -1913,21 +1922,34 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           ),
         ),
 
-        // Typing indicator
+        // Typing indicator. Multi-device: typing peers are DEVICE ids; collapse
+        // each to its master so the profile/nickname lookup (master-keyed) hits
+        // and two devices of one person show as a single name. Also EXCLUDE our
+        // OWN identity — a sibling device (e.g. the master) typing must not show
+        // "you are typing" to its other device (the "Pixel sees Pixel typing" leak).
         if (typingPeers.isNotEmpty)
-          TypingIndicatorBar(
-            names: typingPeers
-                .map((pid) {
-                  final nicknames =
-                      ref.watch(serverNicknamesProvider(widget.serverId));
-                  return serverDisplayNameFor(
-                    ref.watch(profileProvider),
-                    pid,
-                    nickname: nicknames[pid] ?? '',
-                  );
-                })
-                .toList(),
-          ),
+          Builder(builder: (context) {
+            final links = ref.watch(deviceLinkProvider);
+            final myMaster =
+                links.identityOf(ref.watch(identityProvider).peerId ?? '');
+            final nicknames =
+                ref.watch(serverNicknamesProvider(widget.serverId));
+            final profiles = ref.watch(profileProvider);
+            final masters = typingPeers
+                .map((pid) => links.identityOf(pid))
+                .where((master) => master != myMaster)
+                .toSet();
+            if (masters.isEmpty) return const SizedBox.shrink();
+            return TypingIndicatorBar(
+              names: masters
+                  .map((master) => serverDisplayNameFor(
+                        profiles,
+                        master,
+                        nickname: nicknames[master] ?? '',
+                      ))
+                  .toList(),
+            );
+          }),
 
         // Reply preview bar
         if (_replyToMessageId != null)

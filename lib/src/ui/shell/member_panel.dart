@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
@@ -296,9 +297,10 @@ final _serverMemberEntriesProvider = Provider.family
     .autoDispose<(List<_MemberListEntry>, int, bool, String?), String>(
         (ref, serverId) {
   final membersAsync = ref.watch(serverMembersProvider(serverId));
-  final peerIds = ref.watch(peersProvider.select((p) => p.keys.toSet()));
+  // Multi-device: a member is online if ANY of their devices is visible.
+  // `onlineIdentitiesProvider` already folds device→master + invisibility.
+  final onlineIdentities = ref.watch(onlineIdentitiesProvider);
   final localPeerId = ref.watch(identityProvider).peerId;
-  final invisiblePeers = ref.watch(invisiblePeersProvider);
   final amInvisible = ref.watch(invisibleModeProvider);
 
   return membersAsync.when(
@@ -308,15 +310,13 @@ final _serverMemberEntriesProvider = Provider.family
       final online = members
           .where((m) {
             if (m.peerId == localPeerId) return !amInvisible;
-            return peerIds.contains(m.peerId) &&
-                !invisiblePeers.contains(m.peerId);
+            return onlineIdentities.contains(m.peerId);
           })
           .toList();
       final offline = members
           .where((m) {
             if (m.peerId == localPeerId) return amInvisible;
-            return !peerIds.contains(m.peerId) ||
-                invisiblePeers.contains(m.peerId);
+            return !onlineIdentities.contains(m.peerId);
           })
           .toList();
 
