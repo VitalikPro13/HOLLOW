@@ -1,9 +1,20 @@
 # Multi-Node Test Harness — Handoff & Continuation Plan (Step 9B-i)
 
-**Status:** ✅ FIRST TEST GREEN (2026-06-19). The Olm KeyBundle glare deadlock (Fix B) is fixed
+**Status:** ✅ RUNGS 1 + 2 DONE (2026-06-19). Glare fix + inspectors committed (`82eefdc`). Rung 2
+(servers + channels + MLS + the `DebugSnapshot` live-crypto inspector) GREEN: `server_join_forms_mls
+_and_channel_message_decrypts` drives owner-creates-server → joiner-joins → MLS group forms across
+both device leaves at the same epoch → owner's MLS-encrypted channel message decrypts on the joiner,
+asserted through every inspector layer (member panel UI + raw CRDT master-keys + raw MLS device-leaves
++ live MLS epoch + Olm status + decrypted channel row). Full suite 340/340, clippy clean, production
+build clean (cfg(test) gating verified). Next: rung 3 (device lifecycle: link sibling, revoke, ghost
+cutoff) + ring-2 control plane (call/VC signal routing, file-request handshake, shard assignment).
+
+**Below: the original Fix B handoff, kept for history.**
+
+**Status (Fix B, historical):** ✅ FIRST TEST GREEN. The Olm KeyBundle glare deadlock (Fix B) is fixed
 and a mock-fidelity gap (offline node never got `WsEvent::Disconnected`) was closed. The
-`peer_fallback_recovers_own_sends_correct_direction` test passes; full suite 339/339 green; clippy
-clean. Regression-guard verified (reverting the `mine`-inversion fix makes the test fail on the
+`peer_fallback_recovers_own_sends_correct_direction` test passes. Regression-guard verified
+(reverting the `mine`-inversion fix makes the test fail on the
 wrong sides + sig-verify, then re-applying passes). **NOT committed** yet. The scaffold is now the
 working foundation for testing the entire app — next is expanding the test set (§4 step 8).
 

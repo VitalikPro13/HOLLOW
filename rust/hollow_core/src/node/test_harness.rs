@@ -515,6 +515,51 @@ impl TestNode {
         keys
     }
 
+    // --- Live crypto state (queries the running event loop) ----------------
+
+    /// Snapshot the node's LIVE in-memory MLS/Olm state (owned by the running
+    /// event loop). Round-trips a `DebugSnapshot` command over the oneshot.
+    /// Returns `None` if the loop didn't reply within the timeout.
+    pub(crate) async fn debug_snapshot(&self) -> Option<super::types::DebugSnapshotReply> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(NodeCommand::DebugSnapshot { reply: tx })
+            .await
+            .ok()?;
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+            .await
+            .ok()?
+            .ok()
+    }
+
+    /// The MLS group's leaf DEVICE ids for `server_id` (raw, device-keyed — the
+    /// truth under the master-keyed member panel). Empty if no group / no reply.
+    pub(crate) async fn mls_members(&self, server_id: &str) -> Vec<String> {
+        let mut v = self
+            .debug_snapshot()
+            .await
+            .and_then(|s| s.mls_members.get(server_id).cloned())
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    /// The current MLS epoch for `server_id` (None if no group / no reply).
+    pub(crate) async fn mls_epoch(&self, server_id: &str) -> Option<u64> {
+        self.debug_snapshot()
+            .await
+            .and_then(|s| s.mls_epoch.get(server_id).copied())
+    }
+
+    /// Olm session status with a peer DEVICE id: "none" | "unconfirmed" |
+    /// "confirmed" | "absent" (no session object at all).
+    pub(crate) async fn olm_status(&self, device_peer_id: &str) -> String {
+        self.debug_snapshot()
+            .await
+            .and_then(|s| s.olm_sessions.get(device_peer_id).cloned())
+            .unwrap_or_else(|| "absent".to_string())
+    }
+
     // --- Presence (UI layer, read from the authoritative relay) ------------
 
     /// The set of master identities this node would show as ONLINE (online dots /
@@ -669,6 +714,33 @@ fn drain_events(node: &mut TestNode) {
 
 async fn sleep_ms(ms: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
+
+/// Drive `CreateServer` on `node` and return the new `server_id` (captured from
+/// the `ServerCreated` event the owner emits). The default `#general` channel id
+/// is `format!("{}-general", &server_id[..8])`.
+async fn create_server_and_wait(node: &mut TestNode, name: &str) -> String {
+    node.cmd_tx
+        .send(NodeCommand::CreateServer { name: name.to_string() })
+        .await
+        .unwrap();
+    let mut server_id = None;
+    let ok = wait_event(node, std::time::Duration::from_secs(3), |ev| {
+        if let NetworkEvent::ServerCreated { server_id: sid, .. } = ev {
+            server_id = Some(sid.clone());
+            true
+        } else {
+            false
+        }
+    })
+    .await;
+    assert!(ok, "owner should emit ServerCreated");
+    server_id.expect("ServerCreated carried a server_id")
+}
+
+/// The default `#general` channel id for a server.
+fn general_channel_of(server_id: &str) -> String {
+    format!("{}-general", &server_id[..8.min(server_id.len())])
 }
 
 // ---------------------------------------------------------------------------
@@ -851,4 +923,133 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
         "earliest message must be our own C-send (correct order), got {:?}",
         earliest.text
     );
+}
+
+// ---------------------------------------------------------------------------
+// Rung 2: a friend JOINS a server, the MLS group forms across both nodes, and
+// an encrypted channel message DECRYPTS on the joiner's device. This is the
+// Step-6 multi-device-MLS surface — the biggest untested area — driven and
+// inspected end to end (CRDT member panel + raw MLS leaves + live MLS epoch +
+// decrypted channel message), no live devices.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn server_join_forms_mls_and_channel_message_decrypts() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // O = owner (single device), J = joiner (single device). Both plain
+    // single-device identities (device == master) — the common case.
+    const O_MASTER: u8 = 30;
+    const J_MASTER: u8 = 40;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    // Befriend O <-> J (so Olm key exchange + presence work as in production;
+    // server join needs a live Olm session for the direct handshake messages).
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1500).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    // Let Olm sessions confirm bidirectionally before the join handshake rides them.
+    sleep_ms(4000).await;
+
+    // Olm sanity (live-state inspector): O <-> J sessions are confirmed.
+    assert_eq!(
+        o.olm_status(&j.device_id).await,
+        "confirmed",
+        "owner must hold a confirmed Olm session with the joiner before join"
+    );
+
+    // --- Owner creates a server (+ implicit #general channel) ---
+    let server_id = create_server_and_wait(&mut o, "Test Server").await;
+    let general = general_channel_of(&server_id);
+    sleep_ms(300).await;
+
+    // Owner has an MLS group with itself as the sole leaf at epoch 0.
+    assert_eq!(
+        o.mls_members(&server_id).await,
+        vec![o.device_id.clone()],
+        "owner is the sole MLS leaf right after CreateServer"
+    );
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // --- Joiner joins the server ---
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .await
+        .unwrap();
+
+    // Joiner should complete the CRDT join (ServerJoined) first…
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should emit ServerJoined");
+
+    // …then the MLS handshake (KeyPackage → 2s batch timer → Welcome) forms the
+    // group on the joiner. Give the 2s mls_batch_timer room to fire after the KP.
+    sleep_ms(5000).await;
+
+    // --- MLS group formed across BOTH nodes (raw device-keyed leaves) ---
+    let owner_leaves = o.mls_members(&server_id).await;
+    let joiner_leaves = j.mls_members(&server_id).await;
+    let expected = {
+        let mut v = vec![o.device_id.clone(), j.device_id.clone()];
+        v.sort();
+        v
+    };
+    assert_eq!(owner_leaves, expected, "owner's MLS group must contain both device leaves");
+    assert_eq!(joiner_leaves, expected, "joiner's MLS group must contain both device leaves");
+    // Both at the same (post-add) epoch.
+    assert!(o.mls_epoch(&server_id).await.unwrap_or(0) >= 1, "owner epoch advanced past the add");
+    assert_eq!(
+        o.mls_epoch(&server_id).await,
+        j.mls_epoch(&server_id).await,
+        "owner and joiner must be at the same MLS epoch"
+    );
+
+    // --- Member panel (UI layer): both see two MASTER-keyed members, online ---
+    let panel = j.member_panel(&server_id, &relay);
+    let masters: Vec<String> = panel.iter().map(|r| r.master.clone()).collect();
+    assert!(masters.contains(&o_master) && masters.contains(&j_master),
+        "joiner's member panel shows both masters, got {masters:?}");
+    assert!(panel.iter().all(|r| r.online), "both members online in the panel");
+    // Raw layer: CRDT member keys are MASTERS, not device ids (canonicalize_members).
+    assert_eq!(j.raw_crdt_member_keys(&server_id), {
+        let mut v = vec![o_master.clone(), j_master.clone()]; v.sort(); v
+    }, "CRDT members must be master-keyed");
+
+    drain_events(&mut j);
+
+    // --- Owner sends an MLS-encrypted channel message; joiner DECRYPTS it ---
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "hello channel".to_string(),
+            message_id: "ch-msg-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+
+    let got = wait_event(&mut j, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "hello channel")
+    })
+    .await;
+    assert!(got, "joiner must receive + decrypt the channel message");
+    sleep_ms(200).await;
+
+    // Channel-pane inspector: the decrypted message is stored, attributed to the
+    // owner's MASTER, on the receive side (is_mine=false).
+    let msgs = j.channel_messages(&server_id, &general);
+    let row = msgs.iter().find(|m| m.text == "hello channel").expect("message stored");
+    assert_eq!(row.sender_master, o_master, "channel message attributed to owner master");
+    assert!(!row.is_mine, "received message is not is_mine on the joiner");
 }

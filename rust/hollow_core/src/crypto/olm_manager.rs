@@ -214,6 +214,13 @@ impl OlmManager {
         self.sessions.contains_key(peer_id) && self.outbound_only.contains(peer_id)
     }
 
+    /// TEST-ONLY: enumerate the peer DEVICE ids we hold any Olm session for, so
+    /// the multi-node harness can snapshot session status across all peers.
+    #[cfg(test)]
+    pub fn session_peer_ids(&self) -> Vec<String> {
+        self.sessions.keys().cloned().collect()
+    }
+
     /// Remove an existing session (e.g., to replace it).
     pub fn remove_session(&mut self, peer_id: &str) {
         self.sessions.remove(peer_id);

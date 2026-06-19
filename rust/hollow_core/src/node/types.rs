@@ -654,6 +654,30 @@ pub(crate) enum NodeCommand {
     ShareRemove { root_hash: String, delete_file: bool },
     /// Enumerate persisted shares; result returned via NetworkEvent::ShareList.
     ShareList,
+
+    /// TEST-ONLY: read a live snapshot of the event loop's in-memory MLS/Olm
+    /// state (which the running loop owns and is otherwise unreadable from
+    /// outside) and reply on the oneshot. Never sent in production — the variant
+    /// does not exist in release builds. Used by the multi-node test harness to
+    /// inspect MLS group membership / epoch and Olm session status.
+    #[cfg(test)]
+    DebugSnapshot {
+        reply: tokio::sync::oneshot::Sender<DebugSnapshotReply>,
+    },
+}
+
+/// TEST-ONLY: a snapshot of a node's live in-memory crypto state, answered by
+/// the event loop for the harness's MLS/Olm inspectors.
+#[cfg(test)]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DebugSnapshotReply {
+    /// server_id -> the MLS group's leaf DEVICE ids (device-keyed, the raw truth
+    /// under the master-keyed CRDT member panel).
+    pub mls_members: std::collections::HashMap<String, Vec<String>>,
+    /// server_id -> current MLS epoch.
+    pub mls_epoch: std::collections::HashMap<String, u64>,
+    /// peer DEVICE id -> Olm session status: "none" | "unconfirmed" | "confirmed".
+    pub olm_sessions: std::collections::HashMap<String, String>,
 }
 
 // -- Wire protocol types (v2: encrypted) --

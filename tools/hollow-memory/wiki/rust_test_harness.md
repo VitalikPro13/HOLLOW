@@ -68,9 +68,13 @@ The GAP between the two layers is where multi-device bugs hide, so both exist on
 - **Raw layer** (device-keyed underlying truth → assert the invariant beneath the UI when it diverges):
   `raw_crdt_member_keys` (should be MASTER ids; a leaked device id = a `canonicalize_members` bug),
   `MockRelay::online_devices`/`room_devices`.
-- **Deferred (rung 2):** live MLS/Olm in-memory inspectors (`mls_members`, `mls_epoch`, `olm_status`) —
-  those managers are owned by the running event loop; add via a `DebugSnapshot` NodeCommand the loop
-  answers from its LIVE managers when the server/channel scenarios need it.
+- **Live crypto (async, via `DebugSnapshot`):** `TestNode::mls_members(sid)` (raw device leaves),
+  `mls_epoch(sid)`, `olm_status(device)` ("none"/"unconfirmed"/"confirmed"/"absent"), `debug_snapshot()`.
+  These round-trip a `#[cfg(test)] NodeCommand::DebugSnapshot { reply: oneshot }` that the event loop
+  answers from its LIVE in-memory `mls`/`olm` (owned by the loop, otherwise unreadable). The variant +
+  its dispatch arm are `cfg(test)`-gated so they don't exist in release (the command match has no
+  wildcard; production build verified clean). Olm enumeration uses a `cfg(test) OlmManager::
+  session_peer_ids()`. Reply struct: `types::DebugSnapshotReply`.
 
 ## Helpers + serialization
 
@@ -85,8 +89,29 @@ The GAP between the two layers is where multi-device bugs hide, so both exist on
 - Tests set `HOLLOW_DATA_DIR` to a throwaway tempdir so no stray global-data-dir path touches the
   developer's real `~/.hollow` DB.
 
+## Build ladder
+
+rung1 inspectors ✅ → rung2 servers+channels+MLS ✅ → rung3 device lifecycle (link sibling, revoke,
+ghost cutoff) → ring-2 control plane (call/VC signal routing, file-request handshake, shard assignment).
+Coverage line (ring 1/2/3, what's coverable) in `reports/HARNESS_COVERAGE_MAP.md`.
+
+**Server-join + MLS handshake (rung 2) sequence** (2-node, owner O + joiner J; room code == server_id;
+default channel == `{server_id[..8]}-general`, non-public): J `JoinServer` → JoinRoom → relay
+`RoomMembers` → J sends `ServerJoinRequest` direct to O → O adds `MemberAdded{J_master}` CRDT op, sends
+`ServerStateSnapshot` + `SyncResponse` + `KeyRequest` direct → J adopts snapshot, completes join
+(`ServerJoined`), sends `MlsKeyPackage` direct to O → O queues it, **the 2s `mls_batch_timer` fires** →
+O `add_members_batch` → `MlsWelcome` direct to J (+ `MlsCommit` to existing leaves) → J `join_from_welcome`
+forms its group. **Both leaves at the same epoch.** Then `SendChannelMessage` (non-public) → MLS-encrypt
+→ `SendToRoomTopic` (mock treats as room broadcast) → receiver `mls.decrypt` → `ChannelMessageReceived`.
+Owner is always the MLS coordinator in 2-node. **Sleep ≥~4-5s after JoinServer** so the batch timer
+ticks AFTER the KeyPackage is queued (Welcome only goes out post-queue).
+
 ## Current tests
 
+- `server_join_forms_mls_and_channel_message_decrypts` — owner creates a server, friend joins, MLS group
+  forms across both device leaves at the same epoch, owner's MLS-encrypted channel message decrypts on
+  the joiner. Asserts every layer: member panel (UI, master-keyed, online) + raw CRDT master-keys + raw
+  MLS device-leaves + live epoch + Olm status + decrypted channel row.
 - `peer_fallback_recovers_own_sends_correct_direction` — A (single-device friend) + B/C (share master
   M). C sends DMs to A while B offline; B reconnects + C offline; B fires `DmSyncRequest{both_directions}`;
   A re-serves B's OWN stranded sends. Asserts (through the inspectors) B recovers all on the CORRECT

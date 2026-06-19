@@ -1576,6 +1576,34 @@ async fn run_event_loop(
                             }).await;
                         }
                     }
+
+                    // TEST-ONLY: snapshot live in-memory MLS/Olm state for the
+                    // multi-node harness (these managers are owned by this loop and
+                    // are otherwise unreadable from a TestNode). Reads the SAME live
+                    // state the production paths use — no persisted snapshot lag.
+                    #[cfg(test)]
+                    NodeCommand::DebugSnapshot { reply } => {
+                        let mut snap = super::types::DebugSnapshotReply::default();
+                        if let Some(ref mls_mgr) = mls {
+                            for sid in mls_mgr.group_ids() {
+                                snap.mls_members.insert(sid.clone(), mls_mgr.group_members(&sid));
+                                if let Ok(ep) = mls_mgr.epoch(&sid) {
+                                    snap.mls_epoch.insert(sid.clone(), ep);
+                                }
+                            }
+                        }
+                        for peer in olm.session_peer_ids() {
+                            let status = if olm.has_confirmed_session(&peer) {
+                                "confirmed"
+                            } else if olm.has_unconfirmed_session(&peer) {
+                                "unconfirmed"
+                            } else {
+                                "none"
+                            };
+                            snap.olm_sessions.insert(peer, status.to_string());
+                        }
+                        let _ = reply.send(snap);
+                    }
                 }
             }
             // Handle signaling service events (bootstrap peer discovery).
