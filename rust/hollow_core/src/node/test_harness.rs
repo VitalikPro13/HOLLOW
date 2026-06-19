@@ -651,6 +651,13 @@ async fn spawn_node_with_friends(
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("messages.db").to_str().unwrap().to_string();
 
+    // Mirror production `start_node`: run the one-time storage-hygiene migration in
+    // the single-connection window BEFORE any store/actor opens. (In production
+    // this runs in `api::network::start_node`; the harness uses `spawn_node_mock`
+    // which bypasses that path, so do it here for parity + to exercise the code.)
+    crate::storage::MessageStore::migrate_auto_vacuum_once(&db_path, &passphrase)
+        .expect("auto_vacuum migration");
+
     // Fresh Olm account + seeded friendships persisted to this node's DB BEFORE
     // the node connects (mirrors start_node loading an existing DB).
     let olm = {

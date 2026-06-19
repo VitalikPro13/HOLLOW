@@ -1116,6 +1116,16 @@ pub fn start_node() -> Result<String, String> {
         .ok_or("Invalid path encoding")?
         .to_string();
 
+    // One-time storage hygiene (legacy `auto_vacuum=0` → INCREMENTAL). MUST run
+    // HERE — this is the single-connection window: it precedes the first
+    // MessageStore::open below AND the CryptoStore/CrdtStore actors (opened later
+    // in their own blocking threads). Doing the VACUUM/page-1 probe while those
+    // long-lived connections are open raced the SQLCipher codec and logged
+    // `hmac check failed for pgno=1`. Non-fatal: pure disk hygiene.
+    if let Err(e) = MessageStore::migrate_auto_vacuum_once(&db_path, &passphrase) {
+        hollow_log!("[HOLLOW] auto_vacuum migration skipped: {e}");
+    }
+
     // Load Olm state from DB (synchronous, on FFI thread).
     let olm = {
         let store = MessageStore::open(&db_path, &passphrase)?;

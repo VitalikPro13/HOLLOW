@@ -103,15 +103,15 @@ impl MessageStore {
         conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", passphrase))
             .map_err(|e| format!("Failed to set encryption key: {e}"))?;
 
-        // Enable incremental auto-vacuum. For existing databases (auto_vacuum=0),
-        // convert with a one-time full VACUUM. New databases get it automatically.
-        let auto_vac: i32 = conn
-            .query_row("PRAGMA auto_vacuum;", [], |r| r.get(0))
-            .unwrap_or(0);
-        if auto_vac == 0 {
-            let _ = conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;");
-        }
-        let _ = conn.execute_batch("PRAGMA incremental_vacuum(100);");
+        // NOTE: auto_vacuum conversion + incremental reclaim is NOT done here.
+        // `open()` is the universal path (~139 transient call sites) and the
+        // CrdtStore/CryptoStore actors hold long-lived connections to the SAME
+        // WAL file — running `PRAGMA auto_vacuum` (a page-1 read) + `VACUUM` (an
+        // exclusive-lock full-file rewrite) on every concurrent open raced the
+        // SQLCipher codec and spewed `hmac check failed for pgno=1` to stderr
+        // (harmless — swallowed — but noisy in prod + the test harness). The
+        // one-time legacy migration now runs ONCE at startup in a single-connection
+        // window via `migrate_auto_vacuum_once` (see api/network.rs::start_node).
 
         // Journal mode: WAL everywhere EXCEPT iOS.
         //
@@ -750,6 +750,36 @@ impl MessageStore {
         .map_err(|e| format!("Failed to create device_labels table: {e}"))?;
 
         Ok(MessageStore { conn })
+    }
+
+    /// One-time storage hygiene, run ONCE at node startup while the DB is held by
+    /// a SINGLE connection — before the CryptoStore/CrdtStore actors and any
+    /// transient `open()` calls exist. Converts a legacy database created with
+    /// `auto_vacuum=0` to INCREMENTAL (which requires a full `VACUUM` — an
+    /// exclusive-lock, whole-file rewrite) and does one incremental reclaim.
+    ///
+    /// MUST run in a single-connection window: the `VACUUM` takes an exclusive
+    /// lock and the page-1 `auto_vacuum` read races any other connection's
+    /// SQLCipher codec, producing spurious `hmac check failed for pgno=1` noise.
+    /// Idempotent — once converted the DB reads `auto_vacuum=INCREMENTAL` and the
+    /// `VACUUM` never runs again. A missing/locked DB is a non-fatal skip (caller
+    /// logs); correctness never depends on it (incremental vacuum is pure disk
+    /// hygiene, not data integrity).
+    pub fn migrate_auto_vacuum_once(path: &str, passphrase: &str) -> Result<(), String> {
+        let conn = Connection::open(path)
+            .map_err(|e| format!("Failed to open database for migration: {e}"))?;
+        conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", passphrase))
+            .map_err(|e| format!("Failed to set encryption key: {e}"))?;
+
+        let auto_vac: i32 = conn
+            .query_row("PRAGMA auto_vacuum;", [], |r| r.get(0))
+            .unwrap_or(0);
+        if auto_vac == 0 {
+            conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;")
+                .map_err(|e| format!("auto_vacuum migration failed: {e}"))?;
+        }
+        let _ = conn.execute_batch("PRAGMA incremental_vacuum(100);");
+        Ok(())
     }
 
     pub fn wal_checkpoint(&self) -> Result<(), String> {

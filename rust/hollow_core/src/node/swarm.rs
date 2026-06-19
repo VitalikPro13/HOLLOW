@@ -1688,23 +1688,32 @@ async fn run_event_loop(
                                 });
                             }
                         }
-                        // Verify local shard integrity on startup.
-                    // Removes DB records for shards whose files are missing or corrupt.
-                    {
-                        let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
-                        if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &db_passphrase, &vault_dir) {
-                            for server_id in server_states.keys() {
-                                if let Ok(bad_keys) = cs.verify_server_shards(server_id) {
-                                    if !bad_keys.is_empty() {
-                                        hollow_log!("[HOLLOW-VAULT] {} corrupt/missing shards in {server_id}, cleaning DB records", bad_keys.len());
-                                        for key in &bad_keys {
-                                            let _ = cs.delete_shard(server_id, key);
+                        // Verify local shard integrity on startup. Removes DB records
+                        // for shards whose files are missing or corrupt.
+                        //
+                        // Gated on having servers: with none, the loop below has
+                        // nothing to verify, yet opening a `ContentStore` (a SEPARATE
+                        // SQLCipher connection that runs its own `PRAGMA key` page-1
+                        // check) while the MessageStore/CrdtStore/CryptoStore
+                        // connections are concurrently live raced the codec and
+                        // logged a harmless `hmac check failed for pgno=1` on every
+                        // connect. A node in ≥1 server has real shard data (page 1
+                        // exists) so the legitimate open doesn't race.
+                        if !server_states.is_empty() {
+                            let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
+                            if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &db_passphrase, &vault_dir) {
+                                for server_id in server_states.keys() {
+                                    if let Ok(bad_keys) = cs.verify_server_shards(server_id) {
+                                        if !bad_keys.is_empty() {
+                                            hollow_log!("[HOLLOW-VAULT] {} corrupt/missing shards in {server_id}, cleaning DB records", bad_keys.len());
+                                            for key in &bad_keys {
+                                                let _ = cs.delete_shard(server_id, key);
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
                         // Re-register push token + channel push prefs on reconnect.
                         if let Some((ref tok, ref plat)) = push_token {
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::RegisterPushToken {
