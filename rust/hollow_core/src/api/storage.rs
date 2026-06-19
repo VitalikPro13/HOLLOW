@@ -238,6 +238,18 @@ pub fn count_dm_messages(peer_id: String) -> Result<u32, String> {
     Ok(ms.count_dm_messages(&peer_id))
 }
 
+/// Count all visible DM messages across every conversation. Drives the Home
+/// stats card — an honest multi-device sync-comparison number (DMs fully
+/// converge across a person's devices; channel messages are lazy-paged and
+/// would diverge, so they are deliberately not counted there).
+#[frb]
+pub fn count_all_dm_messages() -> Result<u32, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    Ok(ms.count_all_dm_messages())
+}
+
 /// Count all channel messages (including hidden/deleted).
 #[frb]
 pub fn count_channel_messages_ffi(server_id: String, channel_id: String) -> Result<u32, String> {

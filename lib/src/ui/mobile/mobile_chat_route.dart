@@ -289,12 +289,23 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     _urlDebounce?.cancel();
     _urlDebounce = Timer(const Duration(milliseconds: 600), _detectUrl);
 
-    if (text.isEmpty || !widget.isDm) return;
+    if (text.isEmpty) return;
     final now = DateTime.now();
     if (_lastTypingSent != null && now.difference(_lastTypingSent!).inSeconds < 3) return;
     _lastTypingSent = now;
     try {
-      network_api.sendTypingIndicator(serverId: '', channelId: widget.peerId!);
+      if (widget.isDm) {
+        network_api.sendTypingIndicator(serverId: '', channelId: widget.peerId!);
+      } else {
+        // Server channel typing: same path the desktop ChannelChatPane uses
+        // (mobile previously only sent DM typing, so a phone never showed as
+        // "typing…" in a server channel — desktop sibling did, which looked
+        // like a multi-device bug but was a mobile send-side gap).
+        network_api.sendTypingIndicator(
+          serverId: widget.serverId!,
+          channelId: widget.channelId!,
+        );
+      }
     } catch (_) {}
   }
 
@@ -1629,6 +1640,12 @@ class _MobileChatHeader extends ConsumerWidget {
       title = '# ${channelName ?? 'Channel'}';
     }
 
+    // For a channel, show the server name as a subtitle so the user knows
+    // which server this channel belongs to (mirrors the DM Online/Offline line).
+    final serverName = (!isDm && serverId != null)
+        ? ref.watch(serverListProvider.select((m) => m[serverId]?.name))
+        : null;
+
     final isOnline = isDm && identityIsOnline(ref, peerId!);
 
     return Container(
@@ -1694,6 +1711,15 @@ class _MobileChatHeader extends ConsumerWidget {
                       style: HollowTypography.caption.copyWith(
                         color: isOnline ? hollow.success : hollow.textSecondary,
                       ),
+                    )
+                  else if (serverName != null && serverName.isNotEmpty)
+                    Text(
+                      serverName,
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
                 ],
               ),

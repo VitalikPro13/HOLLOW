@@ -1669,6 +1669,22 @@ impl MessageStore {
             .unwrap_or(0) as u32
     }
 
+    /// Count all visible DM messages across every peer. Used by the Home stats
+    /// card as a multi-device sync-comparison number: DMs fully converge across a
+    /// person's devices (fan-out + sibling backfill), unlike channel messages
+    /// which are lazy-paged per device and would diverge. Excludes hidden
+    /// (deleted) rows — deletion tombstones are per-device and would skew the
+    /// comparison.
+    pub fn count_all_dm_messages(&self) -> u32 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE hidden_at IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as u32
+    }
+
     pub fn count_channel_messages(
         &self,
         server_id: &str,

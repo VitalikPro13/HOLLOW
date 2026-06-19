@@ -387,6 +387,17 @@ Only shown when `!_hasPassword && _osKeychainAvailable`. Standalone device-level
 - **Copy button** (only shown when revealed): Ghost button with copy icon, copies mnemonic to clipboard, shows success toast.
 - **Warning**: AlertTriangle icon (warning color) + "Anyone with these words can access your account. Never share them." (11px caption, warning color).
 
+### YOUR DEVICES Section (`_DevicesSection` / `_DeviceRow`)
+
+`_DevicesSection` (a `ConsumerStatefulWidget`) lists every device linked to this account, sourced from `myDevicesProvider` (which derives from `deviceLinkProvider` — the Dart mirror of the Rust resolver — inverted against this device's master). `<= 1` device → a "Only this device is linked…" hint. Otherwise active devices render first, with offline/ghost devices behind a "Show all (N offline)" toggle (`_showAll`).
+
+**`initState` refresh (critical):** posts a frame callback that calls `deviceLinkProvider.refresh()` + `deviceLabelProvider.refresh()` + `ref.invalidate(localDevicePeerIdProvider)`. Without this, the list rendered empty/stale after an app restart — `deviceLinkProvider` is only warmed once at event-stream start (races node readiness) and on `DeviceListUpdated` network events, with no live listener while Settings is closed. The data was always persisted in the DB; only the Dart mirror was stale. The mobile twin (`mobile_settings_tab.dart:_DevicesSectionMobile`) does the same.
+
+**`_DeviceRow`** (per device): smartphone icon + label (or shortened peer id) + "This device" badge for the running device + `online`/`offline` subtitle. Action buttons (other devices only, hidden for "This device"):
+- **Sync from this device** (`LucideIcons.refreshCw`, teal when online) → `_syncFrom()`. Confirm dialog ("Pull servers and friends FROM this device onto THIS device… only adds what's missing, nothing removed, messages unaffected; must be online") → FFI `network_api.requestStateSync(sourceDeviceId: device.peerId)`. The tapped device is the SOURCE, this device is the DESTINATION. The source responds (`SiblingStateSyncRequest` handler in swarm.rs) by re-announcing all its servers (drives the destination's join flow → `ServerJoined` → list refresh) + re-sharing its friends. Servers + friends only, not messages. The deterministic escape hatch for when automatic sibling sync didn't converge.
+- **Rename** (`pencil`) → `_rename()` → `deviceLabelProvider.setLabel()` (local label, `device_labels` table).
+- **Remove** (`trash2`, error color) → `_remove()` → confirm → `network_api.revokeDevice()` (Step 7 revocation).
+
 ### ACCOUNT BACKUP Section
 
 Description: "Exports your identity, profile, servers, friends, and messages."

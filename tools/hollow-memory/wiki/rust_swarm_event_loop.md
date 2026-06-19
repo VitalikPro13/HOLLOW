@@ -220,6 +220,7 @@ Critical path — triggers most of the sync machinery:
    - Re-broadcasts voice channel joins to reconnecting peer.
    - Sends DmSyncRequest for DM history.
    - Requests proxy profiles: for offline server members without cached profiles, sends `ProfileRequestFor` to this peer (max 10 per PeerJoined). Relayed profile includes avatar but no banner.
+   - **Sibling server re-announce (2026-06-19):** if the joining peer is in our OWN inbox (`inbox:{master}` — only our own devices ever join it), RE-ANNOUNCE every non-deleted `server_states` entry to it via `SiblingServerAnnounce`/`SendDirect`. Closes the offline-reconnect gap (`SiblingServerAnnounce` is a one-shot live msg; a sibling offline at create/join never learned the server). Receiver is idempotent.
 7. If room matches a pending server join: sends ServerJoinRequest.
 
 ### WsEvent::PeerLeft { room, peer_id }
@@ -238,6 +239,7 @@ Fires when we join a room — provides the full member list. This is the relay's
 3. Initializes/updates gossip overlay if server has 6+ members.
 4. On first RoomMembers event: broadcasts profile to all peers.
 5. For each peer: same sync logic as PeerJoined (CRDT sync, channel sync registration, Olm session establishment, DM sync).
+6. **Sibling server re-announce (reconnecting side):** mirror of the PeerJoined re-announce. RoomMembers fires on the device that JUST reconnected and lists peers already present, so PeerJoined never fires for them here — without this branch, servers created/joined while WE were offline would never sync back. If a listed peer is in our `inbox:{master}`, re-announce every non-deleted server to it via `SiblingServerAnnounce`.
 
 ### WsEvent::Message / DirectMessage { room, from, data }
 The main incoming message path:
@@ -276,6 +278,8 @@ These are handled directly in `handle_incoming_request()`:
 - `ServerJoinRejected` — dedups the rejection popup: a join request reaches EVERY online member, so each sends its own rejection. Only emits `TwitchJoinRejected` (the generic join-rejection event) when `pending_server_joins.remove(&server_id).is_some()` — i.e. the first rejection for an in-flight join. Subsequent rejections find the key already gone and are no-ops. Mirrors the successful-join path's `remove().is_some()` guard.
 - `ServerDeleteBroadcast` — verifies sender is Owner, removes server state.
 - `MemberKickBroadcast` — verifies sender has KICK_MEMBERS and outranks us, removes server state.
+- `SiblingServerAnnounce { server_id }` — (multi-device) one of OUR OWN devices is telling us to onboard a server. `same_identity` only. Returns early if already-`pending_server_joins` or tombstoned. **Otherwise ALWAYS runs the inline join flow — even if we ALREADY hold the server** (deliberate, 2026-06-19; the previous `contains_key`→`ServerUpdated` nudge was unreliable at refreshing the UI list). The join completes with 0 new ops when pending (`applied > 0 || pending_server_joins.contains_key`) and fires `NetworkEvent::ServerJoined` → Dart `onServerCreated` (UNCONDITIONAL list insert). The responder's same-identity `ServerJoinRequest` fast-path re-serves the snapshot idempotently; MLS is not re-keyed. Logs `running join flow (have_it=…)`.
+- `SiblingStateSyncRequest` — (multi-device MANUAL sync, Security→Your Devices "Sync from this device") `same_identity` only. The SOURCE responds by announcing every non-deleted server via `SiblingServerAnnounce` (drives the requester's join flow above) + re-sharing its friend list via `FriendListSync`. Servers + friends only. Triggered by the requester's `NodeCommand::RequestStateSync { source_device_id }` (FFI `request_state_sync`), which targets the source via `inbox:{master}` (fallback: any room listing it). Logs `Manual state-sync from …: announced N server(s) + M friend(s)`.
 
 **Channel sync (plaintext):**
 - `ChannelSyncRequest` — queries DB for messages since timestamp (per-sender or legacy), responds with `ChannelSyncBatch` via MLS or Olm.

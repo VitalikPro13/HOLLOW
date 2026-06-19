@@ -93,6 +93,16 @@ Future<void> revokeDevice({required String devicePeerId}) => RustLib
     .api
     .crateApiNetworkRevokeDevice(devicePeerId: devicePeerId);
 
+/// Multi-device MANUAL state sync (Security → Your Devices "Sync from this
+/// device"). Ask the chosen SOURCE sibling (`source_device_id`) to re-announce
+/// all its servers + re-share its friends to THIS device. Deterministic,
+/// user-triggered escape hatch for when the automatic sibling sync didn't
+/// converge. The source must be online.
+Future<void> requestStateSync({required String sourceDeviceId}) => RustLib
+    .instance
+    .api
+    .crateApiNetworkRequestStateSync(sourceDeviceId: sourceDeviceId);
+
 /// Set (or clear, when `label` is empty) the local human label for a device.
 /// Local-only — not synced or signed, so a person's two devices may show different
 /// labels for the same third device.

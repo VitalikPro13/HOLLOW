@@ -812,6 +812,43 @@ async fn run_event_loop(
                         }
                     }
 
+                    NodeCommand::RequestStateSync { source_device_id } => {
+                        // Manual sync: ask a chosen SOURCE sibling to push us its
+                        // servers + friends. SECURITY: only meaningful for our own
+                        // device; the responder verifies same_identity anyway.
+                        hollow_log!(
+                            "[HOLLOW-SYNC] Manual state-sync request → source device {source_device_id}"
+                        );
+                        let req = serde_json::to_vec(&HavenMessage::SiblingStateSyncRequest)
+                            .unwrap_or_default();
+                        if !req.is_empty() {
+                            // Target the source device directly via our own inbox room
+                            // (only our devices are in inbox:{master}). Fall back to any
+                            // room that currently lists it.
+                            let own_inbox = format!("inbox:{local_peer_str}");
+                            let room = if ws_room_peers.get(&own_inbox)
+                                .is_some_and(|p| p.contains(&source_device_id))
+                            {
+                                Some(own_inbox)
+                            } else {
+                                ws_room_peers.iter()
+                                    .find(|(_, peers)| peers.contains(&source_device_id))
+                                    .map(|(r, _)| r.clone())
+                            };
+                            if let Some(room) = room {
+                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                                    room_code: room,
+                                    target_peer: source_device_id.clone(),
+                                    data: req,
+                                });
+                            } else {
+                                hollow_log!(
+                                    "[HOLLOW-SYNC] Source device {source_device_id} not in any room — is it online?"
+                                );
+                            }
+                        }
+                    }
+
                     NodeCommand::LeaveServer { server_id } => {
                         if sync_handler::handle_leave_server(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
@@ -2016,6 +2053,36 @@ async fn run_event_loop(
                                             &db_path, &db_passphrase,
                                         );
 
+                                        // Multi-device (Step 9D follow-up): RE-ANNOUNCE every server
+                                        // we belong to, to this freshly-online sibling. A server
+                                        // CREATE/JOIN only announces to siblings that are ONLINE at
+                                        // the time (SiblingServerAnnounce is a one-shot live message,
+                                        // not a CRDT op served on reconnect like ServerDeleted) — so a
+                                        // sibling that was OFFLINE when we created or joined a server
+                                        // never learned it exists. This reconnect re-announce closes
+                                        // that gap: the sibling's handler is idempotent (already a
+                                        // member / already joining → no-op), so re-announcing owned
+                                        // AND joined servers every time a sibling appears is safe and
+                                        // self-healing. Skip tombstoned servers (the sibling reconciles
+                                        // deletion via the grow-only CRDT path).
+                                        for (sid, st) in server_states.iter() {
+                                            if st.is_deleted() { continue; }
+                                            let announce = serde_json::to_vec(
+                                                &HavenMessage::SiblingServerAnnounce { server_id: sid.clone() },
+                                            ).unwrap_or_default();
+                                            if !announce.is_empty() {
+                                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                                                    room_code: own_inbox.clone(),
+                                                    target_peer: peer_id.clone(),
+                                                    data: announce,
+                                                });
+                                            }
+                                        }
+                                        hollow_log!(
+                                            "[HOLLOW-CRDT] Re-announced {} server(s) to reconnected sibling {peer_id}",
+                                            server_states.values().filter(|s| !s.is_deleted()).count()
+                                        );
+
                                         // Multi-device link (Step 4): if WE are essentially empty
                                         // (a fresh mnemonic import) and a populated sibling is now
                                         // online, AUTO-REQUEST a full snapshot from it. The sibling
@@ -2551,6 +2618,38 @@ async fn run_event_loop(
                                         );
                                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                             let _ = store.remove_friend(pid_str);
+                                        }
+                                    }
+
+                                    // Multi-device (Step 9D follow-up): RE-ANNOUNCE our servers to a
+                                    // sibling already present in OUR inbox. This is the RECONNECTING
+                                    // side of the gap — the symmetric twin of the PeerJoined re-announce.
+                                    // RoomMembers fires on US (the device that just came back online)
+                                    // and lists peers already there, so PeerJoined never fires for that
+                                    // sibling on our side; without this, a sibling we created/joined a
+                                    // server on while WE were offline would never be told once we return.
+                                    // `inbox:{master}` is only ever joined by our own devices → the
+                                    // room match alone proves siblinghood. Receiver is idempotent.
+                                    {
+                                        let own_inbox = format!("inbox:{}", local_peer_str);
+                                        if room == own_inbox && pid_str.as_str() != device_peer_id {
+                                            for (sid, st) in server_states.iter() {
+                                                if st.is_deleted() { continue; }
+                                                let announce = serde_json::to_vec(
+                                                    &HavenMessage::SiblingServerAnnounce { server_id: sid.clone() },
+                                                ).unwrap_or_default();
+                                                if !announce.is_empty() {
+                                                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                                                        room_code: own_inbox.clone(),
+                                                        target_peer: pid_str.clone(),
+                                                        data: announce,
+                                                    });
+                                                }
+                                            }
+                                            hollow_log!(
+                                                "[HOLLOW-CRDT] Re-announced {} server(s) to sibling {pid_str} on reconnect (RoomMembers)",
+                                                server_states.values().filter(|s| !s.is_deleted()).count()
+                                            );
                                         }
                                     }
 
@@ -7513,11 +7612,30 @@ async fn handle_incoming_request(
                 hollow_log!("[HOLLOW-SECURITY] Ignored SiblingServerAnnounce from non-sibling {peer_str}");
                 return;
             }
-            // Already a member (or already joining) → nothing to do.
-            if server_states.contains_key(&server_id) || pending_server_joins.contains_key(&server_id) {
+            // Already joining → nothing to do (a SyncResponse will complete it and
+            // emit ServerJoined).
+            if pending_server_joins.contains_key(&server_id) {
                 return;
             }
-            hollow_log!("[HOLLOW-CRDT] Sibling {peer_str} announced server {server_id}; onboarding");
+            // A tombstoned server we still hold the shell of → ignore (deletion
+            // reconciles via the grow-only CRDT path, not a re-join).
+            if let Some(state) = server_states.get(&server_id) {
+                if state.is_deleted() { return; }
+            }
+            // ALWAYS run the inline join flow — even if we ALREADY hold the server.
+            // This is the deliberate choice (vs. a weaker ServerUpdated nudge that
+            // proved unreliable at refreshing the UI): the join flow ends in
+            // `Server join completed` → NetworkEvent::ServerJoined → Dart
+            // `onServerCreated`, which UNCONDITIONALLY inserts the server into
+            // serverListProvider. That is the exact path a live (both-online) create
+            // uses and the ONLY path observed to refresh the list reliably. For a
+            // server we already have, the same-identity ServerJoinRequest fast-path
+            // on the responder just re-serves the snapshot/ops (idempotent —
+            // message/op dedup), and the SyncResponse handler completes the pending
+            // join (it runs even with 0 new ops when a join is pending). MLS isn't
+            // re-keyed: we keep our existing leaf; the bootstrap KeyPackage only
+            // fires if we lack the group.
+            hollow_log!("[HOLLOW-CRDT] Sibling {peer_str} announced server {server_id}; running join flow (have_it={})", server_states.contains_key(&server_id));
             // Lightweight inline join (mirrors handle_join_server): join the rooms +
             // send a ServerJoinRequest to the announcer, which same-identity fast-paths
             // us (serves the snapshot + adds our MLS leaf). No twitch proof for a co-owner.
@@ -8593,6 +8711,54 @@ async fn handle_incoming_request(
                     }
                 }
             }
+        }
+
+        HavenMessage::SiblingStateSyncRequest => {
+            // Multi-device MANUAL state sync: our OWN other device (the user tapped
+            // "Sync from this device" on it, choosing US as the source) wants our
+            // full server + friend state. SECURITY: verified-self only.
+            if !super::resolver::same_identity(peer_str, local_peer_str) {
+                hollow_log!(
+                    "[HOLLOW-SYNC] Dropped SiblingStateSyncRequest from non-self peer {peer_str}"
+                );
+                return;
+            }
+            // 1) Announce EVERY non-deleted server we hold to the requester. Each
+            //    announce drives the requester's join flow → ServerJoined → its UI
+            //    list refresh (the proven path). Idempotent on the requester.
+            let mut announced = 0u32;
+            for (sid, st) in server_states.iter() {
+                if st.is_deleted() { continue; }
+                let announce = serde_json::to_vec(
+                    &HavenMessage::SiblingServerAnnounce { server_id: sid.clone() },
+                ).unwrap_or_default();
+                if !announce.is_empty() {
+                    super::crypto_handler::send_raw_to_peer(ws_cmd_tx, ws_room_peers, peer_str, announce);
+                    announced += 1;
+                }
+            }
+            // 2) Re-share our friend list so the requester converges friends too.
+            let mut friends_sent = 0usize;
+            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                if let Ok(friends) = store.load_friends(Some("accepted")) {
+                    if !friends.is_empty() {
+                        let entries: Vec<FriendListEntry> = friends
+                            .into_iter()
+                            .map(|(pid, status, direction, requested_at, _u)| FriendListEntry {
+                                peer_id: pid, status, direction, requested_at,
+                            })
+                            .collect();
+                        friends_sent = entries.len();
+                        super::crypto_handler::send_message_to_peer(
+                            ws_cmd_tx, ws_room_peers,
+                            peer_str, HavenMessage::FriendListSync { friends: entries },
+                        );
+                    }
+                }
+            }
+            hollow_log!(
+                "[HOLLOW-SYNC] Manual state-sync from {peer_str}: announced {announced} server(s) + {friends_sent} friend(s)"
+            );
         }
 
         // -- Multi-device link snapshot (Step 4) --

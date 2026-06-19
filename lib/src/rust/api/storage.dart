@@ -68,6 +68,13 @@ Future<List<StoredMessageEdit>> loadMessageEdits({
 Future<int> countDmMessages({required String peerId}) =>
     RustLib.instance.api.crateApiStorageCountDmMessages(peerId: peerId);
 
+/// Count all visible DM messages across every conversation. Drives the Home
+/// stats card — an honest multi-device sync-comparison number (DMs fully
+/// converge across a person's devices; channel messages are lazy-paged and
+/// would diverge, so they are deliberately not counted there).
+Future<int> countAllDmMessages() =>
+    RustLib.instance.api.crateApiStorageCountAllDmMessages();
+
 /// Count all channel messages (including hidden/deleted).
 Future<int> countChannelMessagesFfi({
   required String serverId,

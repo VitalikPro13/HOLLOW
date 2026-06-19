@@ -11,12 +11,15 @@ import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
+import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/news_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/relay_stats_provider.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
@@ -163,6 +166,161 @@ class MobileSettingsTab extends ConsumerWidget {
           subtitle: 'Version, relay status, news & legal',
           onTap: () =>
               _push(context, 'About', const _AboutTab(key: ValueKey('about'))),
+        ),
+
+        const SizedBox(height: HollowSpacing.lg),
+        Divider(
+          color: hollow.textSecondary.withValues(alpha: 0.50),
+          height: 1,
+        ),
+        const SizedBox(height: HollowSpacing.lg),
+
+        // Sync stats — same numbers as the desktop Home stats card, so this
+        // device can be eyeball-compared against another for sync. DM messages
+        // converge across a person's devices; channel messages are lazy-paged
+        // per device and intentionally not counted (they'd diverge).
+        const _MobileStatsCard(),
+      ],
+    );
+  }
+}
+
+/// Compact sync-stats card for the mobile Settings tab. Mirror of the desktop
+/// Home `_SyncStatsCard` — locally-knowable counts that converge across a
+/// person's devices, for at-a-glance multi-device sync comparison.
+class _MobileStatsCard extends ConsumerWidget {
+  const _MobileStatsCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final friends = ref.watch(friendsProvider);
+    final servers = ref.watch(serverListProvider);
+    final devices = ref.watch(myDevicesProvider);
+    // Recompute the DM count whenever the DM list changes.
+    ref.watch(lastDmMessageProvider);
+    final dmCount = ref.watch(_mobileDmCountProvider);
+
+    final friendCount =
+        friends.values.where((f) => f.status == 'accepted').length;
+    final devicesOnline = devices.where((d) => d.online).length;
+    final deviceCount = devices.length;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(HollowSpacing.md),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        border: Border.all(color: hollow.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(LucideIcons.chartColumn, size: 14,
+                  color: hollow.textSecondary),
+              const SizedBox(width: HollowSpacing.xs),
+              Text(
+                'Your Stats',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          _MobileStatRow(
+            hollow: hollow,
+            icon: LucideIcons.users,
+            label: 'Friends',
+            value: '$friendCount',
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          _MobileStatRow(
+            hollow: hollow,
+            icon: LucideIcons.server,
+            label: 'Servers',
+            value: '${servers.length}',
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          _MobileStatRow(
+            hollow: hollow,
+            icon: LucideIcons.messageSquare,
+            label: 'DM messages',
+            value: dmCount.maybeWhen(
+              data: (n) => '$n',
+              orElse: () => '…',
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          _MobileStatRow(
+            hollow: hollow,
+            icon: LucideIcons.smartphone,
+            label: 'Devices',
+            value: deviceCount > 1
+                ? '$devicesOnline / $deviceCount online'
+                : '1',
+            valueColor: deviceCount > 1
+                ? (devicesOnline == deviceCount
+                    ? hollow.success
+                    : hollow.warning)
+                : hollow.textPrimary,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// DM message count for the mobile stats card (see desktop `_dmMessageCountProvider`).
+final _mobileDmCountProvider = FutureProvider.autoDispose<int>((ref) async {
+  ref.watch(lastDmMessageProvider);
+  try {
+    return await storage_api.countAllDmMessages();
+  } catch (_) {
+    return 0;
+  }
+});
+
+class _MobileStatRow extends StatelessWidget {
+  final HollowTheme hollow;
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color? valueColor;
+
+  const _MobileStatRow({
+    required this.hollow,
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.valueColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 14, color: hollow.textSecondary),
+        const SizedBox(width: HollowSpacing.sm),
+        Text(
+          label,
+          style: HollowTypography.body.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 13,
+          ),
+        ),
+        const Spacer(),
+        Text(
+          value,
+          style: HollowTypography.body.copyWith(
+            color: valueColor ?? hollow.textPrimary,
+            fontWeight: FontWeight.w600,
+            fontSize: 13,
+          ),
         ),
       ],
     );
@@ -2678,6 +2836,22 @@ class _DevicesSectionMobileState extends ConsumerState<_DevicesSectionMobile> {
   bool _showAll = false;
 
   @override
+  void initState() {
+    super.initState();
+    // Re-pull the device list from the running node's resolver whenever this
+    // panel opens. The startup warm-up (event_provider) races node readiness and
+    // there's no live listener keeping deviceLinkProvider fresh while Settings is
+    // closed — so after an app restart the list would render empty/stale even
+    // though the data is persisted in the DB. Refreshing on mount fixes the
+    // "devices disappear after restart" bug.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(deviceLinkProvider.notifier).refresh();
+      ref.read(deviceLabelProvider.notifier).refresh();
+      ref.invalidate(localDevicePeerIdProvider);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final devices = ref.watch(myDevicesProvider);
@@ -2753,6 +2927,51 @@ class _DeviceRowMobile extends ConsumerWidget {
       await ref
           .read(deviceLabelProvider.notifier)
           .setLabel(device.peerId, controller.text.trim());
+    }
+  }
+
+  Future<void> _syncFrom(BuildContext context, WidgetRef ref) async {
+    final name = device.label.isNotEmpty ? device.label : _shortenPeerIdMobile(device.peerId);
+    final confirmed = await showHollowDialog<bool>(
+      context: context,
+      builder: (ctx) => HollowDialog(
+        title: 'Sync from this device?',
+        content: Text(
+          'Pull servers and friends FROM "$name" onto THIS device. Use this if a '
+          'server or friend exists on "$name" but is missing here. It only adds '
+          'what\'s missing — nothing is removed, and your messages are unaffected.\n\n'
+          '"$name" must be online.',
+          style: HollowTypography.body.copyWith(color: HollowTheme.of(ctx).textSecondary),
+        ),
+        actions: [
+          HollowButton.ghost(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          HollowButton.filled(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Sync now'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    if (!device.online) {
+      if (context.mounted) {
+        HollowToast.show(context, '"$name" is offline — bring it online first',
+            type: HollowToastType.error);
+      }
+      return;
+    }
+    try {
+      await network_api.requestStateSync(sourceDeviceId: device.peerId);
+      if (context.mounted) {
+        HollowToast.show(context, 'Syncing from "$name"…', type: HollowToastType.info);
+      }
+    } catch (e) {
+      if (context.mounted) {
+        HollowToast.show(context, 'Sync failed: $e', type: HollowToastType.error);
+      }
     }
   }
 
@@ -2852,6 +3071,14 @@ class _DeviceRowMobile extends ConsumerWidget {
               ],
             ),
           ),
+          if (!device.isThisDevice)
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Sync servers & friends from this device',
+              onPressed: () => _syncFrom(context, ref),
+              icon: Icon(LucideIcons.refreshCw, size: 16,
+                  color: device.online ? hollow.accent : hollow.textSecondary),
+            ),
           IconButton(
             visualDensity: VisualDensity.compact,
             onPressed: () => _rename(context, ref),

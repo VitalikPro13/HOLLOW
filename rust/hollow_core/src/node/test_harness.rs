@@ -1138,6 +1138,90 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
 }
 
 // ---------------------------------------------------------------------------
+// Channel typing indicator round-trips over the MLS server group and is
+// attributed to the sender's MASTER identity on the receiver. Guards the path
+// behind the mobile fix where a phone never SENT channel typing (Dart only
+// called sendTypingIndicator for DMs) — here we drive the Rust send/receive
+// directly to prove the channel-typing wire path is correct end to end, and
+// that TypingStarted carries the master (not the device id), which is what the
+// UI keys its "X is typing…" on.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn channel_typing_roundtrips_master_attributed() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // O = owner (single device), J = joiner (single device).
+    const O_MASTER: u8 = 70;
+    const J_MASTER: u8 = 80;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1500).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+
+    // Owner creates a server, joiner joins, MLS group forms across both.
+    let server_id = create_server_and_wait(&mut o, "Typing Server").await;
+    let general = general_channel_of(&server_id);
+    sleep_ms(300).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should emit ServerJoined");
+    // Give the MLS KeyPackage → batch timer → Welcome handshake time to form the group.
+    sleep_ms(5000).await;
+    assert_eq!(
+        o.mls_epoch(&server_id).await,
+        j.mls_epoch(&server_id).await,
+        "owner and joiner must be at the same MLS epoch before typing"
+    );
+    drain_events(&mut j);
+
+    // --- Owner types in #general; joiner receives TypingStarted for the MASTER ---
+    o.cmd_tx
+        .send(NodeCommand::SendTypingIndicator {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+        })
+        .await
+        .unwrap();
+
+    let o_master_for_pred = o_master.clone();
+    let general_for_pred = general.clone();
+    let server_for_pred = server_id.clone();
+    let got = wait_event(&mut j, std::time::Duration::from_secs(5), move |ev| {
+        matches!(
+            ev,
+            NetworkEvent::TypingStarted { peer_id, server_id: sid, channel_id: cid }
+                if *peer_id == o_master_for_pred
+                    && *sid == server_for_pred
+                    && *cid == general_for_pred
+        )
+    })
+    .await;
+    assert!(
+        got,
+        "joiner must receive a channel TypingStarted attributed to the owner's master \
+         ({o_master}) for {server_id}/{general}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Rung 3: device REVOCATION. One sibling revokes another. Assert the full
 // cutoff: the revoked device gets SelfRevoked, the revoker drops its Olm session
 // to it, and the ghost fan-out guard holds — a subsequent DM from a friend never
@@ -2279,4 +2363,200 @@ async fn server_create_auto_onboards_online_sibling() {
     })
     .await;
     assert!(c_got, "sibling C must decrypt a channel message in the auto-onboarded server");
+}
+
+// ---------------------------------------------------------------------------
+// Step 9D follow-up (server CREATE/JOIN re-announces to OFFLINE siblings on
+// reconnect): the live SiblingServerAnnounce only reaches siblings online AT
+// create/join time. A sibling that was OFFLINE then never learned the server
+// exists — the asymmetry Vitalik hit (deletion reconciled via the grow-only
+// CRDT tombstone, but creation/join did NOT). Here C is OFFLINE when B creates
+// the server; C comes back online and must auto-onboard via the reconnect
+// re-announce (PeerJoined on B's side + RoomMembers on C's side), get its MLS
+// leaf, and decrypt a channel message — WITHOUT C ever calling JoinServer.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn server_create_reannounces_to_offline_sibling_on_reconnect() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // M = our identity, devices B (creator) + C (the offline sibling).
+    const M_MASTER: u8 = 240;
+    const B_DEV: u8 = 241;
+    const C_DEV: u8 = 242;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[]).await;
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
+    sleep_ms(3000).await; // let B↔C meet in the inbox room + Olm settle
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    // --- C goes OFFLINE, then B creates a server (C must NOT learn it live) ---
+    relay.set_online(&c.device_id, false);
+    sleep_ms(300).await;
+
+    let server_id = create_server_and_wait(&mut b, "Offline-Sibling Server").await;
+    let general = general_channel_of(&server_id);
+    sleep_ms(1500).await;
+
+    // C is offline → it has not onboarded.
+    assert!(
+        !c.servers().contains(&server_id),
+        "offline sibling C must NOT have the server yet (live announce can't reach it)"
+    );
+
+    // --- C comes back online: the reconnect re-announce must onboard it ---
+    drain_events(&mut c);
+    relay.set_online(&c.device_id, true);
+
+    let c_onboarded = wait_event(&mut c, std::time::Duration::from_secs(12), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(
+        c_onboarded,
+        "reconnected sibling C must auto-onboard the server it missed while offline (ServerJoined)"
+    );
+    sleep_ms(4000).await; // let C's MLS leaf form (KeyPackage → sibling-re-add → Welcome)
+
+    assert!(
+        c.servers().contains(&server_id),
+        "sibling C's server list must include the re-announced server, got {:?}",
+        c.servers()
+    );
+
+    // B's MLS group must contain C's device leaf so C can decrypt channel messages.
+    let b_leaves = b.mls_members(&server_id).await;
+    assert!(
+        b_leaves.contains(&c.device_id),
+        "creator B's MLS group must contain reconnected sibling C's leaf, got {b_leaves:?}"
+    );
+
+    // --- THE PAYOFF: B sends a channel message; C (re-announced sibling) decrypts it ---
+    drain_events(&mut c);
+    b.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "welcome back".to_string(),
+            message_id: "reannounce-ch-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let c_got = wait_event(&mut c, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "welcome back")
+    })
+    .await;
+    assert!(
+        c_got,
+        "reconnected sibling C must decrypt a channel message in the re-announced server"
+    );
+
+    // --- THE UI-REFRESH GUARD (the actual symptom): C ALREADY HOLDS the server
+    // now. A second reconnect re-announces it; the handler must RUN THE FULL JOIN
+    // FLOW again (not a weak ServerUpdated nudge that proved unreliable), which
+    // ends in NetworkEvent::ServerJoined → Dart `onServerCreated` → the server is
+    // UNCONDITIONALLY (re)inserted into the list. This is the "MLS joined but UI
+    // shows 3 not 4" bug: the crypto/DB onboard had succeeded; the list just never
+    // refreshed. ServerJoined is the only event observed to refresh it reliably
+    // (it's the same event a live both-online create fires), so an already-held
+    // re-announce must produce it too.
+    drain_events(&mut c);
+    relay.set_online(&c.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut c);
+    relay.set_online(&c.device_id, true);
+
+    let c_rejoined = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
+        matches!(
+            ev,
+            NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        )
+    })
+    .await;
+    assert!(
+        c_rejoined,
+        "an already-held server re-announced on reconnect must re-run the join flow \
+         and emit ServerJoined (→ onServerCreated → list refresh) — NOT silently no-op, \
+         else the UI shows a stale count"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// MANUAL state sync (Security → Your Devices "Sync from this device"): the
+// deterministic escape hatch. The DESTINATION device asks a chosen SOURCE
+// sibling to push its servers + friends. The source announces every server it
+// holds; the destination runs its join flow and the server appears (ServerJoined).
+// This is the user-triggered, on-demand equivalent of the reconnect re-announce —
+// guaranteed to work regardless of whether the automatic sync converged.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn manual_state_sync_pulls_servers_from_source_device() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // M = our identity, devices B (SOURCE, owns a server) + C (DESTINATION, missing it).
+    const M_MASTER: u8 = 250;
+    const B_DEV: u8 = 251;
+    const C_DEV: u8 = 252;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[]).await;
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
+    sleep_ms(3000).await;
+
+    // B creates a server while C is OFFLINE, so C never learns it automatically.
+    relay.set_online(&c.device_id, false);
+    sleep_ms(300).await;
+    let server_id = create_server_and_wait(&mut b, "Manual-Sync Server").await;
+    sleep_ms(1000).await;
+
+    // C comes back, but we DON'T rely on the auto re-announce here — we drain it and
+    // then explicitly drive the MANUAL sync to prove the button's path on its own.
+    relay.set_online(&c.device_id, true);
+    sleep_ms(3000).await; // let C↔B re-meet so the request can target B
+    drain_events(&mut c);
+
+    // C (destination) taps "Sync from this device" choosing B (source).
+    c.cmd_tx
+        .send(NodeCommand::RequestStateSync { source_device_id: b.device_id.clone() })
+        .await
+        .unwrap();
+
+    // C must onboard the server B pushed (ServerJoined → onServerCreated → UI list).
+    let c_synced = wait_event(&mut c, std::time::Duration::from_secs(12), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(
+        c_synced,
+        "manual state sync must make C onboard the server held by source device B (ServerJoined)"
+    );
+    sleep_ms(1000).await;
+    assert!(
+        c.servers().contains(&server_id),
+        "C's server list must include the manually-synced server, got {:?}",
+        c.servers()
+    );
 }

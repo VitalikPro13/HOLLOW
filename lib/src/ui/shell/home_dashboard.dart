@@ -35,7 +35,27 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
+import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:url_launcher/url_launcher.dart';
+
+/// Total visible DM message count across all conversations. An honest
+/// multi-device sync-comparison number: DMs fully converge across a person's
+/// devices (fan-out + sibling backfill), so two synced devices should report
+/// the same value. Channel messages are deliberately excluded — they are
+/// lazy-paged per device and would diverge even when fully synced.
+///
+/// Cheap (one indexed COUNT) and refreshed whenever the DM list changes. The
+/// stats card invalidates this on a DM event to keep it live.
+final _dmMessageCountProvider = FutureProvider.autoDispose<int>((ref) async {
+  // Recompute when a DM arrives/changes (last-message map is the cheapest
+  // proxy for "DM table changed").
+  ref.watch(lastDmMessageProvider);
+  try {
+    return await storage_api.countAllDmMessages();
+  } catch (_) {
+    return 0;
+  }
+});
 
 /// Home dashboard — shown when no server or DM is selected in dock mode.
 /// Three-column layout: Profile | Recent Conversations | Stats overview.
@@ -410,6 +430,14 @@ class _ProfileColumn extends ConsumerWidget {
                 ),
         ),
 
+        const SizedBox(height: HollowSpacing.md),
+
+        // Sync / stats card — fills the gap below the recovery card. Shows
+        // locally-knowable counts that converge across a person's devices, so
+        // two devices can be eyeball-compared for sync (DM messages especially:
+        // channel messages are lazy-paged and intentionally NOT counted here).
+        _SyncStatsCard(hollow: hollow),
+
         const Spacer(),
 
         // Peer ID (copyable, centered, bottom)
@@ -448,6 +476,153 @@ class _ProfileColumn extends ConsumerWidget {
               ],
             ),
           ),
+      ],
+    );
+  }
+}
+
+/// Sync / stats card on the left column. Shows counts that fully converge
+/// across a person's devices, so two devices can be compared at a glance to
+/// confirm they are in sync. Local-only: no cross-device protocol — the numbers
+/// themselves are the sync truth.
+///
+/// Deliberately omits channel-message counts: those are lazy-paged per device
+/// (each device only stores the slices it has scrolled to) and would differ
+/// even when fully synced, which would falsely read as "out of sync".
+class _SyncStatsCard extends ConsumerWidget {
+  final HollowTheme hollow;
+  const _SyncStatsCard({required this.hollow});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final friends = ref.watch(friendsProvider);
+    final servers = ref.watch(serverListProvider);
+    final devices = ref.watch(myDevicesProvider);
+    final dmCount = ref.watch(_dmMessageCountProvider);
+
+    final friendCount =
+        friends.values.where((f) => f.status == 'accepted').length;
+    final serverCount = servers.length;
+    final devicesOnline = devices.where((d) => d.online).length;
+    final deviceCount = devices.length;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(HollowSpacing.sm + 2),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        border: Border.all(color: hollow.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(LucideIcons.chartColumn, size: 13,
+                  color: hollow.textSecondary),
+              const SizedBox(width: HollowSpacing.xs),
+              Text(
+                'YOUR STATS',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.8,
+                  fontSize: 10,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+
+          _StatRow(
+            hollow: hollow,
+            icon: LucideIcons.users,
+            label: 'Friends',
+            value: '$friendCount',
+          ),
+          const SizedBox(height: HollowSpacing.xs + 2),
+          _StatRow(
+            hollow: hollow,
+            icon: LucideIcons.server,
+            label: 'Servers',
+            value: '$serverCount',
+          ),
+          const SizedBox(height: HollowSpacing.xs + 2),
+          _StatRow(
+            hollow: hollow,
+            icon: LucideIcons.messageSquare,
+            label: 'DM messages',
+            value: dmCount.maybeWhen(
+              data: (n) => '$n',
+              orElse: () => '…',
+            ),
+          ),
+
+          // Devices line only matters once you've linked a second device. On a
+          // single-device install it's just "1" — show it anyway as a gentle
+          // hint that linking exists, but with the online/total form that
+          // becomes the actual sync indicator on multi-device.
+          const SizedBox(height: HollowSpacing.xs + 2),
+          _StatRow(
+            hollow: hollow,
+            icon: LucideIcons.smartphone,
+            label: 'Devices',
+            value: deviceCount > 1
+                ? '$devicesOnline / $deviceCount online'
+                : '1',
+            // When you have siblings, green if every one is online (actively
+            // converging) — a quick "are we synced right now?" tell.
+            valueColor: deviceCount > 1
+                ? (devicesOnline == deviceCount
+                    ? hollow.success
+                    : hollow.warning)
+                : hollow.textPrimary,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Single label/value row inside the stats card.
+class _StatRow extends StatelessWidget {
+  final HollowTheme hollow;
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color? valueColor;
+
+  const _StatRow({
+    required this.hollow,
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.valueColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 12, color: hollow.textSecondary),
+        const SizedBox(width: HollowSpacing.sm),
+        Text(
+          label,
+          style: HollowTypography.caption.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 11,
+          ),
+        ),
+        const Spacer(),
+        Text(
+          value,
+          style: HollowTypography.body.copyWith(
+            color: valueColor ?? hollow.textPrimary,
+            fontWeight: FontWeight.w600,
+            fontSize: 12,
+          ),
+        ),
       ],
     );
   }

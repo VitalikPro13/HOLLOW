@@ -89,7 +89,7 @@ The canonical source of truth for which servers the local user has joined. State
 
 ### Mutation Methods
 
-**`onServerCreated(serverId, name)`** — called when the Dart event handler receives a `ServerCreated` network event. Creates a new `ServerInfo` with `memberCount: 1` and `channelCount: 1` (assumes the #general channel). Adds to state via `Map.of(state)..` pattern (immutable copy).
+**`onServerCreated(serverId, name)`** — called on `ServerCreated` AND `ServerJoined` events. UNCONDITIONALLY inserts the server into the map (keeps real counts if the entry already existed, else optimistic `memberCount: 1`/`channelCount: 1` so the icon appears instantly), then a background `_refreshCountsFromDb()` patches the real member/channel counts via `getJoinedServers()`. This is the RELIABLE list-refresh path — multi-device sibling re-syncs route through `ServerJoined` (not `ServerUpdated`) precisely because this insert never depends on a DB read landing (the `onServerUpdated` DB-read path proved unreliable at surfacing a newly-onboarded server). See `feedback_sibling_server_reannounce_and_device_list_ui` memory.
 
 **`onServerUpdated(serverId)`** — called on `ServerUpdated` network events. Performs a full DB reload via `crdt_api.getJoinedServers()`, finds the matching server by ID. If found, updates the entry. If NOT found (user was kicked or server deleted while offline), removes the entry from state. This is the only mutation path that handles implicit server removal.
 

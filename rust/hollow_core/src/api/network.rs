@@ -1359,6 +1359,16 @@ pub fn revoke_device(device_peer_id: String) -> Result<(), String> {
     send_node_command(node::NodeCommand::RevokeDevice { device_peer_id })
 }
 
+/// Multi-device MANUAL state sync (Security → Your Devices "Sync from this
+/// device"). Ask the chosen SOURCE sibling (`source_device_id`) to re-announce
+/// all its servers + re-share its friends to THIS device. Deterministic,
+/// user-triggered escape hatch for when the automatic sibling sync didn't
+/// converge. The source must be online.
+#[frb]
+pub fn request_state_sync(source_device_id: String) -> Result<(), String> {
+    send_node_command(node::NodeCommand::RequestStateSync { source_device_id })
+}
+
 /// A local human label for a device (Step 8 Devices panel).
 pub struct DeviceLabel {
     pub device_peer_id: String,

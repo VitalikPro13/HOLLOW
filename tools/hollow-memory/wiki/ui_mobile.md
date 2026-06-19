@@ -117,7 +117,7 @@ New "Channels" section (gated by `Permission.manageChannels`) with:
 - `_replyToMessageId` / `_replyToText` / `_replyToSenderName` — reply state
 - `_editingMessageId` — inline edit mode (message ID being edited)
 - `_editController` / `_editFocusNode` — edit TextField controllers
-- `_lastTypingSent` — 3s throttle for typing indicators
+- `_lastTypingSent` — 3s throttle for typing indicators. `_onTextChanged` sends `sendTypingIndicator` for BOTH DMs (`serverId:''`, `channelId:peerId`) AND server channels (`serverId`/`channelId`) — previously it early-returned on `!isDm`, so a phone never showed as "typing…" in a server channel (fixed 2026-06-19; the Rust path was already correct).
 - `_isInAutoScrollZone` — auto-scroll on new messages
 - `_stagedFilePath` / `_stagedFileName` / `_stagedFileIsImage` — staged file attachment
 - `_isRecordingVoice` — swaps input bar for VoiceRecorderBar
@@ -172,6 +172,7 @@ Wraps each message bubble. Provides:
 
 ### Pin Messages (Channel Only)
 - `pinnedProvider` loaded after channel history loads in `initState` `.then()` callback
+- `_MobileChatHeader` title: DM → friend display name + Online/Offline subtitle; channel → `# channelName` + the **server name** as a subtitle (read from `serverListProvider.select((m) => m[serverId]?.name)`, ellipsis-truncated) so the user knows which server the channel belongs to
 - `_MobileChatHeader` shows pin icon with count badge when `pinnedProvider[key]` is non-empty (between members icon and search icon)
 - Tapping pin icon opens `_showPinnedMessagesSheet()` — bottom sheet with sender name, time, text preview for each pinned message
 - `_showChannelActions()` wires `onPin` callback — permission-gated (`Permission.manageChannels`), toggles `crdt_api.pinMessage()`/`unpinMessage()`

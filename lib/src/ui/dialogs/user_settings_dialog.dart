@@ -2993,6 +2993,22 @@ class _DevicesSectionState extends ConsumerState<_DevicesSection> {
   bool _showAll = false;
 
   @override
+  void initState() {
+    super.initState();
+    // Re-pull the device list from the running node's resolver whenever this
+    // panel opens. The startup warm-up (event_provider) races node readiness and
+    // there's no live listener keeping deviceLinkProvider fresh while Settings is
+    // closed — so after an app restart the list would render empty/stale even
+    // though the data is persisted in the DB. Refreshing on mount fixes the
+    // "devices disappear after restart" bug.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(deviceLinkProvider.notifier).refresh();
+      ref.read(deviceLabelProvider.notifier).refresh();
+      ref.invalidate(localDevicePeerIdProvider);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final devices = ref.watch(myDevicesProvider);
@@ -3067,6 +3083,53 @@ class _DeviceRow extends ConsumerWidget {
       await ref
           .read(deviceLabelProvider.notifier)
           .setLabel(device.peerId, controller.text.trim());
+    }
+  }
+
+  Future<void> _syncFrom(BuildContext context, WidgetRef ref) async {
+    final name = device.label.isNotEmpty ? device.label : shortenPeerId(device.peerId);
+    final confirmed = await showHollowDialog<bool>(
+      context: context,
+      builder: (ctx) => HollowDialog(
+        title: 'Sync from this device?',
+        content: Text(
+          'Pull servers and friends FROM "$name" onto THIS device. Use this if a '
+          'server or friend exists on "$name" but is missing here. It only adds '
+          'what\'s missing — nothing is removed, and your messages are unaffected.\n\n'
+          '"$name" must be online.',
+          style: HollowTypography.body
+              .copyWith(color: HollowTheme.of(ctx).textSecondary),
+        ),
+        actions: [
+          HollowButton.ghost(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          HollowButton.filled(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Sync now'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    if (!device.online) {
+      if (context.mounted) {
+        HollowToast.show(context, '"$name" is offline — bring it online first',
+            type: HollowToastType.error);
+      }
+      return;
+    }
+    try {
+      await network_api.requestStateSync(sourceDeviceId: device.peerId);
+      if (context.mounted) {
+        HollowToast.show(context, 'Syncing from "$name"…',
+            type: HollowToastType.info);
+      }
+    } catch (e) {
+      if (context.mounted) {
+        HollowToast.show(context, 'Sync failed: $e', type: HollowToastType.error);
+      }
     }
   }
 
@@ -3153,6 +3216,18 @@ class _DeviceRow extends ConsumerWidget {
               ],
             ),
           ),
+          // Sync FROM this device (pull servers + friends). Other devices only.
+          if (!device.isThisDevice)
+            HollowTooltip(
+              message: 'Sync servers & friends from this device',
+              child: HollowButton.ghost(
+                compact: true,
+                onPressed: () => _syncFrom(context, ref),
+                icon: Icon(LucideIcons.refreshCw, size: 15,
+                    color: device.online ? hollow.accent : hollow.textSecondary),
+                child: const SizedBox.shrink(),
+              ),
+            ),
           // Rename (any device).
           HollowButton.ghost(
             compact: true,

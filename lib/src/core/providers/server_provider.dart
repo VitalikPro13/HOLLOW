@@ -29,16 +29,46 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
     }
   }
 
-  /// Called when a ServerCreated event arrives.
+  /// Called when a ServerCreated/ServerJoined event arrives.
+  ///
+  /// Inserts the server into the list UNCONDITIONALLY (never depends on a DB
+  /// read finding it — that weak path failed to refresh the list when a sibling
+  /// re-synced a server). The optimistic 1/1 counts are shown immediately so the
+  /// server icon appears instantly; a background DB read then corrects the
+  /// member/channel counts (an already-synced server may have many of each).
   void onServerCreated(String serverId, String name) {
     final updated = Map.of(state);
+    final existing = updated[serverId];
     updated[serverId] = ServerInfo(
       serverId: serverId,
       name: name,
-      memberCount: 1,
-      channelCount: 1, // #general
+      // Keep real counts if we already had them; else optimistic 1/1.
+      memberCount: existing?.memberCount ?? 1,
+      channelCount: existing?.channelCount ?? 1, // #general
     );
     state = updated;
+    // Correct the counts (and name) from the DB without blocking the insert.
+    _refreshCountsFromDb(serverId, name);
+  }
+
+  /// Background: pull real member/channel counts for [serverId] from the DB and
+  /// patch the list entry. No-op if the server isn't (yet) in the DB.
+  Future<void> _refreshCountsFromDb(String serverId, String fallbackName) async {
+    try {
+      final servers = await crdt_api.getJoinedServers();
+      final match = servers.where((s) => s.serverId == serverId).firstOrNull;
+      if (match == null) return; // not in DB yet — keep optimistic entry
+      final updated = Map.of(state);
+      updated[serverId] = ServerInfo(
+        serverId: match.serverId,
+        name: match.name.isNotEmpty ? match.name : fallbackName,
+        memberCount: match.memberCount,
+        channelCount: match.channelCount,
+      );
+      state = updated;
+    } catch (_) {
+      // Keep the optimistic entry on any failure.
+    }
   }
 
   /// Called when a ServerUpdated event arrives — full reload from DB.

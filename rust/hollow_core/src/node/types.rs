@@ -550,6 +550,10 @@ pub(crate) enum NodeCommand {
     /// device list with the device tombstoned, drops our Olm session to it, and (where
     /// we coordinate) removes its MLS leaf from shared servers. Manual-only.
     RevokeDevice { device_peer_id: String },
+    /// Multi-device MANUAL state sync (Security → Your Devices "Sync from this
+    /// device"). Ask the chosen SOURCE sibling to re-announce all its servers +
+    /// re-share its friends to US. `source_device_id` is that device's peer_id.
+    RequestStateSync { source_device_id: String },
     // -- Push notifications --
     RegisterPushToken { token: String, platform: String },
     /// Register per-server/channel push notification prefs with the relay
@@ -926,6 +930,17 @@ pub(crate) enum HavenMessage {
     /// `FriendListSync`.
     #[serde(rename = "friend_list_request")]
     FriendListRequest,
+
+    /// Multi-device MANUAL state sync (user-triggered "Sync from this device"
+    /// button in Security → Your Devices). The DESTINATION device (where the user
+    /// tapped) sends this to a chosen SOURCE sibling. The source responds by
+    /// (re)announcing EVERY server it holds (`SiblingServerAnnounce` per server,
+    /// which drives the destination's proven join flow → `ServerJoined` → UI) and
+    /// re-sharing its friend list (`FriendListSync`). Deterministic, on-demand
+    /// equivalent of the reconnect re-announce — the escape hatch for when the
+    /// automatic sibling sync didn't converge. Verified-self only.
+    #[serde(rename = "sibling_state_sync_request")]
+    SiblingStateSyncRequest,
 
     // -- Multi-device link snapshot (Step 4) --
 

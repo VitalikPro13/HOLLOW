@@ -167,9 +167,27 @@ class EventStreamNotifier extends Notifier<bool> {
     state = true;
     // Warm the device→identity map from the node's resolver (persisted links +
     // our own devices) so attribution is correct before the first profile sync.
+    // The event stream can start BEFORE the node has finished hydrating its
+    // resolver from the DB, so a single immediate refresh can race and come back
+    // empty — and nothing would retry until a DeviceListUpdated event arrives
+    // (which only fires when a sibling re-sends its list over the network). That
+    // left the device list + multi-device presence/attribution stale after every
+    // app restart. Retry a few times so the warm-up catches the node once ready.
+    _warmDeviceMaps();
+  }
+
+  void _warmDeviceMaps() {
     ref.read(deviceLinkProvider.notifier).refresh();
-    // Warm local device labels (Step 8 Devices panel).
     ref.read(deviceLabelProvider.notifier).refresh();
+    // Re-pull shortly after in case the node's resolver wasn't hydrated yet on
+    // the first attempt. Cheap in-memory snapshots; idempotent.
+    for (final ms in const [400, 1200, 3000]) {
+      Future<void>.delayed(Duration(milliseconds: ms), () {
+        if (_subscription == null) return; // stopped meanwhile
+        ref.read(deviceLinkProvider.notifier).refresh();
+        ref.read(deviceLabelProvider.notifier).refresh();
+      });
+    }
   }
 
   void stop() {

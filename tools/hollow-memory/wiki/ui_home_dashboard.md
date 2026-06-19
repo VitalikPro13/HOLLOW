@@ -66,9 +66,11 @@ When `StartupRevealScope.interval()` returns non-null, each column is wrapped in
 
    - **Secured (`identity.mnemonic == null`):** Static row (not tappable). Shows `LucideIcons.shieldCheck` (14px, `hollow.success`), title "Recovery Phrase" (12px, w500), subtitle "Secured" (10px, `hollow.success`).
 
-8. **Spacer** pushes peer ID to bottom.
+8. **`_SyncStatsCard` (Your Stats):** Full-width `hollow.surface` card directly below the recovery card (fills the former gap). A `ConsumerWidget` that reads `friendsProvider` (accepted count), `serverListProvider` (`.length`), `myDevicesProvider`, and `_dmMessageCountProvider`. Four `_StatRow`s: **Friends**, **Servers**, **DM messages** (from FFI `count_all_dm_messages` = `COUNT(*) FROM messages WHERE hidden_at IS NULL`), **Devices** (`N / M online`, value colored `success` when all siblings online else `warning`; plain "1" on a single-device install). Purpose: multi-device sync eyeball-comparison — open on both devices and compare. **Channel message counts are deliberately NOT shown** (lazy-paging makes them diverge per device even when synced). `_dmMessageCountProvider` is a `FutureProvider.autoDispose` that `ref.watch(lastDmMessageProvider)` to recompute on DM changes. Mobile twin: `mobile_settings_tab.dart:_MobileStatsCard` (after the About tile).
 
-9. **Peer ID (copyable, bottom):** Only shown when `localPeerId != null`. `HollowPressable` with `hollow.elevated` hover color. On tap, copies full peer ID to clipboard and shows `HollowToast` "Peer ID copied" (success, 1s duration). Display text truncates to `first8...last6` if length > 16. Styled as `HollowTypography.mono`, 9px, `hollow.textSecondary`. Prefixed with `LucideIcons.copy` (10px).
+9. **Spacer** pushes peer ID to bottom.
+
+10. **Peer ID (copyable, bottom):** Only shown when `localPeerId != null`. `HollowPressable` with `hollow.elevated` hover color. On tap, copies full peer ID to clipboard and shows `HollowToast` "Peer ID copied" (success, 1s duration). Display text truncates to `first8...last6` if length > 16. Styled as `HollowTypography.mono`, 9px, `hollow.textSecondary`. Prefixed with `LucideIcons.copy` (10px).
 
 ---
 
