@@ -10,14 +10,76 @@ import 'package:hollow/src/ui/annotation/annotation_toggle_button.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:window_manager/window_manager.dart';
 
-/// Custom 32px title bar replacing the native Windows chrome.
+/// Custom 32px title bar replacing the native window chrome.
 ///
-/// Layout: [Hollow branding] [drag area ────────] [─] [□] [✕]
+/// Windows/Linux layout: [Hollow branding] [drag area ──] [✎] [─] [□] [✕]
+/// macOS layout (native traffic lights stay top-left, drawn by the OS):
+///   [○○○ gap] [✎ Annotate] [drag area ── Hollow ── drag area]
 class WindowTitleBar extends StatelessWidget {
   const WindowTitleBar({super.key});
 
+  /// Width reserved on the left for the macOS native traffic-light buttons so
+  /// nothing we draw overlaps them.
+  static const double _macTrafficLightGap = 78;
+
   @override
   Widget build(BuildContext context) {
+    if (Platform.isMacOS) {
+      return _buildMacOS(context);
+    }
+    return _buildWindows(context);
+  }
+
+  Widget _buildMacOS(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final brandReveal = StartupRevealScope.interval(context, 0.0, 0.15);
+    final buttonsReveal = StartupRevealScope.interval(context, 0.08, 0.20);
+
+    // Centered title.
+    Widget title = Text(
+      'Hollow',
+      style: HollowTypography.label.copyWith(
+        color: hollow.accent,
+        fontWeight: FontWeight.w700,
+        fontSize: 13,
+      ),
+    );
+    if (brandReveal != null) {
+      title = FadeTransition(opacity: brandReveal, child: title);
+    }
+
+    // Annotate button sits just to the right of the traffic lights.
+    Widget annotate = const AnnotationToggleButton();
+    if (buttonsReveal != null) {
+      annotate = FadeTransition(opacity: buttonsReveal, child: annotate);
+    }
+
+    return Container(
+      height: 32,
+      color: hollow.opaqueBackground,
+      child: Stack(
+        children: [
+          // Full-width drag area underneath everything so the whole bar moves
+          // the window (the traffic lights + button capture their own taps).
+          const Positioned.fill(child: DragToMoveArea(child: SizedBox.expand())),
+          // Centered title (ignores pointer so the drag area still works).
+          Center(
+            child: IgnorePointer(child: title),
+          ),
+          // Traffic-light gap + Annotate button on the left.
+          Padding(
+            padding: const EdgeInsets.only(left: _macTrafficLightGap),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: annotate,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildWindows(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final brandReveal = StartupRevealScope.interval(context, 0.0, 0.15);
     final buttonsReveal = StartupRevealScope.interval(context, 0.08, 0.20);
@@ -44,7 +106,7 @@ class WindowTitleBar extends StatelessWidget {
     Widget buttons = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (Platform.isMacOS || Platform.isWindows || Platform.isLinux) const AnnotationToggleButton(),
+        const AnnotationToggleButton(),
         const SizedBox(width: 4),
         const _MinimizeButton(),
         _MaximizeButton(),

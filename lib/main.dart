@@ -205,16 +205,24 @@ Future<void> main() async {
   // Custom window chrome on desktop — hide native title bar.
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     await windowManager.ensureInitialized();
-    const windowOptions = WindowOptions(
-      size: Size(1280, 800),
-      minimumSize: Size(800, 500),
+    // On macOS we keep the native traffic-light buttons (close/minimize/zoom)
+    // for a proper Mac look — `TitleBarStyle.hidden` already gives a frameless
+    // content area while leaving those three circles in the top-left corner.
+    // Windows/Linux hide the native controls entirely (we draw our own).
+    final windowOptions = WindowOptions(
+      size: const Size(1280, 800),
+      minimumSize: const Size(800, 500),
       center: true,
-      backgroundColor: Color(0xFF0D0F14), // Hollow dark background
+      backgroundColor: const Color(0xFF0D0F14), // Hollow dark background
       titleBarStyle: TitleBarStyle.hidden,
-      windowButtonVisibility: false,
+      windowButtonVisibility: Platform.isMacOS,
     );
     windowManager.waitUntilReadyToShow(windowOptions, () async {
-      await windowManager.setAsFrameless();
+      // setAsFrameless() strips the macOS traffic lights too — only do it on
+      // Windows/Linux where we render the full custom control set ourselves.
+      if (!Platform.isMacOS) {
+        await windowManager.setAsFrameless();
+      }
       // Intercept close so we can minimize to tray instead.
       await windowManager.setPreventClose(true);
       windowManager.addListener(_HollowWindowListener());

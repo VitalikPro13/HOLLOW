@@ -33,7 +33,7 @@
 >
 > Thank you for reading, and as always, let's strive for better software together.
 >
-> -- AnonListen
+> -- Vitalii Rovinskyi (AnonListen / VitalikPro13)
 
 ## Overview
 
