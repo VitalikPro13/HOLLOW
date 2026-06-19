@@ -50,11 +50,11 @@ media/data plane stubbed) · ✗ out of harness scope.
 
 | Feature area | Commands | Cover | What's covered vs not |
 |---|---|---|---|
-| 1:1 calls (voice/video) | `CallSendSignal`, `CallSignal` | ◐ | **CAN:** assert call-signal types are whitelisted + routed to the right peer/identity, offer/answer/ICE-candidate envelopes reach the target, glare/renegotiation ROUTING. **CANNOT:** actual audio/video, SFrame, real ICE/DTLS, codec negotiation, the "iOS cold-VideoToolbox first call" class — those need real libwebrtc + media tracks. |
-| Voice channels | `VoiceChannelJoin/Leave/SendSignal`, gossip mode | ◐ | same split: participant-set state + signal routing ✅; the SFU/gossip media mixing ✗ |
-| File transfer (DM) | `RequestFile`, `WebRtcSendFile`, FileHeader | ◐ | **CAN:** file-request handshake, FileHeader envelope, the header-vs-bytes race LOGIC, offline-image inline path, sig promotion. **CANNOT:** the actual WebRTC data-channel byte transfer (no data channels in-process). Mock can deliver a `BinaryDirect` to simulate arrival. |
-| Vault (erasure shards) | `VaultDownloadFile`, `StoreShardOnPeer`, `RequestShardFromPeer` | ◐ | **CAN:** shard assignment logic, k/m selection, store/request envelopes, reconstruction math (pure). **CANNOT:** the cross-peer WebRTC shard stream. |
-| Recovery pool | `RecoveryPool*` events, assignment | ◐ | **CAN:** pool membership, inventory exchange, assignment algorithm, reconstruction trigger logic. **CANNOT:** actual shard streaming between peers. |
+| 1:1 calls (voice/video) | `CallSendSignal`, `CallSignal` | ◐ | **VERIFIED** (`call_signal_routes_to_friend_device_and_drops_unknown`): call-signal whitelist mapping + master→device routing + unknown-type silent-drop guard. **CANNOT:** actual audio/video, SFrame, real ICE/DTLS, codec negotiation, the "iOS cold-VideoToolbox first call" class — those need real libwebrtc + media tracks. |
+| Voice channels | `VoiceChannelJoin/Leave/SendSignal` | ◐ | **VERIFIED** (`voice_channel_join_leave_and_signal_routing`): join/leave + participant-set tracking + broadcast-signal routing + whitelist (plaintext fallback, no formed MLS needed; only server membership + a Voice channel). The SFU/gossip media mixing ✗ |
+| File transfer (DM) | `SendFile`, `RequestFile`, FileHeader | ◐→✅ | **VERIFIED end-to-end in-process** (`dm_file_transfer_completes_and_decrypts`): FileHeader (Olm), AND the bytes — `stream_to_peer` falls back to WS-relay binary streaming (`ws_stream_send`→`SendBinaryDirect`, which the MockRelay routes in-room) when there's no WebRTC peer, so bytes actually transfer + decrypt + land on disk with correct contents. **CANNOT:** the WebRTC-data-channel-specific path (only that path; the relay fallback IS the same assembly/decrypt logic). |
+| Vault (erasure shards) | `VaultDownloadFile`, `StoreShardOnPeer`, `RequestShardFromPeer` | ◐ | **CAN:** shard assignment logic, k/m selection, store/request envelopes, reconstruction math (pure), AND shard byte streaming over the same relay fallback as files. **CANNOT:** the WebRTC-specific shard stream. (Needs a populated vault to drive fully — heavier setup, not yet built.) |
+| Recovery pool | `InitiateRecoveryPool`, `JoinRecoveryPool`, `RecoveryHello` | ◐→✅ | **VERIFIED** (`recovery_pool_membership_forms`): pool rendezvous room + RecoveryHello/Welcome inventory-exchange + member registration. Shard transfer/reconstruction needs a populated vault (not yet built); the membership control plane is green. |
 | Hollow Share (P2P) | `ShareManifestRequest`, `ShareChunkRequest`, seeding | ◐ | **CAN:** manifest/have/chunk-request envelope routing, bitmap logic. **CANNOT:** real chunk transfer over data channels. |
 | SQLCipher DB | (all persistence) | ◐ | **CAN:** real SQLCipher runs in-harness — schema, CRDT/message/crypto persistence, dedup, migrations are EXERCISED. **CANNOT:** platform-specific failure modes (iOS WAL/App-Group `0xdead10cc`, DPAPI). |
 
@@ -80,15 +80,25 @@ camera, ICE failure, real byte-transfer stalls) — those you see/hear immediate
 
 ---
 
-## The build ladder (where we are)
+## The build ladder (where we are — all DONE 2026-06-19)
 
-1. ✅ **Inspectors (rung 1 foundation)** — UI-layer + raw-layer state readers. DONE 2026-06-19.
-2. **Servers + channels + MLS (rung 1 completion + first ring-2 touch)** — create/join/channel-send,
-   cross-device decrypt, `DebugSnapshot` command for live MLS/Olm in-memory state. ← NEXT
-3. **Device lifecycle (rung 1)** — link sibling, revoke, ghost cutoff.
-4. **Ring-2 control plane** — call/VC signal routing, file-request handshake, shard assignment,
-   recovery-pool logic — each driven + asserted at the envelope/state level, media/data plane stubbed.
+1. ✅ **Inspectors (rung 1 foundation)** — UI-layer + raw-layer state readers.
+2. ✅ **Servers + channels + MLS (rung 1)** — create/join/channel-send, cross-device decrypt,
+   `DebugSnapshot` command for live MLS/Olm in-memory state.
+3. ✅ **Device lifecycle (rung 1)** — revoke, Olm cutoff, ghost fan-out guard.
+4. ✅ **Ring-2 control plane** — 1:1 call signal routing + whitelist, voice-channel join/leave/signal,
+   full DM file transfer (header + bytes + decrypt over the relay fallback), recovery-pool membership.
+
+**Ring 1 is now fully self-verifiable; the coverable ring-2 control plane is covered.** 7 harness tests.
+
+### Remaining (optional, heavier setup)
+- Vault shard transfer + reconstruction with a POPULATED vault (the membership/handshake is green; the
+  full upload→shard→distribute→recover with real erasure shards is a heavier scenario, not yet built).
+- Device LINKING end-to-end (needs a relay link-code map in the mock + an import/restart simulation;
+  revocation — the higher-value half of device lifecycle — is done).
 
 When the harness is green, the claim is precisely: **"the distributed-logic core + the control/signaling
-plane behave correctly across N devices."** Not "the whole app works." Voice audio, pixels, push, and the
-real relay stay Vitalik's manual pass — by design, because those fail visibly and immediately.
+plane (incl. file transfer over the relay path) behave correctly across N devices."** Not "the whole app
+works." Real WebRTC media (audio/video/screen pixels, SFrame, ICE/DTLS), Flutter pixels, FFI, native
+push/keychain, and the real relay C++ stay Vitalik's manual pass — by design, they fail visibly and
+immediately.

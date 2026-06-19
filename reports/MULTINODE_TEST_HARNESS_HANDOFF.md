@@ -1,13 +1,26 @@
 # Multi-Node Test Harness — Handoff & Continuation Plan (Step 9B-i)
 
-**Status:** ✅ RUNGS 1 + 2 DONE (2026-06-19). Glare fix + inspectors committed (`82eefdc`). Rung 2
-(servers + channels + MLS + the `DebugSnapshot` live-crypto inspector) GREEN: `server_join_forms_mls
-_and_channel_message_decrypts` drives owner-creates-server → joiner-joins → MLS group forms across
-both device leaves at the same epoch → owner's MLS-encrypted channel message decrypts on the joiner,
-asserted through every inspector layer (member panel UI + raw CRDT master-keys + raw MLS device-leaves
-+ live MLS epoch + Olm status + decrypted channel row). Full suite 340/340, clippy clean, production
-build clean (cfg(test) gating verified). Next: rung 3 (device lifecycle: link sibling, revoke, ghost
-cutoff) + ring-2 control plane (call/VC signal routing, file-request handshake, shard assignment).
+**Status:** ✅ RUNGS 1 + 2 + 3 + RING-2 CONTROL PLANE DONE (2026-06-19). 7 harness tests, full suite
+345/345, clippy clean, production build clean. Ring 1 (distributed-logic core) is fully self-verifiable;
+the coverable ring-2 control plane is covered. Rungs 1+2 committed (`82eefdc`, `bedfbd5`); rung 3 +
+ring-2 (revocation, call signals, voice channels, file transfer, recovery pool) are the latest batch.
+
+**Tests:** `peer_fallback_recovers_own_sends_correct_direction` (DM backfill + inversion guard),
+`server_join_forms_mls_and_channel_message_decrypts` (servers/MLS/cross-device decrypt),
+`device_revocation_cuts_off_and_ghost_fanout_holds` (revocation cutoff + ghost fan-out),
+`call_signal_routes_to_friend_device_and_drops_unknown` (1:1 call whitelist + routing),
+`dm_file_transfer_completes_and_decrypts` (FULL file send incl. bytes over the relay fallback),
+`voice_channel_join_leave_and_signal_routing` (VC join/leave/signal/whitelist),
+`recovery_pool_membership_forms` (pool formation + RecoveryHello).
+
+**KEY DISCOVERY:** the WS-relay binary-streaming fallback works in-process (`stream_to_peer` →
+`ws_stream_send` → `SendBinaryDirect`, routed by the MockRelay) — so file/shard BYTES actually transfer
++ decrypt in the harness, not just the FileHeader control plane. Data plane over the RELAY path is
+coverable; only the WebRTC-data-channel-specific path is out of scope.
+
+**Remaining (optional, heavier):** vault shard transfer with a POPULATED vault; device LINKING
+end-to-end (needs a relay link-code map in the mock + an import/restart sim — respawn a node over the
+post-`import_pending_link` data dir). See `reports/HARNESS_COVERAGE_MAP.md`.
 
 **Below: the original Fix B handoff, kept for history.**
 

@@ -560,6 +560,24 @@ impl TestNode {
             .unwrap_or_else(|| "absent".to_string())
     }
 
+    // --- File-transfer control state (DB-backed) ---------------------------
+
+    /// A received file's metadata row, as the receiver persisted it from the
+    /// FileHeader (control plane). `completed_at` is `None` until the byte stream
+    /// assembles — which a pure harness run never does (no WebRTC), so this reads
+    /// the CONTROL state: a pending download the UI would show as "downloading".
+    pub(crate) fn file_meta(&self, file_id: &str) -> Option<crate::storage::messages::StoredFile> {
+        self.store().get_file_metadata(file_id).ok().flatten()
+    }
+
+    /// File ids referenced by messages that have no completed file row — i.e. the
+    /// files the node still needs to RequestFile for (the "needs download" set).
+    pub(crate) fn missing_file_ids(&self) -> Vec<String> {
+        let mut v = self.store().get_missing_file_ids().unwrap_or_default();
+        v.sort();
+        v
+    }
+
     // --- Presence (UI layer, read from the authoritative relay) ------------
 
     /// The set of master identities this node would show as ONLINE (online dots /
@@ -741,6 +759,20 @@ async fn create_server_and_wait(node: &mut TestNode, name: &str) -> String {
 /// The default `#general` channel id for a server.
 fn general_channel_of(server_id: &str) -> String {
     format!("{}-general", &server_id[..8.min(server_id.len())])
+}
+
+/// Persist a master-signed v1 `SignedDeviceList` (devices = `device_ids`) into the
+/// DB at `db_path`, the way an inbox-proof / ProfileUpdate ingest would leave it.
+/// This is the precondition `revoke_own_device` reads (it bumps + re-signs from the
+/// stored version). `master_tag` is the shared sibling master seed tag.
+fn seed_device_list_into_db(db_path: &str, passphrase: &str, master_tag: u8, device_ids: &[String]) {
+    let master = NativeKeypair::from_secret_bytes(&seed_bytes(master_tag));
+    let signed = super::crypto_handler::build_signed_device_list(&master, 1, device_ids.to_vec(), Vec::new());
+    let json = serde_json::to_string(&signed).expect("serialize device list");
+    let store = crate::storage::MessageStore::open(db_path, passphrase).expect("open store");
+    store
+        .save_device_list(&signed.master_peer_id, &json, signed.version, &signed.devices, 0)
+        .expect("persist device list");
 }
 
 // ---------------------------------------------------------------------------
@@ -1052,4 +1084,512 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
     let row = msgs.iter().find(|m| m.text == "hello channel").expect("message stored");
     assert_eq!(row.sender_master, o_master, "channel message attributed to owner master");
     assert!(!row.is_mine, "received message is not is_mine on the joiner");
+}
+
+// ---------------------------------------------------------------------------
+// Rung 3: device REVOCATION. One sibling revokes another. Assert the full
+// cutoff: the revoked device gets SelfRevoked, the revoker drops its Olm session
+// to it, and the ghost fan-out guard holds — a subsequent DM from a friend never
+// reaches the revoked-and-dropped device (collect_target_devices filters to
+// devices currently in a room). This is the Steps 7/8 revocation surface.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // A = friend (single device). M = our identity, two devices B + C.
+    const A_MASTER: u8 = 50;
+    const M_MASTER: u8 = 60;
+    const B_DEV: u8 = 61;
+    const C_DEV: u8 = 62;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+
+    // Seed the resolver: M has devices B + C (so devices_for/same_identity work and
+    // revoke_own_device's `belongs` check passes).
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    // A is friends with M; B and C are friends with A.
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&m_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
+    sleep_ms(1200).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&a_master]).await;
+
+    // Persist a v1 signed device list {B,C} into BOTH siblings' DBs (what an
+    // inbox-proof / ProfileUpdate ingest would leave) so revoke bumps from v1→v2.
+    seed_device_list_into_db(&b.db_path, &b.passphrase, M_MASTER, &[b_dev.clone(), c_dev.clone()]);
+    seed_device_list_into_db(&c.db_path, &c.passphrase, M_MASTER, &[b_dev.clone(), c_dev.clone()]);
+
+    // Let Olm sessions confirm all around (A↔B, A↔C, B↔C siblings).
+    sleep_ms(5000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    // B holds a session with sibling C before revocation.
+    assert_ne!(
+        b.olm_status(&c.device_id).await,
+        "absent",
+        "B should hold an Olm session with sibling C before revoking it"
+    );
+
+    // --- B revokes device C ---
+    b.cmd_tx
+        .send(NodeCommand::RevokeDevice { device_peer_id: c.device_id.clone() })
+        .await
+        .unwrap();
+
+    // The revoker B emits DeviceListUpdated.
+    let b_updated = wait_event(&mut b, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::DeviceListUpdated { .. })
+    })
+    .await;
+    assert!(b_updated, "revoker B should emit DeviceListUpdated");
+
+    // The revoked device C receives the tombstone (ProfileUpdate to it FIRST) and
+    // emits SelfRevoked — the trigger for the Dart-side data wipe.
+    let c_nuked = wait_event(&mut c, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::SelfRevoked)
+    })
+    .await;
+    assert!(c_nuked, "revoked device C should emit SelfRevoked");
+    sleep_ms(300).await;
+
+    // B's Olm session to C is torn down (enforce_device_revocations).
+    assert_eq!(
+        b.olm_status(&c.device_id).await,
+        "absent",
+        "B must drop its Olm session to the revoked device C"
+    );
+
+    // --- Ghost fan-out guard: C self-nukes → disconnect; a later DM must NOT
+    // reach it. Simulate C's disconnect (the real device wipes + drops its socket). ---
+    relay.set_online(&c.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut c);
+
+    // A sends a DM to our identity M. With C revoked + out of all rooms,
+    // collect_target_devices targets only B (in the room) — never the ghost C.
+    a.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: m_master.clone(),
+            text: "after-revoke".to_string(),
+            message_id: "post-revoke-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+
+    // B (still live) receives it…
+    let b_got = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "after-revoke")
+    })
+    .await;
+    assert!(b_got, "live device B should still receive the friend's DM");
+
+    // …and C (revoked + offline) must NOT — its thread stays empty of the post-revoke
+    // message even after coming back online (it's dropped from the room, never
+    // targeted, and the receive-side is_revoked guard drops any stray delivery).
+    relay.set_online(&c.device_id, true);
+    sleep_ms(800).await;
+    let c_thread = c.dm_thread(&a.master_id);
+    assert!(
+        !c_thread.iter().any(|m| m.text == "after-revoke"),
+        "revoked device C must NOT receive the post-revocation DM (ghost fan-out guard), got {:?}",
+        c_thread.iter().map(|m| &m.text).collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ring-2 CONTROL PLANE: call signal routing. The harness can't run real
+// audio/video/ICE, but it CAN verify the load-bearing CONTROL path that breaks
+// silently: a call signal addressed to a friend's MASTER must be (a) mapped from
+// its whitelisted signal_type to the right HavenMessage variant and (b) routed to
+// the friend's concrete online DEVICE (the master authenticates as no socket).
+// An unknown signal_type must be silently dropped, never delivered. This guards
+// the "WHITELISTED, not passed through" + master-vs-device routing class.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn call_signal_routes_to_friend_device_and_drops_unknown() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // A = caller (single device). M = callee identity with one online device B.
+    const A_MASTER: u8 = 70;
+    const M_MASTER: u8 = 80;
+    const B_DEV: u8 = 81;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+
+    // M is multi-device-capable (device B != master) so the routing must resolve
+    // master→device — addressing the bare master would be silently dropped.
+    super::resolver::seed_self(&m_master, &[b_dev.clone()]);
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&m_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
+    sleep_ms(2500).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // A sends a call INVITE addressed to M's MASTER. handle_call_send_signal must
+    // map "invite" → CallInvite and route to B (M's online device).
+    let invite_payload = serde_json::json!({
+        "call_id": "call-1", "video": true, "sframe_key": "k",
+    }).to_string();
+    a.cmd_tx
+        .send(NodeCommand::CallSendSignal {
+            peer_id: m_master.clone(),
+            signal_type: "invite".to_string(),
+            payload: invite_payload,
+        })
+        .await
+        .unwrap();
+
+    // B (M's device) receives the CallSignal invite — the call "rings".
+    let mut got_call_id = None;
+    let rang = wait_event(&mut b, std::time::Duration::from_secs(4), |ev| {
+        if let NetworkEvent::CallSignal { signal_type, payload, .. } = ev {
+            if signal_type == "invite" {
+                let v: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+                got_call_id = v["call_id"].as_str().map(|s| s.to_string());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(rang, "callee device B must receive the routed CallInvite (master→device routing)");
+    assert_eq!(got_call_id.as_deref(), Some("call-1"), "the invite carried the right call_id");
+
+    drain_events(&mut b);
+
+    // An UNKNOWN signal type must be silently dropped (whitelist) — never delivered.
+    a.cmd_tx
+        .send(NodeCommand::CallSendSignal {
+            peer_id: m_master.clone(),
+            signal_type: "totally-made-up".to_string(),
+            payload: "{}".to_string(),
+        })
+        .await
+        .unwrap();
+    let leaked = wait_event(&mut b, std::time::Duration::from_millis(800), |ev| {
+        matches!(ev, NetworkEvent::CallSignal { .. })
+    })
+    .await;
+    assert!(!leaked, "an unknown call signal type must be silently dropped, never delivered");
+}
+
+// ---------------------------------------------------------------------------
+// Ring-2 FILE TRANSFER: full DM file send end to end. The FileHeader rides Olm
+// (SendDirect); the encrypted bytes fall back to WSS-relay binary streaming when
+// there's no WebRTC data channel (`stream_to_peer` -> ws_stream_send ->
+// SendBinaryDirect), which the MockRelay routes in-room. So MORE than the control
+// plane is coverable here: the bytes actually transfer + decrypt in-process. We
+// assert the receiver emits FileHeaderReceived, persists the files row, and
+// completes the transfer with the correct decrypted contents on disk. (Only the
+// WebRTC-data-channel byte path itself is out of scope — the relay fallback is
+// the same assembly/decrypt logic.)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn dm_file_transfer_completes_and_decrypts() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 90;
+    const B_MASTER: u8 = 100;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    sleep_ms(4000).await; // let Olm sessions confirm (the FileHeader rides Olm)
+    assert_eq!(
+        a.olm_status(&b.device_id).await, "confirmed",
+        "sender needs a confirmed Olm session for the FileHeader"
+    );
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // Write a small real file for the sender to read + send.
+    let src = global_tmp.path().join("hello.txt");
+    let contents: &[u8] = b"hello file contents";
+    std::fs::write(&src, contents).expect("write src file");
+
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "file-msg-1".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+        })))
+        .await
+        .unwrap();
+
+    // Receiver B emits FileHeaderReceived and persists a files row.
+    let mut got_fid = None;
+    let header = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
+            if file_name.starts_with("hello") {
+                got_fid = Some(file_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(header, "receiver must emit FileHeaderReceived for the sent file");
+    let fid = got_fid.expect("file id from header");
+
+    // The bytes stream over the relay fallback + decrypt; wait for completion.
+    let done = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(done, "receiver must complete the file transfer (relay byte fallback)");
+    sleep_ms(200).await;
+
+    // Inspector: the files row is persisted, complete, and on disk with the
+    // ORIGINAL decrypted contents — a true end-to-end file transfer.
+    let meta = b.file_meta(&fid).expect("receiver persisted a files row");
+    assert_eq!(meta.context_type, "dm", "file context is a DM");
+    assert!(meta.file_name.starts_with("hello"), "header name persisted, got {:?}", meta.file_name);
+    assert_eq!(meta.size_bytes, contents.len() as u64, "size matches the source file");
+    assert!(meta.completed_at.is_some(), "transfer completed");
+    let disk = meta.disk_path.expect("completed file has a disk path");
+    let got = std::fs::read(&disk).expect("read the received file");
+    assert_eq!(got, contents, "received file must decrypt to the original contents");
+    // A completed file is no longer in the needs-download set.
+    assert!(!b.missing_file_ids().contains(&fid), "completed file is not missing");
+}
+
+// ---------------------------------------------------------------------------
+// Ring-2 CONTROL PLANE: voice-channel join/leave + participant tracking + signal
+// routing. Real audio/SFU is out of scope; the control path rides a plaintext
+// fallback (no formed MLS group needed — only server membership + a Voice
+// channel). Both nodes join a server, J joins the voice channel (O sees it in its
+// participant set), a broadcast signal routes, and leave removes the participant.
+// Also guards the VC signal whitelist (unknown type silently dropped).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn voice_channel_join_leave_and_signal_routing() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 110;
+    const J_MASTER: u8 = 120;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await; // Olm confirm (targeted VC signals would need it)
+
+    // Owner creates a server; add a VOICE channel (the default #general is Text).
+    let server_id = create_server_and_wait(&mut o, "VC Server").await;
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            name: "Voice".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut voice_cid = None;
+    let made = wait_event(&mut o, std::time::Duration::from_secs(3), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, channel_type, .. } = ev {
+            if channel_type == "voice" {
+                voice_cid = Some(channel_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(made, "owner should create a voice channel");
+    let voice_cid = voice_cid.expect("voice channel id");
+    sleep_ms(300).await;
+
+    // J joins the server (so both hold server_states with each other as members —
+    // the precondition for the plaintext VC path; MLS-formed not required here).
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should join the server");
+    sleep_ms(1500).await; // let the MemberAdded op propagate to both CRDTs
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // --- J joins the VOICE channel; O sees J in the participant set ---
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+        })
+        .await
+        .unwrap();
+    let o_saw_join = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, .. } if *channel_id == voice_cid)
+    })
+    .await;
+    assert!(o_saw_join, "owner must see the joiner enter the voice channel");
+
+    // --- A broadcast VC signal (audio_state) routes via the plaintext fallback ---
+    drain_events(&mut o);
+    let audio_payload = serde_json::json!({
+        "call_id": voice_cid, "muted": true, "deafened": false,
+    }).to_string();
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: o_master.clone(),
+            signal_type: "audio_state".to_string(),
+            payload: audio_payload,
+        })
+        .await
+        .unwrap();
+    let o_saw_signal = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelSignal { signal_type, .. } if signal_type == "audio_state")
+    })
+    .await;
+    assert!(o_saw_signal, "owner must receive the routed audio_state VC signal");
+
+    // Unknown VC signal type is silently dropped (whitelist).
+    drain_events(&mut o);
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: o_master.clone(),
+            signal_type: "made-up-vc-signal".to_string(),
+            payload: "{}".to_string(),
+        })
+        .await
+        .unwrap();
+    let leaked = wait_event(&mut o, std::time::Duration::from_millis(800), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelSignal { .. })
+    })
+    .await;
+    assert!(!leaked, "an unknown VC signal type must be silently dropped");
+
+    // --- J leaves the voice channel; O sees the leave ---
+    drain_events(&mut o);
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelLeave {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+        })
+        .await
+        .unwrap();
+    let o_saw_leave = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelLeft { channel_id, .. } if *channel_id == voice_cid)
+    })
+    .await;
+    assert!(o_saw_leave, "owner must see the joiner leave the voice channel");
+}
+
+// ---------------------------------------------------------------------------
+// Ring-2 CONTROL PLANE: recovery-pool formation. The cross-peer shard byte
+// streaming + reconstruction math need a populated vault (heavier setup), but the
+// pool's MEMBERSHIP control path is fully in-process: an initiator opens a pool
+// (joins recovery:{server}:{token}), a second node joins + broadcasts a
+// RecoveryHello, and the initiator registers it as a member. This guards the pool
+// rendezvous + RecoveryHello/Welcome inventory-exchange handshake.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn recovery_pool_membership_forms() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 130; // initiator
+    const J_MASTER: u8 = 140; // joiner
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1000).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(1500).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    let server_id = "recovery-server-1".to_string();
+    let token = "tok123".to_string();
+
+    // Initiator opens the pool FIRST (so it's in the room when the joiner's
+    // RecoveryHello room-broadcast arrives).
+    o.cmd_tx
+        .send(NodeCommand::InitiateRecoveryPool { server_id: server_id.clone(), token: token.clone() })
+        .await
+        .unwrap();
+    let created = wait_event(&mut o, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::RecoveryPoolCreated { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(created, "initiator should emit RecoveryPoolCreated");
+    sleep_ms(300).await;
+
+    // Joiner joins the pool → sends RecoveryHello (room broadcast) + emits Joined.
+    j.cmd_tx
+        .send(NodeCommand::JoinRecoveryPool { server_id: server_id.clone(), token: token.clone() })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::RecoveryPoolJoined { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should emit RecoveryPoolJoined");
+
+    // The initiator receives the RecoveryHello and registers the joiner as a member.
+    let o_saw_member = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::RecoveryPoolMemberJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(o_saw_member, "initiator must register the joiner as a recovery-pool member");
 }

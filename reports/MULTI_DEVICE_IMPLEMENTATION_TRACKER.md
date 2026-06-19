@@ -1056,22 +1056,27 @@ a relay — beyond one in-process `integration_test`. So the split is:
      local relay, assert a channel msg crosses). Decide cost/value when we get here. **DESIGN LOCKED
      below (9B-i) — Vitalik-approved 2026-06-18.**
 
-#### 9B-i — Multi-node integration harness (the "isolated instances" idea) — SCAFFOLD BUILT 2026-06-19 (UNCOMMITTED), BLOCKED on Olm glare
-> **⚠ ACTIVE WORK, resume next session. Full handoff: `reports/MULTINODE_TEST_HARNESS_HANDOFF.md`.**
-> Scaffold BUILT + working (hard 80%): N real `spawn_node` in one process, in-process `MockRelay`,
-> per-node temp DBs, nodes join rooms + flow key material + persist own-sends; production seam is
-> behavior-neutral (**338 lib tests still pass**). Key unlock: `run_event_loop` now takes
-> `db_path`/`db_passphrase` as PARAMS (was deriving from the process-global `data_dir()` → all nodes
-> opened the same default DB and collided). New `#[cfg(test)] spawn_node_mock` skips real WS+signaling;
-> `node/test_harness.rs` (NEW) holds the broker + helpers + the inversion-regression test.
-> **BLOCKER:** cross-node Olm sessions never form → DMs don't decrypt (each node keeps only its own
-> sends). Root cause: KeyBundle GLARE deadlock — the tiebreaker `local_peer_str > peer_str` compares
-> this node's MASTER vs the sender's DEVICE id (`swarm.rs` ~4034), which is asymmetric so BOTH peers
-> "defer" → no session. A latent REAL product bug the mock exposed (device≠master only became normal
-> post-multi-device). **Fix B (next session, real product fix):** make the glare tiebreaker
-> id-kind-consistent (recommend DEVICE-id comparison + sibling fallback); audit all
-> `key_bundle_sent_to`/KeyRequest/KeyBundle/SessionAck sites. Verify via the harness test + full suite +
-> one real-device DM-key sanity check. NOT committed.
+#### 9B-i — Multi-node integration harness (the "isolated instances" idea) — ✅ DONE 2026-06-19 (7 tests, 345/345, CI-gated)
+> **✅ COMPLETE. Full handoff: `reports/MULTINODE_TEST_HARNESS_HANDOFF.md`; coverage line:
+> `reports/HARNESS_COVERAGE_MAP.md`; wiki `rust_test_harness`.** N real `spawn_node` in one process,
+> in-process `MockRelay`, per-node temp DBs, two-layer inspectors (UI-collapsed + raw device-keyed) +
+> a `#[cfg(test)] DebugSnapshot` command for live MLS/Olm state. Production seam behavior-neutral.
+> **Glare deadlock FIXED** (tiebreaker now compares DEVICE ids `device_peer_id > peer_str`, not the
+> master — master-vs-device wasn't antisymmetric → both deferred → no session; also a latent product
+> bug the mock surfaced). Mock-fidelity fix: `set_online(false)` now sends `WsEvent::Disconnected`.
+> **7 tests cover ring 1 fully + the coverable ring-2 control plane:** DM backfill+inversion guard,
+> server-join+MLS+cross-device channel decrypt, device revocation+ghost-fanout cutoff, 1:1 call-signal
+> whitelist+routing, FULL DM file transfer (bytes decrypt over the relay fallback), voice-channel
+> join/leave/signal, recovery-pool membership. **KEY DISCOVERY:** the WS-relay binary-stream fallback
+> (`stream_to_peer`→`ws_stream_send`→`SendBinaryDirect`) works in-process, so file/shard BYTES actually
+> transfer+decrypt — the data plane over the RELAY path is coverable (only the WebRTC-data-channel-
+> specific path is out of scope). **CI-INTEGRATED:** the harness runs on every push/PR touching
+> `rust/hollow_core/**` via `cargo llvm-cov --lib` in `.github/workflows/rust-coverage.yml` (the
+> `--ignore-filename-regex .../node/...` only excludes `node/` from the coverage %, NOT from running),
+> and gates `main` via the required "Test & Coverage" check. Caveat: harness tests are timing-sensitive
+> (sleeps for MLS/Olm); a slower instrumented CI runner is a latent flakiness risk. Remaining (optional,
+> heavier, build-on-demand): vault shard transfer with a POPULATED vault; device LINKING e2e (needs a
+> relay link-code map in the mock + an import/restart sim).
 
 *Vitalik's idea (2026-06-18): isolated test instances that spin up multiple identities, talk to each other,
 and let Claude RUN them + verify behavior to test its own multi-device work without the manual 3-device dance.
@@ -1101,17 +1106,20 @@ instances = N data dirs + N processes. The relay is a separate dumb-pipe process
 - **Build timing:** capture now, **build during 9B** (after the live multi-device work settles, so the harness
   pins FINAL behavior not a moving target).
 
-**First tests to write (each an automated version of a manual live-test we already do):**
-- [ ] Harness scaffold: `spawn_node` ×N with per-node `HOLLOW_DATA_DIR` + a shared in-process mock relay;
+**First tests (each an automated version of a manual live-test) — ALL DONE:**
+- [x] Harness scaffold: `spawn_node` ×N with per-node temp DBs + a shared in-process mock relay;
       helpers to create identity, friend two nodes, take a node offline/online, read a node's DB.
-- [ ] DM delivery + direction: A→B DM lands on B with correct `is_mine`, sig verifies.
-- [ ] **Peer-fallback regression (the bug from THIS session):** 3 nodes where B+C share an identity (master M),
-      A is the friend; C(sibling) DMs A while B offline; bring B online with C offline; assert B recovers BOTH
-      directions on the CORRECT sides (`is_mine` inverted from the friend, NOT from the sibling) + zero sig
-      fails. This is the test that would have caught the inversion.
-- [ ] Server channel: A+B join a server, A's channel message decrypts on B (MLS multi-leaf for siblings).
-- [ ] Revocation: revoke a device → its Olm session dropped, no longer a fan-out target, self-nuke event fires.
-- [ ] Wire into CI as a separate `cargo test --test multinode` job (slower than unit tests).
+- [x] DM delivery + direction (covered within the peer-fallback test: correct `is_mine`, sig verifies).
+- [x] **Peer-fallback regression** (`peer_fallback_recovers_own_sends_correct_direction`): B+C share master M,
+      A is the friend; C DMs A while B offline; B online + C offline; B recovers BOTH directions on the
+      CORRECT sides + every bubble signed. Guards the `mine`-inversion regression.
+- [x] Server channel (`server_join_forms_mls_and_channel_message_decrypts`): A+B join a server, MLS group
+      forms across both device leaves, A's channel message decrypts on B.
+- [x] Revocation (`device_revocation_cuts_off_and_ghost_fanout_holds`): revoke a device → Olm session
+      dropped, no longer a fan-out target, `SelfRevoked` fires.
+- [x] Ring-2 control plane: 1:1 call signals, voice channels, full DM file transfer, recovery-pool membership.
+- [x] Wired into CI — the existing `Test & Coverage` job runs `cargo llvm-cov --lib`, which executes the
+      harness tests on every `rust/hollow_core/**` push/PR and gates `main` (no separate job needed).
 
 **Honest limit (write it so nobody over-promises):** Tier 1 proves BEHAVIOR/DATA, not pixels. Visual/interactive
 UI verification stays Tier 2 (logs + `flutter drive` screenshots). The autonomous self-test loop lives at Tier 1

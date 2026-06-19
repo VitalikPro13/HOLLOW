@@ -89,11 +89,17 @@ The GAP between the two layers is where multi-device bugs hide, so both exist on
 - Tests set `HOLLOW_DATA_DIR` to a throwaway tempdir so no stray global-data-dir path touches the
   developer's real `~/.hollow` DB.
 
-## Build ladder
+## Build ladder (all DONE 2026-06-19)
 
-rung1 inspectors ✅ → rung2 servers+channels+MLS ✅ → rung3 device lifecycle (link sibling, revoke,
-ghost cutoff) → ring-2 control plane (call/VC signal routing, file-request handshake, shard assignment).
-Coverage line (ring 1/2/3, what's coverable) in `reports/HARNESS_COVERAGE_MAP.md`.
+rung1 inspectors ✅ → rung2 servers+channels+MLS ✅ → rung3 device revocation ✅ → ring-2 control plane
+(1:1 call signals, voice channels, file transfer, recovery pool) ✅. Ring 1 fully self-verifiable; the
+coverable ring-2 control plane is covered. Coverage line in `reports/HARNESS_COVERAGE_MAP.md`.
+
+**KEY DISCOVERY (file transfer):** the WS-relay binary-streaming fallback works fully in-process —
+`stream_to_peer` falls back to `ws_stream_send` (→ `SendBinaryDirect`, which the MockRelay routes
+in-room) when there's no WebRTC peer. So file/shard BYTES actually transfer + decrypt + land on disk in
+the harness — the data plane over the RELAY path is coverable; only the WebRTC-data-channel-specific
+path is out of scope. Inspectors: `TestNode::file_meta(file_id)` (StoredFile row), `missing_file_ids()`.
 
 **Server-join + MLS handshake (rung 2) sequence** (2-node, owner O + joiner J; room code == server_id;
 default channel == `{server_id[..8]}-general`, non-public): J `JoinServer` → JoinRoom → relay
@@ -106,12 +112,26 @@ forms its group. **Both leaves at the same epoch.** Then `SendChannelMessage` (n
 Owner is always the MLS coordinator in 2-node. **Sleep ≥~4-5s after JoinServer** so the batch timer
 ticks AFTER the KeyPackage is queued (Welcome only goes out post-queue).
 
-## Current tests
+## Current tests (7)
 
 - `server_join_forms_mls_and_channel_message_decrypts` — owner creates a server, friend joins, MLS group
   forms across both device leaves at the same epoch, owner's MLS-encrypted channel message decrypts on
   the joiner. Asserts every layer: member panel (UI, master-keyed, online) + raw CRDT master-keys + raw
   MLS device-leaves + live epoch + Olm status + decrypted channel row.
+- `device_revocation_cuts_off_and_ghost_fanout_holds` — B revokes sibling C: C emits `SelfRevoked`, B
+  emits `DeviceListUpdated`, B drops its Olm session to C, and a friend's later DM reaches live B but NOT
+  the revoked-and-dropped C (ghost fan-out guard). Helper `seed_device_list_into_db` persists a real
+  master-signed v1 device list (the precondition `revoke_own_device` reads).
+- `call_signal_routes_to_friend_device_and_drops_unknown` — a 1:1 call invite maps via the whitelist to
+  `CallInvite`, routes master→device to the friend's online device, and an unknown signal type is
+  silently dropped.
+- `dm_file_transfer_completes_and_decrypts` — full DM file send: FileHeader (Olm) + bytes (relay
+  fallback) transfer, decrypt, and land on disk with the original contents; files row complete.
+- `voice_channel_join_leave_and_signal_routing` — two server members, one joins a Voice channel (the
+  other sees it in participants), a broadcast `audio_state` signal routes, unknown VC signal dropped,
+  leave removes the participant. Plaintext fallback (no formed MLS needed).
+- `recovery_pool_membership_forms` — initiator opens a pool, joiner joins + broadcasts RecoveryHello,
+  initiator registers it as a member.
 - `peer_fallback_recovers_own_sends_correct_direction` — A (single-device friend) + B/C (share master
   M). C sends DMs to A while B offline; B reconnects + C offline; B fires `DmSyncRequest{both_directions}`;
   A re-serves B's OWN stranded sends. Asserts (through the inspectors) B recovers all on the CORRECT
@@ -122,3 +142,14 @@ ticks AFTER the KeyPackage is queued (Welcome only goes out post-queue).
 ## Run
 
 `cargo test --lib test_harness -- --nocapture` (the harness tests). Full suite: `cargo test --lib`.
+
+## CI integration
+
+The harness is CI-gated. `.github/workflows/rust-coverage.yml` (job "Test & Coverage") runs
+`cargo llvm-cov --lib` on every push/PR touching `rust/hollow_core/**` — `--lib` EXECUTES the
+`#[cfg(test)]` harness tests, so a failing harness test fails the job. The
+`--ignore-filename-regex "(...|/node/|...)"` only excludes `node/` from the coverage PERCENTAGE, not
+from running. Branch protection requires "Test & Coverage" → the harness gates merges to `main`. No
+separate job needed. **Caveat:** the harness tests are timing-sensitive (sleeps for the MLS batch timer,
+Olm confirmation, etc.); a slower instrumented CI runner is a latent flakiness risk — bump the sleeps if
+CI flakes, don't assume a logic bug.
