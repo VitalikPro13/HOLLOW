@@ -1053,7 +1053,69 @@ a relay — beyond one in-process `integration_test`. So the split is:
      `remove_identity_leaves_*`, `canonicalize_*`; Dart `multi_device_presence_test.dart`).
    - **Actual two-device mesh** → stays a documented MANUAL live-test checklist (Pixel↔VM↔AL) UNLESS
      we invest in a two-in-process-node harness (a stretch goal — spawn two `spawn_node`s against a
-     local relay, assert a channel msg crosses). Decide cost/value when we get here.
+     local relay, assert a channel msg crosses). Decide cost/value when we get here. **DESIGN LOCKED
+     below (9B-i) — Vitalik-approved 2026-06-18.**
+
+#### 9B-i — Multi-node integration harness (the "isolated instances" idea) — SCAFFOLD BUILT 2026-06-19 (UNCOMMITTED), BLOCKED on Olm glare
+> **⚠ ACTIVE WORK, resume next session. Full handoff: `reports/MULTINODE_TEST_HARNESS_HANDOFF.md`.**
+> Scaffold BUILT + working (hard 80%): N real `spawn_node` in one process, in-process `MockRelay`,
+> per-node temp DBs, nodes join rooms + flow key material + persist own-sends; production seam is
+> behavior-neutral (**338 lib tests still pass**). Key unlock: `run_event_loop` now takes
+> `db_path`/`db_passphrase` as PARAMS (was deriving from the process-global `data_dir()` → all nodes
+> opened the same default DB and collided). New `#[cfg(test)] spawn_node_mock` skips real WS+signaling;
+> `node/test_harness.rs` (NEW) holds the broker + helpers + the inversion-regression test.
+> **BLOCKER:** cross-node Olm sessions never form → DMs don't decrypt (each node keeps only its own
+> sends). Root cause: KeyBundle GLARE deadlock — the tiebreaker `local_peer_str > peer_str` compares
+> this node's MASTER vs the sender's DEVICE id (`swarm.rs` ~4034), which is asymmetric so BOTH peers
+> "defer" → no session. A latent REAL product bug the mock exposed (device≠master only became normal
+> post-multi-device). **Fix B (next session, real product fix):** make the glare tiebreaker
+> id-kind-consistent (recommend DEVICE-id comparison + sibling fallback); audit all
+> `key_bundle_sent_to`/KeyRequest/KeyBundle/SessionAck sites. Verify via the harness test + full suite +
+> one real-device DM-key sanity check. NOT committed.
+
+*Vitalik's idea (2026-06-18): isolated test instances that spin up multiple identities, talk to each other,
+and let Claude RUN them + verify behavior to test its own multi-device work without the manual 3-device dance.
+Investigation confirmed it's not only possible but already half-built: `HOLLOW_DATA_DIR` overrides the entire
+data dir on desktop (`lib/src/core/hollow_data_dir.dart:14`; `HOLLOW_PLAN.md:1514` literally "for
+multi-instance testing"). Everything (identity, SQLCipher DB, files, vault) lives under that one root → N
+instances = N data dirs + N processes. The relay is a separate dumb-pipe process. No isolation code needed.*
+
+**The three tiers considered (full analysis in `project_multinode_test_harness` memory):**
+- **Tier 1 — headless multi-node Rust harness** (CHOSEN, highest value). 2–3 `spawn_node()`s in ONE test
+  process, each with its own data dir, all on a local relay; assert real over-the-wire behavior. Headless →
+  **Claude runs it via `cargo test`, reads assertions, iterates** = the autonomous "test my own work" loop.
+  Would have caught the `mine`-inversion bug instantly. No GUI-perception limit (assertions are data).
+- **Tier 2 — multiple full GUI apps** (`HOLLOW_DATA_DIR=… flutter run` ×3 — works TODAY, you can do it now).
+  Claude can launch them + read each `hollow_debug.log`, but CANNOT see rendered pixels (no screen access).
+  Partial: `flutter drive` screenshot capture → PNGs Claude CAN read (image vision). "Captured frames," not
+  live interactive control. Helps YOU (you watch); helps Claude only via logs/screenshots.
+- **Tier 3 — Docker containers** — clean for CI but Windows-awkward (Xvfb for GUI), heavy; Tier 1 is lighter
+  for the same behavioral coverage. Skip unless CI demands it.
+
+**LOCKED decisions:**
+- **Relay = in-process MOCK relay** (Vitalik-picked over local-uWS / live-prod). Write a tiny Rust mock of the
+  relay's room-routing + offline-buffer (it's a dumb pipe: auth, join/leave room, broadcast-to-room,
+  direct-to-peer, buffer-when-offline + replay-on-join, the `0x07`/`0x03` topic frames). Self-contained, no
+  external binary, no network, deterministic, CI-friendly. ~the load-bearing relay behaviors are few and
+  documented in `feedback_relay_rules` + `relay_uws_server` wiki.
+- **Build timing:** capture now, **build during 9B** (after the live multi-device work settles, so the harness
+  pins FINAL behavior not a moving target).
+
+**First tests to write (each an automated version of a manual live-test we already do):**
+- [ ] Harness scaffold: `spawn_node` ×N with per-node `HOLLOW_DATA_DIR` + a shared in-process mock relay;
+      helpers to create identity, friend two nodes, take a node offline/online, read a node's DB.
+- [ ] DM delivery + direction: A→B DM lands on B with correct `is_mine`, sig verifies.
+- [ ] **Peer-fallback regression (the bug from THIS session):** 3 nodes where B+C share an identity (master M),
+      A is the friend; C(sibling) DMs A while B offline; bring B online with C offline; assert B recovers BOTH
+      directions on the CORRECT sides (`is_mine` inverted from the friend, NOT from the sibling) + zero sig
+      fails. This is the test that would have caught the inversion.
+- [ ] Server channel: A+B join a server, A's channel message decrypts on B (MLS multi-leaf for siblings).
+- [ ] Revocation: revoke a device → its Olm session dropped, no longer a fan-out target, self-nuke event fires.
+- [ ] Wire into CI as a separate `cargo test --test multinode` job (slower than unit tests).
+
+**Honest limit (write it so nobody over-promises):** Tier 1 proves BEHAVIOR/DATA, not pixels. Visual/interactive
+UI verification stays Tier 2 (logs + `flutter drive` screenshots). The autonomous self-test loop lives at Tier 1
++ screenshot-captured integration tests.
 
 **Scope when we build it:**
 - [ ] **Rust:** keep growing `#[cfg(test)]` coverage for every cross-cutting invariant — the
@@ -1118,6 +1180,7 @@ decided to stop and ship the working state — fix in a focused polish pass, NOT
 - [ ] Overall, proper syncing on kick/bans etc., make the master-subdevice relationship be fully synced between each ohter in terms of actions and features.
 - [ ] Fix "sync-import" when using 24-wod phrase on Welcome dialog (either remove or change to reuse the same pipeline as Link Device)
 - [ ] Fill the "Youre devices" list on the newly synced device.
+- [ ] Check the messages inserting on multi-device syncing from the friend identity. Somehow the messages in a row were inserted as the messages "ping-pong" between the peers. Was Pixel sending 3 messages in a row, then AL sent 3 in a row - after Pixel went offline and VM got back online, the messages inserted on both as ping-pong (first message is AL, then Pixel/VM, third is AL, then Pixel/VM instead of the original rows). Only happened once, don't know if can be recreated
 
 ---
 

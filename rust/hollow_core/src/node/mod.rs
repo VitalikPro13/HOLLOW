@@ -23,6 +23,9 @@ pub(crate) mod ws_stream_transfer;
 mod swarm;
 pub(crate) mod ws_client;
 
+#[cfg(test)]
+mod test_harness;
+
 pub(crate) use crdt_store::CrdtStore;
 pub(crate) use types::{LinkPreviewRef, NetworkEvent, NodeCommand, SendFilePayload, ShareRef, SignedDeviceList, VaultUploadFilePayload, VideoThumbRef};
 pub(crate) use crypto_handler::{message_signing_payload, verify_message_signature};

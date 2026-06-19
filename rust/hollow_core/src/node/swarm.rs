@@ -106,14 +106,82 @@ pub(crate) async fn spawn_node(
         license_key, false, ws_cmd_rx, ws_event_tx,
     );
 
+    // Derive DB path/passphrase from the global data dir + master keypair (the
+    // production behavior, unchanged — now passed into the loop explicitly).
+    let db_path = {
+        let data_dir = crate::identity::data_dir().unwrap_or_default();
+        data_dir.join("messages.db").to_string_lossy().to_string()
+    };
+    let db_passphrase = {
+        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
+        hex::encode(&proto[..32.min(proto.len())])
+    };
+
     let handle = tokio::spawn(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store, sig_cmd_tx, sig_event_rx,
         bundle_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
-        initial_invisible,
+        initial_invisible, db_path, db_passphrase,
     ));
 
     // The app's "my peer id" (friendships, display) is the MASTER id.
     Ok((master_peer_id, handle))
+}
+
+/// Test-only spawn variant for the headless multi-node integration harness
+/// (`node::test_harness`). Identical to `spawn_node` EXCEPT it does NOT open a
+/// real WebSocket socket or the HTTP signaling task — instead it accepts an
+/// injected WS channel pair so an in-process `MockRelay` can route between
+/// several nodes with no network/TLS/auth. The signaling side is a dead pair
+/// (its event receiver never fires; DM/room delivery never depends on signaling
+/// — it's a non-fatal HTTP peer-discovery fallback).
+///
+/// Returns `(master_peer_id, event_loop_handle, ws_cmd_rx, ws_event_tx)`: the
+/// caller (broker) drains `ws_cmd_rx` (this node's outbound relay commands) and
+/// pushes into `ws_event_tx` (this node's inbound relay events).
+///
+/// Production `spawn_node` above is untouched; this only exists under `cfg(test)`.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn spawn_node_mock(
+    native_keypair: crate::identity::native_identity::NativeKeypair,
+    device_keypair: crate::identity::native_identity::NativeKeypair,
+    event_tx: mpsc::Sender<NetworkEvent>,
+    cmd_rx: mpsc::Receiver<NodeCommand>,
+    cmd_tx: mpsc::Sender<NodeCommand>,
+    olm: OlmManager,
+    crypto_store: CryptoStore,
+    crdt_store: super::crdt_store::CrdtStore,
+    initial_invisible: bool,
+    db_path: String,
+    db_passphrase: String,
+) -> Result<(
+    String,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::mpsc::UnboundedReceiver<super::ws_client::WsCommand>,
+    tokio::sync::mpsc::UnboundedSender<super::ws_client::WsEvent>,
+), String> {
+    let bundle_keypair = native_keypair.clone();
+    let master_peer_id = native_keypair.peer_id();
+    let device_peer_id = device_keypair.peer_id();
+
+    // Dead signaling channels — the real task is never spawned. The event loop
+    // holds `sig_cmd_tx` (its sends go nowhere) and selects on `sig_event_rx`
+    // (which never yields, since its sender is dropped here). Signaling is a
+    // non-fatal HTTP peer-discovery fallback; DM/room delivery never needs it.
+    let (sig_cmd_tx, _sig_cmd_rx) = mpsc::channel::<SignalingCmd>(8);
+    let (_sig_event_tx, sig_event_rx) = mpsc::channel::<SignalingEvent>(8);
+
+    // Injected WS channels (the broker owns the other ends).
+    let (ws_cmd_tx, ws_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ws_event_tx, ws_event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let handle = tokio::spawn(run_event_loop(
+        event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store, sig_cmd_tx, sig_event_rx,
+        bundle_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
+        initial_invisible, db_path, db_passphrase,
+    ));
+
+    Ok((master_peer_id, handle, ws_cmd_rx, ws_event_tx))
 }
 
 /// The main event loop. Runs until the task is aborted.
@@ -132,6 +200,12 @@ async fn run_event_loop(
     local_peer_str: String,
     device_peer_id: String,
     initial_invisible: bool,
+    // DB path + passphrase, injected by the caller (production derives them from
+    // the global data dir + master keypair; the test harness injects per-node
+    // temp paths so several nodes can run in one process without colliding on the
+    // process-global `data_dir()`).
+    db_path: String,
+    db_passphrase: String,
 ) {
     // Precompute public key base64 for prekey bundle signing.
     let pub_key_proto = bundle_keypair.public_key_protobuf();
@@ -239,15 +313,7 @@ async fn run_event_loop(
     // Auto-rejoin every share row with seeding=1 so we keep serving across restarts.
     super::share_handler::auto_rejoin_seeders(&mut share_registry, &bundle_keypair, &ws_cmd_tx);
 
-    // Derive DB path/passphrase once — used throughout for MessageStore opens.
-    let db_path = {
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        data_dir.join("messages.db").to_string_lossy().to_string()
-    };
-    let db_passphrase = {
-        let proto = bundle_keypair.to_protobuf_encoding().unwrap_or_default();
-        hex::encode(&proto[..32.min(proto.len())])
-    };
+    // `db_path` / `db_passphrase` are now injected by the caller (see signature).
 
     // -- Multi-device resolver warm-up (Phase 6) --
     // Load persisted device links + our own device(s) into the process-global
@@ -3965,12 +4031,23 @@ async fn handle_incoming_request(
             if olm.has_session(peer_str) {
                 hollow_log!("[HOLLOW-CRYPTO] Already have session with {peer_str}, ignoring KeyBundle");
                 key_bundle_sent_to.remove(peer_str);
-            } else if key_bundle_sent_to.remove(peer_str) && local_peer_str > peer_str {
+            } else if key_bundle_sent_to.remove(peer_str) && device_peer_id > peer_str {
                 // Glare: we sent THEM a KeyBundle (responding to their KeyRequest) AND
                 // they sent US a KeyBundle (responding to our KeyRequest). Both sides
                 // would create outbound sessions → MAC mismatch. The lower peer ID
                 // creates the outbound session; we're higher, so we wait for their
                 // PreKey/SessionAck to create an inbound session instead.
+                //
+                // CRITICAL — compare DEVICE ids, not master. `peer_str` is the
+                // SENDER'S DEVICE id (the relay reports device ids + authenticates
+                // device sockets); the outbound Olm session lives on the SOCKET, so
+                // the tiebreaker must be device↔device to stay antisymmetric. Using
+                // the local MASTER (`local_peer_str`) here compared our master vs the
+                // peer's device — two unrelated strings, so BOTH peers of a pair could
+                // satisfy `local > peer` at once → both defer → deadlock (never keyed
+                // until the 30s sweep). All `key_bundle_sent_to` / `key_request_in_flight`
+                // / KeyRequest targets are already device-keyed, so `device_peer_id`
+                // is the consistent id-kind to compare against `peer_str`.
                 //
                 // Do NOT clear key_request_in_flight here: if the low peer's PreKey/
                 // SessionAck is dropped, clearing it would strand us sessionless with

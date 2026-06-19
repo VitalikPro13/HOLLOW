@@ -14,8 +14,10 @@ Source: `rust/hollow_core/src/node/swarm.rs`
 1. Clone the MASTER keypair for the event loop; derive `master_peer_id` + `device_peer_id`.
 2. Spawn the signaling background task via `signaling::spawn_signaling_task(device_keypair, device_peer_id, …)` (DEVICE-keyed register).
 3. Create the WS relay client via `ws_client::spawn_ws_client(…, device_peer_id, device_proto, …)` — DEVICE-keyed auth; connects to `wss://relay.anonlisten.com/ws`.
-4. Spawn the main event loop as a Tokio task via `tokio::spawn(run_event_loop(…, master_peer_id, device_peer_id, …))`.
+4. Derive `db_path` (from the global `data_dir()`) + `db_passphrase` (hex of the master keypair's first 32 protobuf bytes) and spawn the main event loop via `tokio::spawn(run_event_loop(…, master_peer_id, device_peer_id, initial_invisible, db_path, db_passphrase))`. **`run_event_loop` takes `db_path`/`db_passphrase` as PARAMETERS** (it no longer derives them from the global `data_dir()` internally) — so the headless multi-node test harness can inject per-node temp DBs and run several nodes in one process without colliding on the one process-global default DB. Production passes the same derived values → behavior-neutral.
 5. Return `(master_peer_id, handle)` — the app's "my peer id" is the master.
+
+**Test seam (`#[cfg(test)] spawn_node_mock`):** a cfg(test) twin of `spawn_node` that SKIPS the real `spawn_ws_client` + `spawn_signaling_task` and instead returns the injected WS channel ends `(master_peer_id, JoinHandle, ws_cmd_rx, ws_event_tx)`, so the in-process `MockRelay` (`node/test_harness.rs`) can route between several nodes with no network/TLS/auth. Used by the multi-node integration harness (Step 9B-i). Production `spawn_node` is untouched. See `reports/MULTINODE_TEST_HARNESS_HANDOFF.md`.
 
 Parameters received:
 - `NativeKeypair` — Ed25519 identity for signing.
@@ -260,7 +262,7 @@ These are handled directly in `handle_incoming_request()`:
 
 **Crypto handshake:**
 - `KeyRequest` — generates one-time key, responds with `KeyBundle`.
-- `KeyBundle` — creates outbound Olm session, drains pending_messages.
+- `KeyBundle` — creates outbound Olm session, drains pending_messages. **Glare tiebreaker compares DEVICE ids:** when both peers sent each other a KeyBundle (each responding to the other's KeyRequest), only the lower-id peer creates the outbound session; the higher defers to the other's PreKey. The comparison is `device_peer_id > peer_str` (our DEVICE id vs the sender's DEVICE id — the relay reports device ids and Olm sessions live on sockets). It must NOT use the local MASTER (`local_peer_str`): master-vs-device is two unrelated strings, so under near-simultaneous delivery BOTH peers could satisfy `local > peer` and both defer → permanent deadlock until the 30s sweep. All `key_bundle_sent_to`/`key_request_in_flight`/KeyRequest targets are already device-keyed. (Fixed 2026-06-19; surfaced by the multi-node harness, also a latent multi-device production bug.)
 - `Encrypted` — decrypts via Olm (PreKey or Normal message type), then falls through to Layer 2.
 
 **CRDT sync (plaintext):**

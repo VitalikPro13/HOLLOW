@@ -80,6 +80,10 @@ flutter test test/
 cd rust/hollow_core && cargo check
 cd rust/hollow_core && cargo clippy
 
+# Multi-node integration harness — the PRIMARY way to verify distributed-logic changes
+cargo test --lib test_harness -- --nocapture   # drive N real nodes through an in-process MockRelay
+cargo test --lib                               # full Rust suite (harness tests included)
+
 # Regenerate FFI bindings after Rust API changes (run from project root)
 flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"
 
@@ -108,6 +112,7 @@ All UI uses custom Hollow widgets — no Material defaults.
 - **StatusDot:** Optional `pulse` for breathing glow (3s cycle).
 
 ## Key Architecture Notes
+- **Multi-node test harness = PRIMARY testing for distributed logic.** `rust/hollow_core/src/node/test_harness.rs` (`#[cfg(test)]`) spins up N real `spawn_node` event loops in ONE process, each with its own temp SQLCipher DB + keypairs, wired through an in-process `MockRelay` (no sockets/TLS/network). Drive real multi-device scenarios (DMs, servers, offline/online, revoke) and assert on each node's REAL state via two-layer **inspectors** (UI-layer = master-collapsed, reads through the same resolver/CRDT accessors the Dart providers use → green inspector == green UI; raw-layer = device-keyed truth, catches the divergence between them). **Always rely on the harness to verify ring-1 (distributed-logic core) and ring-2 control/signaling changes before declaring them done** — it catches the multi-device state/event bugs that were previously only found by manual 3-device log-copying. Coverage line (what it can/can't verify) in `reports/HARNESS_COVERAGE_MAP.md`; design + build ladder in `reports/MULTINODE_TEST_HARNESS_HANDOFF.md`; wiki `rust_test_harness`. Production seam: `run_event_loop` takes `db_path`/`db_passphrase` as params (was process-global `data_dir()`); `spawn_node_mock` is the cfg(test) twin that skips the real WS/signaling. NOT covered: WebRTC media plane, Flutter pixels, FFI, native push/keychain, real relay C++ — those stay Vitalik's manual/Tier-2 pass.
 - **Node module structure:** `swarm.rs` is the event loop dispatcher; domain logic lives in focused modules (`crypto_handler`, `sync_handler`, `message_ops`, `social`, `vault_ops`, `file_handler`, `voice_handler`, `gossip_relay`). Types/enums are in `types.rs`. Each module exports `pub(crate) async fn handle_*()` functions called from swarm.rs match arms. Functions take individual state variables as parameters (no SwarmContext struct — deferred due to borrow checker constraints with crypto helpers).
 - **Persistence actors:** `CrdtStore` (`node/crdt_store.rs`) and `CryptoStore` (`crypto/store.rs`) own long-lived SQLCipher connections in `spawn_blocking` threads. Fire-and-forget via mpsc channels. CrdtStore uses batch-drain (blocking_recv + try_recv loop) to coalesce multiple CRDT ops into one DB write per server. All sync_handler save sites use CrdtStore. MLS state persistence uses CryptoStore. Never open `MessageStore::open()` in sync handlers.
 - **Peer state tracking in swarm.rs:** `ws_room_peers` (room → peer set), `synced_peers` (HashSet<String>). WS PeerJoined triggers key exchange + sync. 30s keepalive ping in ws_client.rs.
