@@ -138,6 +138,9 @@ pub fn get_joined_servers() -> Result<Vec<ServerFfi>, String> {
         if let Ok(state) =
             serde_json::from_str::<crate::crdt::server_state::ServerState>(&state_json)
         {
+            // Hide tombstoned servers — the node retains the shell to serve the
+            // deletion op to reconnecting peers, but the UI must not list it.
+            if state.is_deleted() { continue; }
             result.push(ServerFfi {
                 server_id,
                 name: state.name().to_string(),

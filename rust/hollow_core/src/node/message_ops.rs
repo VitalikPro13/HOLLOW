@@ -38,10 +38,14 @@ pub(crate) async fn handle_send_message(
 
     // Wrap DM in signed envelope.
     let local_peer = local_peer_str.to_string();
-    let dm_timestamp = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+        .unwrap_or_default();
+    let dm_timestamp = now.as_millis() as i64;
+    // Microsecond send timestamp for stable ordering (Step 9C/C4). Carried over the
+    // wire + persisted so a same-millisecond burst sorts in true send order on every
+    // device (the signed `ts` stays millis — order_us is NOT part of the signature).
+    let dm_order_us = now.as_micros() as i64;
     let signing_payload = message_signing_payload(
         "dm", &peer_id_str, &local_peer, dm_timestamp, &text,
     );
@@ -58,6 +62,7 @@ pub(crate) async fn handle_send_message(
             file_id: None,
             link_preview: link_preview.clone(),
             convo,
+            order_us: Some(dm_order_us),
         }),
     };
     let envelope_json = serde_json::to_string(&build_dm(None))
@@ -74,7 +79,7 @@ pub(crate) async fn handle_send_message(
             let _ = store.insert(
                 &peer_id_str, &text, true, dm_timestamp,
                 sig.as_deref(), pk.as_deref(), Some(&message_id),
-                reply_to_mid.as_deref(), None,
+                reply_to_mid.as_deref(), None, Some(dm_order_us),
             );
             if let Some(lp) = &link_preview {
                 if let Ok(lp_json) = serde_json::to_string(lp) {
@@ -457,10 +462,12 @@ pub(crate) async fn handle_send_channel_message(
     }
 
     let local_peer = local_peer_str.to_string();
-    let timestamp = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+        .unwrap_or_default();
+    let timestamp = now.as_millis() as i64;
+    // Microsecond send timestamp for stable ordering (Step 9C/C4) — see the DM send.
+    let order_us = now.as_micros() as i64;
 
     // Sign the message before encryption.
     let signing_payload = message_signing_payload(
@@ -481,6 +488,7 @@ pub(crate) async fn handle_send_channel_message(
             reply_to: reply_to_mid.clone(),
             file_id: None,
             link_preview: link_preview.clone(),
+            order_us: Some(order_us),
         }),
     };
     // Mention metadata — shared by the notification hint and the offline push
@@ -640,7 +648,7 @@ pub(crate) async fn handle_send_channel_message(
         let _ = store.insert_channel_message(
             &server_id, &channel_id, &local_peer, &text, true, timestamp,
             sig.as_deref(), pk.as_deref(), Some(&message_id),
-            reply_to_mid.as_deref(), None,
+            reply_to_mid.as_deref(), None, Some(order_us),
         );
         if let Some(lp) = &link_preview {
             if let Ok(lp_json) = serde_json::to_string(lp) {
@@ -864,6 +872,7 @@ pub(crate) async fn handle_edit_dm_message(
                                 file_id: inner.file_id.clone(),
                                 link_preview: inner.link_preview.clone(),
                                 convo: inner.convo.clone(),
+                                order_us: inner.order_us, // preserve original ordering on edit
                             }),
                         };
                         if let Ok(json) = serde_json::to_string(&updated) {
@@ -1544,6 +1553,7 @@ pub(crate) async fn handle_envelope_channel_message(
     reply_to: Option<String>,
     file_id: Option<String>,
     link_preview: Option<LinkPreviewRef>,
+    order_us: Option<i64>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -1565,7 +1575,7 @@ pub(crate) async fn handle_envelope_channel_message(
         let rows = store.insert_channel_message(
             &sid, &cid, &sender_peer_id, &text, is_mine, ts,
             sig.as_deref(), pk.as_deref(), mid.as_deref(),
-            reply_to.as_deref(), file_id.as_deref(),
+            reply_to.as_deref(), file_id.as_deref(), order_us,
         );
         let is_new = rows.as_ref().map(|&r| r > 0).unwrap_or(false);
         if is_new {

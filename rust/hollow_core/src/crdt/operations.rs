@@ -30,6 +30,13 @@ pub enum CrdtPayload {
         key: String,
         value: String,
     },
+    /// Server deletion tombstone. Owner-authored only (validated at ingest). Marks
+    /// the ServerState `deleted` and drains membership, but the op survives in the
+    /// op_log so reconnecting members reconcile the deletion via normal grow-only
+    /// sync. `deleted_at` is informational (ordering uses `op.hlc`).
+    ServerDeleted {
+        deleted_at: i64,
+    },
 
     // Channel operations
     ChannelAdded {

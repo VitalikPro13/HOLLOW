@@ -34,6 +34,9 @@ pub(crate) struct StoredMessage {
     /// Persisted as JSON in the `link_preview_json` column. None for
     /// messages with no previewable URL.
     pub link_preview: Option<crate::node::LinkPreviewRef>,
+    /// Microsecond send timestamp for stable ordering (Step 9C/C4). `None` for
+    /// legacy rows (predate the column) → callers fall back to `timestamp * 1000`.
+    pub order_us: Option<i64>,
 }
 
 /// A stored channel message.
@@ -56,6 +59,9 @@ pub(crate) struct StoredChannelMessage {
     /// Persisted as JSON in the `link_preview_json` column. None for
     /// messages with no previewable URL.
     pub link_preview: Option<crate::node::LinkPreviewRef>,
+    /// Microsecond send timestamp for stable ordering (Step 9C/C4). `None` for
+    /// legacy rows (predate the column) → callers fall back to `timestamp * 1000`.
+    pub order_us: Option<i64>,
 }
 
 /// A stored file metadata entry.
@@ -544,6 +550,20 @@ impl MessageStore {
             "ALTER TABLE channel_messages ADD COLUMN link_preview_json TEXT;"
         ).unwrap_or(());
 
+        // -- Migration: order_us — microsecond send timestamp for stable ordering --
+        // (Step 9C/C4). The display ORDER BY uses this BEFORE sender_id, so a
+        // sender's same-millisecond burst stays grouped + in true send order instead
+        // of being alternated by the sender_id tiebreaker (the multi-device-backfill
+        // "ping-pong" bug). Set by the SENDER (microsecond wall clock), carried over
+        // the wire untouched, and NULL for legacy rows / pre-9C peers — those fall
+        // back to the old (timestamp, sender_id, id) order.
+        conn.execute_batch(
+            "ALTER TABLE messages ADD COLUMN order_us INTEGER;"
+        ).unwrap_or(());
+        conn.execute_batch(
+            "ALTER TABLE channel_messages ADD COLUMN order_us INTEGER;"
+        ).unwrap_or(());
+
         // -- Migration: updated_at column for edit/delete sync (H12+H13 QA fix) --
         // Tracks when a message was last modified (edit or delete) so sync queries
         // can catch edits/deletes to old messages that would otherwise be missed.
@@ -873,6 +893,12 @@ impl MessageStore {
     }
 
     /// Insert a message. Returns the row ID.
+    ///
+    /// `order_us` is the SENDER's microsecond send timestamp for stable ordering
+    /// (Step 9C/C4); pass `None` at receive/backfill sites that don't carry it —
+    /// it defaults to `timestamp * 1000`, which orders identically to the legacy
+    /// millisecond `timestamp` so old peers / pre-9C rows are unaffected.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert(
         &self,
         peer_id: &str,
@@ -884,11 +910,13 @@ impl MessageStore {
         message_id: Option<&str>,
         reply_to_mid: Option<&str>,
         file_id: Option<&str>,
+        order_us: Option<i64>,
     ) -> Result<i64, String> {
+        let order_us = order_us.unwrap_or(timestamp.saturating_mul(1000));
         let rows = self.conn
             .execute(
-                "INSERT OR IGNORE INTO messages (peer_id, text, is_mine, timestamp, signature, public_key, message_id, reply_to_mid, file_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![peer_id, text, is_mine as i32, timestamp, signature, public_key, message_id, reply_to_mid, file_id],
+                "INSERT OR IGNORE INTO messages (peer_id, text, is_mine, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![peer_id, text, is_mine as i32, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us],
             )
             .map_err(|e| format!("Failed to insert message: {e}"))?;
         if rows > 0 {
@@ -1043,10 +1071,10 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json
+                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
                  FROM messages
                  WHERE peer_id = ?1 AND hidden_at IS NULL
-                 ORDER BY timestamp DESC, id DESC
+                 ORDER BY timestamp DESC, COALESCE(order_us, timestamp * 1000) DESC, id DESC
                  LIMIT ?2",
             )
             .map_err(|e| format!("Failed to prepare query: {e}"))?;
@@ -1068,6 +1096,7 @@ impl MessageStore {
                     file_id: row.get(11)?,
                     link_preview: row.get::<_, Option<String>>(12)?
                         .and_then(|s| serde_json::from_str(&s).ok()),
+                    order_us: row.get(13)?,
                 })
             })
             .map_err(|e| format!("Failed to query messages: {e}"))?;
@@ -1116,10 +1145,10 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json
+                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
                  FROM messages
                  WHERE peer_id = ?1 AND is_mine = 1 AND (timestamp >= ?2 OR updated_at >= ?2)
-                 ORDER BY timestamp ASC
+                 ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
                  LIMIT ?3",
             )
             .map_err(|e| format!("Failed to prepare dm_messages_since query: {e}"))?;
@@ -1141,6 +1170,7 @@ impl MessageStore {
                     file_id: row.get(11)?,
                     link_preview: row.get::<_, Option<String>>(12)?
                         .and_then(|s| serde_json::from_str(&s).ok()),
+                    order_us: row.get(13)?,
                 })
             })
             .map_err(|e| format!("Failed to query dm_messages_since: {e}"))?;
@@ -1196,10 +1226,10 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json
+                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
                  FROM messages
                  WHERE peer_id = ?1 AND (timestamp > ?2 OR updated_at >= ?2)
-                 ORDER BY timestamp ASC
+                 ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
                  LIMIT ?3",
             )
             .map_err(|e| format!("Failed to prepare dm_messages_for_sibling query: {e}"))?;
@@ -1221,6 +1251,7 @@ impl MessageStore {
                     file_id: row.get(11)?,
                     link_preview: row.get::<_, Option<String>>(12)?
                         .and_then(|s| serde_json::from_str(&s).ok()),
+                    order_us: row.get(13)?,
                 })
             })
             .map_err(|e| format!("Failed to query dm_messages_for_sibling: {e}"))?;
@@ -1409,6 +1440,10 @@ impl MessageStore {
     // -- Channel message methods --
 
     /// Insert a channel message. Returns number of rows inserted (0 if duplicate, 1 if new).
+    ///
+    /// `order_us` — see [`Self::insert`]: the sender's microsecond send timestamp for
+    /// stable ordering (Step 9C/C4); `None` defaults to `timestamp * 1000` (legacy-equivalent).
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_channel_message(
         &self,
         server_id: &str,
@@ -1422,12 +1457,14 @@ impl MessageStore {
         message_id: Option<&str>,
         reply_to_mid: Option<&str>,
         file_id: Option<&str>,
+        order_us: Option<i64>,
     ) -> Result<usize, String> {
+        let order_us = order_us.unwrap_or(timestamp.saturating_mul(1000));
         let rows = self.conn
             .execute(
-                "INSERT OR IGNORE INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, reply_to_mid, file_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![server_id, channel_id, sender_id, text, is_mine as i32, timestamp, signature, public_key, message_id, reply_to_mid, file_id],
+                "INSERT OR IGNORE INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![server_id, channel_id, sender_id, text, is_mine as i32, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us],
             )
             .map_err(|e| format!("Failed to insert channel message: {e}"))?;
         Ok(rows)
@@ -1444,10 +1481,10 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json
+                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
                  FROM channel_messages
                  WHERE server_id = ?1 AND channel_id = ?2 AND hidden_at IS NULL
-                 ORDER BY timestamp DESC, sender_id DESC, id DESC
+                 ORDER BY timestamp DESC, COALESCE(order_us, timestamp * 1000) DESC, sender_id DESC, id DESC
                  LIMIT ?3",
             )
             .map_err(|e| format!("Failed to prepare channel_messages query: {e}"))?;
@@ -1471,6 +1508,7 @@ impl MessageStore {
                     file_id: row.get(13)?,
                     link_preview: row.get::<_, Option<String>>(14)?
                         .and_then(|s| serde_json::from_str(&s).ok()),
+                    order_us: row.get(15)?,
                 })
             })
             .map_err(|e| format!("Failed to query channel_messages: {e}"))?;
@@ -1520,7 +1558,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json
+                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
                  FROM channel_messages
                  WHERE server_id = ?1 AND channel_id = ?2 AND (timestamp > ?3 OR updated_at > ?3)
                  ORDER BY timestamp ASC
@@ -1549,6 +1587,7 @@ impl MessageStore {
                         file_id: row.get(13)?,
                         link_preview: row.get::<_, Option<String>>(14)?
                             .and_then(|s| serde_json::from_str(&s).ok()),
+                        order_us: row.get(15)?,
                     })
                 },
             )
@@ -1573,7 +1612,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json
+                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
                  FROM channel_messages
                  WHERE server_id = ?1 AND channel_id = ?2 AND timestamp < ?3
                  ORDER BY timestamp DESC
@@ -1602,6 +1641,7 @@ impl MessageStore {
                         file_id: row.get(13)?,
                         link_preview: row.get::<_, Option<String>>(14)?
                             .and_then(|s| serde_json::from_str(&s).ok()),
+                        order_us: row.get(15)?,
                     })
                 },
             )
@@ -1898,10 +1938,10 @@ impl MessageStore {
 
         let where_clause = conditions.join(" OR ");
         let sql = format!(
-            "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json
+            "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
              FROM channel_messages
              WHERE server_id = ?1 AND channel_id = ?2 AND ({where_clause})
-             ORDER BY timestamp ASC
+             ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
              LIMIT ?{}",
             param_values.len() + 1,
         );
@@ -1930,6 +1970,7 @@ impl MessageStore {
                     file_id: row.get(13)?,
                     link_preview: row.get::<_, Option<String>>(14)?
                         .and_then(|s| serde_json::from_str(&s).ok()),
+                    order_us: row.get(15)?,
                 })
             })
             .map_err(|e| format!("Failed to query per_sender_since: {e}"))?;
@@ -2904,7 +2945,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json
+                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
                  FROM messages
                  WHERE peer_id = ?1
                  ORDER BY timestamp ASC, id ASC",
@@ -2928,6 +2969,7 @@ impl MessageStore {
                     file_id: row.get(11)?,
                     link_preview: row.get::<_, Option<String>>(12)?
                         .and_then(|s| serde_json::from_str(&s).ok()),
+                    order_us: row.get(13)?,
                 })
             })
             .map_err(|e| format!("Failed to query all DM messages: {e}"))?;
@@ -2949,7 +2991,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json
+                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
                  FROM channel_messages
                  WHERE server_id = ?1 AND channel_id = ?2
                  ORDER BY timestamp ASC, id ASC",
@@ -2975,6 +3017,7 @@ impl MessageStore {
                     file_id: row.get(13)?,
                     link_preview: row.get::<_, Option<String>>(14)?
                         .and_then(|s| serde_json::from_str(&s).ok()),
+                    order_us: row.get(15)?,
                 })
             })
             .map_err(|e| format!("Failed to query all channel messages: {e}"))?;
@@ -3124,7 +3167,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT cm.id, cm.server_id, cm.channel_id, cm.sender_id, cm.text, cm.is_mine, cm.timestamp, cm.signature, cm.public_key, cm.message_id, cm.edited_at, cm.hidden_at, cm.reply_to_mid, cm.file_id, cm.link_preview_json
+                "SELECT cm.id, cm.server_id, cm.channel_id, cm.sender_id, cm.text, cm.is_mine, cm.timestamp, cm.signature, cm.public_key, cm.message_id, cm.edited_at, cm.hidden_at, cm.reply_to_mid, cm.file_id, cm.link_preview_json, cm.order_us
                  FROM channel_messages cm
                  JOIN channel_messages_fts fts ON cm.id = fts.rowid
                  WHERE fts.text MATCH ?3 AND cm.server_id = ?1 AND cm.channel_id = ?2 AND cm.hidden_at IS NULL
@@ -3152,6 +3195,7 @@ impl MessageStore {
                     file_id: row.get(13)?,
                     link_preview: row.get::<_, Option<String>>(14)?
                         .and_then(|s| serde_json::from_str(&s).ok()),
+                    order_us: row.get(15)?,
                 })
             })
             .map_err(|e| format!("Failed to search messages: {e}"))?;
@@ -3176,7 +3220,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT m.id, m.peer_id, m.text, m.is_mine, m.timestamp, m.signature, m.public_key, m.message_id, m.edited_at, m.hidden_at, m.reply_to_mid, m.file_id, m.link_preview_json
+                "SELECT m.id, m.peer_id, m.text, m.is_mine, m.timestamp, m.signature, m.public_key, m.message_id, m.edited_at, m.hidden_at, m.reply_to_mid, m.file_id, m.link_preview_json, m.order_us
                  FROM messages m
                  JOIN messages_fts fts ON m.id = fts.rowid
                  WHERE fts.text MATCH ?2 AND m.peer_id = ?1 AND m.hidden_at IS NULL
@@ -3202,6 +3246,7 @@ impl MessageStore {
                     file_id: row.get(11)?,
                     link_preview: row.get::<_, Option<String>>(12)?
                         .and_then(|s| serde_json::from_str(&s).ok()),
+                    order_us: row.get(13)?,
                 })
             })
             .map_err(|e| format!("Failed to search DM messages: {e}"))?;
@@ -4186,12 +4231,12 @@ mod tests {
         let store = mem_store();
         let convo = "friend_master";
         // Three messages WE sent to the friend, three the friend sent to us.
-        store.insert(convo, "mine 1", true, 100, None, None, Some("m1"), None, None).unwrap();
-        store.insert(convo, "theirs 1", false, 110, None, None, Some("t1"), None, None).unwrap();
-        store.insert(convo, "mine 2", true, 120, None, None, Some("m2"), None, None).unwrap();
-        store.insert(convo, "theirs 2", false, 130, None, None, Some("t2"), None, None).unwrap();
-        store.insert(convo, "mine 3", true, 140, None, None, Some("m3"), None, None).unwrap();
-        store.insert(convo, "theirs 3", false, 150, None, None, Some("t3"), None, None).unwrap();
+        store.insert(convo, "mine 1", true, 100, None, None, Some("m1"), None, None, None).unwrap();
+        store.insert(convo, "theirs 1", false, 110, None, None, Some("t1"), None, None, None).unwrap();
+        store.insert(convo, "mine 2", true, 120, None, None, Some("m2"), None, None, None).unwrap();
+        store.insert(convo, "theirs 2", false, 130, None, None, Some("t2"), None, None, None).unwrap();
+        store.insert(convo, "mine 3", true, 140, None, None, Some("m3"), None, None, None).unwrap();
+        store.insert(convo, "theirs 3", false, 150, None, None, Some("t3"), None, None, None).unwrap();
 
         // Friend path (one-directional): only the messages WE sent.
         let friend = store.get_dm_messages_since(convo, 0, 200).unwrap();
@@ -4213,12 +4258,71 @@ mod tests {
         let store = mem_store();
         let convo = "friend_master";
         // Our latest OUTGOING is newer than the latest INCOMING.
-        store.insert(convo, "theirs", false, 100, None, None, Some("t1"), None, None).unwrap();
-        store.insert(convo, "mine newer", true, 200, None, None, Some("m1"), None, None).unwrap();
+        store.insert(convo, "theirs", false, 100, None, None, Some("t1"), None, None, None).unwrap();
+        store.insert(convo, "mine newer", true, 200, None, None, Some("m1"), None, None, None).unwrap();
 
         // is_mine=0-only high-water stops at the incoming message.
         assert_eq!(store.get_latest_dm_timestamp(convo).unwrap(), Some(100));
         // both-direction high-water sees our newer outgoing message.
         assert_eq!(store.get_latest_dm_timestamp_any(convo).unwrap(), Some(200));
+    }
+
+    /// Step 9C/C4: a same-MILLISECOND burst from two senders must display grouped
+    /// by sender in true send order (order_us), NOT alternated by the sender_id
+    /// tiebreaker (the "ping-pong" bug). Pixel sends 3, then AL sends 3, all at the
+    /// SAME `timestamp` ms but with strictly increasing `order_us` reflecting true
+    /// order. Correct display: P1,P2,P3,A1,A2,A3 (not P,A,P,A,…).
+    #[test]
+    fn channel_same_ms_burst_orders_by_order_us_not_sender() {
+        let store = mem_store();
+        let (sid, cid) = ("s1", "c1");
+        let ms = 1_000i64;
+        // Pixel's master id sorts AFTER AL's so the OLD sender_id-DESC tiebreaker
+        // would have put Pixel first and then interleaved — proving the fix.
+        let pixel = "zzz_pixel_master";
+        let al = "aaa_al_master";
+        // True send order: P1,P2,P3 then A1,A2,A3 — strictly increasing order_us.
+        let send = |sender: &str, text: &str, mid: &str, ous: i64| {
+            store.insert_channel_message(sid, cid, sender, text, false, ms,
+                None, None, Some(mid), None, None, Some(ous)).unwrap();
+        };
+        send(pixel, "P1", "p1", ms * 1000 + 10);
+        send(pixel, "P2", "p2", ms * 1000 + 20);
+        send(pixel, "P3", "p3", ms * 1000 + 30);
+        send(al, "A1", "a1", ms * 1000 + 40);
+        send(al, "A2", "a2", ms * 1000 + 50);
+        send(al, "A3", "a3", ms * 1000 + 60);
+
+        let order: Vec<String> = store
+            .load_channel_messages(sid, cid, 100)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert_eq!(
+            order,
+            vec!["P1", "P2", "P3", "A1", "A2", "A3"],
+            "same-ms burst must group by sender in true send order (order_us), not ping-pong"
+        );
+    }
+
+    /// C4: legacy rows with NULL order_us still sort deterministically (fall back to
+    /// timestamp*1000 then sender_id/id) — backward-compat with pre-9C data.
+    #[test]
+    fn channel_null_order_us_falls_back_deterministically() {
+        let store = mem_store();
+        let (sid, cid) = ("s1", "c1");
+        // Distinct timestamps, NULL order_us (legacy rows) → ordered by timestamp.
+        store.insert_channel_message(sid, cid, "x", "first", false, 100,
+            None, None, Some("m1"), None, None, None).unwrap();
+        store.insert_channel_message(sid, cid, "y", "second", false, 200,
+            None, None, Some("m2"), None, None, None).unwrap();
+        let order: Vec<String> = store
+            .load_channel_messages(sid, cid, 100)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert_eq!(order, vec!["first", "second"], "legacy NULL rows order by timestamp");
     }
 }

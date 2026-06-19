@@ -17,8 +17,11 @@ Nearly every handler in this file follows this sequence:
 7. Broadcast: serialize op to JSON, then either:
    - MLS path: wrap in `MessageEnvelope::CrdtOp { sid, op_json }` and call `send_mls_broadcast()`
    - Plaintext fallback: iterate `state.members`, skip self, check `peer_is_reachable()`, send `HavenMessage::CrdtOpBroadcast`
+8. **Multi-device sibling fan-out (Step 9D):** the member broadcast is MASTER-keyed and EXCLUDES the actor's own identity, so the actor's OTHER device (sibling) wouldn't see the change in real-time unless another member relays it (the `CrdtOpBroadcast` ingest re-gossips to all members incl. our master's devices). MLS-first ops converge siblings for free (`SendToRoom` hits sibling sockets). **Plaintext-only handlers** (kick/ban/role/leave + pin/unpin/layout/pledge/nickname/twitch) additionally call `fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data)` — fans the `CrdtOpBroadcast` bytes to our online siblings EXCLUDING the acting device (`local_device_id`; re-feeding it its own MLS commit would self-drop the group). These handlers therefore take a `local_device_id: &str` param. `fan_to_own_siblings` lives near the top of `sync_handler.rs` (alongside `broadcast_raw_to_members`).
 
 All handlers receive `crdt_store: &CrdtStore` as a parameter. State serialization uses `serialize_state_lean(&state)` helper.
+
+Server tombstone: `CrdtPayload::ServerDeleted` (Step 9D) marks `ServerState.deleted` + drains membership but keeps the shell/op_log; see `handle_delete_server`. Owner-authorship of a `ServerDeleted` op is validated at every ingest (the `allowed` matches + a pre-merge filter in both sync-response paths).
 
 ## Imports and Dependencies
 
@@ -32,7 +35,7 @@ All handlers receive `crdt_store: &CrdtStore` as a parameter. State serializatio
 
 `sync_handler.rs:handle_create_server()` — Creates a new server. Called from `swarm.rs` when processing `NodeCommand::CreateServer`.
 
-Parameters: `server_states`, `mls`, `event_tx`, `ws_cmd_tx`, `bundle_keypair`, `local_peer_str`, `name`
+Parameters: `server_states`, `mls`, `event_tx`, `ws_cmd_tx`, `ws_room_peers`, `bundle_keypair`, `local_peer_str`, `local_device_id`, `name`
 
 Flow:
 1. Generate random 16-byte server ID via `getrandom::fill()`, hex-encoded (32 chars)
@@ -44,8 +47,9 @@ Flow:
 7. Auto-pledge 512 MB storage for the owner — creates and applies `CrdtPayload::StoragePledgeChanged { peer_id: owner, pledge_bytes: 536870912 }`, re-persists state
 8. Create MLS group via `mls_mgr.create_group(&server_id)`, persist MLS state
 9. Emit `NetworkEvent::ServerCreated { server_id, name }` to Dart
+10. **Multi-device (Step 9D): announce the new server to our OWN online siblings** via `fan_to_own_siblings(... HavenMessage::SiblingServerAnnounce { server_id })`. The server room is brand-new and siblings aren't in it, so this is the only way they learn it exists. Each sibling runs a same-identity join fast-path (see `ServerJoinRequest` in `rust_swarm_dispatch`) → gets the snapshot + its own MLS leaf. No-op for a sole single-device install.
 
-No broadcast needed — the server has only one member (the creator) at creation time. New members receive full state via SyncResponse when they join.
+No broadcast to OTHER members needed — the server has only one identity (the creator) at creation. New members receive full state via SyncResponse when they join.
 
 ## handle_create_channel()
 
@@ -117,22 +121,21 @@ Standard broadcast pattern.
 
 ## handle_delete_server()
 
-`sync_handler.rs:handle_delete_server()` — Deletes a server entirely. Owner-only.
+`sync_handler.rs:handle_delete_server()` — Deletes a server. Owner-only. **CRDT-op-only tombstone (Step 9D)** — deletion is a replicable `CrdtPayload::ServerDeleted`, NOT the old one-shot, so an OFFLINE member reconciles it on reconnect (the old one-shot was missed forever).
 
-Parameters: `server_states`, `mls`, `event_tx`, `ws_cmd_tx`, `ws_room_peers`, `sig_cmd_tx`, `bundle_keypair`, `local_peer_str`, `server_id`
+Parameters: `server_states`, `mls`, `event_tx`, `ws_cmd_tx`, `ws_room_peers`, `sig_cmd_tx`, `bundle_keypair`, `local_peer_str`, `local_device_id`, `server_id`
 
 Permission: `Permission::MANAGE_SERVER` (checked via `state.has_permission()`)
 
 Flow:
 1. Permission check — error message says "only the owner can delete the server"
-2. Broadcast deletion to all members BEFORE removing local state:
-   - MLS path: `MessageEnvelope::ServerDelete { sid }`
-   - Plaintext fallback: `HavenMessage::ServerDeleteBroadcast { server_id }`
-3. Remove from `server_states` HashMap
-4. Clean up MLS group: `mls_mgr.remove_group(&server_id)` + persist
-5. Unregister from signaling room: `SignalingCmd::Unregister { room_code }`
-6. Delete from SQLCipher: `store.delete_server_state(&server_id)`
-7. Emit `NetworkEvent::ServerDeleted { server_id }`
+2. Create + apply `CrdtPayload::ServerDeleted { deleted_at }` — sets `ServerState.deleted`, drains members/roles/channels, but KEEPS the shell + op_log
+3. Persist: `save_state` + `insert_op` (mandatory — `op_log` is `#[serde(skip_serializing)]`, so without `insert_op` the owner stops serving the tombstone after restart)
+4. Fan the op to remaining members (MLS-first `MessageEnvelope::CrdtOp`, plaintext `CrdtOpBroadcast` fallback) AND to our OWN siblings (`fan_to_own_siblings`)
+5. Tear down our local MLS group, but **KEEP the CRDT tombstone shell + signaling registration** so we keep serving the tombstone to reconnecting peers (no `server_states.remove` / `delete_server`)
+6. Emit `NetworkEvent::ServerDeleted { server_id }`
+
+The bespoke one-shot `ServerDeleteBroadcast` / MLS `ServerDelete` SEND is removed; their receivers were converted to apply a tombstone (rollout safety for a pre-9D peer). Tombstoned servers are hidden from `get_joined_servers` (and harness `servers()`). **Owner-author of a `ServerDeleted` op is validated at EVERY ingest** (the `CrdtOpBroadcast`/`handle_envelope_crdt_op` `allowed` matches + a filter before `merge_ops` in BOTH `SyncResponse` and `handle_envelope_sync_resp`, checked against the receiver's own role map — never the relayer). Reconnect self-heal: a synced op that sets `is_deleted()` emits `ServerDeleted`; a plain kick (self no longer in members after merge) or ban emits `MemberLeft`.
 
 ## handle_join_server()
 
@@ -512,17 +515,19 @@ Event mapping:
 
 ## handle_envelope_server_delete()
 
-`sync_handler.rs:handle_envelope_server_delete()` — Processes incoming `MessageEnvelope::ServerDelete` via MLS.
+`sync_handler.rs:handle_envelope_server_delete()` — **Legacy** receiver for `MessageEnvelope::ServerDelete` via MLS (a pre-9D peer may still send it; new senders route deletion through the `ServerDeleted` CRDT op). Converted to a TOMBSTONE (Step 9D), not a hard-delete.
 
 Permission: Sender must be Owner. Checked via `state.get_role(sender_peer_id) == MemberRole::Owner`.
 
 If sender is not owner: logs `[HOLLOW-SECURITY] REJECTED MLS ServerDelete` and returns.
 
-Flow on valid owner deletion:
-1. Remove from `server_states`
-2. Delete from SQLCipher
-3. Remove MLS group + persist
+Flow on valid owner deletion (if not already deleted):
+1. Synthesize + apply a local `CrdtPayload::ServerDeleted { deleted_at }` op (sets `deleted`, drains members, keeps shell)
+2. Persist: `insert_op` + `save_state` (keep the shell to relay the tombstone onward)
+3. Remove our local MLS group + persist
 4. Emit `NetworkEvent::ServerDeleted`
+
+The plaintext `HavenMessage::ServerDeleteBroadcast` receiver (in `swarm.rs`) does the same tombstone conversion.
 
 ## handle_envelope_member_kick()
 

@@ -1158,37 +1158,145 @@ it. A broader whole-app suite grows from this foundation afterward.
 flow real-time across master+sibling+friend). These are the two small cosmetic/edge quirks left when Vitalik
 decided to stop and ship the working state — fix in a focused polish pass, NOT blocking.*
 
-- [ ] **Subdevice sees its OWN identity "typing".** When a sibling device types in a channel, the typing
-      event resolves to the shared master, and the OTHER sibling (e.g. master Pixel) displays "you are
-      typing" — a self-leak. Added a self-filter in `channel_chat_pane.dart` (exclude `myMaster` from the
-      typing names) but Vitalik confirmed Pixel STILL sees itself typing after that — so the filter isn't
-      catching this path (likely the typist arrives as a DEVICE id that `identityOf` doesn't collapse to
-      `myMaster` because the resolver link for the sibling's exact typing-sender id isn't warm, OR a second
-      typing render path. Re-trace: log the raw typist id vs `myMaster` at the display site). Channel-typing
-      plaintext-fallback fan-out (`social.rs`, was sending to bare master → dropped) and a `[HOLLOW-TYPING]
-      Channel typing send` diag log already landed this session.
+- [x] **Subdevice sees its OWN identity "typing" — FIXED 2026-06-19 (Ring-3, Vitalik to confirm visually).**
+      Root cause (Explore trace): both Rust receive paths DO collapse the typist device→master before emitting
+      `TypingStarted`, but ONLY when the sibling's device id is warm in the resolver; if it isn't, the typist
+      arrives as a raw DEVICE id and the old `master != myMaster` filter misses it (device != master is always
+      true) → renders "you are typing". FIX: hardened the self-filter on BOTH `channel_chat_pane.dart`
+      (desktop) AND `mobile_chat_route.dart` `_TypingBar` (mobile — which previously had NO collapse/filter at
+      all, so it leaked too AND didn't merge a friend's two devices). A typist is now excluded if it resolves
+      to our master OR `sameIdentity(pid, myMaster)` OR is in our own device set (`myDevicesProvider`) OR is
+      this running device (`localDevicePeerIdProvider`) — warmth-robust by any path. Display name also
+      collapses device→master on mobile now. flutter analyze: zero new issues. HONEST LIMIT: if the sibling's
+      device id is COMPLETELY unknown to the resolver (never ingested), no client filter can catch it — but
+      two siblings sharing a channel have synced device lists in practice. (The earlier `social.rs`
+      plaintext-fallback fan-out + `[HOLLOW-TYPING]` diag log landed in a prior session.)
 - [ ] **First channel message after a fresh device-link relaunch is lost** (the rest arrive fine; a
       tab-switch surfaces it). Same shape as the DM `feedback_dm_online_branch_retry_queue` race — right after
       `import_pending_link` + relaunch, the freshly-minted MLS leaf / Olm sessions are still settling, so the
       very first channel broadcast that lands races the group-join completion. Likely fix: queue/retry the
       first post-link channel message, or have the joiner request an immediate channel sync once its leaf is
       merged. Self-heals on next sync today, so low severity.
-- [~] **Sibling↔sibling SERVER-message backfill** (the server analog of Step 5 DM backfill): **likely NO code
-      needed — VERIFY BY TEST (2026-06-18).** Unlike DMs, the channel-sync responder (`ChannelSyncRequest` →
-      `get_channel_messages_since_per_sender`, `storage/messages.rs`) has **NO `is_mine` filter** and serves ALL
-      senders (an unknown sender → all their messages), and the reconnect trigger (`SyncCoordinator::collect_ready`,
-      registered on PeerJoined + RoomMembers) already fires a `ChannelSyncRequest` per channel **unconditionally** —
-      so a reconnecting device should already recover its OWN channel messages (sent from another device) from any
-      present member, even when no sibling overlaps. This is the same "own data stranded" class as the DM
-      peer-fallback above, but the server rails already cover it. **Test:** offline/online the same way as the DM
-      scenario for a server channel; if Pixel recovers its own VM-sent channel messages from AL/coordinator after
-      reconnect with VM offline, tick this. Only add code if the test shows a gap (e.g. the coordinator-side
-      post-batch-add sync at swarm.rs:~3090 not covering a plain reconnect).
+- [x] **Sibling↔sibling SERVER-message backfill** (the server analog of Step 5 DM backfill): **VERIFIED — NO code
+      needed (harness, 2026-06-19).** Confirmed in code AND by a new harness test
+      (`sibling_recovers_own_channel_messages_from_present_member`): the channel-sync responder (`ChannelSyncRequest` →
+      `get_channel_messages_since_per_sender`, `storage/messages.rs:1856`) has **NO `is_mine` filter** and serves ALL
+      senders, and the reconnect/join trigger (`SyncCoordinator::collect_ready`, registered on PeerJoined + RoomMembers)
+      fires a `ChannelSyncRequest` per channel **unconditionally**. Test scenario: A owns a server; M's device B joins
+      + sends 3 channel msgs (A stores them under master M); B goes offline; M's OTHER device C comes online and joins
+      fresh → C recovers all 3 of its OWN identity's channel messages from A (the only present member), attributed to
+      master M. Log proof: `ChannelSyncRequest from C ... per-sender: 0 entries` → `Sending 3 sync messages` →
+      `Received 3 sync messages`. Same "own data stranded" class as the DM peer-fallback; the server rails already
+      cover it. The coordinator-side post-batch-add sync (swarm.rs) is narrower than reconnect but `collect_ready`
+      covers the plain-reconnect/fresh-join case, so no functional hole.
+      NOTE (separate, NOT a backfill gap): the harness surfaced that two SIBLING devices joining a server in rapid
+      succession can leave the 2nd device without its own MLS leaf ("Not MLS coordinator (excluding sender identity),
+      skipping KeyPackage") — a coordinator-election timing quirk in concurrent two-sibling formation. Step 6 live
+      test confirmed two-sibling leaves DO form in production, so this is likely a rapid-join timing artifact; the C3
+      test sidesteps it (one sibling member at a time). Worth a dedicated harness test under 9C "kick/ban full sync".
 
-- [ ] Overall, proper syncing on kick/bans etc., make the master-subdevice relationship be fully synced between each ohter in terms of actions and features.
-- [ ] Fix "sync-import" when using 24-wod phrase on Welcome dialog (either remove or change to reuse the same pipeline as Link Device)
-- [ ] Fill the "Youre devices" list on the newly synced device.
-- [ ] Check the messages inserting on multi-device syncing from the friend identity. Somehow the messages in a row were inserted as the messages "ping-pong" between the peers. Was Pixel sending 3 messages in a row, then AL sent 3 in a row - after Pixel went offline and VM got back online, the messages inserted on both as ping-pong (first message is AL, then Pixel/VM, third is AL, then Pixel/VM instead of the original rows). Only happened once, don't know if can be recreated
+- [x] **Overall, proper syncing on kick/bans etc. — master↔subdevice fully synced for moderation actions.**
+      DONE 2026-06-19 (harness `moderation_action_converges_on_actor_sibling_without_restart`). The 4
+      plaintext-only moderation handlers (`handle_change_role`, `handle_kick_member`, `handle_ban_member`,
+      `handle_leave_server` in `sync_handler.rs`) broadcast their `CrdtOpBroadcast` only to the master-keyed
+      REMAINING members, which excludes the actor's own identity → a kick/ban/role-change/leave on device B
+      never reached sibling C of the same person (converged only on restart / next SyncRequest). Fix: new
+      `fan_to_own_siblings()` helper fans the op — AND, for kick/ban, the MLS leaf-removal commit — to our own
+      online sibling devices, EXCLUDING the acting device (it already applied locally; re-feeding it its OWN
+      MLS commit fails `process_commit` → self-drops the group). The CRDT self-echo is harmless (idempotent
+      `op_log_dedup`). Threaded `local_device_id` into the 4 handlers. Harness test: M owns a server (devices
+      B+C), V is a victim; B role-changes then kicks V; sibling C reflects both WITHOUT restart. Negative-test
+      confirmed (disabling the fan → C keeps the kicked V → test fails). MLS-first ops (channel CRUD, rename,
+      settings, unban, labels, visibility) already converged siblings via `SendToRoom`. Victim side was
+      already fully multi-device. NOTE: the harness also surfaced a separate concurrent-two-sibling MLS-leaf
+      formation timing quirk (see C3 note) — not part of this fix.
+- [x] **"sync-import" via 24-word phrase on Welcome dialog — REMOVED 2026-06-19** (Vitalik's call: remove, not
+      rework). It was "Restore from Recovery Phrase" (`welcome_dialog.dart`) → `restoreIdentityFromMnemonic`,
+      which rebuilds ONLY the master keypair (your peer id) and never touches `messages.db` — so it recovered
+      identity but no synced data, and a stale DB on disk caused "Loading… forever". Rationale for removal over
+      rework: a phrase that pulls full history from friends would be a stealable master password (security
+      risk); the Link Device pipeline needs the SOURCE online so it can't replace offline mnemonic restore
+      anyway. REMOVED the Welcome menu card + the whole `restorePhrase` view machinery (`_WelcomeView` enum,
+      `_view`/phrase controllers/error/restoring state, `_onRestoreFromPhrase`, `_buildRestorePhrase`) + now-
+      unused imports. KEPT the `restoreIdentityFromMnemonic` FFI — still used by the in-app recovery dialogs
+      (Identity Locked / Recover Identity, `hollow_shell.dart`). Users bring a device online via "Link a device"
+      (live snapshot) or "Restore from Backup" (.hollow file). No mobile duplicate (Welcome is shared; the
+      mobile Settings "Recovery Phrase" is a DISPLAY/export, not an import). flutter analyze: No issues found.
+      FUTURE IDEA (noted, not built): a "trusted guardian" restore-from-friends with the phrase would need
+      threshold/quorum + re-auth to be safe — a separate epic, deliberately out of 9C scope.
+- [x] **Fill the "Your devices" list on the newly synced device — FIXED 2026-06-19** (harness
+      `linked_sibling_resolves_both_devices_at_startup`, negative-tested). ROOT CAUSE: the `.hollow` link
+      snapshot copies the WHOLE `messages.db` (so it carries the SOURCE device's signed device list) but that
+      list does NOT contain the freshly-linked sibling's brand-new device id. At startup the resolver self-seed
+      (`swarm.rs` ~329) used ONLY `list.devices`, so the running sibling's own id resolved to ITSELF (unknown →
+      passthrough), not the master → Dart `myMaster`/`myDevicesProvider` (which inverts the resolver links)
+      computed a wrong master and listed one device, until the source came online and the inbox-proof
+      `merge_sibling_device_id` fired. FIX (one place, both platforms — Rust startup is shared): seed
+      `list.devices ∪ {this_device_peer_id}` so the resolver maps BOTH source + running device → master
+      immediately. The persisted/announced list self-corrects on the first `build_local_device_list`
+      (ProfileUpdate). No Dart change needed (`myDevicesProvider` + both panels read the resolver). Harness
+      asserts `resolve(running)==master`, `resolve(source)==master`, and `devices_for(master)=={both}`;
+      reverting the fix makes it fail (running resolves to self). Panel pixel render = Vitalik's visual check.
+- [x] **Message "ping-pong" insertion order on multi-device sync — FIXED 2026-06-19** (sub-millisecond
+      ordering key). ROOT CAUSE confirmed: the channel display query `ORDER BY timestamp DESC, sender_id DESC,
+      id DESC` (and DM `... id DESC`) — on a same-MILLISECOND burst the `sender_id` tiebreaker deterministically
+      ALTERNATES senders (AL,Pixel,AL,Pixel…) regardless of true send order. Surfaced now because multi-device
+      BACKFILL re-reads the whole thread through that sort at once (live arrival order previously masked it).
+      FIX (Vitalik picked the cheaper microsecond option over a full HLC composite): the SENDER stamps a
+      microsecond send timestamp `order_us` (new nullable column on `messages`+`channel_messages` + a
+      `#[serde(default)] Option<i64>` on `DirectMessagePayload`/`ChannelMessagePayload`/`SyncMessageItem`/
+      `DmSyncItem`), carried over the wire + through backfill UNTOUCHED, used as the display ORDER BY tiebreaker
+      BEFORE `sender_id` via `COALESCE(order_us, timestamp*1000)`. NOT signed (no signing-parity risk); legacy
+      NULL rows fall back to today's `(timestamp, sender_id, id)`. Threaded through ~16 insert sites + 2 send
+      stamps + file sends; receive/backfill sites pass the carried value (push-fetch/FFI/public-channel pass
+      `None` → `ts*1000`). No FFI codegen needed (Dart renders in Rust-sorted order). Verified: 2 deterministic
+      storage tests (`channel_same_ms_burst_orders_by_order_us_not_sender` proves grouping not ping-pong;
+      `channel_null_order_us_falls_back_deterministically` proves legacy compat) + the C3 harness test now also
+      asserts `order_us` survives send→A→backfill→sibling round-trip with strictly increasing order.
+
+#### 9D — Server sync hardening (post-9C, from Vitalik's live testing 2026-06-19)
+*Vitalik's real-device pass after 9C surfaced a deeper class of SERVER-lifecycle sync gaps (DMs were fine).
+Investigation: 3 Explore + 2 Plan agents. All four fixes harness/unit-verified + negative-tested; Vitalik's
+real-device pass still pending. No FFI codegen needed (all internal CRDT/wire types).*
+
+- [x] **Keystone device's channel messages + typing don't decrypt at a friend (OLD servers) — FIXED.** ROOT
+      CAUSE: the keystone device (`device_peer_id == master`, the original single-device install) kept its OLD
+      master-credentialed MLS leaf at startup (`foreign==false`), but the rest of multi-device assumes
+      DEVICE-credentialed leaves — so once a sibling links + groups re-key, a friend's group view advances past
+      the keystone's stale leaf → friend's `decrypt` fails (typing was the visible symptom; real msgs failed too;
+      NEW servers worked because they form consistently). FIX: regenerate the keystone leaf to device-credentialed
+      gated STRICTLY on `has_sibling` (`stale_keystone` clause in `swarm.rs` ~439; legacy SOLE device untouched
+      byte-for-byte). Re-join OWNED groups via a **sibling-re-adds-sibling** fast path in the MlsKeyPackage
+      handler (election excludes the sender's identity = the sibling's, so the sibling adds the keystone's new
+      leaf directly — deterministic single re-adder among our leaves; the existing "sender already a leaf" branch
+      removes the stale colliding "M" leaf first). Verified: deterministic `mls_manager.rs` unit test
+      (`keystone_regen_rejoins_owned_group_via_sibling_no_fork` — friend decrypts the regenerated keystone's msg,
+      same epoch, no fork) + implicitly by the Fix-3 harness test. KEY DETAIL the unit test surfaced: the old +
+      new keystone leaves SHARE credential id (both `device_peer_id`), so it's remove-then-add (2 commits), which
+      production's batch processor (Phase-1 removals, Phase-2 adds) does. Full keystone-restart e2e = Vitalik's
+      old-server real-device check.
+- [x] **Server CREATE / DELETE / lifecycle don't sync to the actor's siblings + offline members never
+      reconcile a deletion — FIXED (tombstone + announce + GAP-A sweep).**
+      • **DELETE → tombstone:** new `ServerDeleted` CRDT op (`operations.rs`) + `#[serde(default)] deleted` flag
+      on `ServerState` (retained shell, drains membership, keeps op_log). Deletion is now CRDT-op-only (Vitalik
+      picked dropping the bespoke one-shot) → online members get it via op gossip, OFFLINE members reconcile on
+      reconnect via grow-only SyncRequest/SyncResponse (the owner RETAINS the tombstone to serve it — the old
+      hard-delete couldn't). Owner-author validation filters forged tombstones before merge (both sync paths +
+      both CrdtOpBroadcast ingests). Plain-kick self-eviction + ban already self-heal on reconnect. Legacy
+      one-shot receivers converted to tombstone-apply (rollout safety). Tombstoned servers hidden from
+      `get_joined_servers` + harness `servers()`. Verified: `offline_member_reconciles_server_deletion_on_reconnect`
+      — FAITHFULLY negative-tested (owner hard-delete → M keeps server → fails).
+      • **CREATE → sibling auto-onboard:** new `SiblingServerAnnounce` msg fanned to online siblings on
+      CreateServer (`fan_to_own_siblings`); the sibling runs a same-identity join fast-path (skips ban/Twitch/
+      private/owner-verify gates — it co-owns), gets the snapshot + its MLS leaf via the keystone sibling-re-add
+      path. Verified: `server_create_auto_onboards_online_sibling` (sibling sees the server + decrypts a channel
+      msg) — negative-tested (no announce → no onboard → fails).
+      • **GAP-A sweep:** 6 plaintext-only handlers (pin/unpin/layout/pledge/nickname/twitch) now also
+      `fan_to_own_siblings` so a sibling converges in real-time even with no other member online to re-gossip
+      (the `CrdtOpBroadcast` ingest re-fans to siblings only when another member is present). Verified:
+      `sibling_nickname_fans_directly_with_no_relayer` — negative-tested.
+      OPEN (Vitalik real-device): offline-sibling onboard of a server created while it was offline (onboards on
+      next inbox meet — the announce re-fire on inbox PeerJoined could be added if the test shows a gap).
 
 ---
 

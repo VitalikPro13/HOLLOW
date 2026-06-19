@@ -443,7 +443,7 @@ fn insert_channel_row(
         if !exists {
             let _ = store.insert_channel_message(
                 server_id, channel_id, sender, text, false, ts, sig, pk, mid,
-                reply_to, file_id,
+                reply_to, file_id, None, // push-fetch frame carries no order_us → ts*1000 default
             );
         }
     }
@@ -558,6 +558,7 @@ fn try_decrypt_dm(
                                 mid.as_deref(),
                                 reply_to.as_deref(),
                                 file_id.as_deref(),
+                                None, // push-fetch frame carries no order_us → ts*1000 default
                             );
                             if let (Some(lp), Some(message_id)) =
                                 (link_preview.as_ref(), mid.as_ref())
@@ -687,7 +688,7 @@ fn try_decrypt_dm(
                                         let _ = store.insert(
                                             from, &msg_text, false, p.ts,
                                             p.sig.as_deref(), p.pk.as_deref(),
-                                            p.mid.as_deref(), None, Some(&p.fid),
+                                            p.mid.as_deref(), None, Some(&p.fid), None,
                                         );
                                     }
                                     let _ = store.insert_file_metadata(

@@ -129,6 +129,7 @@ Self-contained: every op carries its own server, author, timestamp, and payload.
 - `ServerCreated { name: String, owner_peer_id: String }` — genesis operation. Sets server name as AdminLwwReg with Owner priority. Adds owner to members and roles.
 - `ServerRenamed { new_name: String }` — changes server name via AdminLwwReg merge. Author priority looked up from their role in the server.
 - `ServerSettingChanged { key: String, value: String }` — generic key-value settings (e.g., `min_pledge_mb`). Each key is an AdminLwwReg<String>.
+- `ServerDeleted { deleted_at: i64 }` — **server deletion tombstone (Step 9D)**. Owner-authored only (validated at every ingest, not in apply). `apply_op` sets `ServerState.deleted = true` and drains members/roles/channels/etc., but KEEPS `server_id` + `op_log` so the node keeps serving the deletion op to reconnecting peers via grow-only sync (this is what lets an OFFLINE member reconcile a deletion — the old one-shot was missed forever). `deleted` is a monotonic delete-wins latch (no un-delete op). UI hides tombstoned servers via `get_joined_servers`. Replaces the old one-shot `ServerDeleteBroadcast`/MLS `ServerDelete`.
 
 **Channel operations:**
 - `ChannelAdded { channel_id: String, name: String, category: Option<String>, channel_type: String }` — adds a channel. `channel_type` is `"text"` or `"voice"` (defaults to text). Uses `or_insert_with` — first writer wins for the same channel_id, subsequent adds are no-ops.
@@ -226,6 +227,7 @@ The complete replicated state of a Hollow server. Every field is either an add-w
 | `banned_members` | `HashMap<String, AdminLwwReg<bool>>` | LWW per peer_id | `#[serde(default)]` |
 | `labels` | `HashMap<String, LabelInfo>` | Add-wins, remove deletes | `#[serde(default)]` |
 | `label_assignments` | `HashMap<String, Vec<String>>` | Add/remove set per peer | `#[serde(default)]` |
+| `deleted` | `bool` | Tombstone latch (set by `ServerDeleted`, Step 9D); UI hides it; shell retained to serve the op | `#[serde(default)]` |
 | `op_log` | `Vec<CrdtOp>` | Append-only (compacted at 1000) | Required |
 | `hlc` | `Option<Hlc>` | Transient (not serialized) | `#[serde(skip)]` |
 

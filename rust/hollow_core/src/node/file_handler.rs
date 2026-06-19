@@ -195,10 +195,12 @@ pub(crate) async fn handle_send_file(
     }
 
     let local_peer = local_peer_str.to_string();
-    let timestamp = std::time::SystemTime::now()
+    let now_dur = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+        .unwrap_or_default();
+    let timestamp = now_dur.as_millis() as i64;
+    // Microsecond send timestamp for stable ordering (Step 9C/C4).
+    let order_us = now_dur.as_micros() as i64;
 
     // 7. Save file metadata to DB.
     let ctx_type;
@@ -287,6 +289,7 @@ pub(crate) async fn handle_send_file(
                 file_id: Some(file_id.clone()),
                 link_preview: None,
                 convo,
+                order_us: Some(order_us),
             }),
         };
 
@@ -297,7 +300,7 @@ pub(crate) async fn handle_send_file(
                 let _ = store.insert(
                     &peer_str, &signing_payload_text, true, timestamp,
                     sig.as_deref(), pk.as_deref(), Some(&message_id),
-                    None, Some(&file_id),
+                    None, Some(&file_id), Some(order_us),
                 );
             }
         }
@@ -547,6 +550,7 @@ pub(crate) async fn handle_send_file(
                 reply_to: None,
                 file_id: Some(file_id.clone()),
                 link_preview: None,
+                order_us: Some(order_us),
             }),
         };
         let envelope_json = serde_json::to_string(&envelope)
@@ -558,7 +562,7 @@ pub(crate) async fn handle_send_file(
                 let _ = store.insert_channel_message(
                     &sid, &cid, &local_peer, &signing_payload_text, true, timestamp,
                     sig.as_deref(), pk.as_deref(), Some(&message_id),
-                    None, Some(&file_id),
+                    None, Some(&file_id), Some(order_us),
                 );
             }
         }

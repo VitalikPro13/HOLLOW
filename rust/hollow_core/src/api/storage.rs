@@ -95,7 +95,7 @@ pub fn save_message(
     let store = get_store();
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.insert(&peer_id, &text, is_mine, timestamp, signature.as_deref(), public_key.as_deref(), None, None, None)
+    ms.insert(&peer_id, &text, is_mine, timestamp, signature.as_deref(), public_key.as_deref(), None, None, None, None)
 }
 
 /// Load recent messages for a peer from the local database.
@@ -665,7 +665,7 @@ pub fn save_channel_message(
     let store = get_store();
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.insert_channel_message(&server_id, &channel_id, &sender_id, &text, is_mine, timestamp, signature.as_deref(), public_key.as_deref(), None, None, None)
+    ms.insert_channel_message(&server_id, &channel_id, &sender_id, &text, is_mine, timestamp, signature.as_deref(), public_key.as_deref(), None, None, None, None)
         .map(|n| n as i64)
 }
 

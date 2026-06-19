@@ -326,8 +326,22 @@ async fn run_event_loop(
             if let Ok(links) = store.get_all_device_links() {
                 super::resolver::warm_from_links(&links);
             }
+            // Always include THIS running device in the self-seed, UNIONed with any
+            // persisted list. On a freshly LINKED sibling (Step 9C/C5) the imported
+            // list is the SOURCE device's and does NOT yet contain our brand-new
+            // device id — without this union our own id resolves to itself (not the
+            // master), so `myMaster`/`myDevicesProvider` are wrong and the "Your
+            // devices" panel shows only one device until the source comes online and
+            // the inbox-proof merge fires. Seeding our own id here makes the resolver
+            // (and the panel) correct immediately: {source_dev, this_dev} → master.
             match store.load_device_list(&master_peer_str) {
-                Ok(Some(list)) => super::resolver::seed_self(&master_peer_str, &list.devices),
+                Ok(Some(list)) => {
+                    let mut devs = list.devices.clone();
+                    if !devs.iter().any(|d| d == &device_peer_id) {
+                        devs.push(device_peer_id.clone());
+                    }
+                    super::resolver::seed_self(&master_peer_str, &devs);
+                }
                 _ => super::resolver::seed_self(&master_peer_str, &[device_peer_id.clone()]),
             }
         }
@@ -422,10 +436,24 @@ async fn run_event_loop(
                             let cred_id = mgr.credential_identity();
                             let siblings = super::resolver::devices_for(&master_peer_str);
                             let has_sibling = siblings.iter().any(|d| d != &device_peer_id);
-                            let foreign = cred_id != device_peer_id
-                                && (cred_id != master_peer_str || has_sibling);
+                            // The KEYSTONE device (device_peer_id == master) kept its old
+                            // MASTER-credentialed leaf, but the rest of the multi-device
+                            // system assumes DEVICE-credentialed leaves — so once a sibling
+                            // is linked + groups re-key, a friend's group view advances past
+                            // the keystone's stale leaf and can no longer decrypt its channel
+                            // messages/typing. Regenerate to a device-credentialed leaf ONLY
+                            // when we have a sibling (a legacy SOLE single-device install keeps
+                            // its master leaf untouched — re-keying it would orphan servers it
+                            // owns with no peer to re-add it). After regenerate, the
+                            // sibling-re-adds-sibling path + reactive bootstrap re-join groups.
+                            let stale_keystone = cred_id == master_peer_str
+                                && device_peer_id == master_peer_str
+                                && has_sibling;
+                            let foreign = (cred_id != device_peer_id
+                                && (cred_id != master_peer_str || has_sibling))
+                                || stale_keystone;
                             if foreign {
-                                hollow_log!("[HOLLOW-MLS] MLS credential {cred_id} not ours (device={device_peer_id}, has_sibling={has_sibling}); discarding inherited identity + groups, will mint fresh");
+                                hollow_log!("[HOLLOW-MLS] MLS credential {cred_id} not ours / stale keystone (device={device_peer_id}, has_sibling={has_sibling}, stale_keystone={stale_keystone}); discarding inherited identity + groups, will mint fresh");
                                 if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
                                     let _ = store.clear_mls_identity();
                                 }
@@ -682,7 +710,7 @@ async fn run_event_loop(
                     NodeCommand::CreateServer { name } => {
                         sync_handler::handle_create_server(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &bundle_keypair, &local_peer_str, name,
+                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id, name,
                             &crypto_store, &crdt_store,
                         ).await;
                     }
@@ -735,7 +763,7 @@ async fn run_event_loop(
                     NodeCommand::DeleteServer { server_id } => {
                         if sync_handler::handle_delete_server(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &sig_cmd_tx, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &sig_cmd_tx, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -753,7 +781,7 @@ async fn run_event_loop(
                     NodeCommand::ChangeRole { server_id, peer_id, new_role } => {
                         if sync_handler::handle_change_role(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, peer_id, new_role,
                             &crdt_store,
                         ).await { continue; }
@@ -762,7 +790,7 @@ async fn run_event_loop(
                     NodeCommand::KickMember { server_id, peer_id } => {
                         if sync_handler::handle_kick_member(
                             &mut server_states, &mut mls, &mut olm, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, peer_id,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -787,7 +815,7 @@ async fn run_event_loop(
                     NodeCommand::LeaveServer { server_id } => {
                         if sync_handler::handle_leave_server(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &sig_cmd_tx, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &sig_cmd_tx, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -805,7 +833,7 @@ async fn run_event_loop(
                     NodeCommand::BanMember { server_id, peer_id } => {
                         if sync_handler::handle_ban_member(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, peer_id,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1014,7 +1042,7 @@ async fn run_event_loop(
                     NodeCommand::SetNickname { server_id, peer_id, nickname } => {
                         if sync_handler::handle_set_nickname(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, peer_id, nickname,
                             &crdt_store,
                         ).await { continue; }
@@ -1023,7 +1051,7 @@ async fn run_event_loop(
                     NodeCommand::SetTwitchUsername { server_id, peer_id, twitch_username } => {
                         if sync_handler::handle_set_twitch_username(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, peer_id, twitch_username,
                             &crdt_store,
                         ).await { continue; }
@@ -1254,7 +1282,7 @@ async fn run_event_loop(
                     NodeCommand::UpdateChannelLayout { server_id, layout_json } => {
                         if sync_handler::handle_update_channel_layout(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, layout_json,
                             &crdt_store,
                         ).await { continue; }
@@ -1263,7 +1291,7 @@ async fn run_event_loop(
                     NodeCommand::PinMessage { server_id, channel_id, message_id } => {
                         if sync_handler::handle_pin_message(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, channel_id, message_id,
                             &crdt_store,
                         ).await { continue; }
@@ -1272,7 +1300,7 @@ async fn run_event_loop(
                     NodeCommand::UnpinMessage { server_id, channel_id, message_id } => {
                         if sync_handler::handle_unpin_message(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, channel_id, message_id,
                             &crdt_store,
                         ).await { continue; }
@@ -1282,7 +1310,7 @@ async fn run_event_loop(
                     NodeCommand::SetStoragePledge { server_id, pledge_bytes } => {
                         sync_handler::handle_set_storage_pledge(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, pledge_bytes,
                             &crdt_store,
                         ).await;
@@ -3916,6 +3944,7 @@ fn build_dm_sync_items(
             file_id: m.file_id.clone(),
             file_meta,
             hidden_at: m.hidden_at,
+            order_us: m.order_us,
             reactions,
         }
     }).collect()
@@ -4375,7 +4404,7 @@ async fn handle_incoming_request(
             let text = String::from_utf8_lossy(&plaintext).to_string();
             match serde_json::from_str::<MessageEnvelope>(&text) {
                 Ok(MessageEnvelope::ChannelMessage { inner }) => {
-                    let ChannelMessagePayload { sid, cid, text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview } = *inner;
+                    let ChannelMessagePayload { sid, cid, text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us } = *inner;
                     // SECURITY: Verify sender is a member of the claimed server.
                     if let Some(state) = server_states.get(&sid) {
                         if !state.is_member(peer_str) {
@@ -4408,7 +4437,7 @@ async fn handle_incoming_request(
                         match store.insert_channel_message(
                             &sid, &cid, &peer_str, &msg_text, false, ts,
                             sig.as_deref(), pk.as_deref(), mid.as_deref(),
-                            reply_to.as_deref(), file_id.as_deref(),
+                            reply_to.as_deref(), file_id.as_deref(), order_us,
                         ) {
                             Ok(0) => { is_new = false; } // INSERT OR IGNORE skipped — duplicate
                             Ok(_) => {}
@@ -4473,7 +4502,7 @@ async fn handle_incoming_request(
                                 match store.insert_channel_message(
                                     &sid, &cid, &msg.s, &msg.t, is_mine, msg.ts,
                                     msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
-                                    msg.reply_to.as_deref(), msg.file_id.as_deref(),
+                                    msg.reply_to.as_deref(), msg.file_id.as_deref(), msg.order_us,
                                 ) {
                                     Ok(1) => {
                                         new_count += 1;
@@ -4578,7 +4607,7 @@ async fn handle_incoming_request(
                     }
                 }
                 Ok(MessageEnvelope::DirectMessage { inner }) => {
-                    let DirectMessagePayload { text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, convo } = *inner;
+                    let DirectMessagePayload { text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, convo, order_us } = *inner;
                     // SECURITY: Enforce 4,000 character limit on message text.
                     let msg_text = if msg_text.len() > 4000 { msg_text[..4000].to_string() } else { msg_text };
 
@@ -4639,7 +4668,7 @@ async fn handle_incoming_request(
                             match store.insert(
                                 &convo_peer, &msg_text, is_own_device, ts,
                                 sig.as_deref(), pk.as_deref(), mid.as_deref(),
-                                reply_to.as_deref(), file_id.as_deref(),
+                                reply_to.as_deref(), file_id.as_deref(), order_us,
                             ) {
                                 Ok(0) => { is_new = false; } // Duplicate
                                 Ok(_) => {}
@@ -4771,7 +4800,7 @@ async fn handle_incoming_request(
                                 match store.insert(
                                     &convo_peer, &msg.t, is_mine, msg.ts,
                                     msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
-                                    msg.reply_to.as_deref(), msg.file_id.as_deref(),
+                                    msg.reply_to.as_deref(), msg.file_id.as_deref(), msg.order_us,
                                 ) {
                                     Ok(id) if id > 0 => {
                                         new_count += 1;
@@ -4968,7 +4997,7 @@ async fn handle_incoming_request(
                                 match store.insert(
                                     &convo_peer, &msg.t, msg.mine, msg.ts,
                                     msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
-                                    msg.reply_to.as_deref(), msg.file_id.as_deref(),
+                                    msg.reply_to.as_deref(), msg.file_id.as_deref(), msg.order_us,
                                 ) {
                                     Ok(id) if id > 0 => {
                                         new_count += 1;
@@ -6302,6 +6331,24 @@ async fn handle_incoming_request(
                     s
                 });
 
+                // SECURITY (tombstone): a destructive `ServerDeleted` op delivered via
+                // sync must be authenticated as Owner-authored, using OUR current role
+                // map (ServerCreated, which we already hold, establishes the true Owner)
+                // — never trust the relayer. Drop unauthorized tombstones BEFORE persist
+                // + merge so they can't tombstone us via a forged sync.
+                let incoming_ops: Vec<crate::crdt::operations::CrdtOp> = incoming_ops
+                    .into_iter()
+                    .filter(|op| {
+                        if let crate::crdt::operations::CrdtPayload::ServerDeleted { .. } = op.payload {
+                            let ok = state.get_role(&op.author) == crate::crdt::operations::MemberRole::Owner;
+                            if !ok {
+                                hollow_log!("[HOLLOW-SECURITY] Dropped synced ServerDeleted from non-owner {} for {server_id}", op.author);
+                            }
+                            ok
+                        } else { true }
+                    })
+                    .collect();
+
                 // Persist every synced op into the crdt_ops table (INSERT OR
                 // IGNORE — idempotent). op_log is NOT serialized in the state
                 // JSON, so without this a member that joined via sync holds
@@ -6315,6 +6362,10 @@ async fn handle_incoming_request(
                         }
                     }
                 }
+
+                // Capture membership BEFORE merge so we can detect a kick-while-offline
+                // (we were a member, the synced ops remove us → self-evict on reconnect).
+                let was_member_before = state.is_member(local_peer_str);
 
                 match crdt_sync::merge_ops(state, &incoming_ops) {
                     // Run even when 0 ops applied if a join is pending — the
@@ -6480,7 +6531,25 @@ async fn handle_incoming_request(
                             }
                         }
 
-                        if state.is_banned(&local_peer_str) {
+                        // Reconcile changes that happened while we were OFFLINE (the
+                        // grow-only sync just delivered the ops): a server DELETION
+                        // (tombstone), a BAN, or a plain KICK of us.
+                        let deleted_now = state.is_deleted();
+                        let kicked_now = was_member_before && !state.is_member(local_peer_str);
+                        let pending = pending_server_joins.contains_key(&server_id);
+                        if deleted_now {
+                            // Owner tombstoned the server while we were offline. Leave the
+                            // MLS group; keep the shell so we relay the tombstone onward.
+                            if let Some(mls_mgr) = mls.as_mut() {
+                                if mls_mgr.has_group(&server_id) {
+                                    mls_mgr.remove_group(&server_id);
+                                    persist_mls_state(mls_mgr, crypto_store);
+                                }
+                            }
+                            let _ = event_tx.send(NetworkEvent::ServerDeleted {
+                                server_id,
+                            }).await;
+                        } else if state.is_banned(&local_peer_str) || (kicked_now && !pending) {
                             let _ = event_tx.send(NetworkEvent::MemberLeft {
                                 server_id,
                                 peer_id: local_peer_str.to_string(),
@@ -6596,6 +6665,8 @@ async fn handle_incoming_request(
                         | CrdtPayload::LabelUnassigned { peer_id, .. } => {
                             peer_id == &op.author || (sender_perms & Permission::MANAGE_ROLES) != 0
                         }
+                        // Only the Owner can delete a server (tombstone).
+                        CrdtPayload::ServerDeleted { .. } => sender_role == MemberRole::Owner,
                         CrdtPayload::ServerCreated { .. } => true,
                     };
 
@@ -6668,6 +6739,18 @@ async fn handle_incoming_request(
                             let _ = event_tx.send(NetworkEvent::MemberLeft {
                                 server_id: server_id.clone(),
                                 peer_id: peer_id.clone(),
+                            }).await;
+                        }
+                        CrdtPayload::ServerDeleted { .. } => {
+                            // Owner tombstoned the server. The state shell is RETAINED
+                            // (so we keep serving the tombstone to our own offline peers),
+                            // but we leave the MLS group + tell the UI to drop the server.
+                            if let Some(mls_mgr) = mls {
+                                mls_mgr.remove_group(&server_id);
+                                persist_mls_state(mls_mgr, crypto_store);
+                            }
+                            let _ = event_tx.send(NetworkEvent::ServerDeleted {
+                                server_id: server_id.clone(),
                             }).await;
                         }
                         CrdtPayload::MemberBanned { peer_id } => {
@@ -6762,8 +6845,16 @@ async fn handle_incoming_request(
             hollow_log!("[HOLLOW-CRDT] ServerJoinRequest from {peer_str} for server {server_id}");
 
             if let Some(state) = server_states.get_mut(&server_id) {
+                // Multi-device: a SAME-IDENTITY requester is one of OUR OWN devices
+                // (a sibling co-owning/co-membering this server, e.g. onboarding a
+                // newly-created server). It skips the ban + Twitch + owner-verify gates
+                // — those are for strangers; a sibling is already us. It still gets the
+                // normal snapshot + MLS-leaf add below.
+                let is_sibling = super::resolver::same_identity(peer_str, local_peer_str)
+                    && peer_str != local_peer_str;
+
                 // Ban check: reject banned peers before any other verification.
-                if state.is_banned(peer_str) {
+                if !is_sibling && state.is_banned(peer_str) {
                     hollow_log!("[HOLLOW-CRDT] Rejecting join from banned peer {peer_str} for server {server_id}");
                     send_message_to_peer(
                         ws_cmd_tx, ws_room_peers,
@@ -6776,7 +6867,7 @@ async fn handle_incoming_request(
                 }
 
                 // Twitch verification gate: check CRDT settings before accepting.
-                if let Some(twitch_settings) = twitch::TwitchServerSettings::from_server_state(state) {
+                if !is_sibling { if let Some(twitch_settings) = twitch::TwitchServerSettings::from_server_state(state) {
                     let reject_reason = match &twitch_proof_json {
                         None => Some("twitch_required".to_string()),
                         Some(proof_json) => {
@@ -6815,10 +6906,10 @@ async fn handle_incoming_request(
                         );
                         return;
                     }
-                }
+                } } // close Twitch gate + `if !is_sibling`
 
                 // Owner-online verification: if enabled, only the owner accepts joins.
-                if let Some(ref twitch_settings) = twitch::TwitchServerSettings::from_server_state(state) {
+                if !is_sibling { if let Some(ref twitch_settings) = twitch::TwitchServerSettings::from_server_state(state) {
                     if twitch_settings.owner_verify {
                         let owner_id = state.roles.iter()
                             .find(|(_, reg)| *reg.read() == crate::crdt::operations::MemberRole::Owner)
@@ -6845,7 +6936,7 @@ async fn handle_incoming_request(
                             // We ARE the owner — proceed to accept below.
                         }
                     }
-                }
+                } } // close owner-verify gate + `if !is_sibling`
 
                 // Multi-device (Step 6): server membership is keyed by the MASTER
                 // identity, never a device id. Resolve the joining device to its
@@ -6861,8 +6952,9 @@ async fn handle_incoming_request(
                 if !already_member {
                     // Private-server gate: an invite-only server rejects all new
                     // joiners (existing members re-joining are never blocked, since
-                    // they short-circuit above). Mirrors the Twitch gate.
-                    if state.is_private() {
+                    // they short-circuit above). Mirrors the Twitch gate. A sibling
+                    // (our own device) is exempt — it co-owns/co-members the server.
+                    if !is_sibling && state.is_private() {
                         hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: server {server_id} is private");
                         send_message_to_peer(
                             ws_cmd_tx, ws_room_peers,
@@ -7038,21 +7130,32 @@ async fn handle_incoming_request(
                 return;
             }
 
-            if server_states.remove(&server_id).is_some() {
-                // Remove from DB.
-                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                    let _ = store.delete_server_state(&server_id);
+            // Legacy one-shot path (a pre-tombstone peer may still send this). Convert
+            // it to a TOMBSTONE rather than hard-delete: synthesize the owner's
+            // ServerDeleted op locally, apply + persist it, and keep the shell so we
+            // relay it onward like the CRDT-op path. (New senders no longer emit this.)
+            if let Some(state) = server_states.get_mut(&server_id) {
+                if !state.is_deleted() {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    let op = state.create_op(CrdtPayload::ServerDeleted { deleted_at: now_ms });
+                    let _ = state.apply_op(&op);
+                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        let _ = store.insert_crdt_op(&op);
+                        if let Ok(json) = serde_json::to_string(&*state) {
+                            let _ = store.save_server_state(&server_id, &json);
+                        }
+                    }
+                    if let Some(mls_mgr) = mls {
+                        mls_mgr.remove_group(&server_id);
+                        persist_mls_state(mls_mgr, crypto_store);
+                    }
+                    let _ = event_tx.send(NetworkEvent::ServerDeleted {
+                        server_id,
+                    }).await;
                 }
-
-                // Clean up MLS group.
-                if let Some(mls_mgr) = mls {
-                    mls_mgr.remove_group(&server_id);
-                    persist_mls_state(mls_mgr, crypto_store);
-                }
-
-                let _ = event_tx.send(NetworkEvent::ServerDeleted {
-                    server_id,
-                }).await;
             }
         }
 
@@ -7169,6 +7272,7 @@ async fn handle_incoming_request(
                                 file_id: m.file_id.clone(),
                                 file_meta,
                                 hidden_at: m.hidden_at,
+                                order_us: m.order_us,
                                 reactions,
                             }
                         }).collect();
@@ -7394,11 +7498,40 @@ async fn handle_incoming_request(
 
         HavenMessage::PeerDisconnecting => {
             hollow_log!("[HOLLOW-SWARM] Peer {peer_str} is disconnecting gracefully");
-            
+
             // Peer is gracefully disconnecting — emit PeerDisconnected.
             let _ = event_tx.send(NetworkEvent::PeerDisconnected {
                 peer_id: peer_str.to_string(),
             }).await;
+        }
+
+        HavenMessage::SiblingServerAnnounce { server_id } => {
+            // Multi-device: one of OUR OWN devices created a server and is telling us
+            // (its sibling) to onboard. SECURITY: only act on a SAME-IDENTITY sender —
+            // a stranger can't pull us into a server this way.
+            if !super::resolver::same_identity(&peer_str, local_peer_str) {
+                hollow_log!("[HOLLOW-SECURITY] Ignored SiblingServerAnnounce from non-sibling {peer_str}");
+                return;
+            }
+            // Already a member (or already joining) → nothing to do.
+            if server_states.contains_key(&server_id) || pending_server_joins.contains_key(&server_id) {
+                return;
+            }
+            hollow_log!("[HOLLOW-CRDT] Sibling {peer_str} announced server {server_id}; onboarding");
+            // Lightweight inline join (mirrors handle_join_server): join the rooms +
+            // send a ServerJoinRequest to the announcer, which same-identity fast-paths
+            // us (serves the snapshot + adds our MLS leaf). No twitch proof for a co-owner.
+            pending_server_joins.insert(server_id.clone(), None);
+            let _ = sig_cmd_tx.send(SignalingCmd::SetRoom { room_code: server_id.clone() }).await;
+            let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap { room_code: server_id.clone() }).await;
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: server_id.clone() });
+            send_message_to_peer(
+                ws_cmd_tx, ws_room_peers,
+                &peer_str, HavenMessage::ServerJoinRequest {
+                    server_id: server_id.clone(),
+                    twitch_proof_json: None,
+                },
+            );
         }
 
         // -- MLS message handlers --
@@ -7483,11 +7616,11 @@ async fn handle_incoming_request(
 
                         match envelope {
                             MessageEnvelope::ChannelMessage { inner } => {
-                                let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview } = *inner;
+                                let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us } = *inner;
                                 message_ops::handle_envelope_channel_message(
                                     event_tx, bundle_keypair, &local_peer,
                                     sender_master.clone(), sid, cid, text, ts,
-                                    sig, pk, mid, reply_to, file_id, link_preview,
+                                    sig, pk, mid, reply_to, file_id, link_preview, order_us,
                                     db_path, db_passphrase,
                                 ).await;
                             }
@@ -7960,12 +8093,42 @@ async fn handle_incoming_request(
                 return;
             }
 
+            // SIBLING-RE-ADDS-SIBLING fast path (keystone regen recovery): if WE hold
+            // the group and the sender is OUR OWN identity (a sibling/keystone that
+            // regenerated its leaf), WE process it directly — the coordinator election
+            // below excludes the sender's identity (= ours), leaving an owned-server
+            // keystone with no one to re-add it. We hold a valid device-credentialed
+            // leaf, so the batch processor below removes any STALE leaf sharing the
+            // sender's credential (the keystone's old master-credentialed leaf — same
+            // id "M" — caught by the "sender already a leaf" branch) and adds the new
+            // leaf to the SAME group: one epoch advance, no fork. The `!=` guard keeps
+            // us from self-processing (we never send our own KP to ourselves).
+            let sibling_readd = mls.as_ref().is_some_and(|m| {
+                if !(m.has_group(&server_id)
+                    && super::resolver::same_identity(peer_str, local_peer_str)
+                    && peer_str != local_peer_str)
+                {
+                    return false;
+                }
+                // If several of OUR OWN device leaves currently hold the group, only the
+                // lowest-id one re-adds (deterministic single re-adder → no glare). The
+                // sender's (regenerating) leaf is excluded from this tiebreak set.
+                let our_leaves: Vec<String> = m.group_members(&server_id)
+                    .into_iter()
+                    .filter(|p| super::resolver::same_identity(p, local_peer_str) && p != peer_str)
+                    .collect();
+                our_leaves.iter().map(|s| s.as_str()).min() == Some(&device_peer_id[..])
+            });
+            if sibling_readd {
+                hollow_log!("[HOLLOW-MLS] Sibling re-add: adding our own sibling {peer_str}'s regenerated leaf to {server_id} (bypassing coordinator election)");
+            }
+
             // Distributed committer: lowest online MLS member (by MASTER identity)
             // processes KeyPackages. The sender's IDENTITY is excluded from the
             // election — they sent the KeyPackage because they (or a sibling) lost
             // their group, so neither the sending device nor its siblings can be
             // the coordinator that processes it.
-            if let Some(mls_mgr) = mls.as_ref() {
+            if !sibling_readd { if let Some(mls_mgr) = mls.as_ref() {
                 if mls_mgr.has_group(&server_id) {
                     let members: Vec<String> = mls_mgr.group_members(&server_id)
                         .into_iter()
@@ -7991,7 +8154,7 @@ async fn handle_incoming_request(
                         return;
                     }
                 }
-            }
+            } } // close `if let Some(mls_mgr)` + `if !sibling_readd`
 
             if let Some(mls_mgr) = mls {
                 // Create MLS group lazily if it doesn't exist (migration for pre-MLS servers).
@@ -8474,7 +8637,7 @@ async fn handle_incoming_request(
                 &event_tx, &bundle_keypair, &local_peer_str,
                 peer_str.to_string(),
                 server_id, channel_id, text, ts, sig, pk,
-                Some(mid), reply_to, file_id, link_preview,
+                Some(mid), reply_to, file_id, link_preview, None,
                 &db_path, &db_passphrase,
             ).await;
         }
@@ -8615,6 +8778,7 @@ async fn handle_incoming_request(
                                 file_id: m.file_id.clone(),
                                 file_meta,
                                 hidden_at: m.hidden_at,
+                                order_us: m.order_us,
                                 reactions,
                             }
                         }).collect();

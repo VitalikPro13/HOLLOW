@@ -128,6 +128,13 @@ pub struct ServerState {
     pub labels: HashMap<String, LabelInfo>,
     #[serde(default)]
     pub label_assignments: HashMap<String, Vec<String>>,
+    /// Tombstone latch (Step "server sync hardening"): set true by a `ServerDeleted`
+    /// op. The state shell + op_log are RETAINED (not removed) so this node keeps
+    /// serving the deletion op to reconnecting peers via normal grow-only sync.
+    /// Monotonic delete-wins (there is no un-delete op). UI hides tombstoned servers.
+    /// `#[serde(default)]` so every pre-existing persisted ServerState loads as false.
+    #[serde(default)]
+    pub deleted: bool,
     #[serde(default, skip_serializing)]
     pub op_log: Vec<CrdtOp>,
     #[serde(skip)]
@@ -189,6 +196,7 @@ impl ServerState {
             banned_members: HashMap::new(),
             labels: HashMap::new(),
             label_assignments: HashMap::new(),
+            deleted: false,
             op_log: Vec::new(),
             hlc: Some(hlc),
             op_log_dedup: HashSet::new(),
@@ -378,6 +386,23 @@ impl ServerState {
                     });
                 let remote = AdminLwwReg::new(value.clone(), op.hlc.clone(), priority);
                 entry.merge(&remote);
+            }
+
+            CrdtPayload::ServerDeleted { .. } => {
+                // Tombstone: latch `deleted` and drain membership/roles/etc. so the
+                // server can no longer be acted upon, but KEEP `server_id` + `op_log`
+                // (handled by the apply_op tail) so this node keeps serving the
+                // deletion op to reconnecting peers. Idempotent via op_log_dedup.
+                // Owner-authorship is validated at the INGEST sites (CrdtOpBroadcast
+                // + sync-merge), not here — the CRDT layer has no transport context.
+                self.deleted = true;
+                self.members.clear();
+                self.roles.clear();
+                self.channels.clear();
+                self.nicknames.clear();
+                self.twitch_usernames.clear();
+                self.storage_pledges.clear();
+                self.label_assignments.clear();
             }
 
             CrdtPayload::ChannelAdded {
@@ -814,6 +839,13 @@ impl ServerState {
             .get(&key)
             .map(|reg| *reg.read())
             .unwrap_or(false)
+    }
+
+    /// Whether this server has been tombstoned (a `ServerDeleted` op applied). The
+    /// UI must hide tombstoned servers; the node still retains the shell to serve
+    /// the deletion op to reconnecting peers.
+    pub fn is_deleted(&self) -> bool {
+        self.deleted
     }
 
     /// Multi-device-safe membership check: is `peer_id` (device OR master) a member?

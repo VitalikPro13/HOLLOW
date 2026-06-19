@@ -2,12 +2,10 @@
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -31,14 +29,8 @@ class _WelcomeContent extends StatefulWidget {
   State<_WelcomeContent> createState() => _WelcomeContentState();
 }
 
-enum _WelcomeView { menu, restorePhrase }
-
 class _WelcomeContentState extends State<_WelcomeContent> {
-  _WelcomeView _view = _WelcomeView.menu;
-  final _phraseController = TextEditingController();
   final _relayController = TextEditingController(text: kDefaultRelayDomain);
-  String? _phraseError;
-  bool _restoring = false;
   bool _showAdvanced = false;
 
   String get _relayDomain {
@@ -48,36 +40,8 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
   @override
   void dispose() {
-    _phraseController.dispose();
     _relayController.dispose();
     super.dispose();
-  }
-
-  Future<void> _onRestoreFromPhrase() async {
-    final text = _phraseController.text.trim();
-    final words = text.split(RegExp(r'\s+'));
-
-    if (words.length != 24) {
-      setState(() => _phraseError = 'Must be exactly 24 words (got ${words.length})');
-      return;
-    }
-
-    setState(() {
-      _phraseError = null;
-      _restoring = true;
-    });
-
-    try {
-      await identity_api.restoreIdentityFromMnemonic(phrase: text);
-      if (!mounted) return;
-      Navigator.of(context).pop((action: 'restored_mnemonic', relayDomain: _relayDomain));
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _phraseError = 'Restore failed: $e';
-        _restoring = false;
-      });
-    }
   }
 
   Future<void> _onRestoreFromBackup() async {
@@ -178,12 +142,9 @@ class _WelcomeContentState extends State<_WelcomeContent> {
                 ],
               ),
               padding: const EdgeInsets.all(HollowSpacing.xl),
-              // Scrolls when the keyboard (restore-phrase view) or a short
-              // screen squeezes the available height.
+              // Scrolls when a short screen squeezes the available height.
               child: SingleChildScrollView(
-                child: _view == _WelcomeView.menu
-                    ? _buildMenu(hollow)
-                    : _buildRestorePhrase(hollow),
+                child: _buildMenu(hollow),
               ),
             ),
           ),
@@ -244,15 +205,13 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
         const SizedBox(height: HollowSpacing.sm),
 
-        _OptionCard(
-          icon: LucideIcons.keyRound,
-          title: 'Restore from Recovery Phrase',
-          subtitle: 'Enter your 24-word recovery phrase',
-          hollow: hollow,
-          onTap: () => setState(() => _view = _WelcomeView.restorePhrase),
-        ),
-
-        const SizedBox(height: HollowSpacing.sm),
+        // NOTE (Step 9C/C6): the "Restore from Recovery Phrase" option was REMOVED.
+        // A 24-word phrase alone only regenerates the master keypair (your peer id)
+        // — it carries NO synced data, and leaving a stale messages.db on disk caused
+        // a "Loading… forever" mismatch. To bring a device fully online use "Link a
+        // device" (live snapshot from an online device) or "Restore from Backup" (a
+        // .hollow file). The mnemonic-restore FFI still exists for the in-app
+        // recovery dialogs (Identity Locked / Recover Identity in hollow_shell).
 
         _OptionCard(
           icon: LucideIcons.smartphone,
@@ -313,103 +272,6 @@ class _WelcomeContentState extends State<_WelcomeContent> {
             ),
           ),
         ],
-      ],
-    );
-  }
-
-  Widget _buildRestorePhrase(HollowTheme hollow) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Back button + title
-        Row(
-          children: [
-            GestureDetector(
-              onTap: _restoring
-                  ? null
-                  : () => setState(() {
-                        _view = _WelcomeView.menu;
-                        _phraseError = null;
-                      }),
-              child: Icon(
-                LucideIcons.arrowLeft,
-                size: 20,
-                color: _restoring
-                    ? hollow.textSecondary.withValues(alpha: 0.3)
-                    : hollow.textSecondary,
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            Text(
-              'Restore from Recovery Phrase',
-              style: HollowTypography.subheading.copyWith(
-                color: hollow.textPrimary,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ],
-        ),
-
-        const SizedBox(height: HollowSpacing.lg),
-
-        Text(
-          'Enter your 24-word recovery phrase, separated by spaces.',
-          style: HollowTypography.body.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 13,
-          ),
-        ),
-
-        const SizedBox(height: HollowSpacing.md),
-
-        HollowTextField(
-          controller: _phraseController,
-          hintText: 'word1 word2 word3 ... word24',
-          maxLines: 4,
-        ),
-
-        if (_phraseError != null) ...[
-          const SizedBox(height: HollowSpacing.sm),
-          Text(
-            _phraseError!,
-            style: HollowTypography.caption.copyWith(
-              color: hollow.error,
-              fontSize: 11,
-            ),
-          ),
-        ],
-
-        const SizedBox(height: HollowSpacing.lg),
-
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [
-            HollowButton.ghost(
-              onPressed: _restoring
-                  ? null
-                  : () => setState(() {
-                        _view = _WelcomeView.menu;
-                        _phraseError = null;
-                      }),
-              child: const Text('Cancel'),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            HollowButton.filled(
-              onPressed: _restoring ? null : _onRestoreFromPhrase,
-              child: _restoring
-                  ? SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    )
-                  : const Text('Restore'),
-            ),
-          ],
-        ),
       ],
     );
   }

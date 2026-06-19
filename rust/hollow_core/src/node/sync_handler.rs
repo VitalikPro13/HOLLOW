@@ -38,6 +38,39 @@ fn broadcast_raw_to_members(
     }
 }
 
+/// Multi-device (Step 9C): fan pre-serialized bytes to our OWN online sibling
+/// devices, EXCLUDING the acting device (`local_device_id`).
+///
+/// The remaining-member broadcast skips the actor's own identity (members are
+/// master-keyed; the actor's siblings resolve to the same master), so a
+/// moderation/leave CRDT op — and the MLS leaf-removal commit for kick/ban —
+/// never reaches a person's OTHER devices. Without this they only converge on
+/// restart / the next SyncRequest. We exclude the acting device itself because
+/// (a) it already applied the change locally and (b) re-feeding a node its OWN
+/// MLS commit fails `process_commit` (epoch already advanced) → self-drops the
+/// group. Returns the number of sibling devices reached (0 for a sole device).
+fn fan_to_own_siblings(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    local_device_id: &str,
+    data: Vec<u8>,
+) -> usize {
+    let mut sent = 0;
+    for dev in online_devices_for(ws_room_peers, local_peer_str) {
+        if dev == local_device_id { continue; } // never re-feed the acting device
+        if let Some(room) = super::crypto_handler::ws_room_for_peer(ws_room_peers, &dev) {
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                room_code: room,
+                target_peer: dev.clone(),
+                data: data.clone(),
+            });
+            sent += 1;
+        }
+    }
+    sent
+}
+
 /// Convenience: broadcast a `CrdtOpBroadcast` (plaintext fallback) to all members'
 /// devices. Used by every sync-handler CRDT op whose MLS broadcast failed/absent.
 fn broadcast_crdt_op_to_members(
@@ -73,8 +106,10 @@ pub(crate) async fn handle_create_server(
     mls: &mut Option<MlsManager>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
+    local_device_id: &str,
     name: String,
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
@@ -142,10 +177,19 @@ pub(crate) async fn handle_create_server(
         name,
     }).await;
 
-
-    // No broadcast needed for CreateServer — the server only has
-    // one member (the creator) at this point. New members will
-    // receive full state via SyncResponse when they join.
+    // Multi-device: announce the new server to our OWN online sibling devices so
+    // they auto-onboard (the server room is brand-new; siblings aren't in it and
+    // have no other way to learn it exists). Each sibling runs its join flow and we
+    // serve the snapshot + add its MLS leaf via the same-identity ServerJoinRequest
+    // fast-path. Offline siblings onboard when they next come online + we re-announce.
+    // No-op for a sole single-device install (no siblings online).
+    let announce = serde_json::to_vec(&HavenMessage::SiblingServerAnnounce {
+        server_id: server_id.clone(),
+    }).unwrap_or_default();
+    let sent = fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, announce);
+    if sent > 0 {
+        hollow_log!("[HOLLOW-CRDT] Announced new server {server_id} to {sent} online sibling device(s)");
+    }
 }
 
 // ── 2. CreateChannel ──────────────────────────────────────────────────
@@ -499,6 +543,7 @@ pub(crate) async fn handle_delete_server(
     sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
+    local_device_id: &str,
     server_id: String,
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
@@ -515,40 +560,57 @@ pub(crate) async fn handle_delete_server(
         }
     }
 
-    hollow_log!("[HOLLOW-CRDT] Deleting server {server_id}");
+    hollow_log!("[HOLLOW-CRDT] Deleting server {server_id} (tombstone)");
 
-    // Broadcast deletion — MLS first, plaintext fallback.
-    let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
-    if mls_ok {
-        let envelope = MessageEnvelope::ServerDelete { sid: server_id.clone() };
-        if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store) {
-            hollow_log!("[HOLLOW-MLS] ServerDelete broadcast failed: {e}");
-        }
-    } else if let Some(state) = server_states.get(&server_id) {
-        let local_peer = local_peer_str.to_string();
-{
-            let data = serde_json::to_vec(&HavenMessage::ServerDeleteBroadcast {
-                server_id: server_id.clone(),
-            }).unwrap_or_default();
-            broadcast_raw_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, data);
-        }
+    // CRDT-op-only deletion (replaces the old missable one-shot ServerDeleteBroadcast):
+    // create a replicable `ServerDeleted` tombstone op. Online members get it via the
+    // normal CrdtOpBroadcast gossip near-instantly; an OFFLINE member reconciles it on
+    // reconnect via grow-only SyncRequest/SyncResponse (the owner RETAINS the tombstone
+    // shell + op_log to serve it). This is what lets an offline member ever learn the
+    // server is gone — the previous one-shot was missed forever.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let Some(state) = server_states.get_mut(&server_id) else { return false; };
+    let op = state.create_op(CrdtPayload::ServerDeleted { deleted_at: now_ms });
+    let _ = state.apply_op(&op); // marks shell `deleted`, drains membership, keeps op_log
+
+    // Persist the tombstone shell + the op (op_log is skip_serializing → the op MUST be
+    // persisted via insert_op or the owner stops serving it after restart).
+    crdt_store.insert_op(op.clone());
+    if let Ok(json) = serialize_state_lean(state) {
+        crdt_store.save_state(server_id.clone(), json);
     }
 
-    server_states.remove(&server_id);
+    // Fan the tombstone op to remaining members (MLS-first, plaintext fallback) AND to
+    // our OWN siblings (the master-keyed member broadcast excludes our identity).
+    if let Ok(op_json) = serde_json::to_string(&op) {
+        let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+        let mls_sent = if mls_ok {
+            let envelope = MessageEnvelope::CrdtOp { sid: server_id.clone(), op_json: op_json.clone() };
+            send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store).is_ok()
+        } else { false };
+        let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+            server_id: server_id.clone(), op_json,
+        }).unwrap_or_default();
+        if !mls_sent {
+            // Plaintext fallback to remaining members (MLS absent / epoch stale).
+            broadcast_raw_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, data.clone());
+        }
+        // Siblings always get the plaintext op directly (SendToRoom reaches them too,
+        // but a direct fan also covers the no-other-member-online case).
+        fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
+    }
 
-    // Clean up MLS group.
+    // Tear down our LOCAL MLS group (we're leaving the server) but KEEP the CRDT
+    // tombstone shell + signaling registration so we keep serving the tombstone to
+    // reconnecting peers. (We no longer hard-delete the server_states entry / DB row.)
     if let Some(mls_mgr) = mls {
         mls_mgr.remove_group(&server_id);
         persist_mls_state(mls_mgr, crypto_store);
     }
-
-    // Unregister from signaling room for this server.
-    let _ = sig_cmd_tx.send(SignalingCmd::Unregister {
-        room_code: server_id.clone(),
-    }).await;
-
-    // Remove from DB
-    crdt_store.delete_server(server_id.clone());
+    let _ = sig_cmd_tx;
 
     let _ = event_tx.send(NetworkEvent::ServerDeleted {
         server_id,
@@ -630,6 +692,7 @@ pub(crate) async fn handle_change_role(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
+    local_device_id: &str,
     server_id: String,
     peer_id: String,
     new_role: String,
@@ -674,9 +737,16 @@ pub(crate) async fn handle_change_role(
 
         // Broadcast to connected server members only.
         if let Ok(op_json) = serde_json::to_string(&op) {
-broadcast_crdt_op_to_members(
+            broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
-            )
+            );
+            // Also fan to our OWN online siblings (role-change is plaintext-only —
+            // no MLS path — so the remaining-member broadcast skips our identity).
+            let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+                server_id: server_id.clone(),
+                op_json,
+            }).unwrap_or_default();
+                        fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
         }
     }
     false
@@ -693,6 +763,7 @@ pub(crate) async fn handle_kick_member(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
+    local_device_id: &str,
     server_id: String,
     peer_id: String,
     crypto_store: &CryptoStore,
@@ -745,6 +816,9 @@ pub(crate) async fn handle_kick_member(
                 if member_peer_str == &peer_id { continue; } // Kicked peer gets MemberKickBroadcast instead
                 send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
             }
+            // Also fan the removal op to our OWN online siblings (excluded from the
+            // master-keyed remaining-member loop) so they converge without restart.
+                        fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
         }
 
         // Send kick notification to EVERY online device of the kicked identity
@@ -788,6 +862,11 @@ pub(crate) async fn handle_kick_member(
                                     if member_peer_str == &peer_id { continue; }
                                     send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
                                 }
+                                // Our OWN siblings each hold their own leaf at the prior epoch —
+                                // forward them the commit too (excluding this device, which already
+                                // merged it) so they rotate to the new epoch instead of falling
+                                // behind and self-dropping the group on the next channel message.
+                                                                fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
                                 hollow_log!("[HOLLOW-MLS] Removed all leaves of {peer_id} from MLS group, epoch rotated");
                             }
                             Err(e) => hollow_log!("[HOLLOW-MLS] Failed to merge remove commit: {e}"),
@@ -879,6 +958,7 @@ pub(crate) async fn handle_leave_server(
     sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
+    local_device_id: &str,
     server_id: String,
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
@@ -923,6 +1003,10 @@ pub(crate) async fn handle_leave_server(
             for member_peer_str in &broadcast_targets {
                 send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
             }
+            // Leaving is an identity-level action: fan the self-removal op to our OWN
+            // siblings so they leave the server too (each applies the self-MemberRemoved,
+            // allowed because peer_id == op.author). The acting device already left.
+                        fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
         }
 
         // MLS: remove ALL of OUR leaves from the group (this device + any sibling
@@ -991,6 +1075,7 @@ pub(crate) async fn handle_ban_member(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
+    local_device_id: &str,
     server_id: String,
     peer_id: String,
     crypto_store: &CryptoStore,
@@ -1041,6 +1126,8 @@ pub(crate) async fn handle_ban_member(
                 if member_peer_str == &peer_id { continue; }
                 send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
             }
+            // Also fan the ban op to our OWN online siblings (excluded above).
+                        fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
         }
 
         // Send kick notification to every device of the banned identity.
@@ -1074,6 +1161,9 @@ pub(crate) async fn handle_ban_member(
                                     if member_peer_str == &peer_id { continue; }
                                     send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
                                 }
+                                // Forward the epoch-rotating commit to our OWN siblings too
+                                // (excluding this device, which already merged it).
+                                                                fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
                                 hollow_log!("[HOLLOW-MLS] Removed all leaves of banned {peer_id} from MLS group");
                             }
                             Err(e) => hollow_log!("[HOLLOW-MLS] Failed to merge ban remove commit: {e}"),
@@ -1516,6 +1606,7 @@ pub(crate) async fn handle_set_nickname(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
+    local_device_id: &str,
     server_id: String,
     peer_id: String,
     nickname: String,
@@ -1551,9 +1642,14 @@ pub(crate) async fn handle_set_nickname(
 
         // Broadcast to connected server members
         if let Ok(op_json) = serde_json::to_string(&op) {
-broadcast_crdt_op_to_members(
+            broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
-            )
+            );
+            // Also fan to our OWN siblings (plaintext-only op skips our identity).
+            let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+                server_id: server_id.clone(), op_json,
+            }).unwrap_or_default();
+            fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
         }
     }
     false
@@ -1568,6 +1664,7 @@ pub(crate) async fn handle_set_twitch_username(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
+    local_device_id: &str,
     server_id: String,
     peer_id: String,
     twitch_username: String,
@@ -1597,9 +1694,14 @@ pub(crate) async fn handle_set_twitch_username(
         }).await;
 
         if let Ok(op_json) = serde_json::to_string(&op) {
-broadcast_crdt_op_to_members(
+            broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
-            )
+            );
+            // Also fan to our OWN siblings (plaintext-only op skips our identity).
+            let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+                server_id: server_id.clone(), op_json,
+            }).unwrap_or_default();
+            fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
         }
     }
     false
@@ -1660,6 +1762,7 @@ pub(crate) async fn handle_update_channel_layout(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
+    local_device_id: &str,
     server_id: String,
     layout_json: String,
     crdt_store: &CrdtStore,
@@ -1691,9 +1794,14 @@ pub(crate) async fn handle_update_channel_layout(
         }).await;
 
         if let Ok(op_json) = serde_json::to_string(&op) {
-broadcast_crdt_op_to_members(
+            broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
-            )
+            );
+            // Also fan to our OWN siblings (plaintext-only op skips our identity).
+            let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+                server_id: server_id.clone(), op_json,
+            }).unwrap_or_default();
+            fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
         }
     }
     false
@@ -1708,6 +1816,7 @@ pub(crate) async fn handle_pin_message(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
+    local_device_id: &str,
     server_id: String,
     channel_id: String,
     message_id: String,
@@ -1740,9 +1849,14 @@ pub(crate) async fn handle_pin_message(
         }).await;
 
         if let Ok(op_json) = serde_json::to_string(&op) {
-broadcast_crdt_op_to_members(
+            broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
-            )
+            );
+            // Also fan to our OWN siblings (plaintext-only op skips our identity).
+            let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+                server_id: server_id.clone(), op_json,
+            }).unwrap_or_default();
+            fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
         }
     }
     false
@@ -1757,6 +1871,7 @@ pub(crate) async fn handle_unpin_message(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
+    local_device_id: &str,
     server_id: String,
     channel_id: String,
     message_id: String,
@@ -1789,9 +1904,14 @@ pub(crate) async fn handle_unpin_message(
         }).await;
 
         if let Ok(op_json) = serde_json::to_string(&op) {
-broadcast_crdt_op_to_members(
+            broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
-            )
+            );
+            // Also fan to our OWN siblings (plaintext-only op skips our identity).
+            let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+                server_id: server_id.clone(), op_json,
+            }).unwrap_or_default();
+            fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
         }
     }
     false
@@ -1806,6 +1926,7 @@ pub(crate) async fn handle_set_storage_pledge(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
+    local_device_id: &str,
     server_id: String,
     pledge_bytes: u64,
     crdt_store: &CrdtStore,
@@ -1830,9 +1951,14 @@ pub(crate) async fn handle_set_storage_pledge(
         }).await;
 
         if let Ok(op_json) = serde_json::to_string(&op) {
-broadcast_crdt_op_to_members(
+            broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
-            )
+            );
+            // Also fan to our OWN siblings (plaintext-only op skips our identity).
+            let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
+                server_id: server_id.clone(), op_json,
+            }).unwrap_or_default();
+            fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
         }
     }
 }
@@ -1942,6 +2068,7 @@ pub(crate) async fn flush_pending_sync_requests(
                         file_id: m.file_id.clone(),
                         file_meta,
                         hidden_at: m.hidden_at,
+                        order_us: m.order_us,
                         reactions,
                     }
                 }).collect();
@@ -2077,6 +2204,8 @@ pub(crate) async fn handle_envelope_crdt_op(
             | CrdtPayload::LabelUnassigned { peer_id, .. } => {
                 peer_id == &op.author || (sender_perms & Permission::MANAGE_ROLES) != 0
             }
+            // Only the Owner can delete a server (tombstone).
+            CrdtPayload::ServerDeleted { .. } => sender_role == MemberRole::Owner,
             CrdtPayload::ServerCreated { .. } => true,
         };
         if !allowed {
@@ -2111,6 +2240,15 @@ pub(crate) async fn handle_envelope_crdt_op(
             CrdtPayload::MemberRemoved { peer_id } => {
                 let _ = event_tx.send(NetworkEvent::MemberLeft {
                     server_id: sid.clone(), peer_id: peer_id.clone(),
+                }).await;
+            }
+            CrdtPayload::ServerDeleted { .. } => {
+                // Owner tombstoned the server. Shell retained (serve to our offline
+                // peers); UI drops the server. (MLS group teardown is handled by the
+                // plaintext CrdtOpBroadcast path / left to lazily orphan here — this
+                // MLS handler has no mls handle.)
+                let _ = event_tx.send(NetworkEvent::ServerDeleted {
+                    server_id: sid.clone(),
                 }).await;
             }
             CrdtPayload::RoleChanged { peer_id, role, .. } => {
@@ -2188,15 +2326,29 @@ pub(crate) async fn handle_envelope_server_delete(
         hollow_log!("[HOLLOW-SECURITY] REJECTED MLS ServerDelete from {sender_peer_id} — not owner");
         return;
     }
-    if server_states.remove(&sid).is_some() {
-        crdt_store.delete_server(sid.clone());
-        if let Some(mls_mgr_ref) = mls {
-            mls_mgr_ref.remove_group(&sid);
-            persist_mls_state(mls_mgr_ref, crypto_store);
+    // Legacy one-shot MLS path (a pre-tombstone peer may still send this). Convert to
+    // a TOMBSTONE: synthesize + apply the owner's ServerDeleted op, persist, keep the
+    // shell to relay onward. (New senders route deletion through the CRDT op instead.)
+    if let Some(state) = server_states.get_mut(&sid) {
+        if !state.is_deleted() {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            let op = state.create_op(CrdtPayload::ServerDeleted { deleted_at: now_ms });
+            let _ = state.apply_op(&op);
+            crdt_store.insert_op(op.clone());
+            if let Ok(json) = serialize_state_lean(state) {
+                crdt_store.save_state(sid.clone(), json);
+            }
+            if let Some(mls_mgr_ref) = mls {
+                mls_mgr_ref.remove_group(&sid);
+                persist_mls_state(mls_mgr_ref, crypto_store);
+            }
+            let _ = event_tx.send(NetworkEvent::ServerDeleted {
+                server_id: sid,
+            }).await;
         }
-        let _ = event_tx.send(NetworkEvent::ServerDeleted {
-            server_id: sid,
-        }).await;
     }
 }
 
@@ -2284,6 +2436,17 @@ pub(crate) async fn handle_envelope_sync_resp(
 ) {
     if let Some(state) = server_states.get_mut(&sid) {
         if let Ok(incoming_ops) = serde_json::from_str::<Vec<crate::crdt::operations::CrdtOp>>(&ops_json) {
+            // SECURITY (tombstone): drop a `ServerDeleted` op not authored by the Owner
+            // (validated against OUR role map) BEFORE persist + merge — never trust the
+            // relayer. Mirrors the plaintext SyncResponse path.
+            let incoming_ops: Vec<crate::crdt::operations::CrdtOp> = incoming_ops
+                .into_iter()
+                .filter(|op| {
+                    if let crate::crdt::operations::CrdtPayload::ServerDeleted { .. } = op.payload {
+                        state.get_role(&op.author) == crate::crdt::operations::MemberRole::Owner
+                    } else { true }
+                })
+                .collect();
             // Persist synced ops — op_log is not serialized in the state
             // JSON, so ops merged in RAM are lost on restart without this
             // (a member then serves a near-empty op log to future joiners).
@@ -2297,10 +2460,18 @@ pub(crate) async fn handle_envelope_sync_resp(
                     if let Ok(json) = serialize_state_lean(state) {
                         crdt_store.save_state(sid.clone(), json);
                     }
-                    let _ = event_tx.send(NetworkEvent::SyncCompleted {
-                        server_id: sid.clone(),
-                        ops_applied: applied as u32,
-                    }).await;
+                    // Reconcile a deletion that happened while offline (UI hides the
+                    // tombstoned server; the shell is retained to relay onward).
+                    if state.is_deleted() {
+                        let _ = event_tx.send(NetworkEvent::ServerDeleted {
+                            server_id: sid.clone(),
+                        }).await;
+                    } else {
+                        let _ = event_tx.send(NetworkEvent::SyncCompleted {
+                            server_id: sid.clone(),
+                            ops_applied: applied as u32,
+                        }).await;
+                    }
                 }
             }
         }
@@ -2358,7 +2529,7 @@ pub(crate) async fn handle_envelope_channel_sync_req(
                     sig: m.signature.clone(), pk: m.public_key.clone(),
                     mid: m.message_id.clone(), edited_at: m.edited_at,
                     reply_to: m.reply_to_mid.clone(), file_id: m.file_id.clone(),
-                    file_meta, hidden_at: m.hidden_at, reactions,
+                    file_meta, hidden_at: m.hidden_at, order_us: m.order_us, reactions,
                 }
             }).collect();
             if !items.is_empty() {
@@ -2493,7 +2664,7 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
                 if let Ok(1) = store.insert_channel_message(
                     &sid, &cid, &msg.s, &msg.t, is_mine, msg.ts,
                     msg.sig.as_deref(), msg.pk.as_deref(), msg.mid.as_deref(),
-                    msg.reply_to.as_deref(), msg.file_id.as_deref(),
+                    msg.reply_to.as_deref(), msg.file_id.as_deref(), msg.order_us,
                 ) {
                     new_count += 1;
                     // If the synced message was already edited, stamp edited_at directly.

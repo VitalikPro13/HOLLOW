@@ -417,6 +417,9 @@ pub(crate) struct ChannelMsg {
     pub sender_master: String,
     pub is_mine: bool,
     pub timestamp: i64,
+    /// Microsecond ordering key (Step 9C/C4) — `None` if it didn't survive the
+    /// wire/backfill (a regression) or a legacy/pre-9C row.
+    pub order_us: Option<i64>,
 }
 
 #[allow(dead_code)] // Inspector API — methods are used as scenarios are added.
@@ -450,12 +453,19 @@ impl TestNode {
 
     // --- Servers / channels / members (UI layer) ---------------------------
 
-    /// Server ids this node is a member of (what the server strip shows).
+    /// Server ids this node is a member of (what the server strip shows). Mirrors
+    /// `get_joined_servers`: tombstoned (deleted) servers are HIDDEN — the node keeps
+    /// the shell to serve the deletion op, but the UI list excludes it.
     pub(crate) fn servers(&self) -> Vec<String> {
         self.store()
             .load_all_servers()
             .unwrap_or_default()
             .into_iter()
+            .filter(|(_, json)| {
+                serde_json::from_str::<ServerState>(json)
+                    .map(|s| !s.is_deleted())
+                    .unwrap_or(true)
+            })
             .map(|(sid, _)| sid)
             .collect()
     }
@@ -486,6 +496,14 @@ impl TestNode {
         rows
     }
 
+    /// A member's server nickname as the UI would read it (master-keyed, collapses
+    /// device→master via `get_nickname`'s resolver). Empty string = no nickname.
+    pub(crate) fn server_nickname(&self, server_id: &str, master: &str) -> String {
+        self.server_state(server_id)
+            .map(|s| s.get_nickname(master))
+            .unwrap_or_default()
+    }
+
     /// A channel's messages, oldest-first, as the channel pane shows them
     /// (sender collapsed to master).
     pub(crate) fn channel_messages(&self, server_id: &str, channel_id: &str) -> Vec<ChannelMsg> {
@@ -498,6 +516,7 @@ impl TestNode {
                 text: m.text,
                 is_mine: m.is_mine,
                 timestamp: m.timestamp,
+                order_us: m.order_us,
             })
             .collect()
     }
@@ -644,6 +663,20 @@ async fn spawn_node_with_friends(
     device_tag: u8,
     friend_masters: &[&str],
 ) -> TestNode {
+    spawn_node_full(relay, master_tag, device_tag, friend_masters, None).await
+}
+
+/// Full spawn with an optional pre-seeded SIGNED self device list (Step 9C/C5):
+/// persists a master-signed `{devices}` list into the node's DB BEFORE start, so
+/// startup's resolver self-seed reads it — mimicking a freshly-LINKED sibling whose
+/// imported DB holds the SOURCE device's list (and NOT yet its own new device id).
+async fn spawn_node_full(
+    relay: &MockRelay,
+    master_tag: u8,
+    device_tag: u8,
+    friend_masters: &[&str],
+    pre_seed_self_devices: Option<&[String]>,
+) -> TestNode {
     let master = NativeKeypair::from_secret_bytes(&seed_bytes(master_tag));
     let device = NativeKeypair::from_secret_bytes(&seed_bytes(device_tag));
     let passphrase = passphrase_for(&master);
@@ -667,6 +700,17 @@ async fn spawn_node_with_friends(
         store.save_olm_account(&pickle).expect("save olm");
         for fm in friend_masters {
             store.save_friend(fm, "accepted", "outgoing", 0).expect("seed friend");
+        }
+        // Pre-seed a signed self device list (C5: simulate the imported source list).
+        if let Some(devices) = pre_seed_self_devices {
+            let signed = super::crypto_handler::build_signed_device_list(
+                &master, 1, devices.to_vec(), Vec::new(),
+            );
+            if let Ok(json) = serde_json::to_string(&signed) {
+                store.save_device_list(
+                    &signed.master_peer_id, &json, signed.version, &signed.devices, 0,
+                ).expect("persist pre-seed device list");
+            }
         }
         mgr
     };
@@ -1599,4 +1643,640 @@ async fn recovery_pool_membership_forms() {
     })
     .await;
     assert!(o_saw_member, "initiator must register the joiner as a recovery-pool member");
+}
+
+// ---------------------------------------------------------------------------
+// Step 9C / C3 (VERIFY-ONLY): sibling↔sibling SERVER-message backfill — the
+// server analog of the DM peer-fallback. Claim under test (tracker §9C): the
+// channel-sync rails already recover a device's OWN channel messages that were
+// sent from a now-offline SIBLING, with NO new code — because the
+// `ChannelSyncRequest` responder has no `is_mine` filter (serves all senders by
+// sender_id+timestamp) and the reconnect trigger (`SyncCoordinator::collect_ready`,
+// registered on PeerJoined/RoomMembers) fires a `ChannelSyncRequest` per channel
+// unconditionally. Scenario: A owns a server; M's two devices B + C both join
+// (both MLS leaves). C goes offline; B sends 3 channel messages (stored on A under
+// master M). Then B goes offline and C reconnects — C must recover B's sends (its
+// OWN identity's messages) from A, the only present member. If this is green, the
+// `[~]` item is confirmed needing no code.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn sibling_recovers_own_channel_messages_from_present_member() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // A = owner/friend (single device). M = our identity with two devices B + C.
+    const A_MASTER: u8 = 150;
+    const M_MASTER: u8 = 160;
+    const B_DEV: u8 = 161;
+    const C_DEV: u8 = 162;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+
+    // M has devices B + C (resolver collapses both → master M; A routes M→devices).
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    // A is friends with M; B and C are friends with A (so Olm sessions form for the
+    // server-join handshake, exactly as in the server-join test).
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&m_master]).await;
+    sleep_ms(1500).await;
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&a_master]).await;
+    sleep_ms(5000).await; // let Olm confirm all around (A↔B, A↔C, B↔C)
+    drain_events(&mut a);
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    // --- A creates a server; B (one device of M) joins and forms its MLS leaf ---
+    // We test the backfill rail with ONE sibling member at a time, which isolates
+    // the "own data stranded" recovery from the separate concurrent-two-sibling-MLS
+    // formation timing (C joins FRESH later, while B is offline). C recovering B's
+    // sends on join is the exact §9C claim ("the server rails already cover the same
+    // 'own data stranded' class as the DM peer-fallback").
+    let server_id = create_server_and_wait(&mut a, "Backfill Server").await;
+    let general = general_channel_of(&server_id);
+    sleep_ms(300).await;
+
+    // C stays OFFLINE for the whole "B sends" phase (it joins fresh afterwards).
+    relay.set_online(&c.device_id, false);
+    sleep_ms(200).await;
+
+    b.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .await
+        .unwrap();
+    let b_joined = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(b_joined, "device B should join the server");
+    sleep_ms(4000).await; // let B's MLS leaf form (KeyPackage → batch-add → Welcome)
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // B and A are the two MLS leaves; B's channel message must decrypt on A.
+    let a_leaves = a.mls_members(&server_id).await;
+    assert!(
+        a_leaves.contains(&b.device_id),
+        "A's MLS group must contain B's device leaf, got {a_leaves:?}"
+    );
+
+    // --- B sends 3 channel messages; A (present) stores them under master M ---
+    for (i, mid) in ["s1", "s2", "s3"].iter().enumerate() {
+        b.cmd_tx
+            .send(NodeCommand::SendChannelMessage {
+                server_id: server_id.clone(),
+                channel_id: general.clone(),
+                text: format!("from-B-{}", i + 1),
+                message_id: (*mid).to_string(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+        sleep_ms(80).await; // keep timestamps strictly ordered
+    }
+    let a_got = wait_event(&mut a, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "from-B-3")
+    })
+    .await;
+    assert!(a_got, "owner A must receive B's channel messages");
+    sleep_ms(300).await;
+    {
+        // Sanity: A holds B's three sends, attributed to our master M.
+        let on_a = a.channel_messages(&server_id, &general);
+        for t in ["from-B-1", "from-B-2", "from-B-3"] {
+            let row = on_a.iter().find(|m| m.text == t)
+                .unwrap_or_else(|| panic!("A should hold {t}, got {:?}",
+                    on_a.iter().map(|m| &m.text).collect::<Vec<_>>()));
+            assert_eq!(row.sender_master, m_master, "B's send attributed to master M on A");
+        }
+    }
+
+    // --- B goes offline; C comes online and JOINS the server fresh ---
+    // C is M's OTHER device; B's sends are its OWN identity's history, now stranded
+    // (the only device that sent them is offline). On join, C's channel-sync must
+    // recover them from A — the present member.
+    relay.set_online(&b.device_id, false);
+    sleep_ms(200).await;
+    drain_events(&mut c);
+    relay.set_online(&c.device_id, true);
+    sleep_ms(500).await; // let C re-run its connect flow
+
+    c.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .await
+        .unwrap();
+    let c_joined = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(c_joined, "device C should join the server fresh");
+
+    // On join, C registers with the SyncCoordinator and fires a ChannelSyncRequest
+    // per channel; A serves B's messages (sender = master M = C's OWN identity — no
+    // is_mine filter blocks them). The backfill path emits MessageSyncCompleted.
+    let recovered = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::MessageSyncCompleted { server_id: sid, new_message_count }
+            if *sid == server_id && *new_message_count > 0)
+            || matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "from-B-3")
+    })
+    .await;
+    assert!(recovered, "C should receive a channel-sync carrying B's messages from A on join");
+    sleep_ms(700).await; // let any remaining inserts commit
+
+    // --- THE ASSERTION: C recovered all 3 of its own identity's channel sends ---
+    let on_c = c.channel_messages(&server_id, &general);
+    for t in ["from-B-1", "from-B-2", "from-B-3"] {
+        let row = on_c.iter().find(|m| m.text == t).unwrap_or_else(|| {
+            panic!(
+                "C must recover its own identity's channel message {t:?} from A on join \
+                 (sibling server backfill). Got: {:?}",
+                on_c.iter().map(|m| &m.text).collect::<Vec<_>>()
+            )
+        });
+        // Attributed to our master M (C's own identity) — the messages it sent from B.
+        assert_eq!(row.sender_master, m_master, "recovered message attributed to master M");
+        // C4: the microsecond ordering key survived the send → A → backfill → C round
+        // trip (not NULL), so cross-device ordering is stable.
+        assert!(
+            row.order_us.is_some(),
+            "recovered message {t:?} must carry order_us through the wire+backfill (C4)"
+        );
+    }
+    // C4: the three backfilled sends are in true send order on C (B-1 < B-2 < B-3 by
+    // order_us), even though they may share a millisecond timestamp.
+    let recovered_seq: Vec<(&str, i64)> = ["from-B-1", "from-B-2", "from-B-3"]
+        .iter()
+        .map(|t| (*t, on_c.iter().find(|m| m.text == *t).unwrap().order_us.unwrap()))
+        .collect();
+    assert!(
+        recovered_seq[0].1 < recovered_seq[1].1 && recovered_seq[1].1 < recovered_seq[2].1,
+        "backfilled sends must keep strictly increasing order_us (true send order): {recovered_seq:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Step 9C / C2: server MODERATION actions reach the actor's OWN sibling devices.
+// The bug: kick/ban/role-change/leave broadcast their CRDT op only to the
+// REMAINING members (master-keyed, actor's identity excluded), so a moderation
+// action on device B never reaches sibling C of the same person — C only
+// converged on restart. Fix: each handler also fans the op (and, for kick/ban,
+// the MLS leaf-removal commit) to our own online siblings, excluding the acting
+// device. Scenario: M owns a server (devices B + C); V is a victim member. B
+// performs role-change then kick of V; C (sibling, never restarted) must reflect
+// both WITHOUT restart. (Owner M creates the server so role-change/kick perms
+// hold for either of M's devices.)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn moderation_action_converges_on_actor_sibling_without_restart() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // M = owner identity, devices B + C. V = victim (single device, a friend so
+    // the join handshake's Olm session forms).
+    const M_MASTER: u8 = 170;
+    const B_DEV: u8 = 171;
+    const C_DEV: u8 = 172;
+    const V_MASTER: u8 = 180;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let v_master = NativeKeypair::from_secret_bytes(&seed_bytes(V_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    // B + C (siblings) are friends with V; V is friends with M.
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&v_master]).await;
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&v_master]).await;
+    sleep_ms(1500).await;
+    let mut v = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&m_master]).await;
+    sleep_ms(5000).await; // let Olm confirm all around
+    drain_events(&mut b);
+    drain_events(&mut c);
+    drain_events(&mut v);
+
+    // --- B (device of owner M) creates the server; C is a sibling, V joins ---
+    let server_id = create_server_and_wait(&mut b, "Mod Server").await;
+    sleep_ms(500).await;
+
+    // V joins the server.
+    v.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .await
+        .unwrap();
+    let v_joined = wait_event(&mut v, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(v_joined, "victim V should join the server");
+    sleep_ms(2500).await;
+
+    // C (B's sibling) joins so it holds the server CRDT state as a member of M.
+    c.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .await
+        .unwrap();
+    let c_joined = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(c_joined, "sibling C should join the server");
+    sleep_ms(3000).await; // CRDT membership converges across B, C, V
+    drain_events(&mut b);
+    drain_events(&mut c);
+    drain_events(&mut v);
+
+    // Pre-state: C's member panel shows M (owner) + V (member), V as a plain Member.
+    {
+        let panel = c.member_panel(&server_id, &relay);
+        let v_row = panel.iter().find(|r| r.master == v_master)
+            .unwrap_or_else(|| panic!("C should see V as a member pre-action, got {:?}",
+                panel.iter().map(|r| &r.master).collect::<Vec<_>>()));
+        assert_eq!(v_row.role, crate::crdt::operations::MemberRole::Member,
+            "V starts as a plain Member on C");
+    }
+
+    // --- B changes V's role to Moderator; C (sibling) must reflect it ---
+    b.cmd_tx
+        .send(NodeCommand::ChangeRole {
+            server_id: server_id.clone(),
+            peer_id: v_master.clone(),
+            new_role: "moderator".to_string(), // MemberRole::from_str is lowercase
+        })
+        .await
+        .unwrap();
+    sleep_ms(1500).await; // op fans to C (the fix) — no restart
+
+    {
+        let v_row = c.member_panel(&server_id, &relay)
+            .into_iter()
+            .find(|r| r.master == v_master)
+            .expect("C still sees V after role change");
+        assert_eq!(
+            v_row.role, crate::crdt::operations::MemberRole::Moderator,
+            "sibling C must reflect V's role change to Moderator WITHOUT restart (C2 fix)"
+        );
+    }
+
+    // --- GAP-A (Fix 4): B sets its OWN server nickname; sibling C must reflect it
+    // WITHOUT restart. (Here V is online and re-gossips B's op to C too, so this
+    // also passes via the relay path; the DIRECT sibling-fan is isolated in the
+    // dedicated no-relayer test `sibling_nickname_fans_directly_with_no_relayer`.) ---
+    b.cmd_tx
+        .send(NodeCommand::SetNickname {
+            server_id: server_id.clone(),
+            peer_id: m_master.clone(),
+            nickname: "PixelNick".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(1500).await; // op fans to C (the Fix-4 sibling fan) — no restart
+    {
+        let nick = c.server_nickname(&server_id, &m_master);
+        assert_eq!(
+            nick, "PixelNick",
+            "sibling C must reflect our own nickname change WITHOUT restart (Fix 4 GAP-A)"
+        );
+    }
+
+    // --- B kicks V; C (sibling) must drop V from its member panel ---
+    b.cmd_tx
+        .send(NodeCommand::KickMember {
+            server_id: server_id.clone(),
+            peer_id: v_master.clone(),
+        })
+        .await
+        .unwrap();
+    // B emits MemberLeft for V locally.
+    let b_kicked = wait_event(&mut b, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::MemberLeft { peer_id, .. } if *peer_id == v_master)
+    })
+    .await;
+    assert!(b_kicked, "actor B should emit MemberLeft for the kicked victim");
+    sleep_ms(1500).await; // removal op fans to C (the fix) — no restart
+
+    // THE C2 ASSERTION: C dropped V without ever restarting.
+    {
+        let panel = c.member_panel(&server_id, &relay);
+        assert!(
+            !panel.iter().any(|r| r.master == v_master),
+            "sibling C must drop the kicked V from its member panel WITHOUT restart (C2 fix), got {:?}",
+            panel.iter().map(|r| &r.master).collect::<Vec<_>>()
+        );
+        // C still sees the owner identity M — only V was removed.
+        assert!(
+            panel.iter().any(|r| r.master == m_master),
+            "C still shows the owner identity M after the kick"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step 9C / C5: a freshly-LINKED sibling's "Your devices" list shows BOTH devices
+// immediately (not just itself). Bug: the imported .hollow backup carries the
+// SOURCE device's signed device list, which does NOT contain the new sibling's
+// brand-new device id. At startup the resolver self-seed used ONLY that list, so
+// the running device resolved to ITSELF (not the master) → `myMaster` wrong →
+// `myDevicesProvider` (which inverts the resolver) showed one device until the
+// source came online and the inbox-proof merge fired. Fix: startup seeds
+// `list.devices ∪ {this_device}`. This asserts the Rust state the panel reads
+// (the resolver links), which is the harness-coverable half; the actual panel
+// render is Vitalik's visual check.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn linked_sibling_resolves_both_devices_at_startup() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // M = our identity. SOURCE device already existed; SIB is the freshly-linked
+    // device we're booting. The imported list contains ONLY the source device id.
+    const M_MASTER: u8 = 190;
+    const SOURCE_DEV: u8 = 191;
+    const SIB_DEV: u8 = 192;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let source_dev = NativeKeypair::from_secret_bytes(&seed_bytes(SOURCE_DEV)).peer_id();
+    let sib_dev = NativeKeypair::from_secret_bytes(&seed_bytes(SIB_DEV)).peer_id();
+
+    // CRUCIAL: do NOT pre-seed the resolver here (no `seed_self`). The whole point
+    // is that STARTUP must seed our own running device from the persisted list +
+    // its own id. The test_guard already cleared the resolver.
+
+    // Spawn the sibling with a pre-seeded SOURCE-ONLY device list (mimics import).
+    let sib = spawn_node_full(&relay, M_MASTER, SIB_DEV, &[], Some(&[source_dev.clone()])).await;
+    sleep_ms(800).await; // let startup run its resolver self-seed
+
+    // --- THE C5 ASSERTION: the resolver knows BOTH devices → master ---
+    // The running sibling device must resolve to the master (NOT itself) — this is
+    // what makes `myMaster`/`myDevicesProvider` correct in the panel.
+    assert_eq!(
+        super::resolver::resolve(&sib_dev), m_master,
+        "the freshly-linked running device must resolve to the master at startup (C5)"
+    );
+    // The source device (from the imported list) also resolves to the master.
+    assert_eq!(
+        super::resolver::resolve(&source_dev), m_master,
+        "the imported source device must resolve to the master"
+    );
+    // `devices_for(master)` (what `myDevicesProvider` inverts) contains BOTH — so the
+    // panel shows two devices, not one.
+    let mut devs = super::resolver::devices_for(&m_master);
+    devs.sort();
+    let mut expected = vec![source_dev.clone(), sib_dev.clone()];
+    expected.sort();
+    assert_eq!(
+        devs, expected,
+        "resolver must list BOTH the source and the freshly-linked device for the master (C5)"
+    );
+
+    // Keep `sib` alive to the end (its event loop owns the seeded resolver state).
+    drop(sib);
+}
+
+// ---------------------------------------------------------------------------
+// Fix 4 (GAP-A, no-relayer isolation): a plaintext-only lifecycle op fans to the
+// actor's OWN sibling DIRECTLY when no other member is online to re-gossip it.
+// M has two devices B + C, ALONE in a server (no friend member). B sets a server
+// nickname; C must reflect it WITHOUT restart — only possible via the direct
+// `fan_to_own_siblings` (the CrdtOpBroadcast re-gossip path has no other member to
+// relay through). Guards the 6 plaintext handlers' sibling fan.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn sibling_nickname_fans_directly_with_no_relayer() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // M = our identity, devices B + C. No friend / other member exists.
+    const M_MASTER: u8 = 200;
+    const B_DEV: u8 = 201;
+    const C_DEV: u8 = 202;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[]).await;
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
+    sleep_ms(3000).await;
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    // B creates a server; C joins it (sequential — C becomes a CRDT member).
+    let server_id = create_server_and_wait(&mut b, "Solo Server").await;
+    sleep_ms(500).await;
+    c.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "sibling C should join its own identity's server");
+    sleep_ms(2000).await;
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    // B sets a server nickname for our identity. The ONLY member besides B is C
+    // (same identity), so the master-keyed remaining-member broadcast targets
+    // nobody — only the direct sibling fan can deliver it to C.
+    b.cmd_tx
+        .send(NodeCommand::SetNickname {
+            server_id: server_id.clone(),
+            peer_id: m_master.clone(),
+            nickname: "SoloNick".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(1500).await;
+
+    assert_eq!(
+        c.server_nickname(&server_id, &m_master), "SoloNick",
+        "sibling C must receive the nickname via the DIRECT sibling fan (no relayer present)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix 2 (tombstone + reconnect reconciliation): a member who was OFFLINE when the
+// owner deleted a server must learn it's gone on RECONNECT — via the grow-only
+// SyncRequest/SyncResponse path carrying the ServerDeleted tombstone op. Before
+// the fix, deletion was a missable one-shot and the offline member kept the server
+// forever. The MockRelay does NOT durably queue the (now-removed) one-shot, so this
+// test PROVES the tombstone+reconnect path specifically.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn offline_member_reconciles_server_deletion_on_reconnect() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // O = owner (single device), M = member (single device).
+    const O_MASTER: u8 = 210;
+    const M_MASTER: u8 = 220;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&m_master]).await;
+    sleep_ms(1500).await;
+    let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await; // Olm confirm (server join handshake rides it)
+    drain_events(&mut o);
+    drain_events(&mut m);
+
+    // O creates a server; M joins.
+    let server_id = create_server_and_wait(&mut o, "Doomed Server").await;
+    sleep_ms(300).await;
+    m.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "member M should join the server");
+    sleep_ms(2500).await;
+    assert!(m.servers().contains(&server_id), "M holds the server before deletion");
+
+    // --- M goes OFFLINE; O deletes the server ---
+    relay.set_online(&m.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut o);
+    o.cmd_tx
+        .send(NodeCommand::DeleteServer { server_id: server_id.clone() })
+        .await
+        .unwrap();
+    let o_deleted = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::ServerDeleted { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(o_deleted, "owner O emits ServerDeleted");
+    sleep_ms(300).await;
+    // O's UI no longer lists it (tombstone hidden) but O RETAINS the shell to serve.
+    assert!(!o.servers().contains(&server_id), "O's UI drops the deleted server");
+
+    // --- M comes back ONLINE → reconnect SyncRequest → O serves the tombstone op ---
+    drain_events(&mut m);
+    relay.set_online(&m.device_id, true);
+    let m_saw_delete = wait_event(&mut m, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ServerDeleted { server_id: sid } if *sid == server_id)
+            || matches!(ev, NetworkEvent::MemberLeft { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(m_saw_delete, "M must learn the server was deleted on reconnect (tombstone sync)");
+    sleep_ms(500).await;
+
+    // --- THE CORE ASSERTION: M no longer lists the deleted server ---
+    assert!(
+        !m.servers().contains(&server_id),
+        "offline member M must reconcile the deletion on reconnect (server gone), got {:?}",
+        m.servers()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix 3 (server CREATE auto-onboards siblings): when one of M's devices creates a
+// server, M's OTHER online device must auto-onboard — see the server AND get its own
+// MLS leaf (so it can decrypt channel messages). The creator announces the new
+// server to siblings (SiblingServerAnnounce), the sibling runs the same-identity
+// join fast-path, and the sibling-re-adds / bootstrap path gives it an MLS leaf.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn server_create_auto_onboards_online_sibling() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // M = our identity, devices B (creator) + C (sibling). No friend needed.
+    const M_MASTER: u8 = 230;
+    const B_DEV: u8 = 231;
+    const C_DEV: u8 = 232;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[]).await;
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
+    sleep_ms(3000).await; // let B↔C meet in the inbox room + Olm settle
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    // B creates a server. C is online → should be auto-announced + onboard.
+    let server_id = create_server_and_wait(&mut b, "Shared Server").await;
+    let general = general_channel_of(&server_id);
+
+    // C learns about the server (ServerJoined) WITHOUT ever calling JoinServer itself.
+    let c_onboarded = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(c_onboarded, "sibling C must auto-onboard the newly-created server (ServerJoined)");
+    sleep_ms(4000).await; // let C's MLS leaf form (KeyPackage → sibling-re-add → Welcome)
+
+    // C's UI lists the server.
+    assert!(
+        c.servers().contains(&server_id),
+        "sibling C's server list must include the auto-onboarded server, got {:?}",
+        c.servers()
+    );
+
+    // B's MLS group must contain C's device leaf (so C can decrypt channel messages).
+    let b_leaves = b.mls_members(&server_id).await;
+    assert!(
+        b_leaves.contains(&c.device_id),
+        "creator B's MLS group must contain sibling C's leaf, got {b_leaves:?}"
+    );
+
+    // --- THE PAYOFF: B sends a channel message; C (auto-onboarded sibling) decrypts it ---
+    drain_events(&mut c);
+    b.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "hello sibling".to_string(),
+            message_id: "sib-ch-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let c_got = wait_event(&mut c, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "hello sibling")
+    })
+    .await;
+    assert!(c_got, "sibling C must decrypt a channel message in the auto-onboarded server");
 }

@@ -1088,4 +1088,68 @@ mod tests {
         assert_eq!(key_epoch2, peer1_key);
         assert_eq!(key_epoch2, peer2_key);
     }
+
+    /// Fix 1 (keystone regen): an OLD owned group (keystone owner + sibling + friend).
+    /// The keystone REGENERATES a fresh device-credentialed leaf; the SIBLING re-adds it
+    /// to the SAME group (one epoch advance — Welcome to the keystone, Commit to the
+    /// friend). The friend must then DECRYPT a message from the regenerated keystone,
+    /// and the group must NOT fork (sibling still decrypts at the same epoch).
+    #[test]
+    fn keystone_regen_rejoins_owned_group_via_sibling_no_fork() {
+        // OLD owned server: keystone "M" (master-credentialed legacy leaf is just
+        // credential id "M" here), sibling "MdevB", friend "F".
+        let mut keystone_old = MlsManager::new("M").unwrap();
+        keystone_old.create_group("oldsrv").unwrap();
+
+        let mut sibling = MlsManager::new("MdevB").unwrap();
+        let (_c1, w1) = keystone_old.add_member("oldsrv", &sibling.generate_key_package().unwrap()).unwrap();
+        keystone_old.merge_pending_commit("oldsrv").unwrap();
+        sibling.join_from_welcome("oldsrv", &w1).unwrap();
+
+        let mut friend = MlsManager::new("F").unwrap();
+        let (c2, w2) = keystone_old.add_member("oldsrv", &friend.generate_key_package().unwrap()).unwrap();
+        keystone_old.merge_pending_commit("oldsrv").unwrap();
+        sibling.process_commit("oldsrv", &c2).unwrap();
+        friend.join_from_welcome("oldsrv", &w2).unwrap();
+
+        // Keystone REGENERATES: a fresh manager with the SAME credential id "M" but a
+        // brand-new signature key + no groups (what startup does on `stale_keystone`).
+        let mut keystone_new = MlsManager::new("M").unwrap();
+        assert!(!keystone_new.has_group("oldsrv"), "regenerated keystone has no group yet");
+
+        // The OLD keystone leaf (credential "M") is STILL in the group, colliding with
+        // the new one's credential id. Production handles this in the batch processor:
+        // Phase 1 REMOVES the stale "M" leaf (commit 1), Phase 2 ADDS the new "M" leaf
+        // (commit 2). Model both, with the friend applying each commit.
+        // Phase 1: sibling removes the stale "M" leaf.
+        let c_rm = sibling.remove_member("oldsrv", "M").unwrap();
+        sibling.merge_pending_commit("oldsrv").unwrap();
+        friend.process_commit("oldsrv", &c_rm).unwrap();
+
+        // Phase 2: sibling adds the keystone's NEW leaf (now "M" is free).
+        let kp = keystone_new.generate_key_package().unwrap();
+        let (c3, w3, added) = sibling.add_members_batch("oldsrv", &[("M".into(), kp)]).unwrap();
+        sibling.merge_pending_commit("oldsrv").unwrap();
+        assert_eq!(added, vec!["M".to_string()], "sibling added the keystone's new leaf");
+        // Friend applies the same commit (no fork — same group, advanced one epoch).
+        friend.process_commit("oldsrv", &c3).unwrap();
+        keystone_new.join_from_welcome("oldsrv", &w3).unwrap();
+
+        // THE ASSERT: friend decrypts a channel message from the REGENERATED keystone.
+        let ct = keystone_new.encrypt("oldsrv", b"hello from regenerated keystone").unwrap();
+        let (pt, sender) = friend.decrypt("oldsrv", &ct).unwrap();
+        assert_eq!(pt, b"hello from regenerated keystone".to_vec());
+        assert_eq!(sender, "M", "decrypted message attributed to the keystone leaf id");
+
+        // No fork: the sibling also decrypts at the same epoch.
+        let ct2 = keystone_new.encrypt("oldsrv", b"again").unwrap();
+        assert_eq!(sibling.decrypt("oldsrv", &ct2).unwrap().0, b"again".to_vec());
+
+        // And the friend's SFrame key matches the keystone's (same epoch, no fork).
+        assert_eq!(
+            friend.export_secret("oldsrv", "sframe", b"", 32).unwrap(),
+            keystone_new.export_secret("oldsrv", "sframe", b"", 32).unwrap(),
+            "friend + regenerated keystone share the same epoch SFrame key (no fork)"
+        );
+    }
 }

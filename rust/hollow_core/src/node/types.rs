@@ -804,6 +804,16 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "disconnecting")]
     PeerDisconnecting,
 
+    /// Multi-device: the creator of a NEW server tells its OWN sibling devices the
+    /// server exists so they auto-onboard (the server room is brand-new, siblings
+    /// aren't in it, and a sibling has no other way to learn). The receiving sibling
+    /// runs its normal join flow for `server_id`; the creator's ServerJoinRequest
+    /// handler same-identity fast-paths it (no Twitch/ban gates for a co-owner).
+    #[serde(rename = "sib_server_announce")]
+    SiblingServerAnnounce {
+        server_id: String,
+    },
+
     // -- MLS group encryption messages --
 
     /// MLS-encrypted channel message (replaces Olm fan-out for channels).
@@ -1515,6 +1525,10 @@ pub(crate) struct DirectMessagePayload {
     /// `resolve(sender)` as before) → backward-compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub convo: Option<String>,
+    /// Microsecond send timestamp for stable cross-device ordering (Step 9C/C4).
+    /// `None` from a pre-9C peer → receiver falls back to `ts * 1000`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_us: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1535,6 +1549,10 @@ pub(crate) struct ChannelMessagePayload {
     pub file_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_preview: Option<LinkPreviewRef>,
+    /// Microsecond send timestamp for stable cross-device ordering (Step 9C/C4).
+    /// `None` from a pre-9C peer → receiver falls back to `ts * 1000`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_us: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2255,6 +2273,12 @@ pub(crate) struct SyncMessageItem {
     /// Deletion timestamp (if message was deleted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_at: Option<i64>,
+    /// Microsecond send timestamp for stable cross-device ordering (Step 9C/C4).
+    /// Carried verbatim through backfill so a sender's same-millisecond burst sorts
+    /// in true send order on every device. `None` from a pre-9C peer → the receiver
+    /// falls back to `ts * 1000` (legacy-equivalent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_us: Option<i64>,
     /// Reactions on this message (synced alongside the message).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<SyncReactionItem>,
@@ -2409,6 +2433,10 @@ pub(crate) struct DmSyncItem {
     /// Deletion timestamp (if message was deleted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_at: Option<i64>,
+    /// Microsecond send timestamp for stable cross-device ordering (Step 9C/C4).
+    /// See [`SyncMessageItem::order_us`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_us: Option<i64>,
     /// Reactions on this message (synced alongside the message).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<SyncReactionItem>,

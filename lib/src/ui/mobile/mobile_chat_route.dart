@@ -2383,10 +2383,31 @@ class _TypingBar extends ConsumerWidget {
     final typingPeers = ref.watch(typingProvider)[contextKey] ?? {};
     if (typingPeers.isEmpty) return const SizedBox.shrink();
 
+    // Robust self-filter (Step 9C/C1): a sibling device typing must never render as
+    // "you are typing" on our other device. Exclude any typist that resolves to our
+    // master OR is one of our own device ids OR this running device (the typist may
+    // arrive as a raw DEVICE id if its resolver link isn't warm — a bare master
+    // compare would miss it). Also collapse device→master for the display name so
+    // two devices of one friend show as a single person.
+    final links = ref.watch(deviceLinkProvider);
+    final myMaster = links.identityOf(ref.watch(identityProvider).peerId ?? '');
+    final myDeviceIds =
+        ref.watch(myDevicesProvider).map((d) => d.peerId).toSet();
+    final myRunningDevice =
+        ref.watch(localDevicePeerIdProvider).valueOrNull;
+    bool isMe(String pid) =>
+        links.identityOf(pid) == myMaster ||
+        links.sameIdentity(pid, myMaster) ||
+        myDeviceIds.contains(pid) ||
+        (myRunningDevice != null && pid == myRunningDevice);
+
     final profiles = ref.watch(profileProvider);
     final names = typingPeers
-        .map((pid) => displayNameFor(profiles, pid))
+        .where((pid) => !isMe(pid))
+        .map((pid) => displayNameFor(profiles, links.identityOf(pid)))
+        .toSet()
         .toList();
+    if (names.isEmpty) return const SizedBox.shrink();
 
     String text;
     if (names.length == 1) {

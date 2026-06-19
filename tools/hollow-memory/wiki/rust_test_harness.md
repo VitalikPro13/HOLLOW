@@ -112,8 +112,30 @@ forms its group. **Both leaves at the same epoch.** Then `SendChannelMessage` (n
 Owner is always the MLS coordinator in 2-node. **Sleep ≥~4-5s after JoinServer** so the batch timer
 ticks AFTER the KeyPackage is queued (Welcome only goes out post-queue).
 
-## Current tests (7)
+## Current tests (13)
 
+Step 9C/9D added 6 more (2026-06-19), each negative-tested where it guards a fix:
+- `sibling_recovers_own_channel_messages_from_present_member` (9C/C3) — a fresh-joining sibling recovers its
+  OWN identity's channel history from a present member (verify-only: no code needed); also asserts `order_us`
+  survives send→A→backfill→sibling with strictly increasing order (9C/C4).
+- `moderation_action_converges_on_actor_sibling_without_restart` (9C/C2) — B role-changes then kicks V; B's
+  sibling C reflects both WITHOUT restart (sibling moderation fan-out); also asserts a nickname change (with V
+  online relaying).
+- `sibling_nickname_fans_directly_with_no_relayer` (9D GAP-A) — M's two devices ALONE in a server; a nickname
+  change reaches the sibling ONLY via the direct `fan_to_own_siblings` (no other member to re-gossip).
+- `linked_sibling_resolves_both_devices_at_startup` (9C/C5) — a freshly-linked sibling resolves BOTH its own
+  device + the imported source device → master at startup (so "Your devices" shows two).
+- `offline_member_reconciles_server_deletion_on_reconnect` (9D tombstone) — member offline when owner deletes;
+  on reconnect the deleted server is GONE (tombstone+grow-only-sync path; the MockRelay doesn't queue the
+  removed one-shot). Faithfully negative-tested (owner hard-delete → member keeps server → fails).
+- `server_create_auto_onboards_online_sibling` (9D create) — creator makes a server → its online sibling
+  auto-onboards (sees it + decrypts a channel message via its new MLS leaf, formed by the sibling-re-add path).
+
+Plus a deterministic `crypto::mls_manager::tests::keystone_regen_rejoins_owned_group_via_sibling_no_fork`
+(unit, not harness) proving the keystone-regen sibling-re-add: friend decrypts the regenerated keystone's
+message at the same epoch, no fork (must model remove-then-add — old+new leaf share credential).
+
+The original 7:
 - `server_join_forms_mls_and_channel_message_decrypts` — owner creates a server, friend joins, MLS group
   forms across both device leaves at the same epoch, owner's MLS-encrypted channel message decrypts on
   the joiner. Asserts every layer: member panel (UI, master-keyed, online) + raw CRDT master-keys + raw
