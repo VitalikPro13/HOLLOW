@@ -58,16 +58,16 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 ## Download
 
-| Platform | Link |
+| Platform | Download |
 |----------|------|
-| Windows (10+) | [Download (.zip)](https://hollow.anonlisten.com) |
-| macOS (14.2+) | [Download (.dmg)](https://hollow.anonlisten.com) |
-| Linux | [Download (Experimental Flatpak)](https://hollow.anonlisten.com) |
-| Android (7+) | [Download (Experimental APK)](https://hollow.anonlisten.com) |
+| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.6.0-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.6.0-win64.zip) |
+| macOS (14.2+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.6.0.dmg) |
+| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.6.0-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.6.0-linux.tar.gz) (Experimental)|
+| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.6.0-android.apk) |
 | iOS | Coming soon |
 | Web | Not planned |
 
-Current Progress: macOS is fully working! Linux is experimental and not properly tested but core features work. Mobile port to Android/iOS is FINALLY DONE! 100% of the features are implemented, including the push notifications support (iOS is in the process). Websites are updated, so now you can enjoy the proper cross-platform release. There are areas for improvement, but everything will come in its time!
+Current Progress: Win/mac builds are finally signed/notarized now! The mobile port is out of Experimental phase. iOS will be available soon on public TestFlight first. I think that there is a bug with push notifications since I've added the multi-device support, so they might not work properly or be degraded in content preview. Will be fixed, thanks!
 
 ## Tech Stack
 
