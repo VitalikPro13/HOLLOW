@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-06-20-v060",
+    "date": "Jun 20, 2026",
+    "title": "v0.6 - Multi-Device Sync, Code Signing & Push Notifications",
+    "body": "Hello! This was probably the hardest release in terms of scale. Absolutely MASSIVE amount of work and time put into making it convenient and without compromising privacy.\n\n- First off, now you can sync between devices! Head to Security tab in Settings and find the section on device linking. If both devices are online, you both get data. If not, then nobody. Manual syncing on friends/servers is available.\n\n- Windows builds are now officially signed! Always check that the files have valid signatures and only download from official website!\n\n- Push Notifications for both Android/iOS. They're empty and just wake up the app in the background to securely fetch the messages. Apple/Google never see any data, not even ciphertext.\n\n- Other improvements like new Help Center and fixes.\n\nI'm really happy how everything turned out. Give as much feedback as you can and wait for more updates. Thanks!"
+  },
+  {
     "id": "2026-06-07-v050",
     "date": "Jun 7, 2026",
     "title": "v0.5 — macOS Release, Cross-Platform Auto-Updater & Mobile Port",

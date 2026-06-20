@@ -1,7 +1,7 @@
 # Hollow Protocol Whitepaper
 
-**Version 0.4.2**\
-**Author: AnonListen**\
+**Version 0.6.0**\
+**Author: Vitalii Rovinskyi**\
 *This document was generated with the assistance of Claude (AI). All technical content reflects the author's architecture and design decisions.*
 
 ---
@@ -10,9 +10,11 @@
 
 Hollow is a fully distributed, end-to-end encrypted communication platform. There are no central servers that store messages, files, or metadata. Members of a server collectively host it — the relay is a zero-knowledge signaling pipe that routes encrypted blobs between peers without any ability to read, modify, or store them.
 
-Hollow provides real-time text messaging, voice and video calls, screen sharing, file sharing, and distributed storage — all with end-to-end encryption. The protocol is designed so that even a fully compromised relay operator learns nothing beyond which peer IDs are connected and which rooms they occupy.
+Hollow provides real-time text messaging, voice and video calls, screen sharing, file sharing, and distributed storage — all with end-to-end encryption. A single human identity can run on multiple devices (multi-device sync), and mobile clients receive push notifications without ever exposing message content to Apple or Google. The protocol is designed so that even a fully compromised relay operator learns nothing beyond which peer IDs are connected and which rooms they occupy.
 
-This document describes the Hollow protocol as implemented in the Alpha release. It covers the cryptographic architecture, networking model, synchronization protocol, and security properties. It is not an implementation guide — it describes the system at the protocol level so that its security properties can be evaluated independently of the source code.
+This document describes the Hollow protocol as implemented in the Alpha release. It covers the cryptographic architecture, networking model, synchronization protocol, multi-device identity model, push-notification privacy design, and security properties. It is not an implementation guide — it describes the system at the protocol level so that its security properties can be evaluated independently of the source code.
+
+The client is a native application for Windows, macOS, Linux, Android, and iOS (a single Rust core shared across all platforms, with a Flutter UI). All cryptographic operations are identical across platforms.
 
 ---
 
@@ -20,24 +22,27 @@ This document describes the Hollow protocol as implemented in the Alpha release.
 
 1. [Introduction](#1-introduction)
 2. [Identity](#2-identity)
-3. [Direct Message Encryption (Olm / Double Ratchet)](#3-direct-message-encryption-olm--double-ratchet)
-4. [Server Encryption (MLS)](#4-server-encryption-mls)
-5. [Voice, Video, and Screen Share Encryption (SFrame)](#5-voice-video-and-screen-share-encryption-sframe)
-6. [File Transfer Encryption](#6-file-transfer-encryption)
-7. [Hollow Share (Private P2P File Distribution)](#7-hollow-share-private-p2p-file-distribution)
-8. [Vault (Distributed Encrypted Storage)](#8-vault-distributed-encrypted-storage)
-9. [CRDT Synchronization](#9-crdt-synchronization)
-10. [Authorization and Permission Model](#10-authorization-and-permission-model)
-11. [Relay Architecture](#11-relay-architecture)
-12. [WebRTC Transport Layer](#12-webrtc-transport-layer)
-13. [Message Signing and Verification](#13-message-signing-and-verification)
-14. [The Rat Files (Cryptographic Evidence)](#14-the-rat-files-cryptographic-evidence)
-15. [Gossip Overlay Network](#15-gossip-overlay-network)
-16. [Anti-Censorship Transport](#16-anti-censorship-transport)
-17. [Twitch Community Verification](#17-twitch-community-verification-optional)
-18. [Summary of Cryptographic Primitives](#18-summary-of-cryptographic-primitives)
-19. [Threat Model](#19-threat-model)
-20. [Limitations and Future Work](#20-limitations-and-future-work)
+3. [Multi-Device Identity and Synchronization](#3-multi-device-identity-and-synchronization)
+4. [Direct Message Encryption (Olm / Double Ratchet)](#4-direct-message-encryption-olm--double-ratchet)
+5. [Server Encryption (MLS)](#5-server-encryption-mls)
+6. [Voice, Video, and Screen Share Encryption (SFrame)](#6-voice-video-and-screen-share-encryption-sframe)
+7. [File Transfer Encryption](#7-file-transfer-encryption)
+8. [Hollow Share (Private P2P File Distribution)](#8-hollow-share-private-p2p-file-distribution)
+9. [Vault (Distributed Encrypted Storage)](#9-vault-distributed-encrypted-storage)
+10. [CRDT Synchronization](#10-crdt-synchronization)
+11. [Authorization and Permission Model](#11-authorization-and-permission-model)
+12. [Relay Architecture](#12-relay-architecture)
+13. [Push Notifications (Mobile)](#13-push-notifications-mobile)
+14. [WebRTC Transport Layer](#14-webrtc-transport-layer)
+15. [Message Signing and Verification](#15-message-signing-and-verification)
+16. [The Rat Files (Cryptographic Evidence)](#16-the-rat-files-cryptographic-evidence)
+17. [Gossip Overlay Network](#17-gossip-overlay-network)
+18. [Anti-Censorship Transport](#18-anti-censorship-transport)
+19. [Twitch Community Verification](#19-twitch-community-verification-optional)
+20. [Verification and Correctness Assurance](#20-verification-and-correctness-assurance)
+21. [Summary of Cryptographic Primitives](#21-summary-of-cryptographic-primitives)
+22. [Threat Model](#22-threat-model)
+23. [Limitations and Future Work](#23-limitations-and-future-work)
 
 ---
 
@@ -51,13 +56,15 @@ This document describes the Hollow protocol as implemented in the Alpha release.
 - **Decentralized state.** Server metadata (channels, members, roles, settings) is synchronized via CRDTs with no authoritative source. Any online member can serve as a sync peer.
 - **Verifiable authorship.** Every message carries an Ed25519 signature over a canonical payload. Recipients verify that the claimed sender actually authored the message. Exported messages are cryptographically unforgeable — stronger than screenshots.
 - **Distributed storage.** Server files are distributed across members using adaptive erasure coding. No single member's departure causes data loss.
+- **Multi-device without accounts.** One identity can run on several devices, kept in sync, without any account server — and without the relay ever learning that two connections belong to the same person.
+- **Metadata-minimizing push.** Mobile push notifications carry only an opaque wake-up signal; message content is fetched over the existing E2EE channels and decrypted on-device, never exposed to Apple or Google.
 - **Zero VPS bandwidth for media.** Voice, video, screen sharing, and file transfers flow over peer-to-peer WebRTC connections. The relay carries only signaling.
 
 ### 1.2 Architecture Overview
 
 Hollow consists of three components:
 
-1. **The client application** — a native binary (not Electron) that handles UI, state management, and all cryptographic operations. The backend is written in Rust, the UI in Flutter (Dart), connected via FFI.
+1. **The client application** — a native binary (not Electron) that handles UI, state management, and all cryptographic operations. The backend is written in Rust, the UI in Flutter (Dart), connected via FFI. The same Rust core runs on Windows, macOS, Linux, Android, and iOS, so cryptographic behavior is identical across platforms. A single person can run the client on several devices at once (§3).
 
 2. **The relay server** — a lightweight WebSocket router that forwards encrypted messages between room members. It is a dumb pipe with no knowledge of application semantics. The relay is open-source.
 
@@ -137,7 +144,7 @@ Total: 119 bytes. The ciphertext contains the AES-256-GCM encrypted keypair (68-
 
 - **Password with silent unlock** (flags = `0x03`): Same password-derived encryption as above, but the wrapping key is also cached in the OS credential store for silent unlock. The identity file is encrypted (protecting against file copying), but the app opens normally on the same device. A toggle in Settings ("Ask for password on launch") controls this behavior. If the OS credential store becomes unavailable, the app falls back to requesting the password.
 
-- **Device protection only** (flags = `0x02`): A random 32-byte wrapping key is stored in the OS credential store — **Windows Credential Manager** (`CredWriteW`/`CredReadW`) as primary with a **DPAPI blob** (`identity.dpapi`) as fallback on Windows, **Keychain** (`security-framework` crate, service `com.hollow.identity`) on macOS. Silent unlock on the same machine. The identity file is useless if copied to another machine.
+- **Device protection only** (flags = `0x02`): A random 32-byte wrapping key is stored in the OS credential store — **Windows Credential Manager** (`CredWriteW`/`CredReadW`) as primary with a **DPAPI blob** (`identity.dpapi`) as fallback on Windows, **Keychain** (`security-framework` crate, service `com.hollow.identity`) on macOS. On mobile, the equivalent silent-unlock layer is provided by the App Lock subsystem (§2.6), which gates a copy of the wrapping secret behind the OS secure enclave (Android Keystore / iOS Keychain) and biometric authentication. Silent unlock on the same machine. The identity file is useless if copied to another device.
 
 **Windows dual storage:** On Windows, `store_key()` writes to both Windows Credential Manager and a DPAPI-encrypted blob on disk. `retrieve_key()` tries Credential Manager first; if unavailable, falls back to the DPAPI blob and auto-migrates the key to Credential Manager on success. This provides resilience against either storage mechanism failing independently.
 
@@ -149,7 +156,9 @@ Total: 119 bytes. The ciphertext contains the AES-256-GCM encrypted keypair (68-
 
 ### 2.4 Local Storage Encryption
 
-All local data is stored in **SQLCipher** (AES-256-CBC encrypted SQLite). The database encryption key is derived from the first 32 bytes of the keypair's protobuf encoding, hex-encoded as a passphrase. The database is inaccessible without the keypair.
+All local data is stored in **SQLCipher** (AES-256-CBC encrypted SQLite). The database encryption key is derived from the first 32 bytes of the **master** keypair's protobuf encoding, hex-encoded as a passphrase. The database is inaccessible without the keypair. Because the passphrase is a deterministic function of the master identity, an encrypted database transferred to another of the same person's devices (device linking, §3.4) opens transparently under the transferred master key.
+
+**iOS shared-database constraint.** On iOS, the SQLCipher database is migrated into a shared **App Group container** (`group.com.anonlisten.hollow`) so the push Notification Service Extension can open the same encrypted database to decrypt incoming messages on-device (§13.5). Because two processes (the app and the extension) may open the database, it uses **rollback-journal mode (`journal_mode=TRUNCATE`) on iOS rather than WAL**. WAL keeps a persistent shared-memory lock; an app suspended while holding a file lock in a shared container is killed by iOS (`EXC_CRASH 0xdead10cc`). Rollback-journal mode locks only during a transaction, and a 4-second busy timeout lets the two processes wait on each other. All other platforms use WAL.
 
 ### 2.5 Account Recovery
 
@@ -159,13 +168,106 @@ Two recovery methods are implemented:
 
 **Encrypted backup:** Full account state (identity key + encrypted database + optional vault shards) is exported as a passphrase-protected `.hollow` file. The passphrase is processed through Argon2id (64 MB memory cost, ~500ms per attempt) to derive an AES-256-GCM encryption key. Brute-force resistant by design.
 
+### 2.6 App Lock (Mobile)
+
+Mobile clients add an **App Lock** that gates application launch behind a PIN, password, or biometric authentication:
+
+- **PIN / password lock.** A numeric PIN or a password is processed through the **same Argon2id + AES-256-GCM identity-at-rest pipeline** described in §2.3. A PIN is cryptographically identical to a password — it is simply numeric input — so there is no separate, weaker code path.
+- **Biometric layer.** Biometric unlock is a *layer on top of* a PIN/password, not an independent lock type. A copy of the PIN/password secret is stored in the OS secure enclave (Android Keystore / iOS Keychain) and released only after a successful `local_auth` biometric check. The underlying identity encryption is always the Argon2id path; biometrics gate retrieval of the secret.
+- **Pre-unlock marker.** The lock-type marker and any biometric secret are stored in OS-backed secure storage (Keystore/Keychain), *not* in SQLCipher, because they must be readable *before* the encrypted database is unlocked at launch.
+- **Self-heal.** A stored biometric secret that fails to unlock the identity is deleted to avoid a failing-biometric loop. Mnemonic recovery resets the identity to plaintext.
+
+As with desktop at-rest protection, the database remains sealed until the Argon2id key derivation completes (typically 1.5–3 seconds), and protection is never silently enabled — the 24-word mnemonic is the sole universal recovery path.
+
 ---
 
-## 3. Direct Message Encryption (Olm / Double Ratchet)
+## 3. Multi-Device Identity and Synchronization
+
+A single Hollow *person* — one master identity — can run on several physical devices simultaneously, with messages, friends, servers, and history kept in sync. This is achieved without any account server and without the relay ever learning that two connections belong to the same human.
+
+### 3.1 Two-Tier Key Hierarchy
+
+Each person is one **master identity**: the Ed25519 keypair derived from the BIP-39 mnemonic (§2). The master key governs everything durable and cross-device — profile, friendships, DM-room derivation, **message-content signatures**, server/MLS membership, and the SQLCipher database passphrase.
+
+Each physical device *additionally* holds its own **independent, randomly generated Ed25519 device key** (not derived from the mnemonic). The device peer ID is produced by the same multihash encoding used for master IDs, so it is byte-for-byte indistinguishable — to the relay, to rooms, and to Olm — from any other peer ID.
+
+The device key drives identity **only at the transport layer**: relay authentication (a distinct relay socket per device) and signaling. Everything else stays master-keyed. Crucially, the rooms a device joins are all *master-derived* (`inbox:{master}`, the DM room code, the server ID), so a device authenticates as itself yet occupies its identity's rooms.
+
+**Security property.** Because each device presents a distinct random peer ID while joining master-derived rooms, **the relay never learns that two peer IDs belong to one person.** The device-to-person collapse happens entirely on the client side, on the observing peer. The relay requires zero multi-device awareness and remains a dumb pipe.
+
+The device key shares the same at-rest protection as the master key (§2.3): both files are wrapped by the same session key, and a protection change rewrites both.
+
+### 3.2 The Signed Device List
+
+A person's set of active devices is published as a **master-signed device list**:
+
+```
+SignedDeviceList {
+    master_pubkey_b64,   // master Ed25519 public key
+    master_peer_id,      // MUST equal peer_id derived from the pubkey (binds key → identity)
+    devices: [...],      // sorted, deduplicated active device peer IDs
+    revoked: [...],      // sorted, deduplicated revoked device peer IDs (tombstones)
+    version: u64,        // monotonic
+    sig_b64,             // master's Ed25519 signature over the canonical payload
+}
+```
+
+The canonical signing payload is:
+
+```
+hollow-devices:{master_peer_id}:{version}:{sorted_device_csv}:{sorted_revoked_csv}
+```
+
+Devices and revocations are sorted and deduplicated before signing, so the payload is deterministic regardless of insertion order. Verification re-derives the payload, confirms that the master peer ID matches the supplied public key, and checks the Ed25519 signature.
+
+**Security property.** The device list is a self-authenticating capability: only the holder of the master private key can mint or amend it. A friend stores an incoming list verbatim (the signature travels with it) and never needs to re-verify, so additions and revocations are equally tamper-proof.
+
+**Monotonic, replay-resistant merge.** The version is monotonic per master and is signed once per version, governing both the active and revoked sets together. A higher version is the latest word — it may both add devices and un-revoke them. A replay (lower-or-equal version) can never shrink the tombstone set, so it can never un-revoke a device. Because each device independently seeds its own list at version 1, receivers **union-merge** active sets (`union(devices) − revoked`, keeping the highest version) rather than rejecting a "stale" sibling list. Adding is monotonic and safe; removal happens only via the signed `revoked` set.
+
+The signed list propagates as an attachment on profile sync, so friends converge on a person's full device set as their devices meet in shared rooms.
+
+### 3.3 Device-to-Master Resolver
+
+Clients maintain a resolver mapping each known device peer ID to its master. Its core invariant is that an **unknown peer ID resolves to itself** — a stranger, a single-device user, or a friend whose device list has not yet arrived is treated as their own identity. This makes a fresh single-device install **byte-for-byte identical to pre-multi-device Hollow**; multi-device behavior activates only once a signed device list is ingested.
+
+Two rules govern every cross-device interaction:
+
+1. **Outbound targeted sends resolve master → device.** The relay reports device peer IDs, and only a device authenticates as a socket. Anything addressed to the bare master is in no room and is silently dropped, so a targeted send must expand the master to a concrete *online* device. **Content sends fan out** to all of a recipient's online devices (plus the sender's own siblings); **negotiated, key-paired connections** (a call, a WebRTC channel, a file stream) target exactly one device to avoid competing connections and answer glare.
+2. **Inbound per-person attribution collapses device → master.** A message arriving from a device ID is filed and displayed under the person. Message-content signatures are made with the master key, so a message verifies across all of a person's devices regardless of which device sent it.
+
+### 3.4 Device Linking and Snapshot Sync
+
+A new, empty device pulls the full identity and database from an online existing device. There is no QR ceremony and no separate key exchange — the mnemonic *is* the pairing channel and the authorization: two installs of one mnemonic are already siblings.
+
+- **Rendezvous.** Linking uses a **6-character relay code** over an unambiguous alphabet, held in a RAM-only `code → peer_id` map on the relay with a 5-minute TTL, one-shot. The code is a rendezvous token only; the populated device's on-screen confirmation is the actual authorization before any key material leaves it.
+- **Transfer reuses the encrypted-backup pipeline.** The transfer is *not* a parallel crypto path. The source produces exactly the bytes of an encrypted `.hollow` backup — `[magic][salt:16][nonce:12][AES-256-GCM]` with the key derived from the passphrase via Argon2id — where **the link code (or the shared master peer ID) is the passphrase**. The blob crossing the relay is therefore standard backup ciphertext; the relay carries ciphertext only. A receiver acknowledgement confirms receipt before the source reports success.
+- **Stash-and-reboot import.** The receiver writes the blob to disk and restarts. On next launch, *before* the identity is loaded, it imports the backup — the identical path as a manual "restore from backup." In-place import while the node runs was deliberately rejected: it fought the live SQLCipher connection and a protection-mismatched throwaway identity, producing an unrecoverable load state. The rule is general: never swap identity or database in place while the node runs — stash, restart, import in the pre-boot window.
+
+Because the snapshot copies the source's entire database, including its MLS signing material, a linked sibling **regenerates its own MLS signing identity** on import (§5). Reusing the source's MLS signature key would violate MLS's one-leaf-per-signature-key rule.
+
+### 3.5 Sibling Synchronization and Backfill
+
+A snapshot is a point-in-time copy; ongoing changes are reconciled continuously:
+
+- **DM backfill.** When one device sends or receives DMs while a sibling is offline, the sibling pulls the missed history per-conversation on reconnect (gated on same-identity, so a friend can never trigger a whole-database pull). A subtler case is also handled: a friend can re-serve *your own* sends that are stranded on the friend's device because the originating sibling went offline before the receiving sibling came online.
+- **Direction re-orientation.** A message-direction field received from a *friend* is sender-relative and is inverted at the receiver (used for both database insertion and signature-context reconstruction); a field received from a *sibling* (same identity) is not inverted. Signatures never involve device IDs, so they verify intact across devices provided the direction context is correct.
+- **Server announcements.** Server lifecycle changes converge a person's own siblings as well as offline members. Server creation announces to online siblings (which run a same-identity join fast path); on reconnect, a node re-announces all of its non-deleted servers when a sibling appears, and a manual per-device sync control re-drives the same onboarding primitives on demand.
+
+### 3.6 Device Revocation
+
+Revocation removes a device from a person's identity. It is **manual-only**: any device a person controls can revoke another, since all of a person's devices hold the master key (there is no privileged "primary" device). Revoking adds the target's device ID to the master-signed `revoked` array and bumps the version (§3.2), which is cryptographically binding and replay-resistant.
+
+- **Self-teardown.** The new tombstoned list is sent **to the revoked device first**. On ingesting its own ID in the `revoked` set, that device wipes its local data directory and relaunches to a clean welcome screen. The cryptographic cutoff has already occurred for everyone else; this is the revoked device honestly tearing itself down.
+- **Crypto enforcement on observers.** On ingesting a revocation, every other peer **drops and erases its Olm session** to the revoked device, and the MLS coordinator removes that device's single MLS leaf (advancing the epoch). The device's *master* remains a valid member — only that one device's leaf and sessions are torn down.
+- **Liveness, not just session state.** A person's device list accumulates dead "ghost" device IDs across re-link cycles (each re-link mints a fresh device key; the union-merge never prunes — pruning is what tombstones are for). Targeted fan-out therefore uses **room presence**, not session existence, as the liveness test: a message is fanned only to devices *currently in a room*. A ghost is in no room and is skipped, preventing phantom deliveries and stuck notification counts. Genuinely-offline real devices still receive their copy via reconnect backfill (§3.5).
+
+---
+
+## 4. Direct Message Encryption (Olm / Double Ratchet)
 
 DMs between two peers use the **Olm protocol** (Double Ratchet with Curve25519 key exchange) via the `vodozemac` library — the same cryptographic implementation used by Matrix/Element.
 
-### 3.1 Session Establishment
+### 4.1 Session Establishment
 
 1. **Key request.** Peer A sends a `KeyRequest` to Peer B via the relay.
 2. **Key bundle.** B generates a one-time Curve25519 key and responds with a `KeyBundle` containing its identity key and one-time key.
@@ -173,28 +275,40 @@ DMs between two peers use the **Olm protocol** (Double Ratchet with Curve25519 k
 4. **Inbound session.** B creates an inbound session from the PreKey message.
 5. **Session acknowledgement.** A `SessionAck` handshake upgrades both sides to Normal (type 1) ratchet mode.
 
-### 3.2 Double Ratchet Properties
+### 4.2 Double Ratchet Properties
 
 - Every message uses a unique encryption key derived via the ratchet.
 - Forward secrecy: compromising current keys does not reveal past messages.
 - Post-compromise security: a new DH exchange heals the session after compromise.
 - Message keys are deleted after use.
 
-### 3.3 State Persistence
+### 4.3 State Persistence
 
 Olm session state is serialized ("pickled") to JSON and stored in SQLCipher. Sessions survive application restarts. Stale sessions (unused for 7+ days) are automatically pruned to limit storage growth.
 
-### 3.4 Key Exchange via Relay
+### 4.4 Key Exchange via Relay
 
 Key bundles travel as signed JSON messages through the relay. The relay sees base64-encoded key material but cannot derive session keys without the private Curve25519 keys, which never leave the device.
 
+### 4.5 Self-Healing over an Unreliable Relay
+
+The relay is a dumb pipe and **never acknowledges a direct message** — a successful TCP write is the only feedback the sender gets. A single dropped handshake frame (key request, key bundle, session acknowledgement, or pre-key message) must therefore not strand session establishment. Hollow makes Olm setup eventually self-healing:
+
+- **Timestamped in-flight tracking.** Outstanding key requests carry a timestamp and expire after a short timeout, so a lost request is retried rather than blocking forever.
+- **Periodic reconciliation sweep.** A background sweep (every 30 seconds) re-initiates key exchange with online peers that lack a *confirmed* session and whose prior request has gone stale.
+- **Confirmation is event-driven, never optimistic.** A session is reported "established" only on real confirmation — a received session acknowledgement, or a successfully decrypted reply — never merely because an outbound session was created. This eliminates the class of failure where one side believes a session exists while the other never received it.
+
+### 4.6 Glare Resolution (Multi-Device Aware)
+
+When two peers send each other a key bundle simultaneously ("glare"), a deterministic tiebreaker decides which side keeps its outbound session. The comparison is made between two peer IDs **of the same kind** — each side's own **device** ID against the remote **device** ID — because Olm sessions live on transport sockets, which are device-keyed. Comparing a resolved master ID against a device ID would not be antisymmetric and could deadlock both sides into deferring; the device-versus-device comparison is consistent and always resolves.
+
 ---
 
-## 4. Server Encryption (MLS)
+## 5. Server Encryption (MLS)
 
 Servers (group chats) use **Messaging Layer Security (MLS)**, RFC 9420.
 
-### 4.1 Ciphersuite
+### 5.1 Ciphersuite
 
 ```
 MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
@@ -205,7 +319,7 @@ MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
 - Hash: SHA-256
 - Signature: Ed25519
 
-### 4.2 Group Lifecycle
+### 5.2 Group Lifecycle
 
 **One MLS group per server.** All channels within a server share a single MLS group. Channel routing is handled at the application layer.
 
@@ -228,13 +342,25 @@ MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
 **Rejoining after removal (ban/unban cycle):**
 A peer who was removed and later re-invited must drop its stale MLS group state and bootstrap from scratch. The rejoining peer sends a fresh KeyPackage to the coordinator. Without this, the rejoining peer's stale epoch causes one-way decryption failure.
 
-### 4.3 Distributed Coordinator Model
+### 5.2.1 Multi-Device Membership (Per-Device Leaves)
+
+A person who is a server member with multiple devices holds **one MLS leaf per device**. Each leaf's credential is the bare device peer ID, and each device generates its own distinct MLS signature key, so the leaves are cryptographically independent.
+
+The CRDT membership map (§10), by contrast, keys each member by their **master** identity — one human is one member entry, regardless of how many devices they run. This produces the system's central multi-device invariant:
+
+> **Membership state is master-keyed; the MLS ratchet tree is device-keyed.** Every comparison that bridges the two (is this sender a member? what is their role?) collapses the device ID to its master through the resolver (§3.3). Membership and permission checks operate on the master; MLS encryption and decryption operate on per-device leaves.
+
+Because the bare master is in no transport room, every targeted member send is fanned out master → online devices. Adding or removing a single device adjusts exactly that device's leaf (one epoch advance); the person's other devices and their membership entry are unaffected.
+
+**Linked-sibling key regeneration.** A device linked via snapshot import (§3.4) inherits the source device's MLS signing material in the copied database. It deterministically clears and regenerates that material before joining any group, because two leaves sharing one signature key violate MLS and would prevent the sibling from adding to or decrypting in any group. A legacy sole-device install (no siblings) keeps its original leaf untouched — its leaf is never re-keyed, since no peer could re-add it.
+
+### 5.3 Distributed Coordinator Model
 
 MLS operations (add/remove) require a single member to generate the Commit. Hollow uses **deterministic coordinator election**: the online member with the lexicographically lowest peer ID in the MLS group acts as coordinator. This avoids conflicts without requiring consensus, and ensures any member can onboard new joiners — not just the server owner.
 
 **Sender exclusion:** When a peer sends a KeyPackage (indicating it lost its MLS group state), that peer is excluded from the coordinator election for processing that KeyPackage. Without this, the lowest-ID peer losing its group would create a permanent deadlock — it would be elected coordinator for its own recovery but cannot process its own KeyPackage.
 
-### 4.3.1 MLS Auto-Recovery
+### 5.3.1 MLS Auto-Recovery
 
 Three recovery paths ensure MLS group membership self-heals after disruptions:
 
@@ -244,25 +370,33 @@ Three recovery paths ensure MLS group membership self-heals after disruptions:
 
 3. **Startup member enumeration.** When `RoomMembers` arrives (listing all connected peers on startup), each peer checks for missing MLS groups for all shared servers and sends KeyPackages as needed.
 
-### 4.4 Epoch and Key Rotation
+### 5.4 Epoch and Key Rotation
 
 Every membership change advances the MLS **epoch**. Each epoch derives fresh encryption keys. An attacker who compromises keys from one epoch cannot decrypt messages from other epochs.
 
-### 4.5 Targeted Peer-to-Peer Encryption
+### 5.4.1 State Persistence Invariants
+
+MLS group state — the signature keypair, credential, and serialized group (ratchet tree, secret tree, and epoch) — is persisted to SQLCipher. Three invariants keep group membership self-consistent across restarts and reconnections:
+
+- **Persist on encrypt.** Encrypting a message advances the sender's secret-tree generation. The group state is persisted immediately after every encrypt, so a restart cannot reuse a stale generation (which the receiver would reject as secret reuse).
+- **Sync requests are plaintext.** After a reconnection a peer's MLS epoch may be stale, so synchronization requests and other idempotent coordination probes are sent as plaintext envelopes (§5.6) rather than MLS-encrypted. CRDT broadcasts fall back to plaintext if MLS encryption fails.
+- **Decryption failure triggers resync.** A peer that cannot decrypt a message it should be able to read treats this as evidence of a missed epoch and immediately synchronizes from the sender.
+
+### 5.5 Targeted Peer-to-Peer Encryption
 
 Server-context operations that target a specific peer — shard requests/responses, sync payloads, file transfers, voice SDP/ICE signaling — use **Olm + direct send** instead of MLS broadcast. This is O(1) per operation instead of O(n) broadcast, and avoids churning the MLS group ratchet for peer-to-peer work. MLS broadcast is reserved for channel messages that all members need to see.
 
-### 4.6 Reconnection Caveat
+### 5.6 Reconnection Caveat
 
 After a WebSocket reconnection, a peer's MLS epoch may be stale. Messages that must work immediately after reconnection — sync requests, shard coordination, voice channel state changes — are sent as plaintext `HavenMessage` envelopes. This is a deliberate design choice: these messages are idempotent probes that carry no sensitive content.
 
 ---
 
-## 5. Voice, Video, and Screen Share Encryption (SFrame)
+## 6. Voice, Video, and Screen Share Encryption (SFrame)
 
 Real-time media streams are encrypted with **SFrame** (Secure Frames) using keys derived from the MLS epoch.
 
-### 5.1 Key Derivation
+### 6.1 Key Derivation
 
 **Server voice channels:** The SFrame key is derived from the MLS group's epoch:
 
@@ -274,45 +408,47 @@ Each MLS epoch produces a unique 32-byte SFrame key. When the epoch advances (me
 
 **1:1 DM calls:** A random 32-byte key is generated per call and transmitted inside the Olm-encrypted `CallInvite` message.
 
-### 5.2 Encryption
+### 6.2 Encryption
 
 - **Algorithm:** AES-128-GCM
 - **Key:** Derived per the SFrame specification from the exported secret
 - **Per-frame encryption:** Each audio and video frame is independently encrypted
 
-### 5.3 Scope
+### 6.3 Scope
 
 SFrame E2EE is applied to:
 
 - **Voice calls** (1:1 DM calls and server voice channels)
 - **Video calls** (1:1 DM calls and server voice channels)
 - **Screen sharing video** (1:1 DM screen share and server voice channel screen share)
-- **Screen sharing audio** (platform-dependent transport — see §5.8)
+- **Screen sharing audio** (platform-dependent transport — see §6.8)
 
 All media types using WebRTC media tracks — audio tracks, video tracks, and screen share video tracks — are encrypted with the same SFrame key for a given session or epoch.
 
-### 5.4 Transport
+Voice and video calls are available on all platforms, including mobile (Android and iOS), with the same SFrame encryption. Screen-share *sending* and system-audio capture are desktop-only (Windows, macOS, Linux); mobile clients can receive a remote screen-share track but cannot originate one (§23).
+
+### 6.4 Transport
 
 Voice, video, and screen share video travel over **WebRTC peer-to-peer connections** (DTLS-SRTP as the base transport, SFrame as the application-layer encryption). The relay is not in the media path — it carries only WebRTC signaling (SDP offers/answers, ICE candidates).
 
 For peers behind symmetric NATs (~10-15% of users), a **TURN server** relays the encrypted media. The TURN server sees only SFrame ciphertext.
 
-### 5.5 Call Topologies
+### 6.5 Call Topologies
 
 - **1:1 calls:** Direct peer-to-peer WebRTC. Lowest latency, no intermediary.
 - **Small group (2-5 participants):** Full mesh — every participant sends to every other participant.
 - **Larger group (6+ participants):** Gossip-tree forwarding. Each participant forwards received audio/video to their connected subset of peers (6-12 neighbors). Covers large groups in 2-3 hops. No central media server. Zero VPS bandwidth for media.
 - **Transition:** Automatic with hysteresis — mesh below 6 participants, gossip at 6+, back to mesh at 4.
 
-### 5.6 Key Index Synchronization
+### 6.6 Key Index Synchronization
 
 SFrame cryptors must be initialized with the correct key index corresponding to the current MLS epoch (`epoch % 16`). New keys are applied via key rotation (not replacement) to update all existing cryptor indices atomically. The key index is explicitly set per peer after every cryptor creation. Without this, cryptors default to key index 0 and silently fail to decrypt frames encrypted under a non-zero epoch index.
 
-### 5.7 SFrame Key Memory Handling
+### 6.7 SFrame Key Memory Handling
 
 SFrame keys are zeroed in memory after use. Key bytes are cleared via `fillRange(0, length, 0)` in `finally` blocks at every site where keys are set or consumed.
 
-### 5.8 Screen Share Audio Transport
+### 6.8 Screen Share Audio Transport
 
 Screen share audio uses a **platform-dependent transport** due to operating system audio subsystem constraints:
 
@@ -334,9 +470,9 @@ macOS uses Process Tap to inject system audio directly as a WebRTC audio track. 
 
 ---
 
-## 6. File Transfer Encryption
+## 7. File Transfer Encryption
 
-### 6.1 Direct File Transfer (P2P)
+### 7.1 Direct File Transfer (P2P)
 
 Files are encrypted before transmission:
 
@@ -347,24 +483,24 @@ Files are encrypted before transmission:
 
 The entire file is encrypted as a single unit. The AES key and nonce are transmitted inside the `FileHeader` message, which is encrypted via Olm (DMs) or MLS (servers). File bytes are streamed separately over WebRTC data channels (peer-to-peer) with a fallback to WebSocket relay streaming.
 
-### 6.2 Transport Priority
+### 7.2 Transport Priority
 
 1. **WebRTC data channel** (direct P2P) — preferred. ~9 MB/s throughput (depends on the Internet connection speed).
 2. **WebSocket relay streaming** — fallback when WebRTC is unavailable. Relay forwards the encrypted bytes without reading them.
 
 File metadata (name, size, AES key, nonce) always travels through the encrypted channel (Olm/MLS via relay). Only the encrypted file bytes use the WebRTC data channel. This separation ensures that even if the P2P connection is compromised, the encryption key is not exposed.
 
-### 6.3 Image Processing
+### 7.3 Image Processing
 
 All images are auto-converted to Balanced WebP on send (~95% smaller than PNG/JPEG; similar quality). Metadata (EXIF, GPS, camera info) is stripped before transmission. Configurable quality tiers: Lossless (100%), Balanced (50%), Small (30%).
 
 ---
 
-## 7. Hollow Share (Private P2P File Distribution)
+## 8. Hollow Share (Private P2P File Distribution)
 
 Share is a chunked, resumable, multi-source P2P file distribution system — conceptually similar to BitTorrent but with end-to-end encryption, no tracker, no IP exposure, and no public DHT.
 
-### 7.1 Chunk Encryption
+### 8.1 Chunk Encryption
 
 - **Algorithm:** AES-256-GCM
 - **Key:** 32 bytes, randomly generated per share
@@ -373,7 +509,7 @@ Share is a chunked, resumable, multi-source P2P file distribution system — con
   - Deterministic: same key + different chunk index = unique nonce
   - No nonce reuse within a share's lifetime
 
-### 7.2 Manifest
+### 8.2 Manifest
 
 ```json
 {
@@ -390,7 +526,7 @@ Share is a chunked, resumable, multi-source P2P file distribution system — con
 
 **Root hash:** SHA-256 of the canonical JSON manifest. Serves as the content identifier.
 
-### 7.3 Share Link
+### 8.3 Share Link
 
 ```
 hollow://share/<base64url([version: 1 byte][root_hash: 32 bytes][key: 32 bytes])>
@@ -398,14 +534,14 @@ hollow://share/<base64url([version: 1 byte][root_hash: 32 bytes][key: 32 bytes])
 
 65-byte payload, 87 base64url characters, QR-code compatible. The link encodes everything needed to verify and decrypt the file. Anyone with the link can download; anyone without it cannot. The link IS the access control.
 
-### 7.4 Peer Discovery and Chunk Transport
+### 8.4 Peer Discovery and Chunk Transport
 
 - **Relay rendezvous:** Peers join a relay room keyed by the root hash. The relay forwards only signaling — zero file bytes ever touch the relay.
 - **STUN-only WebRTC:** Share connections use STUN (no TURN) so share traffic never consumes relay bandwidth. If no peer-to-peer connection can be established, chunks are skipped (not relayed).
 - **No IP exposure:** ICE candidates are exchanged via the encrypted relay, never published to a public DHT.
 - **ISP-invisible:** Looks like normal WebRTC traffic with no protocol fingerprint to throttle.
 
-### 7.5 Download Protocol
+### 8.5 Download Protocol
 
 - **Have-map exchange:** Compact bitmaps (MSB-first, 1 bit per chunk) broadcast every 10 seconds.
 - **Rarest-first scheduling:** BitTorrent-style piece selection across all connected peers.
@@ -414,7 +550,7 @@ hollow://share/<base64url([version: 1 byte][root_hash: 32 bytes][key: 32 bytes])
 - **Receiver-initiated WebRTC reconnection** with 10-second stale-offer timeout.
 - **Bandwidth management:** Process-wide token bucket (20 MiB/s refill, 40 MiB burst). Scheduler pauses for 200ms after any messaging or voice traffic to avoid interference. Two scheduling modes: rarest-first (default, optimizes swarm health) and sequential (optimizes single-file completion).
 
-### 7.6 Share-Backed Large Files
+### 8.6 Share-Backed Large Files
 
 Files larger than 34 MB sent in DMs or server channels transparently use Share as the transport layer instead of direct WebRTC data channel streaming. The sender creates a hidden Share, and the `FileHeader` message includes a `ShareRef` (root hash + AES key) instead of triggering a binary stream.
 
@@ -422,7 +558,7 @@ The receiver downloads via the Share protocol (chunked, resumable, multi-source)
 
 Share-backed transfers use **STUN-only** (no TURN) to ensure large file traffic never consumes relay bandwidth.
 
-### 7.7 Persistence and Seeding
+### 8.7 Persistence and Seeding
 
 - Download state (have-bitmap, chunk progress) is persisted to the local database. Paused or interrupted downloads resume without re-fetching.
 - Completed files automatically seed. Seeding state survives app restarts.
@@ -430,18 +566,18 @@ Share-backed transfers use **STUN-only** (no TURN) to ensure large file traffic 
 
 ---
 
-## 8. Vault (Distributed Encrypted Storage)
+## 9. Vault (Distributed Encrypted Storage)
 
 The Vault provides persistent distributed storage for server files (doesn't include images) using adaptive erasure coding. Every member donates storage. Files are encrypted before erasure coding, so shard-holding members see only encrypted noise.
 
-### 8.1 File Encryption
+### 9.1 File Encryption
 
 Files are encrypted **before** erasure coding:
 
 - **Algorithm:** AES-256-GCM
 - **Key/nonce:** Random per file, stored in the manifest (encrypted via MLS for the server)
 
-### 8.2 Adaptive Storage Modes
+### 9.2 Adaptive Storage Modes
 
 **Small servers (<6 members) — Full Replication:**
 Every file is synced to every member. Simple, reliable. Storage overhead: N× (where N = member count).
@@ -462,7 +598,7 @@ Files are split into `k` data shards + `m` parity shards. Any `k` of `k+m` shard
 
 Parameters scale with `log(member_count)`, overhead converges to 1.5×. Computed automatically — no admin configuration needed.
 
-### 8.3 Content-Addressed Storage
+### 9.3 Content-Addressed Storage
 
 Every piece of data is addressed by its SHA-256 hash:
 
@@ -472,7 +608,7 @@ content_id = SHA-256(encrypted_data)
 
 This provides deduplication, integrity verification, and location-independent addressing.
 
-### 8.4 Deterministic Shard Placement (XOR Distance)
+### 9.4 Deterministic Shard Placement (XOR Distance)
 
 Shard placement is deterministic — all peers compute the same placements independently:
 
@@ -484,7 +620,7 @@ Shard placement is deterministic — all peers compute the same placements indep
 
 Any peer can independently recompute placements using the content ID + member list + pledges (all available via CRDT). No central directory needed.
 
-### 8.5 Shard Format
+### 9.5 Shard Format
 
 ```
 [header_length: u32 LE][header JSON][shard data]
@@ -502,7 +638,7 @@ Header:
 }
 ```
 
-### 8.6 Storage Tiers and Retention
+### 9.6 Storage Tiers and Retention
 
 | Data Type | Tier | Default Retention |
 |-----------|------|-------------------|
@@ -511,7 +647,7 @@ Header:
 
 Retention is forward-only: changing the retention setting only affects content created after the change. Existing files and messages keep their original retention. This prevents retroactive evidence destruction. Message retention is a per-server CRDT setting; file retention is per-tier.
 
-### 8.7 Self-Healing and Rebalancing
+### 9.7 Self-Healing and Rebalancing
 
 When a member departs:
 1. Surviving members detect under-replicated content by comparing confirmed placements against online peers.
@@ -523,7 +659,7 @@ When a new member joins:
 2. A migration plan moves shards from over-capacity peers to the new member.
 3. Migration happens gradually in the background.
 
-### 8.8 Recovery Pool Protocol
+### 9.8 Recovery Pool Protocol
 
 When a server is dissolved or members are ejected, ex-members can cooperatively reconstruct files using the shards they still hold locally:
 
@@ -539,7 +675,7 @@ When a server is dissolved or members are ejected, ex-members can cooperatively 
 
 Shard inventories can also be exported/imported as `.hollow-shards` bundles for out-of-band exchange.
 
-### 8.9 Storage Layout
+### 9.9 Storage Layout
 
 - Shards: `~/.hollow/vault/{server_id}/{shard_key}.shard`
 - Decrypted cache: `~/.hollow/vault_cache/{content_id}.{ext}` (LRU-evicted, 1 GB cap)
@@ -547,11 +683,11 @@ Shard inventories can also be exported/imported as `.hollow-shards` bundles for 
 
 ---
 
-## 9. CRDT Synchronization
+## 10. CRDT Synchronization
 
 Server state (channels, members, roles, settings) is replicated across all members using **Conflict-free Replicated Data Types (CRDTs)**.
 
-### 9.1 Hybrid Logical Clock (HLC)
+### 10.1 Hybrid Logical Clock (HLC)
 
 All CRDT operations are timestamped with a **Hybrid Logical Clock**:
 
@@ -569,7 +705,7 @@ Properties:
 - **Clock drift protection:** Updates more than 5 minutes ahead of local time are rejected.
 - Deterministic total order via `(physical_ms, counter, actor)` tuple.
 
-### 9.2 Operation Format
+### 10.2 Operation Format
 
 ```
 CrdtOp {
@@ -580,11 +716,11 @@ CrdtOp {
 }
 ```
 
-### 9.3 Payload Types
+### 10.3 Payload Types
 
 | Category | Operations |
 |----------|-----------|
-| Server | ServerCreated, ServerRenamed, ServerSettingChanged (includes retention settings) |
+| Server | ServerCreated, ServerRenamed, ServerSettingChanged (includes retention settings), ServerDeleted |
 | Channels | ChannelAdded, ChannelRemoved, ChannelRenamed, ChannelVisibilityChanged, ChannelPostingChanged, ChannelLayoutUpdated |
 | Members | MemberAdded, MemberRemoved, MemberBanned, MemberUnbanned, NicknameChanged, TwitchUsernameChanged |
 | Roles | RoleChanged (owner/admin/moderator/member), RolePermissionsChanged |
@@ -592,7 +728,7 @@ CrdtOp {
 | Messages | MessagePinned, MessageUnpinned |
 | Storage | StoragePledgeChanged |
 
-### 9.4 Conflict Resolution
+### 10.4 Conflict Resolution
 
 **Last-Write-Wins (LWW)** per key, ordered by HLC timestamp. For role conflicts, a priority system applies:
 
@@ -605,7 +741,7 @@ CrdtOp {
 
 Higher-priority role changes always override lower-priority ones. Admin writes always win over member writes for server settings (AdminLwwReg).
 
-### 9.5 Synchronization Protocol
+### 10.5 Synchronization Protocol
 
 When two peers connect:
 1. Each sends a **state vector** — a compact summary of the latest HLC timestamp seen from each author.
@@ -615,18 +751,27 @@ When two peers connect:
 
 This is idempotent: applying the same operation twice has no effect. Peers can sync with any other online member — there is no single source of truth.
 
-### 9.6 Security
+**Operation-log persistence.** Every merged operation is persisted to the local encrypted database, not held only in memory. A member that joined purely by synchronizing must be able to serve the full operation history to future joiners after a restart.
+
+**State snapshot on join.** Because operation logs are compacted past a threshold and cannot be trusted as a complete reconstruction source, a join is preceded by a signed **server-state snapshot** sent ahead of the operation-log delta (the WebSocket transport is FIFO). A joiner adopts the snapshot only while its own join is still pending; an established member never lets a peer overwrite its state. Operation deltas are then merged on top.
+
+**Replicable deletion.** Server deletion is a replicable `ServerDeleted` tombstone operation rather than a one-shot command. The deleting node retains the server shell and operation log so it can serve the tombstone to members who were offline at deletion time; those members reconcile on reconnect through the same grow-only synchronization path. The tombstone is honored only if authored by the server owner, checked against the receiver's own role map.
+
+### 10.6 Security
 
 CRDT operations are validated on receipt:
-- The `author` field is verified against the actual sender's peer ID (prevents forged authorship).
+- The `author` field is verified against the actual sender's peer ID (prevents forged authorship). Authorization is always checked against the operation's **author**, never the transport sender that relayed it.
 - Permission checks ensure the author has the required role for the operation type (e.g., only admins+ can change roles).
+- A member's *own* voluntary departure (`MemberRemoved` where the removed peer equals the author) is always allowed, bypassing the kick-permission check.
 - Unauthorized operations are rejected and logged.
+
+**Multi-device note.** Membership entries are keyed by **master** identity (§3), while MLS leaves and transport peer IDs are device-keyed. All role and membership checks resolve a device ID to its master before comparing, so one person is one member regardless of device count, and an authorization check against a device ID never silently fails to match.
 
 ---
 
-## 10. Authorization and Permission Model
+## 11. Authorization and Permission Model
 
-### 10.1 Role Hierarchy
+### 11.1 Role Hierarchy
 
 Hollow implements a **two-layer role system**:
 
@@ -641,7 +786,7 @@ Hollow implements a **two-layer role system**:
 
 **Cosmetic labels** (unlimited): Decorative tags with a name and color, assigned to members for display. Labels never affect permissions — they are purely visual.
 
-### 10.2 Permission Bits
+### 11.2 Permission Bits
 
 Six permission bits control access:
 
@@ -657,7 +802,7 @@ Six permission bits control access:
 
 Default permissions per role can be overridden via `RolePermissionsChanged` CRDT operations. Custom permission sets are stored as `AdminLwwReg<u32>` (Last-Writer-Wins register, admin-only writes).
 
-### 10.3 Tier-Gated Permission Editing
+### 11.3 Tier-Gated Permission Editing
 
 Permission editing follows strict hierarchy enforcement:
 
@@ -666,7 +811,7 @@ Permission editing follows strict hierarchy enforcement:
 - The Owner role's permissions are immutable.
 - Kick/ban operations follow the same hierarchy: a member can only kick/ban members of lower rank.
 
-### 10.4 Channel Access Control
+### 11.4 Channel Access Control
 
 Each channel has two independent access control settings, stored as CRDT values:
 
@@ -680,7 +825,7 @@ Each channel has two independent access control settings, stored as CRDT values:
 - `ModeratorPlus` — Moderator rank and above
 - `AdminPlus` — Admin rank and above
 
-### 10.5 Enforcement Model
+### 11.5 Enforcement Model
 
 **Cryptographically enforced** (Rust backend):
 - Message sending: `can_post_in_channel()` checked before broadcast. Unauthorized messages are rejected with an error.
@@ -694,7 +839,7 @@ Each channel has two independent access control settings, stored as CRDT values:
 
 **Limitation:** True cryptographic enforcement of channel visibility requires per-channel MLS subgroups, where each channel has its own MLS group and only authorized members hold the decryption keys. This is planned but not yet implemented. Currently, all server members can technically decrypt all channel messages.
 
-### 10.6 Public Channels
+### 11.6 Public Channels
 
 Individual channels can be marked as **public** via a per-channel `is_public` boolean flag in the ChannelInfo CRDT (toggled by members with `MANAGE_CHANNELS` permission).
 
@@ -711,9 +856,9 @@ Individual channels can be marked as **public** via a per-channel `is_public` bo
 
 ---
 
-## 11. Relay Architecture
+## 12. Relay Architecture
 
-### 11.1 Design Principle
+### 12.1 Design Principle
 
 The relay is a **zero-knowledge message router**. It routes encrypted blobs between peers based on room membership. It has no knowledge of message semantics, encryption keys, or application state. The relay source code is open-source.
 
@@ -721,7 +866,7 @@ The relay is a **zero-knowledge message router**. It routes encrypted blobs betw
 
 **Privacy hardening:** The relay is configured with all logging disabled. No connection events, peer IDs, IP addresses, or timestamps are written to disk. System journal uses volatile (RAM-only) storage with 1-hour maximum retention. The TURN server (coturn) is configured with `log-file=/dev/null` and `no-stdout-log`. Rsyslog filters discard any relay or TURN messages from system log files.
 
-### 11.2 Authentication
+### 12.2 Authentication
 
 Peers authenticate to the relay via Ed25519 signature:
 
@@ -731,7 +876,7 @@ Signed payload: "hollow-ws-auth:{peer_id}:{unix_timestamp}"
 
 The relay verifies the signature against the provided public key and checks that the timestamp is within ±60 seconds of server time (replay protection).
 
-### 11.3 Room Model
+### 12.3 Room Model
 
 - Peers join named rooms (alphanumeric + `:-_.`, max 128 characters).
 - Each server has a room (room ID = server ID).
@@ -740,9 +885,11 @@ The relay verifies the signature against the provided public key and checks that
 - Max 10,000 rooms per peer.
 - Max 64 MB per WebSocket binary message; 1 MB per text message (silently dropped if exceeded).
 
-### 11.4 Binary Protocol
+**Connection supersession.** When a client reconnects (a mobile resume, a network change, or a TLS re-handshake) it opens a new socket while the old half-open socket may not yet have closed. The relay supersedes: a newer authenticated socket for an existing peer ID evicts and closes the older one, and room teardown is socket-aware — a stale duplicate's delayed close can only tear down state that still points at *that* socket, never the live successor's. Messages directed at a peer that is connected but has not yet rejoined its target room are briefly buffered, so a fresh device's first handshake message is not lost in the gap between authentication and room join.
 
-Seven binary frame types for efficient transport. Input types (client → relay) are transformed into output types (relay → client):
+### 12.4 Binary Protocol
+
+Binary frame types for efficient transport. Input types (client → relay) are transformed into output types (relay → client):
 
 **Input frames (client sends):**
 - **0x01 (Broadcast):** `[0x01][room_hash: 32 bytes][payload]` — forwarded to all room members as-is. Used for WebRTC signaling.
@@ -750,15 +897,18 @@ Seven binary frame types for efficient transport. Input types (client → relay)
 - **0x03 (Msg Broadcast):** `[0x03][room\0][payload]` — universal broadcast for non-channel messages (CRDT sync, key exchange, coordination). Forwarded as **0x05**.
 - **0x04 (Direct Msg):** `[0x04][room\0][target\0][payload]` — direct message to a specific peer. Forwarded as **0x06**.
 - **0x07 (Topic Broadcast):** `[0x07][room\0][topic\0][payload]` — topic-aware broadcast for channel messages. Only forwarded to peers subscribed to the topic (or wildcard subscribers). Forwarded as **0x08**.
+- **0x09 (Channel Direct):** `[0x09][room\0][target\0][channel\0][flags:1][payload]` — a channel message addressed to a single *offline* member for push delivery (§13.3). The payload is the same group ciphertext the room broadcast carried; the sender (never the relay) selects offline targets from its own membership state.
 
 **Output frames (relay sends):**
 - **0x05 (Msg Broadcast, forwarded):** `[0x05][room\0][sender\0][payload]` — relay prepends the sender's peer ID.
 - **0x06 (Direct Msg, forwarded):** `[0x06][room\0][sender\0][payload]` — relay replaces target with sender.
 - **0x08 (Topic Broadcast, forwarded):** `[0x08][room\0][topic\0][sender\0][payload]` — relay prepends sender, preserves topic.
 
+A further direct frame type carries an Olm-encrypted file header with inlined, encrypted image bytes to a specific peer; it is used to deliver an image DM to an offline recipient who is in no room (§13.2).
+
 **Topic subscription:** Clients send a `subscribe` JSON command to set per-room topic filters. Peers with no subscription entry for a room receive all messages (wildcard, backwards compatible). Peers with a subscription set receive only messages matching a subscribed topic. Channel messages use 0x07 with `channel_id` as the topic; non-channel messages (CRDT, sync, keys) use 0x03 universal broadcast.
 
-### 11.5 Resource Protection
+### 12.5 Resource Protection
 
 - **No application-level rate limiting.** Soft backpressure and per-peer rate limits were removed because they silently dropped CRDT sync payloads and broke reconnection flows. Authenticated peers are trusted.
 - **Hard backpressure:** 64 MB per connection (uWebSockets built-in). Catches truly dead connections without interfering with legitimate traffic.
@@ -767,7 +917,7 @@ Seven binary frame types for efficient transport. Input types (client → relay)
 - **DoS protection:** Ed25519 authentication + license key revocation. Only authenticated peers can send messages.
 - **Room membership enforcement:** Messages are only forwarded to peers in the same room. Non-members' messages are silently dropped.
 
-### 11.6 TURN Credential Management
+### 12.6 TURN Credential Management
 
 For peers behind symmetric NATs, the relay provides time-limited TURN credentials:
 
@@ -776,7 +926,7 @@ For peers behind symmetric NATs, the relay provides time-limited TURN credential
 - The TURN server (coturn) validates credentials against the same shared secret.
 - Clients auto-refresh credentials every 50 minutes.
 
-### 11.7 What the Relay Sees
+### 12.7 What the Relay Sees
 
 | Data | Visible to Relay |
 |------|-----------------|
@@ -793,7 +943,7 @@ For peers behind symmetric NATs, the relay provides time-limited TURN credential
 | File transfer bytes | **No** (P2P, not relayed) |
 | IP addresses | **No** (relay does not log IPs; TURN logging disabled) |
 
-### 11.8 License Key System
+### 12.8 License Key System
 
 The relay supports an optional license key system for controlling access during alpha/beta phases:
 
@@ -803,7 +953,7 @@ The relay supports an optional license key system for controlling access during 
 - Active connections using a revoked key are terminated on the next reload cycle.
 - License keys are cached client-side in the encrypted SQLCipher database.
 
-### 11.9 Server Statistics Endpoint
+### 12.9 Server Statistics Endpoint
 
 The relay exposes a `/server-stats` endpoint returning real-time operational metrics:
 
@@ -814,13 +964,13 @@ The relay exposes a `/server-stats` endpoint returning real-time operational met
 
 Statistics are cached for 5 seconds to avoid excessive filesystem reads. This endpoint is used by the client's home dashboard to display relay health.
 
-### 11.10 Additional HTTP Endpoints
+### 12.10 Additional HTTP Endpoints
 
 - **`/relay-status`** — Returns `{"license_required": bool, "version": "..."}`. Clients query this on startup to determine whether a license key is required before attempting WebSocket authentication.
 - **`/health`** — Returns `{"status": "ok", "service": "hollow-signaling"}`. Used for uptime monitoring.
 - **`/register`**, **`/unregister`**, **`/bootstrap/{room_code}`** — HTTP-based peer discovery for signaling. Stale entries are cleaned up every 180 seconds. Max 50 peers per signaling room, max 5 addresses per peer.
 
-### 11.11 Self-Hosted Relay Configuration
+### 12.11 Self-Hosted Relay Configuration
 
 The relay domain is fully configurable, enabling decentralized operation:
 
@@ -831,21 +981,80 @@ The relay domain is fully configurable, enabling decentralized operation:
 
 Since the relay is a zero-knowledge pipe, switching relays is transparent to the protocol — the same identity, encryption, and CRDT synchronization work identically regardless of which relay is used. A censorious or unavailable relay can be replaced without any protocol changes.
 
+### 12.12 Temporary Nicknames
+
+To allow users to send friend requests without sharing a 64-character peer ID, the relay supports **ephemeral, relay-scoped nicknames**:
+
+- A nickname (lowercase `a-z`, `0-9`, `_`; 3–20 characters) is claimed via a relay text command and held in a RAM-only `nickname → peer_id` map.
+- Nicknames are **never persisted** and are released on disconnect. There is no durable mapping between a handle and an identity on the relay.
+- A friend request resolves a nickname to a peer ID in one step, then proceeds via the normal friend-request flow.
+
+Because the mapping lives only in relay memory for the duration of a connection, the relay holds no long-term directory of human-readable handles. The underlying identity remains the Ed25519 peer ID; the nickname is a transient convenience layer.
+
 ---
 
-## 12. WebRTC Transport Layer
+## 13. Push Notifications (Mobile)
 
-### 12.1 Architecture
+Mobile operating systems terminate background processes, so a Hollow client cannot hold a persistent WebSocket while the app is closed. Firebase Cloud Messaging (Android) and the Apple Push Notification service (iOS) are the only OS-sanctioned way to wake a terminated app. Hollow must therefore route a wake signal through Google and Apple infrastructure — parties it does not trust. The entire push design exists to do this **without ever exposing message content to those parties.**
+
+### 13.1 The Core Privacy Guarantee
+
+**The push payload carries zero message content.** It is exactly `{type: "wake", sender: <peer_id>}` for a DM, or `{type: "channel_wake", sender, server, channel, mention}` for a channel message. Carrying ciphertext in the push — *even encrypted* — was deliberately rejected, because the push body's size, timing, and frequency would themselves leak metadata to Apple and Google.
+
+Consequently:
+
+- **What Apple/Google learn:** that *some* message arrived for a device token, plus an opaque sender peer ID (a `12D3KooW…` identifier, not a human name) and, for channels, opaque server/channel IDs and a single mention bit. They never see message text, message size, or who-is-who beyond opaque IDs. Push timing is coarsened by debouncing (§13.3).
+- **How E2EE is preserved:** the message *content* travels exclusively over Hollow's own existing E2EE channels (Olm for DMs, MLS for channels) between the client and Hollow's own relay, and is decrypted **on-device**. Apple and Google are pure wake-up couriers, categorically outside the content path.
+
+A small push-relay sidecar service holds the Firebase/APNs credentials and emits only the empty `{wake, sender}` payload; the relay itself never contacts Apple or Google with content.
+
+### 13.2 Direct Message Push Flow
+
+The relay is normally stateless. Push delivery requires one concession: when a DM's recipient is **offline**, the relay briefly buffers the **ciphertext** in RAM (a per-peer cap of 100 text messages and 1 image, 24-hour TTL, swept periodically) so the woken client can fetch the *triggering* message — the relay is a dumb pipe, and without buffering the message would already be gone by the time the client wakes seconds later. This buffer is latency glue, not durability; the distributed sync layer (§3.5, §10) owns durability. The buffered bytes are ciphertext only.
+
+When the woken client later joins the DM room, the relay replays all buffered frames. The client runs a minimal **fetch node** that connects in a special fetch mode (excluded from member lists, emits no presence — *waking via push does not show the user as online*), pulls the replayed ciphertext, decrypts it with the existing Olm session, persists it, and posts a populated notification.
+
+**Offline images.** An image DM is normally two messages plus a separate byte stream, and the byte stream is never sent to an offline peer. For offline delivery, the sender inlines the AES-encrypted image bytes into the (Olm-encrypted) file header and sends it as a dedicated direct-image frame to the DM room; the fetch node decrypts the bytes, writes the file, and inserts the message row. A caption is sent exactly once as a separate encrypted text frame, never via the normal send path (which would advance and persist the Olm ratchet for a message the offline peer never receives, creating a permanent decryption gap).
+
+### 13.3 Channel Message Push Flow
+
+The same privacy invariants extend to server channels. After the normal room broadcast, the **sender** — the only party holding the plaintext and the membership list — selects the offline members from its own CRDT state and sends each one a `0x09` channel-direct frame whose payload is **the same MLS (or public-channel) ciphertext the room broadcast carried**. The relay never learns server membership; it only buffers and forwards. The sender also computes a per-target mention bit (an `@everyone`, a name/nickname mention, or a reply to that member) so mentions can be prioritized.
+
+The relay buffers offline channel messages under a separate per-peer cap and applies two filters before contacting the push sidecar:
+
+- **Push preferences.** A RAM-only per-peer registry (server-level and per-channel mute levels), re-sent by the client on every reconnect, lets the relay suppress unwanted pushes. Filtering must happen relay-side because an iOS alert push cannot be suppressed after delivery. (This leaks a coarse "this peer wants pushes for this server" signal to Hollow's own relay — never to Apple/Google — in exchange for the suppression working at all.)
+- **Anti-spam debounce.** Non-mention pushes are debounced per server (and capped while continuously offline); mentions use a much shorter debounce; a small per-peer floor applies across all servers.
+
+A channel wake causes the fetch node to join the **server** room and decrypt the buffered messages via the persisted MLS group state. If the device's MLS epoch is stale (it missed a commit while offline), decryption fails gracefully to a content-free banner, and the app self-heals via normal channel sync on next open.
+
+### 13.4 Signature Integrity Through the Push Path
+
+Push-fetched messages remain Ed25519-verifiable end to end. The message-row signature is persisted alongside the text it covers, so verification reconstructs the same canonical payload (§15). For offline images, the file header itself carries the signature and public key (for a captionless image it is the sole signature carrier, signed over the file sentinel). Authorization checks validate the cryptographic author, never the transport or fetch path, so a relay or fetch node cannot forge attribution.
+
+### 13.5 iOS On-Device Decryption (Notification Service Extension)
+
+iOS does not run the app's background handler when the app is force-killed — Apple will not relaunch a user-terminated app for a background push. The only iOS process that always runs for a `mutable-content` push is the **Notification Service Extension (NSE)**, a separate short-lived process. On iOS, therefore, *all* content resolution for a force-killed app happens in the NSE:
+
+1. **Instant tier.** The NSE reads a shared App Group cache of sender names and avatars (written by the main app) to show the sender immediately.
+2. **Fetch-and-decrypt tier.** If the live app is not already running (checked via a heartbeat file in the App Group), the NSE calls a dedicated Rust C-ABI entry point that runs the same fetch-node logic: connect to Hollow's relay in fetch mode, pull the buffered ciphertext, and decrypt it on-device with vodozemac (DMs) or OpenMLS (channels). The decrypted text is shown in the banner; **no plaintext or ciphertext ever passes through Apple.**
+
+The NSE opens the same shared SQLCipher database as the app (§2.4), which is why that database uses rollback-journal mode on iOS. The NSE's measured memory footprint (~3 MB) sits comfortably within Apple's 24 MB extension limit even with the full networking and cryptography stack linked in. To keep the NSE outside the protocol's source of truth, its decryption is designed so that a buggy extension can at worst show a wrong or missing banner — never corrupt the canonical message ratchet.
+
+---
+
+## 14. WebRTC Transport Layer
+
+### 14.1 Architecture
 
 The WebSocket relay handles signaling (SDP offers/answers, ICE candidates). WebRTC data channels and media tracks handle the heavy payload — file bytes, vault shard bytes, voice, video, and screen share. This separation means ~85-90% of data transfer bandwidth is direct peer-to-peer with zero relay involvement.
 
-### 12.2 ICE Configuration
+### 14.2 ICE Configuration
 
 - **STUN servers:** Public STUN servers + self-hosted coturn for server-reflexive candidate discovery.
 - **TURN server:** Self-hosted coturn on the VPS for peers behind symmetric NATs.
 - **Share exception:** Hollow Share connections use STUN-only (no TURN) to ensure share traffic never consumes relay bandwidth.
 
-### 12.3 Signaling Flow
+### 14.3 Signaling Flow
 
 1. Peer A creates an `RTCPeerConnection` and generates ICE candidates.
 2. A sends the SDP offer + ICE candidates to B via the relay (small signaling messages).
@@ -853,7 +1062,7 @@ The WebSocket relay handles signaling (SDP offers/answers, ICE candidates). WebR
 4. ICE negotiation completes (~200ms). Direct P2P connection established (or TURN fallback).
 5. Data/media flows over the WebRTC connection — zero relay bandwidth.
 
-### 12.4 Connection Types
+### 14.4 Connection Types
 
 | Service | Connection Type | Encryption |
 |---------|----------------|------------|
@@ -866,19 +1075,19 @@ The WebSocket relay handles signaling (SDP offers/answers, ICE candidates). WebR
 | Screen share audio (Windows) | RTCDataChannel (type 0x03) | DTLS (out-of-process Opus) |
 | Screen share audio (macOS) | RTCPeerConnection audio track | DTLS-SRTP + SFrame |
 
-### 12.5 Glare Resolution
+### 14.5 Glare Resolution
 
 When two peers simultaneously attempt to establish a connection, the **polite-peer protocol** resolves the conflict: the peer with the lexicographically smaller peer ID drops its own offer and accepts the remote one. ICE candidates arriving before the connection is ready are queued.
 
-### 12.6 Backpressure
+### 14.6 Backpressure
 
 `getBufferedAmount()` monitoring prevents WebRTC data channel SCTP buffer overflow. The sender pauses when the buffer exceeds the threshold and resumes when it drains. Max 4 inflight chunks per peer for Share.
 
 ---
 
-## 13. Message Signing and Verification
+## 15. Message Signing and Verification
 
-### 13.1 Canonical Signing Payload
+### 15.1 Canonical Signing Payload
 
 Every message carries an Ed25519 signature over a canonical string:
 
@@ -894,7 +1103,7 @@ hollow-msg:{type}:{context}:{sender}:{timestamp_ms}:{text}
 | timestamp_ms | Milliseconds since Unix epoch (i64) |
 | text | Message body (may be empty for file-only messages) |
 
-### 13.2 Verification
+### 15.2 Verification
 
 1. Decode the sender's Ed25519 public key from the protobuf-encoded bytes.
 2. Derive the peer ID from the public key (identity multihash → base58).
@@ -903,28 +1112,28 @@ hollow-msg:{type}:{context}:{sender}:{timestamp_ms}:{text}
 
 If any step fails, the message is rejected. This prevents impersonation: even if an attacker can inject messages into the encrypted channel, they cannot forge a valid signature without the sender's private key.
 
-### 13.3 Timestamp Integrity
+### 15.3 Timestamp Integrity
 
 The timestamp in the signature payload is authoritative. The UI hydrates its display timestamp from the Rust-signed value, not from the local clock. This prevents timestamp manipulation on the receiver side.
 
-### 13.4 Edit and Delete Signing
+### 15.4 Edit and Delete Signing
 
 Message edits and deletions carry their own signatures over canonical payloads. The edit chain is preserved: each edit records the previous signature, public key, and timestamp, creating a verifiable history. Deletion operations are signed events, not tombstones.
 
 ---
 
-## 14. The Rat Files (Cryptographic Evidence)
+## 16. The Rat Files (Cryptographic Evidence)
 
 Hollow's architecture ensures that **nobody can remotely destroy evidence**. Messages are digitally signed, locally stored, and distributed — no central authority can issue a "delete from all devices" command.
 
-### 14.1 Evidence Properties
+### 16.1 Evidence Properties
 
 - **Non-repudiation:** Every message carries an Ed25519 signature. The sender cannot deny authorship.
 - **Integrity:** Any modification to a message invalidates its signature.
 - **Unforgeable:** Unlike screenshots, Hollow message proofs are cryptographically verifiable by any third party with standard Ed25519 tools.
 - **Survivable:** Even if the server owner kicks everyone and dissolves the server, evidence persists on ex-members' devices.
 
-### 14.2 Message Proof Export
+### 16.2 Message Proof Export
 
 Any message can be exported as a JSON proof containing:
 - Message text, timestamp, and context (server/channel or DM)
@@ -935,7 +1144,7 @@ Any message can be exported as a JSON proof containing:
 
 Anyone can verify the proof independently using standard Ed25519 libraries — no Hollow installation required.
 
-### 14.3 Archive Format (.hollow-archive)
+### 16.3 Archive Format (.hollow-archive)
 
 A portable, cryptographically verified export format for conversation history:
 
@@ -946,7 +1155,7 @@ A portable, cryptographically verified export format for conversation history:
 - **File embedding** with SHA-256 integrity hashes (three modes: full, images-only, placeholder).
 - **Archive-level signature:** The exporter's Ed25519 key signs a deterministic hash of the entire archive contents. This catches selective omission — it attests that the archive is the exporter's complete record.
 
-### 14.4 Evidence Recovery (Cooperative Shard Gathering)
+### 16.4 Evidence Recovery (Cooperative Shard Gathering)
 
 When a server is dissolved, ex-members can cooperatively reconstruct files they no longer have locally:
 
@@ -958,13 +1167,13 @@ When a server is dissolved, ex-members can cooperatively reconstruct files they 
 
 ---
 
-## 15. Gossip Overlay Network
+## 17. Gossip Overlay Network
 
-### 15.1 Connection Subset Management
+### 17.1 Connection Subset Management
 
 For large servers, maintaining a full mesh of WebRTC connections is impractical. Hollow limits persistent connections to 6-12 peers per server (50 total across all servers).
 
-### 15.2 Peer Scoring
+### 17.2 Peer Scoring
 
 Peers are scored on four metrics:
 - **Uptime ratio:** Connection duration relative to total time.
@@ -974,7 +1183,7 @@ Peers are scored on four metrics:
 
 Neighbor rotation runs every 300 seconds (5 minutes). The lowest-scoring peer is dropped and the highest-scoring unconnected peer is added. Max 1 rotation per cycle for stability. Separately, peer list exchange runs at adaptive intervals (120s/180s/240s, scaled by server member count) to share known peers with neighbors.
 
-### 15.3 Gossip Broadcast
+### 17.3 Gossip Broadcast
 
 When a peer receives data tagged as broadcast (files, images), it re-forwards to its connected WebRTC subset (minus the source). This creates a gossip tree that covers 1000+ members in ~3 hops (~600ms), with zero relay bandwidth. Voice and video media flow over WebRTC media tracks (DTLS-SRTP, peer-to-peer) and are not gossip-relayed.
 
@@ -982,19 +1191,19 @@ When a peer receives data tagged as broadcast (files, images), it re-forwards to
 - **TTL / hop limit:** 4 hops maximum to prevent infinite propagation. Default TTL is included in the broadcast metadata.
 - **Fallback:** Fewer than 6 reachable peers → connect to all available.
 
-### 15.4 Peer Exchange
+### 17.4 Peer Exchange
 
 Connected peers share known peer lists for each server via `PeerExchange` messages sent directly to each neighbor (not broadcast). This enables peer discovery beyond the directly connected subset. Peer exchange is capped at 50 entries and only accepted from current gossip neighbors.
 
 ---
 
-## 16. Anti-Censorship Transport
+## 18. Anti-Censorship Transport
 
-### 16.1 Baseline Protection
+### 18.1 Baseline Protection
 
 Hollow's standard transport (WebSocket over TLS on port 443) looks like normal HTTPS traffic to network observers. This is sufficient in most environments.
 
-### 16.2 Research and Testing
+### 18.2 Research and Testing
 
 Extensive testing was conducted against Russia's TSPU deep packet inspection system:
 
@@ -1003,17 +1212,17 @@ Extensive testing was conducted against Russia's TSPU deep packet inspection sys
 - **VPN tunnels** (WireGuard, OpenVPN, IKEv2) are all blocked in Russia.
 - **Regular VPN** works, confirming the issue is protocol fingerprinting, not IP blocking.
 
-### 16.3 Future: TLS Camouflage
+### 18.3 Future: TLS Camouflage
 
 A TLS camouflage tunnel (REALITY-style) is planned to make tunnel traffic indistinguishable from a real HTTPS connection to a popular domain. This approach has <5% detection rate against the most advanced DPI systems. The architecture would reuse the same local-tunnel-to-VPS pattern that was tested with Shadowsocks — only the tunnel protocol would change.
 
 ---
 
-## 17. Twitch Community Verification (Optional)
+## 19. Twitch Community Verification (Optional)
 
 Server owners can optionally gate membership behind Twitch follow or subscription verification. This provides community identity verification without requiring any personal information.
 
-### 17.1 OAuth Flow
+### 19.1 OAuth Flow
 
 Verification uses the **Device Code Grant** flow (OAuth 2.0 RFC 8628):
 
@@ -1024,7 +1233,7 @@ Verification uses the **Device Code Grant** flow (OAuth 2.0 RFC 8628):
 
 The verification flow runs entirely client-side. The relay never sees or stores the user's OAuth token — only the Ed25519-signed verification proof is broadcast to the server.
 
-### 17.2 Verification Proof
+### 19.2 Verification Proof
 
 After verification, a cryptographic proof is generated and broadcast to the server:
 
@@ -1033,7 +1242,7 @@ After verification, a cryptographic proof is generated and broadcast to the serv
 - Server members verify the signature and store the proof locally.
 - The proof is re-verified on each server join if the owner requires "owner must be online" verification mode.
 
-### 17.3 Privacy Properties
+### 19.3 Privacy Properties
 
 - No Twitch data is stored on the relay or any server infrastructure.
 - The OAuth token is ephemeral — used once and discarded.
@@ -1042,7 +1251,27 @@ After verification, a cryptographic proof is generated and broadcast to the serv
 
 ---
 
-## 18. Summary of Cryptographic Primitives
+## 20. Verification and Correctness Assurance
+
+Distributed, multi-device cryptographic logic is difficult to verify by manual testing alone — many failure modes appear only with specific timing across several devices. Hollow's correctness rests on a **multi-node integration harness** that exercises the real protocol code deterministically.
+
+### 20.1 Multi-Node Harness
+
+The harness spins up *N* real node event loops in a single test process, each with its own Ed25519 keypairs and its own temporary SQLCipher database, wired together through an **in-process mock relay** rather than real sockets or TLS. The same Rust core that ships in the client runs in the harness, so the encryption, ratcheting, CRDT merge, and synchronization logic under test is the production logic — not a model of it. The mock relay reproduces the load-bearing, protocol-visible behaviors of the real relay (authentication, room join/leave, broadcast and direct routing, topic frames, offline buffering and replay, and disconnect events) so that reconnection and offline/online transitions are exercised faithfully.
+
+### 20.2 Two-Layer Inspection
+
+Multi-device bugs hide in the gap between the *master-collapsed* view that the UI presents and the *device-keyed* truth underneath. The harness exposes both layers: a UI-layer inspector that reads through the same resolver and CRDT accessors the application uses, and a raw-layer inspector that exposes per-device state (per-device MLS leaf membership, per-device Olm session status, raw device-keyed CRDT keys). A test can therefore assert precisely where the master-keyed and device-keyed layers should and should not diverge — the central invariant of the multi-device design (§3, §5).
+
+### 20.3 Coverage and Scope
+
+The harness self-verifies the **distributed-logic core**: DM messaging and sync/backfill (direction, signatures, deduplication, edits/deletes/reactions), friends and profiles, presence and typing, CRDT servers/channels/roles/permissions/bans, MLS group formation across per-device leaves at a shared epoch with cross-device channel decryption, public channels, device revocation (tombstone propagation, Olm/MLS cutoff, and the ghost-device liveness guard), and Olm key exchange and glare. It also covers the **control and signaling plane** for calls, voice channels, recovery pools, and file transfer (including the actual bytes over the relay fallback path). The harness runs in continuous integration as a required check, gating merges.
+
+It deliberately does **not** cover the WebRTC media plane (audio/video pixels, SFrame on live tracks, ICE/TURN/DTLS), the Flutter UI, the FFI bridge, native push delivery (FCM/APNs and the iOS extension), identity at-rest unlock, or the real relay's C++ implementation. Those remain the subject of manual platform testing. The honest claim when the harness is green is therefore precise: *the distributed-logic core and the control/signaling plane behave correctly across many devices* — not that the entire application is verified.
+
+---
+
+## 21. Summary of Cryptographic Primitives
 
 | Component | Algorithm | Key Size | Purpose |
 |-----------|-----------|----------|---------|
@@ -1063,19 +1292,26 @@ After verification, a cryptographic proof is generated and broadcast to the serv
 | Identity wrapping (OS keychain) | DPAPI / Keychain + AES-256-GCM | 256-bit key | Identity keypair encryption at rest (OS-bound) |
 | Local storage | SQLCipher (AES-256-CBC) | 256-bit | Database encryption at rest |
 | Backup encryption | Argon2id + AES-256-GCM | 256-bit (64 MB memory cost) | Brute-force resistant account backup |
+| Device list | Ed25519-signed, versioned | 256-bit | Master-signed binding of a person's devices and revocations |
+| Per-device transport key | Ed25519 (random per device) | 256-bit | Per-device relay authentication; decouples device ID from identity |
+| Device-link transfer | Argon2id + AES-256-GCM (`.hollow` backup) | 256-bit | Encrypted identity + DB transfer to a new device (code = passphrase) |
+| Mobile app lock | Argon2id + AES-256-GCM (+ OS secure enclave for biometric) | 256-bit | PIN/password/biometric launch lock over the identity-at-rest key |
 | Twitch verification | Ed25519-signed proof | 256-bit | Verifiable community membership proof |
 | Anti-censorship | Planned (TLS camouflage) | — | DPI-resistant transport tunnel (not yet implemented) |
 
 ---
 
-## 19. Threat Model
+## 22. Threat Model
 
-### 19.1 What Hollow Protects Against
+### 22.1 What Hollow Protects Against
 
 | Threat | Protection |
 |--------|------------|
 | Message content interception | E2EE (Olm for DMs, MLS for servers). Only intended recipients hold decryption keys. |
-| Relay compromise | Zero-knowledge design. A fully compromised relay learns only peer IDs, room membership, and connection timestamps. |
+| Relay compromise | Zero-knowledge design. A fully compromised relay learns only peer IDs and room membership (both in memory, not logged to disk). |
+| Push-provider metadata harvesting | Empty wake-up pushes (`{wake, sender}` only). Apple/Google never receive message text, size, or content; all content is fetched from Hollow's relay and decrypted on-device. |
+| Device-list tampering | The device list is signed by the master key and versioned; only the master can add or revoke a device, and replays cannot un-revoke. |
+| Stolen/lost device | Manual device revocation: a signed tombstone removes the device's MLS leaf and Olm sessions everywhere and causes the revoked device to wipe itself. |
 | Voice/video eavesdropping | SFrame E2EE. Media is encrypted per-frame. TURN servers see only ciphertext. |
 | File content interception | AES-256-GCM per file. Relay and TURN see only encrypted bytes. |
 | Man-in-the-middle on key exchange | Authenticated Olm key exchange + Ed25519 identity binding. |
@@ -1089,7 +1325,7 @@ After verification, a cryptographic proof is generated and broadcast to the serv
 | Privilege escalation | Permission checks on all state-changing operations. CRDT author ≠ self-reported field — verified against actual sender. |
 | Identity file theft | HKEYV1 at-rest protection. Identity file encrypted via DPAPI/Keychain (machine-bound) or Argon2id + AES-256-GCM (password). Stolen files are useless without the original machine or password. |
 
-### 19.2 What Hollow Does Not Currently Defend Against
+### 22.2 What Hollow Does Not Currently Defend Against
 
 - **Traffic analysis.** Message timing and size patterns are visible to the relay and network observers. Constant-rate padding is not implemented.
 - **Local device compromise.** If an attacker has access to an unlocked device with the decrypted database open, they can read everything. This is true of any E2EE system. Identity at-rest protection (§2.3) mitigates offline attacks: the identity file is encrypted via DPAPI/Keychain (machine-bound) or a user password (Argon2id), so a stolen identity file is useless without the original machine or password. However, a live session with the wrapping key in memory remains vulnerable.
@@ -1097,7 +1333,7 @@ After verification, a cryptographic proof is generated and broadcast to the serv
 - **Quantum computing.** All key exchanges use Curve25519. Migration to ML-KEM (Kyber) is planned but not prioritized for the alpha.
 - **Trust-on-first-use (TOFU).** Peer identity verification relies on out-of-band fingerprint comparison. There is no certificate authority or web of trust.
 
-### 19.3 Relay Operator Trust Assumptions
+### 22.3 Relay Operator Trust Assumptions
 
 The relay operator is assumed to be **honest-but-curious**: the relay faithfully forwards messages but may attempt to read or log traffic. The protocol is designed so that curiosity yields nothing useful.
 
@@ -1107,15 +1343,16 @@ The relay operator is **not trusted** with: message contents, encryption keys, f
 
 ---
 
-## 20. Limitations and Future Work
+## 23. Limitations and Future Work
 
 - **No post-quantum cryptography.** All key exchanges use Curve25519. If quantum computers eventually break elliptic curve crypto, intercepted ciphertext could theoretically be decrypted retroactively. A future migration to ML-KEM (Kyber) is a consideration but not a priority — no consumer chat app has shipped this yet.
 - **No traffic analysis protection.** The relay uses native TLS via uWebSockets C++ with OpenSSL (direct TLS termination, no reverse proxy), which protects message *content* from network eavesdroppers. However, message *timing and size patterns* remain visible — an observer can infer who is chatting with whom based on when messages are sent, even without reading them. Defeating this would require constant-rate padding (sending dummy traffic to hide real messages), which is impractical for a chat app.
 - **Single relay dependency.** Multi-relay support with cross-relay room gossip is designed but not yet deployed. Horizontal scaling to millions of users via a swarm of relay nodes is the planned architecture.
-- **No device linking.** Each device has an independent identity. Multi-device sync (QR code linking) is planned.
 - **No social recovery.** Shamir's Secret Sharing for key recovery via trusted contacts is designed but not implemented.
 - **Channel visibility is UI-enforced only.** All server members receive all channel messages via the server-wide MLS group. A modified client could read restricted channels. Per-channel MLS subgroups are planned for cryptographic enforcement.
-- **Platform-specific media limitations.** Screen share audio uses different transport paths per platform (data channel on Windows, WebRTC audio track on macOS). Mobile platforms (Android/iOS) do not support screen sharing or system audio capture due to OS restrictions.
+- **Multi-device push previews degrade gracefully.** When a person runs multiple devices, a fully force-killed phone may fall back to a generic "new message" banner if the relay-buffered ciphertext was sealed to a different device's Olm ratchet. The message itself is never lost — it arrives in full via live delivery and sibling backfill when the device next connects (§3.5).
+- **No web client.** Windows, macOS, Linux, Android, and iOS are supported. A Flutter Web build is a future target with no working build today.
+- **Mobile media constraints.** Voice and video calls (with SFrame E2EE), file transfer, DMs, MLS servers, vault, and archive all work on mobile. However, mobile clients cannot *originate* screen sharing or capture system audio (no platform equivalent of WASAPI loopback / Process Tap), and the large-file Share transport (>34 MB, STUN-only) is excluded on mobile because it does not survive carrier-grade NAT. Screen-share audio on desktop still uses different transport paths per platform (out-of-process Opus over a data channel on Windows, a WebRTC audio track on macOS).
 - **Files are not encrypted at rest.** SQLCipher encrypts messages and metadata, but downloaded file attachments (`~/.hollow/files/`), vault shards, and vault cache are stored as plaintext on disk. AES-256-GCM at-rest file encryption keyed from the identity is planned.
 
 ---
