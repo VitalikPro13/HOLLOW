@@ -850,7 +850,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         _stagedFileName = file.name;
         _stagedFileIsImage = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].contains(ext);
       });
-      _focusNode.requestFocus();
+      // Defer the re-focus past the OS window-focus restoration after the native
+      // file dialog closes (a synchronous requestFocus races it → keystrokes
+      // don't land until the user clicks the field again). See chat_pane.dart.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focusNode.requestFocus();
+      });
     } finally { _isPicking = false; }
   }
 

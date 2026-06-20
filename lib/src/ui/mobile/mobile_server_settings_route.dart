@@ -1302,6 +1302,24 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     );
   }
 
+  /// Toggle a channel's public flag (mirrors desktop channels_tab globe). Sends
+  /// the CRDT op then optimistically updates the local channel map (same pattern
+  /// as `_renameChannel`).
+  Future<void> _toggleChannelPublic(String channelId, bool currentlyPublic) async {
+    final newVal = !currentlyPublic;
+    await crdt_api.setChannelPublic(
+      serverId: widget.serverId,
+      channelId: channelId,
+      isPublic: newVal,
+    );
+    final old = _channels[channelId];
+    if (old != null && mounted) {
+      setState(() {
+        _channels[channelId] = old.copyWith(isPublic: newVal);
+      });
+    }
+  }
+
   void _renameChannel(int index, String channelId, String currentName) {
     final controller = TextEditingController(text: currentName);
     showHollowDialog(
@@ -1656,6 +1674,22 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
+            // Public-channel toggle (text channels only) — mirrors desktop's
+            // channels_tab globe. Accent = public, grey = private. Gated by the
+            // MANAGE_CHANNELS permission that already wraps this whole editor.
+            if (!isVoice)
+              HollowPressable(
+                onTap: () =>
+                    _toggleChannelPublic(item.channelId, ch?.isPublic ?? false),
+                padding: const EdgeInsets.all(HollowSpacing.xs),
+                child: Icon(
+                  LucideIcons.globe,
+                  size: 16,
+                  color: (ch?.isPublic ?? false)
+                      ? hollow.accent
+                      : hollow.textSecondary,
+                ),
+              ),
             HollowPressable(
               onTap: () => _renameChannel(index, item.channelId, name),
               padding: const EdgeInsets.all(HollowSpacing.xs),

@@ -1122,6 +1122,44 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     );
   }
 
+  /// The on-disk data directory shown in the FILES section. Mirrors the Rust
+  /// core's `dirs::data_dir()/hollow` per platform, resolved to a real path via
+  /// the home/APPDATA env var (falls back to the `~`/`%APPDATA%` template if the
+  /// env var is missing). Desktop only — mobile uses a sandboxed app container.
+  String _dataLocationPath() {
+    final env = Platform.environment;
+    if (Platform.isWindows) {
+      final appData = env['APPDATA'];
+      return appData != null ? '$appData\\hollow' : r'%APPDATA%\hollow';
+    }
+    final home = env['HOME'] ?? '~';
+    if (Platform.isMacOS) {
+      return '$home/Library/Application Support/hollow';
+    }
+    // Linux: XDG_DATA_HOME, default ~/.local/share.
+    final xdg = env['XDG_DATA_HOME'];
+    final base = (xdg != null && xdg.isNotEmpty) ? xdg : '$home/.local/share';
+    return '$base/hollow';
+  }
+
+  /// Open the data directory in the OS file manager.
+  Future<void> _openDataFolder() async {
+    final dir = _dataLocationPath();
+    try {
+      if (Platform.isWindows) {
+        await Process.start('explorer.exe', [dir]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [dir]);
+      } else {
+        await launchUrl(Uri.file(dir));
+      }
+    } catch (_) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Could not open folder',
+          type: HollowToastType.error);
+    }
+  }
+
   Widget _buildSystemTab(HollowTheme hollow) {
     final isDesktop =
         Platform.isWindows || Platform.isLinux || Platform.isMacOS;
@@ -1401,6 +1439,54 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                         color: hollow.textSecondary, fontSize: 9)),
               ],
             ),
+          ),
+
+          const SizedBox(height: HollowSpacing.lg),
+
+          // Data location — where the identity key + encrypted DB + files live.
+          // Per-platform template (dirs::data_dir()/hollow in the Rust core).
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(LucideIcons.folder, size: 16, color: hollow.textSecondary),
+              const SizedBox(width: HollowSpacing.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Data Location',
+                      style: HollowTypography.body
+                          .copyWith(color: hollow.textPrimary),
+                    ),
+                    const SizedBox(height: 2),
+                    SelectableText(
+                      _dataLocationPath(),
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Identity key, encrypted database, and downloaded files.',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              HollowButton.outline(
+                onPressed: _openDataFolder,
+                icon: const Icon(LucideIcons.externalLink, size: 14),
+                compact: true,
+                child: const Text('Open'),
+              ),
+            ],
           ),
 
           const SizedBox(height: HollowSpacing.xl),

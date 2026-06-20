@@ -206,11 +206,19 @@ fn fetch_and_decrypt(
         Some(id) => id,
         None => return Ok("[]".to_string()),
     };
-    let proto = id
+    // DB passphrase = MASTER-derived (must NOT change — a device-derived
+    // passphrase opens an empty DB). WS auth = DEVICE key (the relay keyed this
+    // device's push token + offline buffer by its device id; the fetch must auth
+    // as the device to receive its buffered ciphertext).
+    let master_proto = id
         .keypair
         .to_protobuf_encoding()
         .map_err(|e| format!("encode keypair: {e}"))?;
-    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+    let passphrase = hex::encode(&master_proto[..32.min(master_proto.len())]);
+    let proto = id
+        .device_keypair
+        .to_protobuf_encoding()
+        .map_err(|e| format!("encode device keypair: {e}"))?;
 
     let db_path = std::path::Path::new(data_dir)
         .join("messages.db")
@@ -231,8 +239,19 @@ fn fetch_and_decrypt(
     };
 
     let pub_key_b64 = base64::engine::general_purpose::STANDARD
-        .encode(id.keypair.public_key_protobuf());
-    let peer_id = id.keypair.peer_id();
+        .encode(id.device_keypair.public_key_protobuf());
+    let peer_id = id.device_keypair.peer_id();
+    let local_master = id.keypair.peer_id();
+
+    // Warm the resolver from persisted device links so the MASTER-paired DM room
+    // + conversation key resolve correctly (single-device → self-map no-op).
+    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &passphrase) {
+        if let Ok(links) = store.get_all_device_links() {
+            crate::node::resolver::warm_from_links(&links);
+        }
+    }
+    crate::node::resolver::seed_self(&local_master, &[peer_id.clone(), local_master.clone()]);
+
     let relay = if relay_domain.is_empty() {
         "relay.anonlisten.com"
     } else {
@@ -273,6 +292,7 @@ fn fetch_and_decrypt(
     let results = rt.block_on(crate::node::fetch::run_fetch(
         relay,
         &peer_id,
+        &local_master,
         &proto,
         &pub_key_b64,
         license_key,

@@ -654,7 +654,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         _stagedFileName = file.name;
         _stagedFileIsImage = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].contains(ext);
       });
-      _focusNode.requestFocus();
+      // Defer the re-focus to after the OS returns window focus from the native
+      // file dialog. A synchronous requestFocus() here races that restoration —
+      // Flutter marks the node focused but keystrokes don't land, so the user has
+      // to click the field a few times. A post-frame callback runs after the
+      // window-focus event settles.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focusNode.requestFocus();
+      });
     } finally { _isPicking = false; }
   }
 

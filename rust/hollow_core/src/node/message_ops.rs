@@ -163,7 +163,7 @@ async fn fan_out_dm_envelope(
     // device — the exact "first message lost, peer shows offline" symptom.
     let dm_room = dm_room_code(local_peer_str, recipient_master);
     let recipient_devices = collect_target_devices(
-        ws_room_peers, &dm_room, recipient_master, recipient_master, /*exclude*/ None,
+        ws_room_peers, Some(olm), &dm_room, recipient_master, recipient_master, /*exclude*/ None,
     );
     for device_peer in &recipient_devices {
         send_dm_to_device(
@@ -178,8 +178,11 @@ async fn fan_out_dm_envelope(
     // THIS device (never echo to ourselves).
     let own_master = super::resolver::resolve(local_peer_str);
     let sibling_json = sibling_envelope_json.unwrap_or(envelope_json);
+    // Siblings: live-only (None for olm) — an offline own-sibling is reached via
+    // pending_messages queue + Step 5 backfill, NOT via the offline-buffer/push
+    // path (we never want to PUSH our own phone for our OWN outgoing message).
     let mut siblings: HashSet<String> = collect_target_devices(
-        ws_room_peers, &dm_room, &own_master, "", /*exclude*/ Some(device_peer_id),
+        ws_room_peers, None, &dm_room, &own_master, "", /*exclude*/ Some(device_peer_id),
     ).into_iter().collect();
     // ALSO union peers in our `inbox:{master}` room. A freshly-linked sibling joins
     // the inbox room IMMEDIATELY (it's the sibling rendezvous) but may not have
@@ -230,27 +233,44 @@ async fn fan_out_dm_envelope(
 /// drops one id (our own device).
 fn collect_target_devices(
     ws_room_peers: &HashMap<String, HashSet<String>>,
+    // When Some, also include OFFLINE-but-real devices (Step 9A push): a device
+    // that is in the resolver's signed-list view AND we hold an Olm session with
+    // → it gets the offline-buffer/push treatment so a fully-quit phone wakes.
+    // None = live-only (self fan-out to our own siblings: never push our own phone).
+    olm: Option<&OlmManager>,
     dm_room: &str,
     master: &str,
     fallback_self: &str,
     exclude: Option<&str>,
 ) -> Vec<String> {
-    // Stored devices, but ONLY those CURRENTLY IN A ROOM (reachable right now) —
-    // this is what drops dead ghosts. A ghost has a STALE persisted Olm session
-    // (so `has_session` is NOT enough — it would still let the ghost through, then
-    // `send_dm_to_device` room-sends "Sent encrypted DM to offline <ghost>" firing
-    // a spurious push + unread on the receiver). A ghost is never in a room, so
-    // room-presence is the unambiguous liveness test. A genuinely-offline REAL
-    // multi-device sibling also isn't in a room now → it gets nothing instantly,
-    // but its queued copy drains on reconnect (PeerJoined/KeyBundle) + Step 5
-    // backfill, so the message still arrives — just not via the instant
-    // offline-buffer/FCM path. Offline FCM push for a SINGLE-device recipient is
-    // preserved by the `fallback_self` branch below (no device links → send to the
-    // master id → offline buffer → push), so the common case is unaffected.
+    // Online devices: stored devices CURRENTLY IN A ROOM (reachable right now).
+    // Room-presence is the unambiguous liveness test that drops dead ghosts (a
+    // ghost has a STALE persisted Olm session, so `has_session` alone is NOT a
+    // liveness test — it's only used below to qualify the OFFLINE set).
     let mut set: HashSet<String> = super::resolver::devices_for(master)
         .into_iter()
         .filter(|d| super::crypto_handler::ws_room_for_peer(ws_room_peers, d).is_some())
         .collect();
+    // Offline-but-real devices (Step 9A): a known device of this master that is
+    // NOT in a room but we DO hold an Olm session with. The resolver's
+    // `devices_for` reflects the signed device list MINUS revoked tombstones
+    // (Step 7 `forget`s a revoked device), so it's the authoritative "real
+    // devices" set; intersecting with `has_session` drops never-contacted ghosts
+    // (a real offline phone we've messaged has a session; a ghost we never
+    // established one with does not). These hit `send_dm_to_device`'s
+    // session+offline branch → relay buffers under the device id + pushes its
+    // token → the quit phone's background fetch (which now auths as that device)
+    // decrypts the preview. Without this a fully-quit phone was never targeted at
+    // all → no push (the Step 9A break). Self fan-out passes None to skip this.
+    if let Some(olm) = olm {
+        for d in super::resolver::devices_for(master) {
+            if super::crypto_handler::ws_room_for_peer(ws_room_peers, &d).is_none()
+                && olm.has_session(&d)
+            {
+                set.insert(d);
+            }
+        }
+    }
     // Union: peers physically in the DM room that resolve to this master (always
     // included — live presence trumps the stored list, and is reachable by definition).
     if let Some(peers) = ws_room_peers.get(dm_room) {
@@ -603,9 +623,12 @@ pub(crate) async fn handle_send_channel_message(
     // relay filters against the member's registered push prefs. The relay never
     // learns server membership — the SENDER picks the targets from its CRDT.
     {
+        // `server.members` is MASTER-keyed (Step 6). Pick masters who are NOT
+        // reachable by ANY of their devices, and who aren't us.
         let offline_members: Vec<&String> = server.members.keys()
             .filter(|p| {
-                p.as_str() != local_peer_str && !peer_is_reachable(ws_room_peers, p)
+                !super::resolver::same_identity(p, local_peer_str)
+                    && !peer_is_reachable(ws_room_peers, p)
             })
             .collect();
         if !offline_members.is_empty() {
@@ -620,6 +643,8 @@ pub(crate) async fn handle_send_channel_message(
                 offline_members.len(), server_id, channel_id
             );
             for member in offline_members {
+                // Mention flag is per MEMBER (master): @everyone, a reply to their
+                // message, or their display name / nickname mentioned.
                 let mentioned = has_everyone
                     || reply_author.as_deref() == Some(member.as_str())
                     || (!mentioned_names.is_empty() && {
@@ -632,13 +657,33 @@ pub(crate) async fn handle_send_channel_message(
                                 || nick.is_some_and(|nk| n.eq_ignore_ascii_case(nk))
                         })
                     });
-                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendChannelDirect {
-                    room_code: server_id.clone(),
-                    target_peer: member.clone(),
-                    channel_id: channel_id.clone(),
-                    mention: mentioned,
-                    data: offline_wire_bytes.clone().unwrap_or_default(),
-                });
+                // Expand the offline MASTER member into its real DEVICE ids — the
+                // relay keys the push token + offline buffer by DEVICE id (Step 9A).
+                // Targeting the bare master buffers under an id no device authenticates
+                // as → no push reaches any device. Real-device predicate mirrors the
+                // DM fan-out: a known device of this master, offline (not in a room),
+                // that we hold an Olm session with (drops never-contacted ghosts). A
+                // single-device member (no device links) → fall back to the master id,
+                // which IS that member's device id = pre-multi-device behavior.
+                let mut targets: Vec<String> = super::resolver::devices_for(member)
+                    .into_iter()
+                    .filter(|d| {
+                        super::crypto_handler::ws_room_for_peer(ws_room_peers, d).is_none()
+                            && olm.has_session(d)
+                    })
+                    .collect();
+                if targets.is_empty() {
+                    targets.push(member.clone());
+                }
+                for target in targets {
+                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendChannelDirect {
+                        room_code: server_id.clone(),
+                        target_peer: target,
+                        channel_id: channel_id.clone(),
+                        mention: mentioned,
+                        data: offline_wire_bytes.clone().unwrap_or_default(),
+                    });
+                }
             }
         }
     }

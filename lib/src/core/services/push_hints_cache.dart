@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// Writes a tiny shared "push hints" cache into the iOS App Group container so
@@ -59,6 +60,23 @@ class PushHintsCache {
     final base = Directory('$dir/push_hints');
     if (!base.existsSync()) base.createSync(recursive: true);
 
+    // The friend ids are MASTER ids, but a push `sender` is the relay-attested
+    // DEVICE id of the sending device (a keystone-rotated / multi-device friend
+    // sends from a device id ≠ its master). The NSE does a raw `map[sender]`
+    // lookup (it has no resolver), so we must additionally key each friend's hint
+    // under EVERY device id that resolves to that friend's master — otherwise a
+    // device-id sender misses and the banner degrades to a content-free
+    // "New message" with no name/avatar/fetch. Build master → all device ids.
+    final aliasesFor = <String, List<String>>{};
+    try {
+      for (final link in await network_api.getDeviceLinks()) {
+        if (link.devicePeerId == link.masterPeerId) continue; // self-map: skip
+        (aliasesFor[link.masterPeerId] ??= <String>[]).add(link.devicePeerId);
+      }
+    } catch (e) {
+      debugPrint('[HOLLOW-PUSHHINTS] getDeviceLinks failed (master-only): $e');
+    }
+
     final map = <String, dynamic>{};
     final keep = <String>{}; // avatar files to retain this pass
 
@@ -72,6 +90,8 @@ class PushHintsCache {
         String? avatarPath;
         final bytes = await storage_api.getAvatar(peerId: peerId);
         if (bytes != null && bytes.isNotEmpty) {
+          // Avatar file is keyed by the MASTER id (one per person); every alias
+          // entry below points at this same file.
           final f = File('${base.path}/$peerId.img');
           await f.writeAsBytes(bytes, flush: true);
           avatarPath = f.path;
@@ -79,10 +99,16 @@ class PushHintsCache {
         }
 
         if (name != null || avatarPath != null) {
-          map[peerId] = {
+          final entry = {
             'name': ?name,
             'avatar': ?avatarPath,
           };
+          // Key under the master AND every known device id of this friend, so
+          // `map[sender]` in the NSE hits regardless of which device sent it.
+          map[peerId] = entry;
+          for (final deviceId in aliasesFor[peerId] ?? const <String>[]) {
+            map[deviceId] = entry;
+          }
         }
       } catch (e) {
         debugPrint('[HOLLOW-PUSHHINTS] skip $peerId: $e');

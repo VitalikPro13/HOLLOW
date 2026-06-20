@@ -40,10 +40,18 @@ pub(crate) struct FetchedDm {
 /// decrypt channel messages (MLS via `mls` when available, public plaintext
 /// otherwise). When None, this is a DM wake — join the DM room for
 /// `sender_peer_id` and decrypt via Olm.
+/// `peer_id`: the DEVICE peer_id the socket AUTHENTICATES as (multi-device:
+/// the relay keyed this device's push token + offline buffer by it, so the fetch
+/// MUST auth as the device, not the master, to receive its buffered ciphertext).
+/// `local_master`: this identity's MASTER peer_id — DM rooms are MASTER-paired
+/// (`dm_room_code` is pure; the live node always computes it from masters), so
+/// the room is derived from `local_master` + the sender's master, NOT the device
+/// id, or the fetch joins the wrong room and finds nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_fetch(
     relay_domain: &str,
     peer_id: &str,
+    local_master: &str,
     keypair_proto: &[u8],
     pub_key_b64: &str,
     license_key: Option<&str>,
@@ -59,7 +67,14 @@ pub(crate) async fn run_fetch(
     let relay_url = format!("wss://{relay_domain}/ws");
     let room = match server_room {
         Some(s) => s.to_string(),
-        None => crate::node::types::dm_room_code(peer_id, sender_peer_id),
+        None => {
+            // MASTER-paired DM room: resolve both ends to their master identity
+            // (resolver warmed from DB links before this call). A single-device
+            // install resolves each to itself → identical to the pre-multi-device
+            // room. The socket still AUTHS as the device (`peer_id`) above.
+            let sender_master = crate::node::resolver::resolve(sender_peer_id);
+            crate::node::types::dm_room_code(local_master, &sender_master)
+        }
     };
 
     hollow_log!(
@@ -461,6 +476,13 @@ fn try_decrypt_dm(
 ) -> Option<FetchedDm> {
     let haven: HavenMessage = serde_json::from_str(data).ok()?;
 
+    // Olm decrypt is keyed by the SENDER DEVICE id (`from`) — sessions are
+    // per-device. But DB rows + the surfaced conversation key on the MASTER, so a
+    // multi-device sender's messages land in the one thread (matching the live
+    // node's `convo_peer = resolve(peer_id)`). The resolver is warmed from DB
+    // links before run_fetch; a single-device sender resolves to itself.
+    let convo = crate::node::resolver::resolve(from);
+
     match haven {
         HavenMessage::Encrypted {
             message_type,
@@ -544,12 +566,12 @@ fn try_decrypt_dm(
                             .map(|m| store.dm_message_exists(m))
                             .unwrap_or(false);
                         hollow_log!(
-                            "[HOLLOW-FETCH] insert DM from={} mid={:?} ts={} exists={} text_len={}",
-                            from, mid, ts, already_exists, msg_text.len()
+                            "[HOLLOW-FETCH] insert DM from={} convo={} mid={:?} ts={} exists={} text_len={}",
+                            from, convo, mid, ts, already_exists, msg_text.len()
                         );
                         if !already_exists {
                             let _ = store.insert(
-                                from,
+                                &convo,
                                 &msg_text,
                                 false,
                                 ts,
@@ -588,7 +610,7 @@ fn try_decrypt_dm(
                     }
 
                     Some(FetchedDm {
-                        from_peer: from.to_string(),
+                        from_peer: convo.clone(),
                         text: msg_text,
                         timestamp: ts,
                         message_id: mid.unwrap_or_default(),
@@ -626,7 +648,7 @@ fn try_decrypt_dm(
                         }
                     }
                     Some(FetchedDm {
-                        from_peer: from.to_string(),
+                        from_peer: convo.clone(),
                         text: new_text,
                         timestamp: ts,
                         message_id: mid,
@@ -686,16 +708,19 @@ fn try_decrypt_dm(
                                         .unwrap_or(false)
                                     {
                                         let _ = store.insert(
-                                            from, &msg_text, false, p.ts,
+                                            &convo, &msg_text, false, p.ts,
                                             p.sig.as_deref(), p.pk.as_deref(),
                                             p.mid.as_deref(), None, Some(&p.fid), None,
                                         );
                                     }
+                                    // context_id + sender_id key on the MASTER so the
+                                    // file lands under the same thread as its message
+                                    // row (Step 5.1 DM-file context rule).
                                     let _ = store.insert_file_metadata(
                                         &p.fid, &p.name, &p.ext, &p.mime,
                                         p.size, 0, p.img, p.w, p.h,
-                                        p.mid.as_deref(), "dm", from,
-                                        from, false, p.ts,
+                                        p.mid.as_deref(), "dm", &convo,
+                                        &convo, false, p.ts,
                                         p.vthumb.as_ref(),
                                     );
                                     let _ = store.mark_file_complete(&p.fid, &disk_str);
@@ -709,7 +734,7 @@ fn try_decrypt_dm(
                                 // text) and, if the companion text DM also arrived,
                                 // merges this image_path onto it by mid.
                                 return Some(FetchedDm {
-                                    from_peer: from.to_string(),
+                                    from_peer: convo.clone(),
                                     text: msg_text,
                                     timestamp: p.ts,
                                     message_id: p.mid.clone().unwrap_or_default(),

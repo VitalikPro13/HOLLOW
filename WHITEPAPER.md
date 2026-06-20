@@ -1040,6 +1040,18 @@ iOS does not run the app's background handler when the app is force-killed — A
 
 The NSE opens the same shared SQLCipher database as the app (§2.4), which is why that database uses rollback-journal mode on iOS. The NSE's measured memory footprint (~3 MB) sits comfortably within Apple's 24 MB extension limit even with the full networking and cryptography stack linked in. To keep the NSE outside the protocol's source of truth, its decryption is designed so that a buggy extension can at worst show a wrong or missing banner — never corrupt the canonical message ratchet.
 
+### 13.6 Push Under Multi-Device
+
+The push path is the most cross-cutting place where the device/master split (§3) surfaces, because every layer it touches is keyed differently: the relay's push token and offline buffer are keyed by the **device** peer ID a socket authenticated with, while a person's display identity, conversation key, and database rows are keyed by the **master**.
+
+- **Waking the right device.** A push token is registered under the device that registered it, and the relay buffers a message under the **specific device** the sender addressed. So the sender's offline targeting must reach each *real* offline device — not only devices currently in a room. Targeting expands a recipient's master to its **known, real, offline devices** (those in the signed device list with which the sender holds a session), distinct from the live-presence fan-out used for online delivery; a never-contacted ghost ID (§3.4) is excluded so it can never trigger a phantom push. For channels, the same expansion turns each offline **master** member into its real devices before the per-target `0x09` frame is emitted.
+
+- **The fetch node authenticates as its device.** A woken device runs the fetch node under **its own device key**, because the relay will replay a buffered frame only to a socket presenting the exact device ID the message was buffered under — and will only push to that device's registered token. The fetch node still derives the master-paired DM room and stores rows under the **master** (resolving its own device→master and the sender's device→master from the locally-persisted device links), so a message woken on one device lands in the single shared conversation rather than a per-device thread. The database passphrase remains master-derived; only the transport identity is the device key.
+
+- **Per-person notification grouping.** A multi-device *sender* may send from any of its device IDs, so the receiving client collapses the push `sender` device→master before resolving the display name/avatar and choosing the notification's grouping key — one person yields one notification card regardless of which of their devices sent.
+
+A fresh single-device install is unaffected throughout: every device→master resolution is the identity map, so the push path behaves byte-for-byte as it did before multi-device.
+
 ---
 
 ## 14. WebRTC Transport Layer

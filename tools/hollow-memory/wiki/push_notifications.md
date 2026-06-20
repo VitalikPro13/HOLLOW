@@ -75,13 +75,27 @@ ONLY — E2EE preserved).
 
 ## Rust fetch — node/fetch.rs
 
-`run_fetch(relay_domain, peer_id, keypair_proto, pub_key_b64, license, sender,
-timeout, &mut olm, &crypto_store, db_path, db_passphrase) -> Vec<FetchedDm>`.
+`run_fetch(relay_domain, peer_id, local_master, keypair_proto, pub_key_b64, license,
+sender, server_room, timeout, &mut olm, &mut mls, &crypto_store, db_path,
+db_passphrase) -> Vec<FetchedDm>`.
 
 - Connects to the relay in **fetch-peer mode** (`is_fetch=true` in `ClientMsg::Auth`
   → excluded from `peer_sockets`, no `PeerJoined`, invisible to member lists).
-- Joins exactly one DM room (`dm_room_code(peer_id, sender)`), parses binary `0x06`
-  (text) + `0x08` (image) frames + `EditMessage`.
+- **Multi-device (Step 9A): auths as the DEVICE, rooms by the MASTER.** `peer_id` /
+  `keypair_proto` / `pub_key_b64` are the **device** key — the relay keyed this
+  device's push token + offline buffer by its device id, and replays a buffered
+  frame ONLY to a socket presenting that exact device id (so the fetch MUST auth as
+  the device, not the master, or it joins as a different id and finds nothing). The
+  DM room is `dm_room_code(local_master, resolve(sender))` — master-paired (rooms
+  are derived from masters; `dm_room_code` is pure). The DB passphrase stays
+  MASTER-derived (a device-derived one opens an empty DB). The callers
+  (`start_fetch_node`, NSE `fetch_and_decrypt`) warm the resolver from the persisted
+  device links + `seed_self` before calling, so `resolve(sender)`→master works; the
+  decrypted DM is stored under `resolve(sender)` (the master) so a multi-device
+  sender lands in the one shared thread. Single-device → every resolve is identity.
+- Joins exactly one DM room (DM wake) or the server room (`server_room` Some =
+  channel wake), parses binary `0x06` (text) + `0x08` (image) frames + `EditMessage`
+  (DM) / MLS + public channel messages (channel).
 - `IDLE_AFTER_FIRST = 1200ms`: after the first message, wait only this between
   frames to drain the replayed burst, then return PROMPTLY (the banner can't
   render until this returns). `outstanding_image` holds to the full deadline when
@@ -225,8 +239,15 @@ relay never learns server membership, content decrypted on-device.
 
 ### Sender fan-out (message_ops.rs `handle_send_channel_message`)
 After the room/topic broadcast, the sender filters `server.members` by
-`!peer_is_reachable` (offline members) and sends each a **0x09 frame**:
-`[0x09][room\0][target\0][channel\0][flags:1][payload]` (flags bit0 = mention).
+`!same_identity(self)` + `!peer_is_reachable` (offline members, excluding our own
+siblings) and **expands each offline MASTER member to its real DEVICE ids** —
+`devices_for(master)` ∩ has-session ∩ not-in-room (the same offline-real predicate
+as DM fan-out; falls back to the master id for a single-device member). The relay
+keys the push token + buffer by DEVICE id, so targeting the bare master would buffer
+under an id no device authenticates as → no push reaches any device (Step 9A fix).
+Each target device gets a **0x09 frame**:
+`[0x09][room\0][target\0][channel\0][flags:1][payload]` (flags bit0 = mention; the
+mention is computed once per master and applied to all its device frames).
 Payload = the SAME wire bytes the room broadcast carried — MLS group ciphertext
 is decryptable by every member, so one encryption serves both paths
 (`send_mls_broadcast_topic` now returns the serialized `MlsChannelMessage` bytes;
@@ -323,4 +344,8 @@ Tapping any Hollow notification opens the sender's DM chat. Three entry points, 
 2. `FirebaseMessaging.instance.getInitialMessage()` — app COLD-STARTED by a push tap.
 3. flutter_local_notifications (Android bg-fetch banners): `onDidReceiveNotificationResponse` (app alive) + `getNotificationAppLaunchDetails()` (cold start). Every per-peer `plugin.show()` must pass `payload: sender` or the tap carries no target (the group summary intentionally has none → just opens the app).
 
-Routing: `PushNotificationService.registerOpenChatHandler` (and `registerOpenChannelHandler` for channel pushes) is called from `_MobileShellState.initState`. Taps arriving BEFORE registration (cold start: push init runs in node start, shell mounts after identity unlock) are buffered (`_pendingOpenChatPeer`) and delivered on registration. The handler mirrors the in-app banner: set `selectedPeerProvider`, null `selectedServerProvider`, `markDmSeen`, push `MobileChatRoute` via rootNavigator, clear selection in `.then()`.
+Routing: `PushNotificationService.registerOpenChatHandler` (and `registerOpenChannelHandler` for channel pushes) is called from `_MobileShellState.initState`. Taps arriving BEFORE registration (cold start: push init runs in node start, shell mounts after identity unlock) are buffered (`_pendingOpenChatPeer`) and delivered on registration. The handler `_openChatFromPush` (mobile_shell.dart) mirrors the in-app banner: set `selectedPeerProvider`, null `selectedServerProvider`, `markDmSeen`, push `MobileChatRoute` via rootNavigator, clear selection in `.then()`.
+
+**Multi-device device→master resolution + KNOWN iOS GAP (2026-06-20).** A DM push `sender` can be the friend's DEVICE id, but every DM thread/provider keys on the MASTER. `_openChatFromPush` resolves device→master via the Rust `identityFor` FFI (live node resolver, warmed at startup) with a `deviceLinkProvider` mirror fallback, then `peerId.isEmpty?peerId`. Android works (it taps the Dart-posted local banner whose payload is already the resolved master `personKey`). **iOS DM tap is STILL broken** — a force-killed iOS tap arrives via FCM `data['sender']` (raw device id) through `onMessageOpenedApp`/`getInitialMessage`, and the resolve didn't fix it (resolver/links likely still cold on the freshly-woken node at tap time). Channels are fine (key on `server:channel`, identity-independent). Open in HOLLOW_PLAN.md; next: log the actual id reaching the handler, resolve inside `MobileChatRoute` after links settle, or carry the master in the push payload.
+
+**iOS hints-cache device aliasing (push_hints_cache.dart, 2026-06-20).** The NSE does a raw `map[sender]` lookup against `hints.json` to show name/avatar, with no resolver. Since a sender can be a device id, `writeNow` keys each friend's hint under the MASTER **and every device id** that resolves to it (`getDeviceLinks()`), so `map[sender]` hits regardless of which device sent — else the banner degrades to a content-free "New message". Avatar file stays one-per-person (master-keyed); alias entries point at it.

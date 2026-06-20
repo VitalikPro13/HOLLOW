@@ -186,6 +186,14 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
   String displayName = _truncatePeerId(sender);
   Uint8List? avatarBytes;
 
+  // Per-PERSON notification key (multi-device, Step 9A). The relay `sender` is a
+  // DEVICE id; a friend who DMs from two devices would otherwise create two
+  // separate cards (and chat-route `dismissPeerNotification(friend.master)` —
+  // keyed on master — wouldn't clear them). Resolve device→master so one person =
+  // one card. getPushProfile (above/below) warms the Rust resolver from DB links,
+  // so identityFor resolves correctly here; single-device → returns sender as-is.
+  String personKey = sender;
+
   if (rustReady) {
     try {
       final profile = await network_api.getPushProfile(peerId: sender);
@@ -194,6 +202,11 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
         displayName = profile.displayName;
       }
       avatarBytes = profile?.avatarBytes;
+      // Resolve AFTER getPushProfile (it warmed the resolver).
+      try {
+        final m = await network_api.identityFor(peerId: sender);
+        if (m.isNotEmpty) personKey = m;
+      } catch (_) {}
     } catch (e) {
       await _pushLog('getPushProfile FAILED: $e');
     }
@@ -243,7 +256,7 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
         final batch = messages
             .map((m) => MapEntry(m.messageId, previewText(m)))
             .toList();
-        final texts = await _accumulateLines(sender, batch);
+        final texts = await _accumulateLines(personKey, batch);
 
         // iOS: the APNs alert banner (rewritten by the NSE to name+avatar) is
         // ALREADY on screen — it grabbed attention. Remove it now and post ONE
@@ -259,7 +272,7 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
           try {
             await FlutterLocalNotificationsPlugin()
                 .cancel(_iosCollapseId(sender));
-            await _pushLog('iOS: cancelled APNs banner id=${_iosCollapseId(sender)}');
+            await _pushLog('iOS: cancelled APNs banner id=${_iosCollapseId(sender)} (person=$personKey)');
           } catch (e) {
             await _pushLog('iOS: cancel APNs banner failed: $e');
           }
@@ -268,7 +281,7 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
         // First (and only) post on the happy path — already populated.
         // No imagePath: BigPicture is intentionally omitted for speed (see above).
         await _showNotification(
-          sender: sender,
+          sender: personKey,
           title: displayName,
           body: texts.last,
           lines: texts,
@@ -300,7 +313,7 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
   // silent miss.
   if (!contentShown && !Platform.isIOS) {
     await _showNotification(
-      sender: sender,
+      sender: personKey,
       title: displayName,
       body: 'Sent you a message',
       avatarBytes: avatarBytes,

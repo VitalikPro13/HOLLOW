@@ -332,6 +332,16 @@ pub(crate) async fn handle_send_file(
                 .into_iter()
                 .filter(|d| ws_room_for_peer(&ws_room_peers, d).is_some())
                 .collect();
+        // Offline-but-real RECIPIENT devices (Step 9A push): a real device of the
+        // recipient that's offline but we hold an Olm session with → the offline
+        // image path buffers under it + pushes its token so a fully-quit phone gets
+        // the image preview. Mirrors message_ops::collect_target_devices. Only the
+        // recipient (not our own siblings — never push our own phone for our send).
+        for d in crate::node::resolver::devices_for(&recipient_master) {
+            if ws_room_for_peer(&ws_room_peers, &d).is_none() && olm.has_session(&d) {
+                file_set.insert(d);
+            }
+        }
         let own_master_f = crate::node::resolver::resolve(local_peer_str);
         for sib in crate::node::resolver::devices_for(&own_master_f) {
             if ws_room_for_peer(&ws_room_peers, &sib).is_some() {

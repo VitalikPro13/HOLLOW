@@ -1924,10 +1924,18 @@ pub fn get_push_profile(peer_id: String) -> Result<Option<PushProfile>, String> 
             return Ok(None);
         }
     };
-    let profile = store.load_profile_light(&peer_id)?;
+    // The push `sender` is a relay-attested DEVICE id, but profiles (and avatars)
+    // are stored keyed by MASTER (Step 1). Warm the resolver from DB links and
+    // resolve device→master so a multi-device sender's name/avatar loads (and two
+    // of their devices map to one profile). Single-device → resolves to itself.
+    if let Ok(links) = store.get_all_device_links() {
+        node::resolver::warm_from_links(&links);
+    }
+    let master = node::resolver::resolve(&peer_id);
+    let profile = store.load_profile_light(&master)?;
     match profile {
         Some(p) => {
-            let avatar = store.load_avatar(&peer_id).unwrap_or(None);
+            let avatar = store.load_avatar(&master).unwrap_or(None);
             hollow_log!("[HOLLOW-PUSH] get_push_profile: loaded '{}' (avatar={})",
                 p.display_name, avatar.is_some());
             Ok(Some(PushProfile {
@@ -2005,12 +2013,22 @@ pub fn start_fetch_node(
             return Ok(vec![]);
         }
     };
-    let proto = id
+    // DB passphrase is derived from the MASTER key (master-derived, must NOT
+    // change — a device-derived passphrase would open an empty DB).
+    let master_proto = id
         .keypair
         .to_protobuf_encoding()
         .map_err(|e| format!("Failed to encode keypair: {e}"))?;
-    let key_bytes = &proto[..32.min(proto.len())];
-    let passphrase = hex::encode(key_bytes);
+    let passphrase = hex::encode(&master_proto[..32.min(master_proto.len())]);
+
+    // WS auth uses the DEVICE key: the relay keyed this device's push token +
+    // offline buffer by its device id (the full node auths with the device key
+    // too), so the fetch MUST auth as the device to receive its buffered
+    // ciphertext (the relay replays only to the exact device id that joins).
+    let proto = id
+        .device_keypair
+        .to_protobuf_encoding()
+        .map_err(|e| format!("Failed to encode device keypair: {e}"))?;
 
     let hollow_dir = crate::identity::data_dir()?;
     std::fs::create_dir_all(&hollow_dir)
@@ -2037,10 +2055,23 @@ pub fn start_fetch_node(
     };
 
     use base64::Engine;
+    // Device-keyed WS auth (see the proto note above).
     let pub_key_b64 = base64::engine::general_purpose::STANDARD.encode(
-        id.keypair.public_key_protobuf(),
+        id.device_keypair.public_key_protobuf(),
     );
-    let peer_id = id.keypair.peer_id();
+    let peer_id = id.device_keypair.peer_id();
+    let local_master = id.keypair.peer_id();
+
+    // Warm the resolver from persisted device links so run_fetch can map the
+    // local device + the sender's device id back to their masters for the
+    // MASTER-paired DM room + conversation key (single-device → self-map no-op).
+    if let Ok(store) = MessageStore::open(&db_path, &passphrase) {
+        if let Ok(links) = store.get_all_device_links() {
+            node::resolver::warm_from_links(&links);
+        }
+    }
+    // Ensure our own device→master mapping exists even if no links row yet.
+    node::resolver::seed_self(&local_master, &[peer_id.clone(), local_master.clone()]);
 
     let license_key = get_license_key()
         .lock()
@@ -2087,6 +2118,7 @@ pub fn start_fetch_node(
     let results = rt.block_on(node::fetch::run_fetch(
         &relay_domain,
         &peer_id,
+        &local_master,
         &proto,
         &pub_key_b64,
         license_key.as_deref(),

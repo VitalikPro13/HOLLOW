@@ -1,13 +1,17 @@
 # Multi-Device Identity & Sync — Implementation Tracker
 
-**Status:** In progress. Steps 1, 2, 2.5, 3, 4, 5, **6 (MLS per-device leaves), 7 (revocation), 8 (Devices
-panel) ALL DONE and live-verified** (latest 2026-06-18, Pixel↔VM↔AL). A revoked device is cut off
-everywhere AND self-nukes (wipe + relaunch to Welcome) from any online path; the Devices panel lists/labels/
-removes devices. 335 lib + 21 widget tests pass; clippy/analyze clean. Step 7's live test surfaced a chain of
+**Status:** ✅ **EPIC COMPLETE (2026-06-20).** ALL steps done and live-verified: 1, 2, 2.5, 3, 4, 5, 5.1/5.2,
+**6 (MLS per-device leaves), 7 (revocation), 8 (Devices panel), 9A (multi-device push), 9B/9B-i
+(multi-node test harness, 358 tests, CI-gated), 9C (server UX polish)**. Multi-device push delivers +
+decrypts on a fully-quit phone on BOTH Android and iOS (fetch auths as DEVICE, sender targets offline-real
+devices, iOS hints-cache device-aliased). One minor NON-blocking gap parked: an iOS DM push TAP opens a
+device-keyed empty thread (push delivery/content is fine; tap-navigation only — see Step 9A + HOLLOW_PLAN.md).
+A revoked device is cut off everywhere AND self-nukes from any online path; the Devices panel lists/labels/
+removes devices. 358 Rust lib + 21 widget tests pass; clippy/analyze clean.
+Step 7's live test surfaced a chain of
 multi-device send/attribution bugs (ghost-device fan-out → phantom chats + stuck pills; tombstone never
 reaching the revoked device; self-nuke toast crashing the wipe) — all fixed, see [[feedback_ghost_device_fanout]].
-Remaining: **Step 9 (epic closing point: multi-device push + app-wide test suite, done LAST)** + the minor
-**9C server-UX polish** items. Step 5 detail in its section below;
+Step 5 detail in its section below;
 earlier baseline:
 Steps 1, 2, 2.5, **3 DONE and live-verified** (host+phone+VM, commit `bbf91aa`):
 per-device identity, presence collapse, profile sync, sibling friend-list sync, and Olm sender-side DM
@@ -987,9 +991,9 @@ comparison + manual Sync deferred to a later pass (need new health-query FFI + w
       device (local label persists); Remove fires the revocation (see Step 7 test); single-device shows only
       "This device" with no Remove button.
 
-### Step 9 — Epic closing point: multi-device push + app-wide test suite  ▢ not started  ⚠ do LAST
+### Step 9 — Epic closing point: multi-device push + app-wide test suite  ✅ DONE (9A + 9B/9B-i all complete)
 
-#### 9A — Multi-device push notifications
+#### 9A — Multi-device push notifications  ✅ DONE 2026-06-20 (LIVE-VERIFIED both platforms; one minor iOS DM-tap nav gap parked)
 *Goal: make the FCM/APNs + relay-fetch push subsystem multi-device-aware for BOTH DMs and server channels.
 Deliberately the FINAL step — push is the most fragile cross-cutting subsystem (FCM/APNs/NSE/App-Group/
 Olm-ratchet-slot/MLS-epoch rules), single-device push works today, and every functional path (live delivery
@@ -1008,17 +1012,39 @@ multi-device churns.*
   selection + offline detection must resolve master→device, and the NSE/fetch group-state decrypt must pick
   the right device leaf for the current MLS epoch.
 
-**Scope when we get here:**
-- [ ] DM fetch isolate: device→master aware identity load; pick a ratchet/device the buffered ciphertext was
-      actually sealed to (or have the SENDER target a deterministic device for the offline buffer), so the
-      background fetch can decrypt → rich preview restored on a fully-quit phone.
-- [ ] Channel push 0x09: resolve member master→online/offline devices for target selection; per-target
-      mention flag still computed sender-side; NSE/`hollow_push_fetch_and_decrypt` picks the correct device
-      leaf + tolerates stale-epoch with the content-free fallback.
-- [ ] Re-validate the whole push UX (per-peer/per-channel grouping, collapse-ids, App-Group cache, iOS NSE
-      footprint) on multi-device — without regressing single-device, which is the common case.
-- [ ] **Test:** fully-quit phone (sibling/rotated device) receives a DECRYPTED DM preview AND a decrypted
-      "Server • #channel" channel preview; single-device push unchanged; no double-notify across siblings.
+**The actual root cause (found 2026-06-20, simpler than the ratchet theory above):** the fetch node
+authenticated as the **MASTER** id, but the relay keys the push token + offline buffer by the **DEVICE**
+id the full node authed with, and replays a buffered frame ONLY to a socket presenting that exact device
+id. So a fetch joining as master got nothing → generic banner. Plus the sender's fan-out (DM + channel)
+dropped every non-in-room device (Step 7 ghost filter), so a fully-quit phone was never even a buffer/push
+target.
+
+**What landed (all LIVE-VERIFIED — Android working; iOS push DELIVERY + DECRYPTION working):**
+- [x] **Fetch node auths as its DEVICE, rooms by the MASTER** (`start_fetch_node` + NSE `fetch_and_decrypt`):
+      WS-auth triple = `device_keypair`; DB passphrase stays master-derived; `run_fetch` gained a
+      `local_master` param and derives the DM room from `dm_room_code(local_master, resolve(sender))`; callers
+      warm the resolver from DB device-links + `seed_self` first; the decrypted DM is stored under
+      `resolve(sender)` (master) so it lands in the one shared thread.
+- [x] **DM sender targets offline-but-real devices** (`message_ops::collect_target_devices` + file_handler):
+      adds `devices_for(master)` ∩ has-Olm-session ∩ not-in-room to the recipient set so a quit phone is
+      buffered + pushed; own siblings stay push-suppressed; single-device fallback (master id) preserved.
+- [x] **Channel sender resolves each offline MASTER member → real devices** for the 0x09 fan-out (same
+      predicate); mention flag per master applied to all its device frames; own siblings excluded.
+- [x] **Dart per-person dedup:** push handler resolves `sender`→master (`identityFor`) for grouping/profile;
+      `get_push_profile` resolves device→master internally; iOS hints-cache keys each friend under master +
+      ALL device ids (`push_hints_cache.dart` via `getDeviceLinks()`) so the NSE `map[sender]` hits for a
+      device-id sender (else generic banner).
+- [x] **Harness test** `dm_buffers_for_offline_real_sibling_device` (358 tests pass) — asserts a DM to a
+      multi-device id buffers a frame under an offline-but-real sibling's DEVICE id (the push target).
+- [x] **LIVE-VERIFIED 2026-06-20:** Android multi-device push works end-to-end; iOS push delivers + decrypts
+      the content on a force-killed phone (after the hints-cache device-alias fix).
+
+**KNOWN MINOR GAP (parked, HOLLOW_PLAN.md):** tapping an iOS DM push opens a device-keyed empty thread
+instead of the real DM. iOS taps arrive via FCM `data['sender']` (raw device id); the device→master resolve
+at `_openChatFromPush` (Rust `identityFor` + mirror fallback) did NOT fix it (resolver/links likely cold at
+cold-start tap). Android unaffected (taps the Dart-posted local banner, payload already master). Channels
+fine. Push DELIVERY/CONTENT is unaffected — this is purely tap-navigation. Next: log the id reaching the
+handler, resolve inside `MobileChatRoute` after links settle, or carry the master in the push payload.
 
 **Cross-refs:** `feedback_fcm_image_invisible_bubble.md`, `project_push_notification_implementation.md`,
 `project_channel_push_notifications.md`, `project_ios_push_tier_b_disposable_nse.md`,

@@ -127,6 +127,17 @@ impl MockRelay {
         inner.rooms.get(room).cloned().unwrap_or_default()
     }
 
+    /// Number of frames currently buffered for `peer` in the offline queue. The
+    /// relay buffers a direct frame under the TARGET device id when that device
+    /// isn't in the room — and (on the real relay) fires a push to that device's
+    /// token. So `buffered_count(device) > 0` is the proxy for "this device would
+    /// have been woken by a push" (Step 9A: a quit phone must be a buffer target).
+    #[allow(dead_code)]
+    pub(crate) fn buffered_count(&self, peer: &str) -> usize {
+        let inner = self.inner.lock().unwrap();
+        inner.offline.get(peer).map(|v| v.len()).unwrap_or(0)
+    }
+
     /// Mark a node offline (simulate a disconnect): stop delivering to it, drop
     /// it from every room (broadcasting PeerLeft), so peers see it leave. Its
     /// event loop keeps running but receives nothing until it comes back.
@@ -1342,6 +1353,91 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
         !c_thread.iter().any(|m| m.text == "after-revoke"),
         "revoked device C must NOT receive the post-revocation DM (ghost fan-out guard), got {:?}",
         c_thread.iter().map(|m| &m.text).collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Step 9A push targeting: a DM to a multi-device identity must reach a fully-quit
+// (offline-but-real) sibling device via the relay's offline buffer, so the real
+// relay would fire a push to THAT device's token. Guards the Step 9A break where
+// `collect_target_devices` dropped every non-in-room device (the Step 7 ghost
+// filter) and so never targeted a quit phone at all. The complement assertion —
+// a never-contacted GHOST id is NOT buffered — is covered by the revocation test.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn dm_buffers_for_offline_real_sibling_device() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // A = friend (single device). M = our identity, two devices B + C.
+    const A_MASTER: u8 = 90;
+    const M_MASTER: u8 = 100;
+    const B_DEV: u8 = 101;
+    const C_DEV: u8 = 102;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+
+    // A's resolver must know M's devices (it's the SENDER that fans master→devices).
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+    super::resolver::update_many(&m_master, [b_dev.as_str(), c_dev.as_str()]);
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&m_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
+    sleep_ms(1200).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&a_master]).await;
+
+    // Let Olm sessions confirm all around (A↔B, A↔C). A must hold a session with C
+    // for C to qualify as an offline-REAL target (the has_session ghost filter).
+    sleep_ms(5000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+    drain_events(&mut c);
+    assert_ne!(
+        a.olm_status(&c_dev).await, "absent",
+        "A must hold an Olm session with C before C goes offline (else C is a ghost, not a real target)"
+    );
+
+    // C goes fully offline (the quit phone). B stays online.
+    relay.set_online(&c_dev, false);
+    sleep_ms(500).await;
+    drain_events(&mut c);
+
+    let before = relay.buffered_count(&c_dev);
+
+    // A DMs our identity M. B (online) gets it live; C (offline-but-real) must be
+    // buffered under its DEVICE id so the relay would push its token.
+    a.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: m_master.clone(),
+            text: "wake-the-phone".to_string(),
+            message_id: "push-target-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+
+    // B (live) receives it.
+    let b_got = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "wake-the-phone")
+    })
+    .await;
+    assert!(b_got, "online device B should receive the DM live");
+
+    // C's offline buffer GREW — the relay would push C's token (the Step 9A fix).
+    sleep_ms(400).await;
+    let after = relay.buffered_count(&c_dev);
+    assert!(
+        after > before,
+        "offline-but-real sibling C must be a buffer/push target (before={before} after={after})"
     );
 }
 

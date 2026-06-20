@@ -390,22 +390,23 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       return;
     }
 
-    try {
-      final messageId = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
-      await network_api.sendFile(
-        peerId: widget.isDm ? widget.peerId : null,
-        serverId: widget.isDm ? null : widget.serverId,
-        channelId: widget.isDm ? null : widget.channelId,
-        filePath: file.path!,
-        messageId: messageId,
-        messageText: '',
-      );
-    } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, 'Failed to send file',
-            type: HollowToastType.error);
-      }
-    }
+    // STAGE the file (don't auto-send) so the user can add a caption before
+    // sending — matches desktop (chat_pane.dart `_pickAndStageFile`). The staged
+    // preview (`_StagedFilePreview`) renders above the input bar and `_handleSend`
+    // bundles the caption + file. Re-focus after the OS returns window focus from
+    // the file dialog (a synchronous requestFocus races that restoration).
+    final ext = file.name.contains('.')
+        ? file.name.split('.').last.toLowerCase()
+        : '';
+    setState(() {
+      _stagedFilePath = file.path!;
+      _stagedFileName = file.name;
+      _stagedFileIsImage =
+          ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].contains(ext);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusNode.requestFocus();
+    });
   }
 
   void _showEmojiSheet() {
@@ -449,6 +450,79 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               );
             },
           ),
+        ),
+      ),
+    );
+  }
+
+  /// Attach menu (Telegram-style): one [+] button opens this Photo / File sheet,
+  /// so the composer doesn't crowd two separate icons into the row on small
+  /// screens. Each row reuses the existing `_pickFile` flow.
+  void _showAttachSheet() {
+    final hollow = HollowTheme.of(context);
+    Widget row({
+      required IconData icon,
+      required String label,
+      required VoidCallback onTap,
+    }) {
+      return HollowPressable(
+        onTap: () {
+          Navigator.pop(context);
+          onTap();
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.lg,
+            vertical: HollowSpacing.md,
+          ),
+          child: Row(
+            children: [
+              Icon(icon, size: 22, color: hollow.accent),
+              const SizedBox(width: HollowSpacing.md),
+              Text(
+                label,
+                style: HollowTypography.body.copyWith(color: hollow.textPrimary),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: hollow.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
+      ),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: HollowSpacing.sm),
+              child: Container(
+                width: 32,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: hollow.border,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: HollowSpacing.sm),
+            row(
+              icon: LucideIcons.image,
+              label: 'Photo',
+              onTap: () => _pickFile(imagesOnly: true),
+            ),
+            row(
+              icon: LucideIcons.paperclip,
+              label: 'File',
+              onTap: _pickFile,
+            ),
+            const SizedBox(height: HollowSpacing.sm),
+          ],
         ),
       ),
     );
@@ -809,8 +883,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                     controller: _controller,
                     focusNode: _focusNode,
                     onSend: _handleSend,
-                    onPickFile: _pickFile,
-                    onPickImage: () => _pickFile(imagesOnly: true),
+                    onAttach: _showAttachSheet,
                     onMic: _stagedFilePath != null
                         ? null
                         : () => setState(() => _isRecordingVoice = true),
@@ -1923,8 +1996,7 @@ class _MobileInputBar extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
   final VoidCallback onSend;
-  final VoidCallback onPickFile;
-  final VoidCallback onPickImage;
+  final VoidCallback onAttach;
   final VoidCallback? onMic;
   final VoidCallback onEmoji;
   final ValueChanged<String> onChanged;
@@ -1934,8 +2006,7 @@ class _MobileInputBar extends StatelessWidget {
     required this.controller,
     required this.focusNode,
     required this.onSend,
-    required this.onPickFile,
-    required this.onPickImage,
+    required this.onAttach,
     this.onMic,
     required this.onEmoji,
     required this.onChanged,
@@ -1957,17 +2028,13 @@ class _MobileInputBar extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
+          // Single attach button → Photo / File sheet (keeps the row uncrowded
+          // on small screens like the iPhone 13 mini).
           HollowPressable(
-            onTap: onPickFile,
+            onTap: onAttach,
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.sm),
-            child: Icon(LucideIcons.paperclip, color: hollow.textSecondary, size: 22),
-          ),
-          HollowPressable(
-            onTap: onPickImage,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(HollowSpacing.sm),
-            child: Icon(LucideIcons.image, color: hollow.textSecondary, size: 22),
+            child: Icon(LucideIcons.plus, color: hollow.textSecondary, size: 24),
           ),
           const SizedBox(width: HollowSpacing.xs),
           Expanded(
@@ -1990,6 +2057,19 @@ class _MobileInputBar extends StatelessWidget {
                     horizontal: HollowSpacing.md,
                     vertical: HollowSpacing.md,
                   ),
+                  // Emoji lives INSIDE the field (iMessage-style) so the row has
+                  // room for the text field to breathe.
+                  suffixIcon: HollowPressable(
+                    onTap: onEmoji,
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
+                    padding: const EdgeInsets.all(HollowSpacing.sm),
+                    child: Icon(LucideIcons.smile,
+                        color: hollow.textSecondary, size: 22),
+                  ),
+                  suffixIconConstraints: const BoxConstraints(
+                    minWidth: 40,
+                    minHeight: 40,
+                  ),
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(hollow.radiusXl),
                     borderSide: BorderSide.none,
@@ -1998,13 +2078,6 @@ class _MobileInputBar extends StatelessWidget {
                 onChanged: onChanged,
               ),
             ),
-          ),
-          const SizedBox(width: HollowSpacing.xs),
-          HollowPressable(
-            onTap: onEmoji,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(HollowSpacing.sm),
-            child: Icon(LucideIcons.smile, color: hollow.textSecondary, size: 22),
           ),
           const SizedBox(width: HollowSpacing.xs),
           HollowPressable(

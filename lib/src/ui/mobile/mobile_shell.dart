@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
@@ -65,16 +66,35 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     }
   }
 
-  void _openChatFromPush(String peerId) {
+  Future<void> _openChatFromPush(String peerId) async {
+    if (!mounted) return;
+    // Resolve device→master. A DM push `sender` is the friend's DEVICE id, but
+    // every DM thread / provider keys on the friend's MASTER id. On iOS a
+    // force-killed tap arrives via FCM `data['sender']` (the raw device id,
+    // bypassing the Dart handler's master resolution), so without this the chat
+    // opens a separate empty thread keyed on the device id. (Covers all 3 tap
+    // entry points; a single-device / unknown peer resolves to itself.)
+    //
+    // Resolve via the Rust FFI (the live node resolver is warmed at startup) —
+    // more reliable on a COLD-START tap than the `deviceLinkProvider` mirror,
+    // which warms async and could still be empty when a buffered tap fires. Fall
+    // back to the provider mirror if the FFI call fails.
+    String masterId;
+    try {
+      masterId = await network_api.identityFor(peerId: peerId);
+    } catch (_) {
+      masterId = ref.read(deviceLinkProvider).identityOf(peerId);
+    }
+    if (masterId.isEmpty) masterId = peerId;
     if (!mounted) return;
     // Already viewing this chat — nothing to do.
-    if (ref.read(selectedPeerProvider) == peerId) return;
-    ref.read(selectedPeerProvider.notifier).state = peerId;
+    if (ref.read(selectedPeerProvider) == masterId) return;
+    ref.read(selectedPeerProvider.notifier).state = masterId;
     ref.read(selectedServerProvider.notifier).state = null;
-    ref.read(unreadProvider.notifier).markDmSeen(peerId, null);
+    ref.read(unreadProvider.notifier).markDmSeen(masterId, null);
     Navigator.of(context, rootNavigator: true)
         .push(MaterialPageRoute(
-      builder: (_) => MobileChatRoute(peerId: peerId),
+      builder: (_) => MobileChatRoute(peerId: masterId),
     ))
         .then((_) {
       if (mounted) {
