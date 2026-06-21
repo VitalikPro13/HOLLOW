@@ -12,7 +12,6 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_avatars.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:proximity_sensor/proximity_sensor.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 class MobileVoiceChannelRoute extends ConsumerStatefulWidget {
@@ -37,44 +36,19 @@ class _MobileVoiceChannelRouteState
   Timer? _durationTimer;
   Duration _duration = Duration.zero;
   Offset _pipOffset = const Offset(12, 12);
-  StreamSubscription<int>? _proximitySub;
   bool _wakelockOn = false;
 
   @override
   void dispose() {
     _durationTimer?.cancel();
-    _disableProximity();
     if (_wakelockOn) {
       unawaited(WakelockPlus.disable().catchError((_) {}));
     }
     super.dispose();
   }
 
-  static bool get _isMobilePlatform => Platform.isAndroid || Platform.isIOS;
-
-  /// Blank the screen when the phone is held to the ear — only while on the
-  /// earpiece with no video content on screen.
-  void _syncProximity(VoiceChannelState vcState) {
-    if (!_isMobilePlatform) return;
-    final earpieceMode = vcState.isInVoiceChannel &&
-        !vcState.isSpeakerOn &&
-        !_hasVideo(vcState);
-    if (earpieceMode && _proximitySub == null) {
-      unawaited(
-          ProximitySensor.setProximityScreenOff(true).catchError((_) => false));
-      _proximitySub = ProximitySensor.events.listen((_) {}, onError: (_) {});
-    } else if (!earpieceMode && _proximitySub != null) {
-      _disableProximity();
-    }
-  }
-
-  void _disableProximity() {
-    if (_proximitySub == null) return;
-    _proximitySub?.cancel();
-    _proximitySub = null;
-    unawaited(
-        ProximitySensor.setProximityScreenOff(false).catchError((_) => false));
-  }
+  // Earpiece proximity (blank-on-ear-hold) is handled globally by
+  // CallProximityController so it works from any screen, not just here.
 
   /// Keep the screen awake while video/screen share is displayed.
   void _syncWakelock(bool videoShown) {
@@ -155,7 +129,6 @@ class _MobileVoiceChannelRouteState
     }
 
     final hasVideo = _hasVideo(vcState);
-    _syncProximity(vcState);
     _syncWakelock(hasVideo);
 
     return Scaffold(

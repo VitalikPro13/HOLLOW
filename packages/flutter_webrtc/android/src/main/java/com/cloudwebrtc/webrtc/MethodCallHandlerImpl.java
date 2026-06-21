@@ -142,6 +142,10 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
   public AudioProcessingController audioProcessingController;
 
+  // Hollow fork: post-APM capture makeup gain + limiter, driven by
+  // setCaptureGain. Registered on the capture-post-processing chain.
+  private com.cloudwebrtc.webrtc.audio.CaptureGainProcessor captureGainProcessor;
+
   public static class LogSink implements Loggable {
     @Override
     public void onLogMessage(String message, Severity sev, String tag) {
@@ -334,6 +338,12 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     videoEncoderFactory.setForceSWCodecList(forceSWCodecList);
 
     audioProcessingController = new AudioProcessingController();
+
+    // Hollow fork: install the post-APM makeup gain + limiter so calls aren't
+    // left at WebRTC's conservative AGC target. Process-global — covers DM
+    // calls and voice channels alike. Gain is driven live via setCaptureGain.
+    captureGainProcessor = new com.cloudwebrtc.webrtc.audio.CaptureGainProcessor();
+    audioProcessingController.capturePostProcessing.addProcessor(captureGainProcessor);
 
     factoryBuilder.setAudioProcessingFactory(audioProcessingController.externalAudioProcessingFactory);
 
@@ -777,6 +787,15 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         double volume = call.argument("volume");
         String peerConnectionId = call.argument("peerConnectionId");
         mediaStreamTrackSetVolume(trackId, volume, peerConnectionId);
+        result.success(null);
+        break;
+      }
+      case "setCaptureGain": {
+        // Hollow fork: live makeup gain for the post-APM capture processor.
+        Number gain = call.argument("gain");
+        if (gain != null && captureGainProcessor != null) {
+          captureGainProcessor.setGain(gain.floatValue());
+        }
         result.success(null);
         break;
       }

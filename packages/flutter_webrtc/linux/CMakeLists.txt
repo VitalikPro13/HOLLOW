@@ -27,6 +27,7 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_screen_capture.cc"
   "../common/cpp/src/flutter_webrtc.cc"
   "../common/cpp/src/flutter_webrtc_base.cc"
+  "../common/cpp/src/flutter_capture_gain_processor.cc"
   "../common/cpp/src/flutter_common.cc"
   "flutter_webrtc_plugin.cc"
   "flutter/core_implementations.cc"

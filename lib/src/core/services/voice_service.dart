@@ -58,7 +58,7 @@ class VoiceService {
   String? preferredCameraDeviceId;
 
   /// Microphone input gain (0.0-2.0). Applied via SetVolume on local audio track.
-  double micGain = 1.3;
+  double micGain = 1.0;
 
   /// SFrame encryption service for DM call E2EE.
   FrameCryptorService? _frameCryptor;
@@ -892,14 +892,14 @@ class VoiceService {
           'tracks: ${audioTracks.length}'
           '${audioTracks.isNotEmpty ? ", label=${audioTracks.first.label}" : ""}');
 
-      // Apply mic gain boost.
-      if (micGain != 1.0 && audioTracks.isNotEmpty) {
-        try {
-          await Helper.setVolume(micGain, audioTracks.first);
-          _log('[HOLLOW-VOICE] Applied mic gain: ${micGain.toStringAsFixed(2)}');
-        } catch (e) {
-          _log('[HOLLOW-VOICE] Failed to apply mic gain: $e');
-        }
+      // Apply mic gain via the native post-APM capture processor (makeup
+      // gain + -3 dBFS limiter). Process-global, so always set it — at 1.0
+      // it's transparent. NOT setVolume(): that only scales remote tracks.
+      try {
+        await Helper.setCaptureGain(micGain);
+        _log('[HOLLOW-VOICE] Applied capture gain: ${micGain.toStringAsFixed(2)}');
+      } catch (e) {
+        _log('[HOLLOW-VOICE] Failed to apply capture gain: $e');
       }
 
       // Apply preferred output device if set.
@@ -919,12 +919,10 @@ class VoiceService {
 
   Future<void> updateMicGain(double gain) async {
     micGain = gain;
-    if (_localStream == null) return;
-    final audioTracks = _localStream!.getAudioTracks();
-    if (audioTracks.isNotEmpty) {
-      await Helper.setVolume(gain, audioTracks.first);
-      _log('[HOLLOW-VOICE] Updated mic gain: ${gain.toStringAsFixed(2)}');
-    }
+    // Live mid-call update — native processor reads the new gain atomically.
+    // Process-global, so this works even before/without a local stream.
+    await Helper.setCaptureGain(gain);
+    _log('[HOLLOW-VOICE] Updated capture gain: ${gain.toStringAsFixed(2)}');
   }
 
   /// Add pre-captured audio tracks to the peer connection (synchronous aside

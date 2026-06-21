@@ -154,6 +154,19 @@ class Helper {
   static Future<void> setVolume(double volume, MediaStreamTrack track) =>
       NativeAudioManagement.setVolume(volume, track);
 
+  /// Set the post-APM capture makeup gain (Hollow fork addition).
+  ///
+  /// Boosts the LOCAL microphone after WebRTC's AGC/NS/EC, with a soft
+  /// limiter at ~-3 dBFS so the boost can't clip. [gain] is a linear
+  /// multiplier (1.0 = transparent). Process-global — one call covers all
+  /// local audio tracks (DM calls + voice channels). Updates take effect
+  /// live mid-call. No-op on web.
+  ///
+  /// Unlike [setVolume], which only scales REMOTE (received) tracks, this
+  /// actually affects the outgoing/local capture path.
+  static Future<void> setCaptureGain(double gain) =>
+      NativeAudioManagement.setCaptureGain(gain);
+
   /// Set the microphone mute/unmute for Flutter native
   static Future<void> setMicrophoneMute(bool mute, MediaStreamTrack track) =>
       NativeAudioManagement.setMicrophoneMute(mute, track);

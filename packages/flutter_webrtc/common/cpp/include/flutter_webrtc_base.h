@@ -28,6 +28,7 @@ namespace flutter_webrtc_plugin {
 using namespace libwebrtc;
 
 class FlutterVideoRenderer;
+class FlutterCaptureGainProcessor;
 class FlutterRTCDataChannelObserver;
 class FlutterPeerConnectionObserver;
 
@@ -51,6 +52,12 @@ class FlutterWebRTCBase {
 
   virtual scoped_refptr<RTCAudioProcessing> audio_processing() {
     return audio_processing_;
+  }
+
+  // Hollow fork: post-APM capture makeup gain + limiter. May be null if the
+  // platform's audio processing module is unavailable.
+  FlutterCaptureGainProcessor* capture_gain_processor() {
+    return capture_gain_processor_;
   }
 
   virtual scoped_refptr<RTCMediaTrack> MediaTrackForId(const std::string& id);
@@ -114,6 +121,10 @@ class FlutterWebRTCBase {
   scoped_refptr<RTCVideoDevice> video_device_;
   scoped_refptr<RTCDesktopDevice> desktop_device_;
   scoped_refptr<RTCAudioProcessing> audio_processing_;
+  // Owned raw pointer (CustomProcessing's destructor is protected, so it
+  // can't be deleted through the base interface; we delete the concrete type
+  // in ~FlutterWebRTCBase). Held alive for the lifetime of the audio pipeline.
+  FlutterCaptureGainProcessor* capture_gain_processor_ = nullptr;
   RTCConfiguration configuration_;
 
   std::map<std::string, scoped_refptr<libwebrtc::KeyProvider>> key_providers_;

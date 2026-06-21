@@ -1,5 +1,6 @@
 #include "flutter_webrtc_base.h"
 
+#include "flutter_capture_gain_processor.h"
 #include "flutter_data_channel.h"
 #include "flutter_peerconnection.h"
 
@@ -20,11 +21,23 @@ FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
   video_device_ = factory_->GetVideoDevice();
   desktop_device_ = factory_->GetDesktopDevice();
   audio_processing_ = factory_->GetAudioProcessing();
+  // Hollow fork: install the post-APM makeup gain + limiter so calls aren't
+  // left at WebRTC's conservative AGC target. Process-global — covers DM
+  // calls and voice channels alike. Gain is driven live via setCaptureGain.
+  if (audio_processing_) {
+    capture_gain_processor_ = new FlutterCaptureGainProcessor();
+    audio_processing_->SetCapturePostProcessing(capture_gain_processor_);
+  }
   event_channel_ = EventChannelProxy::Create(messenger_, task_runner_, kEventChannelName);
 }
 
 FlutterWebRTCBase::~FlutterWebRTCBase() {
   LibWebRTC::Terminate();
+  // Deleted after Terminate() so the audio pipeline no longer references it.
+  if (capture_gain_processor_) {
+    delete capture_gain_processor_;
+    capture_gain_processor_ = nullptr;
+  }
 }
 
 EventChannelProxy* FlutterWebRTCBase::event_channel() {

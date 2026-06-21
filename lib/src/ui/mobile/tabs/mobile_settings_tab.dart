@@ -2006,7 +2006,7 @@ class _MicGainSlider extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final asyncGain = ref.watch(micGainProvider);
-    final gain = asyncGain.valueOrNull ?? 1.3;
+    final gain = asyncGain.valueOrNull ?? 1.0;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2025,14 +2025,19 @@ class _MicGainSlider extends ConsumerWidget {
           ],
         ),
         Slider(
-          value: gain.clamp(0.0, 2.0),
-          min: 0.0,
-          max: 2.0,
-          divisions: 40,
+          value: gain.clamp(kMicGainMin, kMicGainMax),
+          min: kMicGainMin,
+          max: kMicGainMax,
+          divisions: 83,
           activeColor: hollow.accent,
           inactiveColor: hollow.border,
           onChanged: (v) =>
               ref.read(micGainProvider.notifier).setGain(v),
+        ),
+        Text(
+          'Boosts your outgoing voice (applies live during calls). '
+          'A limiter at -3 dB prevents clipping.',
+          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
         ),
       ],
     );

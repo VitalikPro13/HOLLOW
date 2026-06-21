@@ -3708,7 +3708,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
 
         // Mic gain slider
         Builder(builder: (context) {
-          final gain = ref.watch(micGainProvider).valueOrNull ?? 1.3;
+          final gain = ref.watch(micGainProvider).valueOrNull ?? 1.0;
           return Padding(
             padding: const EdgeInsets.only(left: 30),
             child: Row(
@@ -3734,10 +3734,10 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
                       overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
                     ),
                     child: Slider(
-                      value: gain.clamp(0.0, 2.0),
-                      min: 0.0,
-                      max: 2.0,
-                      divisions: 40,
+                      value: gain.clamp(kMicGainMin, kMicGainMax),
+                      min: kMicGainMin,
+                      max: kMicGainMax,
+                      divisions: 83,
                       onChanged: (v) => ref.read(micGainProvider.notifier).setGain(v),
                     ),
                   ),
@@ -3757,6 +3757,14 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
             ),
           );
         }),
+        Padding(
+          padding: const EdgeInsets.only(left: 30, top: 4),
+          child: Text(
+            'Boosts your outgoing voice (applies live during calls). '
+            'A limiter at -3 dB prevents clipping.',
+            style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
+          ),
+        ),
         const SizedBox(height: HollowSpacing.md),
 
         // Speaker output (win32audio)

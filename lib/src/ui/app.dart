@@ -10,6 +10,7 @@ import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/dialogs/incoming_call_dialog.dart';
+import 'package:hollow/src/ui/mobile/call_proximity_controller.dart';
 import 'package:hollow/src/ui/shell/hollow_shell.dart';
 import 'package:hollow/src/ui/shell/window_title_bar.dart';
 
@@ -87,6 +88,10 @@ class HollowApp extends ConsumerWidget {
             children: [
               child ?? const SizedBox.shrink(),
               const IncomingCallOverlay(),
+              // Global earpiece proximity (mobile): blanks the screen on
+              // ear-hold for any active call, not just while the call sheet
+              // is visible. Pure side-effect, renders nothing.
+              const CallProximityController(),
             ],
           ),
         );

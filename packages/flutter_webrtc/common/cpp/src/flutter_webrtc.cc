@@ -1,4 +1,5 @@
 #include "flutter_webrtc.h"
+#include "flutter_capture_gain_processor.h"
 #include "flutter_data_channel.h"
 
 #include "flutter_webrtc/flutter_web_r_t_c_plugin.h"
@@ -568,6 +569,23 @@ void FlutterWebRTC::HandleMethodCall(
     auto audioTrack = static_cast<RTCAudioTrack*>(track);
     audioTrack->SetVolume(volume.value());
 
+    result->Success();
+  } else if (method_call.method_name().compare("setCaptureGain") == 0) {
+    // Hollow fork: live makeup gain for the post-APM capture processor.
+    auto args = method_call.arguments();
+    if (!args) {
+      result->Error("Bad Arguments", "setCaptureGain() Null arguments received");
+      return;
+    }
+    const EncodableMap params = GetValue<EncodableMap>(*args);
+    const std::optional<double> gain = maybeFindDouble(params, "gain");
+    if (!gain.has_value()) {
+      result->Error("Bad Arguments", "setCaptureGain() No gain provided");
+      return;
+    }
+    if (capture_gain_processor()) {
+      capture_gain_processor()->SetGain(static_cast<float>(gain.value()));
+    }
     result->Success();
   } else if (method_call.method_name().compare("getLocalDescription") == 0) {
     if (!method_call.arguments()) {

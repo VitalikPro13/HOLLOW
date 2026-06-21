@@ -49,7 +49,7 @@ class VoiceChannelService {
   String? preferredCameraDeviceId;
 
   /// Microphone input gain (0.0-2.0). Applied via SetVolume on local audio track.
-  double micGain = 1.3;
+  double micGain = 1.0;
 
   /// VAD: set of currently speaking peer IDs (updated every 200ms).
   final Set<String> _speakingPeers = {};
@@ -161,14 +161,14 @@ class VoiceChannelService {
       final tracks = _localAudioStream!.getAudioTracks();
       _vcLog('[HOLLOW-VC] Got local audio, tracks=${tracks.length}');
 
-      // Apply mic gain boost.
-      if (micGain != 1.0 && tracks.isNotEmpty) {
-        try {
-          await Helper.setVolume(micGain, tracks.first);
-          _vcLog('[HOLLOW-VC] Applied mic gain: ${micGain.toStringAsFixed(2)}');
-        } catch (e) {
-          _vcLog('[HOLLOW-VC] Failed to apply mic gain: $e');
-        }
+      // Apply mic gain via the native post-APM capture processor (makeup
+      // gain + -3 dBFS limiter). Process-global, so always set it — at 1.0
+      // it's transparent. NOT setVolume(): that only scales remote tracks.
+      try {
+        await Helper.setCaptureGain(micGain);
+        _vcLog('[HOLLOW-VC] Applied capture gain: ${micGain.toStringAsFixed(2)}');
+      } catch (e) {
+        _vcLog('[HOLLOW-VC] Failed to apply capture gain: $e');
       }
     } catch (e) {
       _vcLog('[HOLLOW-VC] Failed to capture audio: $e');
@@ -637,12 +637,10 @@ class VoiceChannelService {
 
   Future<void> updateMicGain(double gain) async {
     micGain = gain;
-    if (_localAudioStream == null) return;
-    final tracks = _localAudioStream!.getAudioTracks();
-    if (tracks.isNotEmpty) {
-      await Helper.setVolume(gain, tracks.first);
-      _vcLog('[HOLLOW-VC] Updated mic gain: ${gain.toStringAsFixed(2)}');
-    }
+    // Live mid-session update — native processor reads the new gain
+    // atomically. Process-global, so works without a local stream too.
+    await Helper.setCaptureGain(gain);
+    _vcLog('[HOLLOW-VC] Updated capture gain: ${gain.toStringAsFixed(2)}');
   }
 
   Future<void> setRemoteVolume(String peerId, double volume) async {

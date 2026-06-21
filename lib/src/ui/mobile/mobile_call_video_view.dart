@@ -1,10 +1,8 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:proximity_sensor/proximity_sensor.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -33,7 +31,6 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
   Timer? _durationTimer;
   Duration _duration = Duration.zero;
   Offset _pipOffset = const Offset(12, 12);
-  StreamSubscription<int>? _proximitySub;
   bool _wakelockOn = false;
 
   /// Last logged video-gate tuple — log only on change (diagnostics for the
@@ -43,7 +40,6 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
   @override
   void dispose() {
     _durationTimer?.cancel();
-    _disableProximity();
     if (_wakelockOn) {
       unawaited(WakelockPlus.disable().catchError((_) {}));
     }
@@ -57,34 +53,8 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     unawaited(WakelockPlus.toggle(enable: videoShown).catchError((_) {}));
   }
 
-  static bool get _isMobilePlatform => Platform.isAndroid || Platform.isIOS;
-
-  /// Blank the screen when the phone is held to the ear — but only while
-  /// audio actually plays through the earpiece (no speaker, no video).
-  void _syncProximity(CallState call) {
-    if (!_isMobilePlatform) return;
-    final earpieceMode = call.status == CallStatus.active &&
-        !call.isSpeakerOn &&
-        !call.isVideoEnabled &&
-        !call.remoteVideoEnabled;
-    if (earpieceMode && _proximitySub == null) {
-      // Android: explicit wake-lock-backed screen-off. iOS blanks natively
-      // while the events stream is subscribed (proximityMonitoringEnabled).
-      unawaited(
-          ProximitySensor.setProximityScreenOff(true).catchError((_) => false));
-      _proximitySub = ProximitySensor.events.listen((_) {}, onError: (_) {});
-    } else if (!earpieceMode && _proximitySub != null) {
-      _disableProximity();
-    }
-  }
-
-  void _disableProximity() {
-    if (_proximitySub == null) return;
-    _proximitySub?.cancel();
-    _proximitySub = null;
-    unawaited(
-        ProximitySensor.setProximityScreenOff(false).catchError((_) => false));
-  }
+  // Earpiece proximity (blank-on-ear-hold) is handled globally by
+  // CallProximityController so it works from any screen, not just here.
 
   void _startTimer(DateTime startedAt) {
     _durationTimer?.cancel();
@@ -163,8 +133,6 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
       _durationTimer?.cancel();
       _durationTimer = null;
     }
-
-    _syncProximity(call);
 
     final showVideo = _hasRealVideo(call);
     _syncWakelock(showVideo);

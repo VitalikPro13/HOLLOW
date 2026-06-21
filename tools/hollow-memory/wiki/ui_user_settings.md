@@ -281,7 +281,7 @@ All use `_buildDeviceRow()` — a Row with icon (14px), label (80px fixed width)
 
 **Microphone** — `LucideIcons.mic`, items from `_audioInputs`. Value stored via `audioInputDeviceProvider.notifier.setDevice()`.
 
-**Mic Gain** — Slider (0%-200%, 40 divisions) indented below the Microphone row. Default 130%. Reads/writes `micGainProvider`. Applied to local audio track via `Helper.setVolume()` post-APM.
+**Mic Gain** — Slider (34%–200%, 83 divisions) indented below the Microphone row, with a caption line ("Boosts your outgoing voice… limiter at -3 dB prevents clipping."). Default 100%. Reads/writes `micGainProvider` (clamped to `kMicGainMin`=0.34 / `kMicGainMax`=2.0 in `settings_provider.dart`). Drives the native **post-APM capture makeup gain + soft limiter** via `Helper.setCaptureGain()` (NOT `setVolume`, which only scales remote tracks — see `services_media_storage.md` / the voice services). Floor is 0.34 not 0 because the gain feeds a real native stage; 0 would mute the user. Applies live mid-call.
 
 **Speaker** — `LucideIcons.volume2`, items from `_audioOutputs`. On change, also calls `webrtc.Helper.selectAudioOutput(deviceId)` to apply immediately to WebRTC.
 

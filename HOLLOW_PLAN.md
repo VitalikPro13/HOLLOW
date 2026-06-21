@@ -1935,9 +1935,9 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] Offline label in Server header doesn't change itself when somebody is online.
 - [X] NSFW label for server
 - [X] Local notifications when desktop/mobile in background (proper ones)
+- [X] Calls are too quiet. They need proper normalization and testing. Maybe echo cancellation or noise suppression are the main suspects here
 - [ ] Camera front/back switching + double-side at the same time on mobile
 - [ ] Pill switching for mobile between screen and camera during calls
-- [ ] Calls are too quiet. They need proper normalization and testing. Maybe echo cancellation or noise suppression are the main suspects here
 - [ ] Image/file loading for the mobile (replicate the instant appearing; though, I feel like that it's a phone limitation)
 - [ ] Annotation on someone else's screen
 - [ ] Conference as in Zoom (join link, only need identity in app; web without identity like public channels - consider later and research pros/cons)

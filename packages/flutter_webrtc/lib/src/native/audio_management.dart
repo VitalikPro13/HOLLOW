@@ -48,6 +48,21 @@ class NativeAudioManagement {
     return Future.value();
   }
 
+  /// Set the post-APM capture makeup gain (Hollow fork addition).
+  ///
+  /// Drives a native capture-post-processor that runs AFTER WebRTC's
+  /// AGC/NS/EC on the local microphone, applying makeup gain followed by a
+  /// soft limiter (~-3 dBFS ceiling). [gain] is a linear multiplier
+  /// (1.0 = transparent). Process-global: affects every local audio track,
+  /// so a single call covers both DM calls and server voice channels. No-op
+  /// on web (no native APM hook).
+  static Future<void> setCaptureGain(double gain) async {
+    if (kIsWeb) return;
+    await WebRTC.invokeMethod('setCaptureGain', <String, dynamic>{
+      'gain': gain,
+    });
+  }
+
   static Future<void> setMicrophoneMute(
       bool mute, MediaStreamTrack track) async {
     if (track.kind != 'audio') {

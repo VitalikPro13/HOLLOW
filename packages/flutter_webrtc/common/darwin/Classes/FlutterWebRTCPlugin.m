@@ -15,6 +15,7 @@
 #import "FlutterRTCVideoPlatformViewController.h"
 #endif
 #import "AudioManager.h"
+#import "CaptureGainProcessor.h"
 
 #import <AVFoundation/AVFoundation.h>
 #import <WebRTC/RTCFieldTrials.h>
@@ -125,6 +126,9 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
   BOOL _speakerOnButPreferBluetooth;
   AVAudioSessionPort _preferredInput;
   AudioManager* _audioManager;
+  // Hollow fork: post-APM capture makeup gain + limiter, driven by
+  // setCaptureGain. Registered on the shared capture-post-processing adapter.
+  CaptureGainProcessor* _captureGainProcessor;
 #if TARGET_OS_IPHONE
   FLutterRTCVideoPlatformViewFactory *_platformViewFactory;
 #endif
@@ -189,6 +193,12 @@ static FlutterWebRTCPlugin *sharedSingleton;
     _speakerOnButPreferBluetooth = NO;
     _eventChannel = eventChannel;
     _audioManager = AudioManager.sharedInstance;
+    // Hollow fork: install the post-APM makeup gain + limiter so calls aren't
+    // left at WebRTC's conservative AGC target. The capturePostProcessingAdapter
+    // is process-global, so this covers DM calls and voice channels alike.
+    // Gain is driven live via setCaptureGain.
+    _captureGainProcessor = [[CaptureGainProcessor alloc] init];
+    [_audioManager.capturePostProcessingAdapter addProcessing:_captureGainProcessor];
 
 #if TARGET_OS_IPHONE
     _preferredInput = AVAudioSessionPortHeadphones;
@@ -1320,6 +1330,14 @@ static FlutterWebRTCPlugin *sharedSingleton;
       RTCAudioTrack* audioTrack = (RTCAudioTrack*)track;
       RTCAudioSource* audioSource = audioTrack.source;
       audioSource.volume = [volume doubleValue];
+    }
+    result(nil);
+  } else if ([@"setCaptureGain" isEqualToString:call.method]) {
+    // Hollow fork: live makeup gain for the post-APM capture processor.
+    NSDictionary* argsMap = call.arguments;
+    NSNumber* gain = argsMap[@"gain"];
+    if (gain != nil && _captureGainProcessor != nil) {
+      [_captureGainProcessor setGain:[gain floatValue]];
     }
     result(nil);
   } else if ([@"setMicrophoneMute" isEqualToString:call.method]) {

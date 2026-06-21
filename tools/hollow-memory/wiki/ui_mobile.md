@@ -578,7 +578,7 @@ Added to `_SystemTab` in `mobile_settings_tab.dart`:
 
 ### Voice & Audio Section
 - **Audio quality picker**: 3 pills (Voice/Music/Hi-Fi) with description label underneath. Reads/writes `audioQualityProvider`
-- **Mic gain slider**: 0–200%, 40 divisions, default 130%. Reads/writes `micGainProvider`. Display label as percentage
+- **Mic gain slider** (`_MicGainSlider`): 34%–200%, 83 divisions, default 100%, with a caption line. Reads/writes `micGainProvider` (clamped 0.34–2.0). Drives the native **post-APM capture makeup gain + -3 dB soft limiter** via `Helper.setCaptureGain()` (the old `setVolume` on the local track was a no-op for outgoing audio). Floor 34% (not 0) so it can't mute. Applies live mid-call
 - **Audio processing info**: Echo cancellation, noise suppression, AGC shown as "Auto" (always on)
 
 ### Ringtone Section
@@ -856,7 +856,7 @@ Defaults: 1:1 voice → earpiece, 1:1 video → speaker, camera-on mid-call → 
 Muted badge = bottom-LEFT, deafened badge = bottom-RIGHT (red box, white icon, `micOff`/`headphoneOff`). Widgets: `_AvatarBadge` in `mobile_voice_avatars.dart` (`MobileSpeakingAvatar.isMuted/isDeafened`, `MobileClusteredAvatars.mutedSet/deafenedSet`), desktop 1:1 `_badgedCallAvatar` in `chat_pane.dart`. Data: VC = `peerAudioStates`; 1:1 = `CallState.isMuted/isDeafened/remoteMuted/remoteDeafened` (synced via the `audio_state` call signal — see providers_voice_files.md).
 
 ### Proximity + wakelock
-`_syncProximity` in both screens: `proximity_sensor` screen-off when in earpiece mode (no speaker, no video/screenshare); Android needs WAKE_LOCK (present), iOS blanks natively while the events stream is subscribed. `_syncWakelock`: `wakelock_plus` (^1.5.2 — 1.6+ conflicts with file_picker via win32) keeps the screen on while video/screen share is displayed; disabled in dispose.
+**Proximity is GLOBAL (since 2026-06-21), not per-screen.** `CallProximityController` (`lib/src/ui/mobile/call_proximity_controller.dart`) — a pure side-effect `ConsumerWidget` mounted in `app.dart`'s mobile `Stack` (next to `IncomingCallOverlay`, always alive) — watches BOTH `callProvider` and `voiceChannelProvider` and engages `proximity_sensor` screen-off whenever EITHER is in earpiece mode (active call/VC, no speaker, no local/remote video; `_vcHasVideo` mirrors the VC route's `_hasVideo`). This blanks the screen on ear-hold from ANY screen, not just the call sheet (the old per-screen `_syncProximity` only ran while that widget was built). Android needs WAKE_LOCK (present); iOS blanks natively while the events stream is subscribed. **Wakelock stays screen-scoped:** `_syncWakelock` in each call screen uses `wakelock_plus` (^1.5.2 — 1.6+ conflicts with file_picker via win32) to keep the screen on while video/screen share is displayed; disabled in dispose.
 
 ### Incoming screen share on mobile (1:1)
 `_hasRealVideo` and `_buildVideoView` check `call.remoteScreenSharing && notifier.screenShareRenderer?.srcObject != null`; the share renders full-bleed inside `InteractiveViewer(maxScale: 6)` (pinch-zoom), taking priority over camera feeds, with the local camera PiP on top. The VC screen-share view got the same InteractiveViewer wrap. (Before 2026-06 the mobile 1:1 view was camera-only and silently ignored an incoming share.)

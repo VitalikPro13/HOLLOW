@@ -195,20 +195,27 @@ class AudioQualityNotifier extends AsyncNotifier<AudioQualityPreset> {
 final micGainProvider =
     AsyncNotifierProvider<MicGainNotifier, double>(MicGainNotifier.new);
 
+/// Mic gain bounds. Floor is 0.34 (not 0): the gain feeds a real native
+/// makeup-gain stage, so 0 would mute the user. 34% keeps things audible even
+/// at the bottom (and is a little wink). A -3 dB limiter caps the top.
+const double kMicGainMin = 0.34;
+const double kMicGainMax = 2.0;
+
 class MicGainNotifier extends AsyncNotifier<double> {
   @override
   Future<double> build() async {
     final val = await storage_api.loadSetting(key: 'mic_gain');
-    if (val == null || val.isEmpty) return 1.3;
-    return double.tryParse(val) ?? 1.3;
+    if (val == null || val.isEmpty) return 1.0;
+    return (double.tryParse(val) ?? 1.0).clamp(kMicGainMin, kMicGainMax);
   }
 
   Future<void> setGain(double gain) async {
+    final clamped = gain.clamp(kMicGainMin, kMicGainMax);
     await storage_api.saveSetting(
       key: 'mic_gain',
-      value: gain.toStringAsFixed(2),
+      value: clamped.toStringAsFixed(2),
     );
-    state = AsyncData(gain);
+    state = AsyncData(clamped);
   }
 }
 
