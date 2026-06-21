@@ -438,12 +438,20 @@ class _HollowWindowListener extends WindowListener {
   @override
   void onWindowFocus() {
     SharedTickers.instance.resume();
+    _container.read(windowFocusedProvider.notifier).state = true;
     // On macOS the window is re-shown natively from the Dock
     // (applicationShouldHandleReopen) without going through the tray restore
     // path, so sync the visible state here.
     if (Platform.isMacOS) {
       _container.read(windowVisibleProvider.notifier).state = true;
     }
+  }
+
+  @override
+  void onWindowBlur() {
+    // Window lost focus (alt-tabbed / clicked another app). Drives native-toast
+    // gating so messages in the open conversation still notify while we're away.
+    _container.read(windowFocusedProvider.notifier).state = false;
   }
 
   @override

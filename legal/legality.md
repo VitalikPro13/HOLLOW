@@ -1,8 +1,8 @@
-# Hollow — Legal Landscape Research
+# Hollow: Legal Research
 
 *Last updated: Jun 21, 2026*
 
-Comprehensive research into age verification laws, illegal-content/CSAM, encryption regulations, and legal liability for encrypted messaging infrastructure providers. Covers the US, UK, and EU.
+Research into age verification laws, illegal-content/CSAM, encryption regulations, and legal liability for encrypted messaging infrastructure providers. Covers the US, UK, and EU.
 
 > **This is not legal advice.** It is research. A qualified attorney should validate jurisdiction-specific current status before any operational reliance.
 
@@ -18,7 +18,7 @@ Comprehensive research into age verification laws, illegal-content/CSAM, encrypt
    - [Legal Classification of Hollow](#legal-classification-of-hollow-us)
 3. [United Kingdom](#united-kingdom)
    - [Online Safety Act 2023](#online-safety-act-2023)
-   - [Section 122 — Client-Side Scanning](#section-122--client-side-scanning)
+   - [Section 122: Client-Side Scanning](#section-122-client-side-scanning)
    - [Investigatory Powers Act (IPA)](#investigatory-powers-act-ipa)
    - [Enforcement to Date](#uk-enforcement-to-date)
 4. [European Union](#european-union)
@@ -38,13 +38,13 @@ Comprehensive research into age verification laws, illegal-content/CSAM, encrypt
    - [The Tor Project](#the-tor-project)
 6. [How E2EE Peers Are Handling This](#how-e2ee-peers-are-handling-this)
 7. [Illegal Content and CSAM Liability](#illegal-content-and-csam-liability)
-   - [US — The Reporting Duty (§ 2258A)](#united-states--the-reporting-duty-18-usc--2258a)
-   - [US — The Criminal CSAM Statutes (§ 2252 / § 2252A)](#united-states--the-criminal-csam-statutes--2252--2252a)
-   - [US — Section 230 Does Not Change This](#united-states--section-230-does-not-change-this-and-doesnt-need-to)
-   - [US — The EARN IT Act](#united-states--the-forward-looking-threat-the-earn-it-act)
+   - [US: The Reporting Duty (§ 2258A)](#united-states-the-reporting-duty-18-usc--2258a)
+   - [US: The Criminal CSAM Statutes (§ 2252 / § 2252A)](#united-states-the-criminal-csam-statutes--2252--2252a)
+   - [US: Section 230 Does Not Change This](#united-states-section-230-does-not-change-this-and-doesnt-need-to)
+   - [US: The EARN IT Act](#united-states-the-earn-it-act-forward-looking-threat)
    - [Client-Side Scanning: The Trap, Not the Solution](#client-side-scanning-the-trap-not-the-solution)
-   - [UK — OSA §121/§122 (Dormant)](#united-kingdom--osa-121122-dormant)
-   - [EU — The "Mere Conduit" Shield](#european-union--the-mere-conduit-shield)
+   - [UK: OSA §121/§122 (Dormant)](#united-kingdom-osa-121122-dormant)
+   - [EU: The "Mere Conduit" Shield](#european-union-the-mere-conduit-shield)
    - [Precedent: Knowledge and Control, Not "Encryption"](#precedent-the-line-is-knowledge-and-control-not-encryption)
    - [No Capability ≠ Willful Blindness](#staying-on-the-safe-side-no-capability--willful-blindness)
 8. [Hollow's Legal Position](#hollows-legal-position)
@@ -55,16 +55,16 @@ Comprehensive research into age verification laws, illegal-content/CSAM, encrypt
 
 ## Executive Summary
 
-As of May 2026, **no end-to-end encrypted messaging app has been banned, fined, or forced to add backdoors in the US, UK, or EU.** Not Signal, not Session, not SimpleX, not Briar. The legal landscape is broadly favorable for encrypted, zero-knowledge infrastructure.
+As of May 2026, **no end-to-end encrypted messaging app has been banned, fined, or forced to add backdoors in the US, UK, or EU.** Not Signal, not Session, not SimpleX, not Briar. The law is broadly favorable for encrypted, zero-knowledge infrastructure.
 
-Hollow's architecture — E2EE with per-user Ed25519 keys, RAM-only relay that cannot decrypt content, zero metadata storage, no accounts, no phone numbers — places it in the lightest regulatory tier under every existing legal framework.
+Hollow's architecture (E2EE with per-user Ed25519 keys, a RAM-only relay that cannot decrypt content, zero metadata storage, no accounts, no phone numbers) places it in the lightest regulatory tier under every existing legal framework.
 
-Age verification laws target **social media platforms** (services with public user-generated content, algorithmic recommendation, community forums). Encrypted private messaging apps have explicit carve-outs or are excluded by definition in every major law.
+Age verification laws target **social media platforms**: services with public user-generated content, algorithmic recommendation, and community forums. Encrypted private messaging apps have explicit carve-outs or are excluded by definition in every major law.
 
 The strongest legal protections come from:
 - **Podchasov v. Russia (ECHR, 2024):** Encryption backdoors violate fundamental human rights. Binding on 46 countries. [34]
-- **Section 230 (US):** Conduit providers not liable for transmitted content. [18]
-- **EU E-Commerce Directive, Article 12:** "Mere conduit" providers not liable for content they didn't initiate, select, or modify. [46]
+- **Section 230 (US):** Conduit providers are not liable for transmitted content. [18]
+- **EU E-Commerce Directive, Article 12:** "Mere conduit" providers are not liable for content they didn't initiate, select, or modify. [46]
 - **Windscribe (2025):** RAM-only, no-logs infrastructure operator acquitted. [28][29]
 - **Signal subpoenas:** "We designed it so we cannot comply" accepted by US courts. [31][32]
 
@@ -74,7 +74,7 @@ The strongest legal protections come from:
 
 ### KOSA (Kids Online Safety Act)
 
-**Status: NOT law.** The Senate passed KOSA 91-3 in July 2024, but it died in the 118th Congress without a House vote. Reintroduced in the 119th Congress (S.1748, May 2025) [1]. A House companion (KIDS Act, H.R.6484) advanced from subcommittee in March 2026 but gutted the Senate version's "duty of care" provision [2][3]. As of May 2026, not signed into law.
+**Status: NOT law.** The Senate passed KOSA 91-3 in July 2024, but it died in the 118th Congress without a House vote. It was reintroduced in the 119th Congress (S.1748, May 2025) [1]. A House companion (KIDS Act, H.R.6484) advanced from subcommittee in March 2026 but gutted the Senate version's "duty of care" provision [2][3]. As of May 2026, it is not signed into law.
 
 **What it would require (Senate version):**
 - Platforms must provide minors with options to protect their information
@@ -82,11 +82,11 @@ The strongest legal protections come from:
 - FTC enforcement with rulemaking authority
 - Threshold: 10M+ monthly active US users providing community forums for user-generated content [4]
 
-**Critical: Direct messaging services are explicitly exempt** as long as they focus on private communication (not public posting) and are not a component of a broader platform [1][4]. A pure E2EE messaging app like Hollow would fall within this exemption.
+**Critical: Direct messaging services are explicitly exempt** as long as they focus on private communication (not public posting) and are not a component of a broader platform [1][4]. A pure E2EE messaging app like Hollow falls within this exemption.
 
 ### State Age Verification Laws
 
-Roughly half of US states have enacted some form of age verification law [5][6]. **All target "social media platforms"** defined as services that:
+Roughly half of US states have enacted some form of age verification law [5][6]. **All target "social media platforms,"** defined as services that:
 - Allow users to create public profiles
 - Publish user-generated content to an audience
 - Use algorithmic recommendation/curation
@@ -108,7 +108,7 @@ Key states with active laws:
 
 **No E2EE messaging app has been required to implement age verification in any US state.** Signal's terms require users to be 13+ (self-declared), with no additional verification mandated by any jurisdiction.
 
-**The Nevada exception to watch:** Nevada's AG sought a court order to prohibit Meta from enabling E2EE in Facebook Messenger for users under 18. The court described E2EE as "an essential tool of child predators." The EFF and ACLU filed a brief in January 2026 arguing encryption is essential for children's safety [14]. This case is specific to Meta (a social media company adding E2EE on top), not to dedicated E2EE messaging apps.
+**The Nevada exception to watch:** Nevada's AG sought a court order to prohibit Meta from enabling E2EE in Facebook Messenger for users under 18. The court described E2EE as "an essential tool of child predators." The EFF and ACLU filed a brief in January 2026 arguing encryption is essential for children's safety [14]. This case is specific to Meta, a social media company adding E2EE on top, not to dedicated E2EE messaging apps.
 
 ### App Store Accountability Acts
 
@@ -122,22 +122,22 @@ A newer generation of laws that push age verification to app stores (Apple/Googl
 | Alabama | HB 161 | Feb 2026 | Active |
 | California | AB 1043 (DAAA) | Jan 2027 | Pending [9][10] |
 
-How they work: Apple/Google verify user age at the OS/app store level and provide an "age signal" to developers. The burden falls primarily on the stores. Apple has already begun implementing this in Utah, Louisiana, and Australia [13]. App developers don't need to build their own age verification.
+How they work: Apple and Google verify user age at the OS/app store level and provide an "age signal" to developers. The burden falls primarily on the stores. Apple has already begun implementing this in Utah, Louisiana, and Australia [13]. App developers don't need to build their own age verification.
 
 ### Legal Classification of Hollow (US)
 
 US law uses several overlapping classifications:
 
-1. **Interactive Computer Service (Section 230):** Broad — covers most online services. Provides liability immunity for third-party content. [18]
+1. **Interactive Computer Service (Section 230):** Broad enough to cover most online services. Provides liability immunity for third-party content. [18]
 
 2. **Electronic Communications Service (ECPA):** Services that enable sending/receiving electronic communications. E2EE services that cannot access content have minimal disclosure obligations. [19]
 
 3. **The three-tier hierarchy for age verification laws:**
-   - **Social media platforms** (Instagram, TikTok, Discord) — Primary targets of all age verification laws
-   - **Communications services** (Signal, Session, Hollow) — Generally exempt due to "direct messaging" carve-outs [1]
-   - **Infrastructure providers** (ISPs, VPNs, relay servers) — Explicitly excluded from social media laws
+   - **Social media platforms** (Instagram, TikTok, Discord): primary targets of all age verification laws
+   - **Communications services** (Signal, Session, Hollow): generally exempt due to "direct messaging" carve-outs [1]
+   - **Infrastructure providers** (ISPs, VPNs, relay servers): explicitly excluded from social media laws
 
-**Hollow's relay = infrastructure provider.** Hollow the app = private communications service. Neither matches any "social media platform" definition in any existing state or federal law.
+**Hollow's relay is an infrastructure provider.** Hollow the app is a private communications service. Neither matches any "social media platform" definition in any existing state or federal law.
 
 ---
 
@@ -145,7 +145,7 @@ US law uses several overlapping classifications:
 
 ### Online Safety Act 2023
 
-Received Royal Assent October 2023, phased in through 2024-2026 [20]. Regulates **"user-to-user services"** — any internet service where user-generated content can be encountered by other users. This technically includes messaging apps.
+Received Royal Assent October 2023, phased in through 2024-2026 [20]. Regulates **"user-to-user services,"** meaning any internet service where user-generated content can be encountered by other users. This technically includes messaging apps.
 
 **Age verification is required only for:**
 - Services hosting pornographic content
@@ -158,18 +158,18 @@ Received Royal Assent October 2023, phased in through 2024-2026 [20]. Regulates 
 
 All regulated services must conduct illegal content risk assessments and have reporting mechanisms [21]. But **small, low-risk services** need only "basic but important measures" if risk assessment shows low risk.
 
-**Messaging apps are technically in scope** but the practical enforcement risk for a small E2EE app with zero user data is currently very low. SimpleX Chat — the closest comparable to Hollow (no user IDs, no metadata, UK-registered company) — has received **zero enforcement actions or data requests** [47].
+**Messaging apps are technically in scope,** but the practical enforcement risk for a small E2EE app with zero user data is currently very low. SimpleX Chat, the closest comparable to Hollow (no user IDs, no metadata, UK-registered company), has received **zero enforcement actions or data requests** [47].
 
-### Section 122 — Client-Side Scanning
+### Section 122: Client-Side Scanning
 
-The most controversial provision. Empowers Ofcom to issue notices requiring services to scan private messages for CSAM/terrorism content, even on E2EE platforms (client-side scanning) [22][23].
+The most controversial provision. It empowers Ofcom to issue notices requiring services to scan private messages for CSAM/terrorism content, even on E2EE platforms (client-side scanning) [22][23].
 
 **Status: DORMANT.** The UK government admitted no technology exists to do this without breaking encryption [24]. The clause remains in the law but:
 - No "accredited technology" has been designated
 - Ofcom has shown little appetite to activate it
 - Signal and WhatsApp both threatened to leave the UK rather than comply [21]
-- Neither has been asked to do anything — both still operate in the UK
-- Privacy advocates call it a "sword of Damocles" — dormant power that could theoretically be activated [22]
+- Neither has been asked to do anything, and both still operate in the UK
+- Privacy advocates call it a "sword of Damocles": a dormant power that could theoretically be activated [22]
 
 ### Investigatory Powers Act (IPA)
 
@@ -182,7 +182,7 @@ Separate from the OSA. Allows the Home Office to issue secret **Technical Capabi
 - Under US diplomatic pressure, the UK reportedly withdrew the demand [51]
 - A separate challenge by Privacy International and Liberty continues
 
-This is the scarier law — but it targets companies with infrastructure/presence in the UK. It has only been used against Apple so far.
+This is the scarier law, but it targets companies with infrastructure or presence in the UK. It has only been used against Apple so far.
 
 ### UK Enforcement to Date
 
@@ -204,12 +204,12 @@ All OSA fines issued as of May 2026 have targeted [26][27]:
 
 ### Chat Control (CSAR)
 
-Proposed regulation to combat CSAM online. Would require messaging services — including E2EE — to scan messages [38].
+Proposed regulation to combat CSAM online. Would require messaging services, including E2EE, to scan messages [38].
 
 **Status as of May 2026:**
 - **Chat Control 1.0 (voluntary scanning derogation): DEAD.** European Parliament voted 311-228 to reject extending the ePrivacy derogation on March 26, 2026. It expired April 3, 2026 [39][40]. Platforms can no longer voluntarily scan messages in the EU.
-- **Chat Control 2.0 (permanent CSAR): In trilogue negotiations.** Council reached a position in November 2025 (dropped mandatory E2EE scanning) [37]. Political trilogues ongoing, targeted for July 2026 deal [52].
-- **Parliament vs. Council split:** Parliament excludes E2EE from scanning, rejects mandatory age verification, demands judicial warrants. Council allows voluntary scanning and age verification [39][53].
+- **Chat Control 2.0 (permanent CSAR): In trilogue negotiations.** Council reached a position in November 2025 (dropped mandatory E2EE scanning) [37]. Political trilogues are ongoing, targeted for a July 2026 deal [52].
+- **Parliament vs. Council split:** Parliament excludes E2EE from scanning, rejects mandatory age verification, and demands judicial warrants. Council allows voluntary scanning and age verification [39][53].
 
 **Current practical impact: NONE.** There is no legal requirement to scan messages in the EU. The voluntary basis expired. The permanent regulation is still under negotiation.
 
@@ -217,30 +217,30 @@ Proposed regulation to combat CSAM online. Would require messaging services — 
 
 In force since February 2024. Creates a tiered regulatory framework [44][45]:
 
-**Tier 1 — Intermediary Services (lightest obligations):**
+**Tier 1, Intermediary Services (lightest obligations):**
 - **Mere conduit:** Transmits or provides access to a communication network. Examples: ISPs, VPNs, DNS, VoIP. Not liable for transmitted content if they didn't initiate, select, or modify it. **Hollow's relay fits here.** [46]
 - **Caching:** Temporary storage for transmission efficiency.
 - **Hosting:** Stores information at user request.
 
-**Tier 2 — Online Platforms (enhanced obligations):**
+**Tier 2, Online Platforms (enhanced obligations):**
 - Subset of hosting that stores AND disseminates information to the public.
 - **Private messaging services are explicitly excluded:** "Interpersonal communication services, such as emails or private messaging services, fall outside the scope of the definition of online platforms as they are used for interpersonal communication between a finite number of persons determined by the sender." [44]
 
-**Tier 3 — Very Large Online Platforms (VLOPs, heaviest):**
+**Tier 3, Very Large Online Platforms (VLOPs, heaviest):**
 - 45M+ monthly active EU users.
 - Currently designated: Google, Meta, Amazon, Apple, TikTok, X, Wikipedia, Booking.com [43].
-- WhatsApp designated VLOP only for its "Channels" feature — private messaging excluded [43].
+- WhatsApp is designated a VLOP only for its "Channels" feature; private messaging is excluded [43].
 
 **Note on public channels:** If Hollow's public channels disseminate content to unlimited recipients, those specific features could partially fall under "online platform" scope. The private messaging portion remains excluded regardless.
 
 ### GDPR for Zero-Data Services
 
-GDPR applies to "processing of personal data." If Hollow genuinely processes no personal data [54][55]:
+GDPR applies to "processing of personal data." If Hollow in fact processes no personal data [54][55]:
 - **IP addresses are personal data under GDPR.** But if the relay never logs IPs (not even in access logs), this trigger is removed.
 - **Transient RAM processing** (e.g., per-IP rate limiting held in memory only, never persisted) is a gray area. Many lawyers argue it technically counts, but enforcement against ephemeral non-logged processing is practically impossible.
 - **Anonymized data** (truly anonymized beyond re-identification) is outside GDPR scope.
 - A privacy policy stating "we collect nothing" is still recommended for transparency compliance even if no data is processed.
-- **Data Protection Impact Assessment (DPIA):** Only required when processing creates "high risk" — a zero-data service wouldn't trigger this.
+- **Data Protection Impact Assessment (DPIA):** Only required when processing creates "high risk," which a zero-data service wouldn't trigger.
 
 ### EU Stance on Encryption
 
@@ -253,9 +253,9 @@ Contradictory and actively contested:
 - 89 tech industry signatories signed an open letter against this [42]
 
 **Against backdoors (ECHR ruling + Parliament):**
-- **Podchasov v. Russia (ECHR, Feb 2024):** Encryption backdoors violate Article 8 (right to private life). Binding on all 46 Council of Europe member states including all EU + UK. [34][35]
+- **Podchasov v. Russia (ECHR, Feb 2024):** Encryption backdoors violate Article 8 (right to private life). Binding on all 46 Council of Europe member states including all EU members plus the UK. [34][35]
 - Parliament's CSAR mandate explicitly excludes E2EE from scanning [39].
-- Council dropped mandatory E2EE scanning in November 2025 compromise [37].
+- Council dropped mandatory E2EE scanning in its November 2025 compromise [37].
 
 **Net assessment:** The Commission wants backdoors. The Parliament and the ECHR oppose them. No backdoor mandate has been enacted. The ECHR precedent currently protects E2EE.
 
@@ -268,7 +268,7 @@ No EU country has targeted E2EE messaging apps with age verification [57]:
 
 All target social media platforms (Instagram, TikTok, Snapchat), not encrypted messaging.
 
-The EU Age Verification Blueprint (published July 2025, "feature ready" April 2026) uses zero-knowledge proofs via the EU Digital Identity Wallet [58]. Designed for social media and adult content, not private communications.
+The EU Age Verification Blueprint (published July 2025, "feature ready" April 2026) uses zero-knowledge proofs via the EU Digital Identity Wallet [58]. It is built for social media and adult content, not private communications.
 
 ---
 
@@ -280,9 +280,9 @@ The EU Age Verification Blueprint (published July 2025, "feature ready" April 20
 
 **Ruling (April 11, 2025):** Athens Court dismissed all charges for lack of evidence. Windscribe's RAM-only servers and no-logs policy meant zero user data existed. [29][30]
 
-**Confirmed again (February 2026):** Dutch authorities seized a Windscribe server and found only a stock Ubuntu install — nothing to extract. [29]
+**Confirmed again (February 2026):** Dutch authorities seized a Windscribe server and found only a stock Ubuntu install, nothing to extract. [29]
 
-**Relevance to Hollow:** Strongest direct precedent for a zero-data infrastructure provider. RAM-only relay, no logs = cannot be compelled to produce data that doesn't exist. However, note that Sak endured a 2-year legal battle before acquittal — the risk is harassment, not liability.
+**Relevance to Hollow:** Strongest direct precedent for a zero-data infrastructure provider. A RAM-only relay with no logs cannot be compelled to produce data that doesn't exist. However, note that Sak endured a 2-year legal battle before acquittal; the risk is harassment, not liability.
 
 ### Signal Subpoenas (US, 2016-2025)
 
@@ -305,13 +305,13 @@ Key quotes:
 - Breaking E2EE "would extend beyond targeting specific individuals, affecting all users inclusively"
 - Backdoors "could facilitate indiscriminate surveillance practices"
 
-**This is the first time an international court explicitly upheld the necessity of E2EE.** Binding on all 46 Council of Europe member states (all EU members + UK + others). [34][35]
+**This is the first time an international court explicitly upheld the necessity of E2EE.** Binding on all 46 Council of Europe member states (all EU members plus the UK and others). [34][35]
 
 ### Bernstein v. DOJ (US, 1999)
 
 **Ruling:** Judge Patel (1996 district court) ruled encryption source code is protected speech under the First Amendment. Ninth Circuit panel upheld 2-1 in May 1999. [59][60]
 
-**Current status:** The Ninth Circuit's en banc opinion was **vacated by the Supreme Court in 2000 due to mootness** after Clinton relaxed export controls. It is **persuasive but not binding precedent** — courts can cite it but aren't required to follow it. No subsequent court has overturned the core principle that source code is expressive speech. [60][61]
+**Current status:** The Ninth Circuit's en banc opinion was **vacated by the Supreme Court in 2000 due to mootness** after Clinton relaxed export controls. It is **persuasive but not binding precedent**: courts can cite it but aren't required to follow it. No subsequent court has overturned the core principle that source code is expressive speech. [60][61]
 
 ### Phil Zimmermann / PGP (1996)
 
@@ -321,7 +321,7 @@ Zimmermann faced a three-year federal criminal investigation for releasing PGP e
 
 ### Lavabit (2013)
 
-**Facts:** FBI obtained a pen register order targeting one user (Edward Snowden). They demanded Lavabit's **SSL/TLS private key** — which would decrypt ALL 410,000 users' communications. [63]
+**Facts:** FBI obtained a pen register order targeting one user (Edward Snowden). They demanded Lavabit's **SSL/TLS private key**, which would decrypt ALL 410,000 users' communications. [63]
 
 **What happened:**
 1. Founder Ladar Levison provided the key as 11 pages of 4-point type (deliberate defiance)
@@ -329,15 +329,15 @@ Zimmermann faced a three-year federal criminal investigation for releasing PGP e
 3. Levison shut down the entire service on August 8, 2013
 4. Fourth Circuit upheld contempt on procedural grounds but **did not rule** on whether government can compel encryption key disclosure [64][65]
 
-**Critical lesson for Hollow:** Lavabit's fatal flaw was a single SSL key that could decrypt all traffic. Hollow has no equivalent — each user has their own Ed25519 keypair. The relay has no decryption capability at all. No master key = no Lavabit problem.
+**Critical lesson for Hollow:** Lavabit's fatal flaw was a single SSL key that could decrypt all traffic. Hollow has no equivalent. Each user has their own Ed25519 keypair, and the relay has no decryption capability at all. No master key means no Lavabit problem.
 
 ### Tornado Cash (2024-2025)
 
 The critical distinction between "writing code" and "operating a service":
 
 - **Alexey Pertsev (Netherlands):** Convicted May 2024, 64 months. Released February 2025 pending appeal. Court found he was not merely writing code but operating infrastructure he knew was used for money laundering. [36]
-- **Roman Storm (US):** Mixed verdict August 2025. Convicted of operating unlicensed money transmitter. Jury deadlocked on money laundering/sanctions. [36]
-- **Fifth Circuit (November 2024):** Ruled that immutable smart contracts ("lines of code without ownership") are not sanctionable property — protecting the code itself while allowing prosecution of operators. [66]
+- **Roman Storm (US):** Mixed verdict August 2025. Convicted of operating an unlicensed money transmitter. Jury deadlocked on money laundering/sanctions. [36]
+- **Fifth Circuit (November 2024):** Ruled that immutable smart contracts ("lines of code without ownership") are not sanctionable property, protecting the code itself while allowing prosecution of operators. [66]
 
 **Relevance to Hollow:** An open-source developer publishing encryption tools is in a fundamentally different position from operating a mixing service. The relay is a dumb pipe, not a custodial financial service. No court has held an OSS developer liable for how users use general-purpose encryption software.
 
@@ -371,89 +371,89 @@ None of these have implemented age verification. None have been fined or banned.
 
 ## Illegal Content and CSAM Liability
 
-Age verification is a *regulatory* question (who counts as a regulated platform). Illegal content — above all CSAM (child sexual abuse material), but also terrorism content, drug trafficking, and illegal marketplaces — is a *criminal liability* question, and it has a different and harsher legal structure. It does not ask "are you a platform?" It asks three narrower questions:
+Age verification is a *regulatory* question (who counts as a regulated platform). Illegal content, above all CSAM (child sexual abuse material) but also terrorism content, drug trafficking, and illegal marketplaces, is a *criminal liability* question, and it has a different and harsher legal structure. It does not ask "are you a platform?" It asks three narrower questions:
 
 1. **Do you knowingly transmit, store, or facilitate it?**
 2. **Do you have actual knowledge and fail to report?**
 3. **Are you under a specific legal duty to detect it?**
 
-The short answer for a service like Hollow is that **every operative criminal and reporting statute in the US, UK, and EU hinges on *knowledge* or *control* that an operator of a genuinely no-content, no-decryption relay cannot have.** A relay that routes only opaque ciphertext it cannot read is in the same legal posture as a telephone switch, an ISP carrying TLS traffic, or Signal — none of which scan, and none of which has been charged for content they could not see.
+The short answer for a service like Hollow is that **every operative criminal and reporting statute in the US, UK, and EU hinges on *knowledge* or *control* that an operator of a no-content, no-decryption relay cannot have.** A relay that routes only opaque ciphertext it cannot read is in the same legal posture as a telephone switch, an ISP carrying TLS traffic, or Signal: none of which scan, and none of which has been charged for content they could not see.
 
-This section documents the law behind that conclusion, and — just as importantly — why the most-suggested "solution" (voluntary client-side CSAM scanning) would *destroy* this posture rather than strengthen it.
+This section documents the law behind that conclusion, and, just as importantly, why the most-suggested "solution" (voluntary client-side CSAM scanning) would *destroy* this posture rather than strengthen it.
 
-### United States — The Reporting Duty (18 U.S.C. § 2258A)
+### United States: The Reporting Duty (18 U.S.C. § 2258A)
 
 The central US statute is **18 U.S.C. § 2258A**, the law that requires providers to report CSAM to NCMEC's CyberTipline. Two features of it answer the question directly:
 
-1. **The duty is triggered only by *actual knowledge*.** § 2258A(a) requires a provider to report only when it "obtains actual knowledge of any facts or circumstances" indicating an apparent violation [74]. A provider that handles only encrypted blobs it cannot decrypt never obtains that knowledge, and so never triggers the duty. (If a provider *does* somehow learn of CSAM — e.g. through a user abuse report it can act on — it must then report it. Hollow's relay has no content to act on; the report path is the AUP/abuse channel, see below.)
+1. **The duty is triggered only by *actual knowledge*.** § 2258A(a) requires a provider to report only when it "obtains actual knowledge of any facts or circumstances" indicating an apparent violation [74]. A provider that handles only encrypted blobs it cannot decrypt never obtains that knowledge, and so never triggers the duty. (If a provider *does* somehow learn of CSAM, e.g. through a user abuse report it can act on, it must then report it. Hollow's relay has no content to act on; the report path is the AUP/abuse channel, see below.)
 
 2. **There is NO affirmative duty to monitor, search, or scan.** § 2258A(f) ("Protection of Privacy") states that nothing in the section requires a provider to "monitor any user... monitor the content of any communication... or affirmatively search, screen, or scan for" facts or circumstances [74]. **Congress wrote the no-duty-to-scan rule directly into the statute.** You are not legally required to look.
 
-The penalty in § 2258A(e) attaches only to a provider that **"knowingly and willfully fails to make a report"** it was required to make — first violation up to $600,000 (under 100M monthly active users) or $850,000 (100M+); subsequent violations higher [74]. A provider with no actual knowledge has no report to make and so cannot incur this penalty.
+The penalty in § 2258A(e) attaches only to a provider that **"knowingly and willfully fails to make a report"** it was required to make: first violation up to $600,000 (under 100M monthly active users) or $850,000 (100M+); subsequent violations higher [74]. A provider with no actual knowledge has no report to make and so cannot incur this penalty.
 
 A major law firm's plain-language summary matches the statute exactly: "online service providers have no affirmative obligation to scan for CSAM, but if they choose to or otherwise learn of CSAM on their service, they must report it under federal law (18 U.S.C. § 2258A)." [75]
 
-### United States — The Criminal CSAM Statutes (§ 2252 / § 2252A)
+### United States: The Criminal CSAM Statutes (§ 2252 / § 2252A)
 
 The underlying crimes are in **18 U.S.C. § 2252 and § 2252A**, and every operative subsection requires a **"knowing"** mental state:
 
-- § 2252A(a)(1) — **knowingly** mails, transports, or ships CSAM
-- § 2252A(a)(2) — **knowingly** receives or distributes CSAM
-- § 2252A(a)(5) — **knowingly** possesses, or knowingly accesses with intent to view, CSAM [76]
+- § 2252A(a)(1): **knowingly** mails, transports, or ships CSAM
+- § 2252A(a)(2): **knowingly** receives or distributes CSAM
+- § 2252A(a)(5): **knowingly** possesses, or knowingly accesses with intent to view, CSAM [76]
 
-Knowledge of the actual content is therefore a required element of every offense. **A relay that transmits ciphertext it cannot decrypt cannot "knowingly" receive, distribute, or possess the content** — it has no knowledge of, and no possession of, the underlying material. This is the conduit/common-carrier posture: a phone company that carries a call in which a crime is discussed has not "knowingly" committed the crime. The relay is even further removed — it cannot even perceive the content, encrypted or not.
+Knowledge of the actual content is therefore a required element of every offense. **A relay that transmits ciphertext it cannot decrypt cannot "knowingly" receive, distribute, or possess the content.** It has no knowledge of, and no possession of, the underlying material. This is the conduit/common-carrier posture: a phone company that carries a call in which a crime is discussed has not "knowingly" committed the crime. The relay is even further removed, since it cannot even perceive the content, encrypted or not.
 
-### United States — Section 230 Does Not Change This (and Doesn't Need To)
+### United States: Section 230 Does Not Change This (and Doesn't Need To)
 
-Section 230's immunity does **not** extend to federal criminal law — § 230(e)(1) carves it out, so the government may still bring federal criminal CSAM prosecutions [77]. This is sometimes raised as a gotcha, but it changes nothing for a no-knowledge conduit: **the protection comes from the underlying statute's "knowing" mens rea, not from Section 230.** Courts have read the § 230(e)(1) carve-out to preserve federal criminal *prosecution* (not to open the door to civil suits premised on federal criminal law) [77]. A conduit with no knowledge is protected at the level of the crime's own elements, with or without Section 230.
+Section 230's immunity does **not** extend to federal criminal law. § 230(e)(1) carves it out, so the government may still bring federal criminal CSAM prosecutions [77]. This is sometimes raised as a gotcha, but it changes nothing for a no-knowledge conduit: **the protection comes from the underlying statute's "knowing" mens rea, not from Section 230.** Courts have read the § 230(e)(1) carve-out to preserve federal criminal *prosecution* (not to open the door to civil suits premised on federal criminal law) [77]. A conduit with no knowledge is protected at the level of the crime's own elements, with or without Section 230.
 
-### United States — The Forward-Looking Threat: The EARN IT Act
+### United States: The EARN IT Act (Forward-Looking Threat)
 
-The one US development worth tracking is the **EARN IT Act** (Eliminating Abusive and Rampant Neglect of Interactive Technologies Act). It has been introduced three times — 2020, 2022, and most recently as **S.1207 in April 2023** (Sens. Graham and Blumenthal) — and **has died in committee every time. It is not law as of mid-2026** [78][79].
+The one US development worth tracking is the **EARN IT Act** (Eliminating Abusive and Rampant Neglect of Interactive Technologies Act). It has been introduced three times (2020, 2022, and most recently as **S.1207 in April 2023**, by Sens. Graham and Blumenthal) and **has died in committee every time. It is not law as of mid-2026** [78][79].
 
 Why it matters if it ever passes:
 
 - It **strips Section 230 immunity** specifically for child-sexual-exploitation claims, enabling state criminal prosecutions and private plaintiff lawsuits against providers [78][80].
 - It effectively **lowers the liability threshold** from the federal "knowing" standard toward state-law negligence/recklessness standards, by letting state laws reach providers [79]. Stanford's Riana Pfefferkorn described the mechanism as "opening the courthouse door and lowering the threshold to get through that door" [78].
-- **Encryption-as-evidence problem.** A 2020 amendment says offering encryption cannot be an *independent* basis for liability — but critics (CDT, CyberScoop) note it still allows the *offering of E2EE* to be used as **evidence of negligence**. The practical effect, per CDT, is that an encrypted provider would face "lengthy and expensive litigation to prove they were not liable for content they could not have known about because of their encryption design" [79][78].
+- **Encryption-as-evidence problem.** A 2020 amendment says offering encryption cannot be an *independent* basis for liability, but critics (CDT, CyberScoop) note it still allows the *offering of E2EE* to be used as **evidence of negligence**. The practical effect, per CDT, is that an encrypted provider would face "lengthy and expensive litigation to prove they were not liable for content they could not have known about because of their encryption design" [79][78].
 
-The risk EARN IT poses is therefore not a clean ban — it is **litigation cost and the reframing of encryption itself as suspect.** This is the same wedge as Chat Control and UK §122 (below): the danger is not a court order Hollow can't satisfy, but a legal climate that treats "we built it so we can't see content" as recklessness rather than principle. The defense remains the architecture itself plus the absence of any scanning capability to point to.
+The risk EARN IT poses is therefore not a clean ban. It is **litigation cost and the reframing of encryption itself as suspect.** This is the same wedge as Chat Control and UK §122 (below): the danger is not a court order Hollow can't satisfy, but a legal climate that treats "we built it so we can't see content" as recklessness rather than principle. The defense remains the architecture itself plus the absence of any scanning capability to point to.
 
 ### Client-Side Scanning: The Trap, Not the Solution
 
-The most common proposal — including from people who mean well — is to voluntarily add **client-side CSAM scanning**: hash-match each image on the device against a known-CSAM database (the Apple NeuralHash / Microsoft PhotoDNA model) before it is encrypted. **For a privacy tool this is the single most damaging thing you could build, and the legal reasons are as strong as the ethical ones.**
+The most common proposal, including from people who mean well, is to voluntarily add **client-side CSAM scanning**: hash-match each image on the device against a known-CSAM database (the Apple NeuralHash / Microsoft PhotoDNA model) before it is encrypted. **For a privacy tool this is the single most damaging thing you could build, and the legal reasons are as strong as the ethical ones.**
 
-1. **It manufactures the capability you currently lack.** Today, "we cannot comply, we have no ability to see content" is a complete answer — the same answer Signal gives. The moment you ship scanning, you have *proven* the capability exists. Every future demand ("scan for this too," "expand the hash list," "report these matches") now has a mechanism to attach to, and the "we can't" defense is gone. You would be voluntarily building the exact pre-condition that EU Chat Control and UK §122 are trying to force.
+1. **It manufactures the capability you currently lack.** Today, "we cannot comply, we have no ability to see content" is a complete answer, the same answer Signal gives. The moment you ship scanning, you have *proven* the capability exists. Every future demand ("scan for this too," "expand the hash list," "report these matches") now has a mechanism to attach to, and the "we can't" defense is gone. You would be voluntarily building the exact pre-condition that EU Chat Control and UK §122 are trying to force.
 
-2. **The hash databases are access-restricted — an independent developer cannot legally obtain them.** The IWF Image Hash List and PhotoDNA hashes are distributed only to **vetted, licensed members** who pass IWF vetting checks; access is membership-gated and contractually controlled, with the lists served through NCMEC/IWF member channels [81]. A small independent project cannot lawfully hold them. So client-side scanning is not even an option Hollow *could* legitimately implement — and that very inaccessibility reinforces the "no capability to scan" position.
+2. **The hash databases are access-restricted, so an independent developer cannot legally obtain them.** The IWF Image Hash List and PhotoDNA hashes are distributed only to **vetted, licensed members** who pass IWF vetting checks; access is membership-gated and contractually controlled, with the lists served through NCMEC/IWF member channels [81]. A small independent project cannot lawfully hold them. So client-side scanning is not even an option Hollow *could* legitimately implement, and that very inaccessibility reinforces the "no capability to scan" position.
 
-3. **It doesn't even work reliably — Apple proved this publicly.** Apple announced on-device NeuralHash scanning of iCloud Photos in **August 2021** and **abandoned it entirely on December 7, 2022**, concluding child protection is achievable "without companies combing through personal data" [82]. Within days of the 2021 announcement, researchers reverse-engineered NeuralHash out of iOS and **produced a hash collision** — two different images with the same hash — demonstrating the false-positive/false-accusation surface that makes on-device matching a surveillance and framing risk, not a safety feature [83]. The most resourced company on earth tried this, got it wrong, and walked it back.
+3. **It doesn't even work reliably, and Apple proved this publicly.** Apple announced on-device NeuralHash scanning of iCloud Photos in **August 2021** and **abandoned it entirely on December 7, 2022**, concluding child protection is achievable "without companies combing through personal data" [82]. Within days of the 2021 announcement, researchers reverse-engineered NeuralHash out of iOS and **produced a hash collision** (two different images with the same hash), demonstrating the false-positive/false-accusation surface that makes on-device matching a surveillance and framing risk, not a safety feature [83]. The most resourced company on earth tried this, got it wrong, and walked it back.
 
-The principled position — and the legally strongest one — is the one Signal, Session, SimpleX, and Briar all take: **do not scan.** For a privacy tool, not scanning is not a loophole; it is the foundation that the entire legal and ethical case rests on.
+The principled position, and the legally strongest one, is the one Signal, Session, SimpleX, and Briar all take: **do not scan.** For a privacy tool, not scanning is not a loophole; it is the foundation that the entire legal and ethical case rests on.
 
-### United Kingdom — OSA §121/§122 (Dormant)
+### United Kingdom: OSA §121/§122 (Dormant)
 
-The UK Online Safety Act 2023 imposes **CSEA (child sexual exploitation and abuse) and illegal-content duties** on user-to-user services, and **§121** ("Notices to deal with terrorism content or CSEA content") gives Ofcom a *conditional* power to require "accredited technology" to identify such content — including, under §121(2)(a)(iii), in **private** communications (the provision that implicates E2EE) [84]. This is the same power often referred to as the "§122 spy clause."
+The UK Online Safety Act 2023 imposes **CSEA (child sexual exploitation and abuse) and illegal-content duties** on user-to-user services, and **§121** ("Notices to deal with terrorism content or CSEA content") gives Ofcom a *conditional* power to require "accredited technology" to identify such content, including, under §121(2)(a)(iii), in **private** communications (the provision that implicates E2EE) [84]. This is the same power often referred to as the "§122 spy clause."
 
-Crucially, it is a **conditional notice power, exercisable only where Ofcom considers it "necessary and proportionate"** — not an automatic scanning mandate — and **the statutory text says nothing about how private-communication scanning is to be achieved without breaking encryption** [84]. As documented in the UK section above, the power remains **dormant**: no "accredited technology" has been designated, the government conceded no technology exists to do this without breaking encryption, and Signal and WhatsApp both said they would leave the UK rather than comply. Hollow would face the same choice — but so far the clause has never been activated against anyone.
+Crucially, it is a **conditional notice power, exercisable only where Ofcom considers it "necessary and proportionate"** (not an automatic scanning mandate), and **the statutory text says nothing about how private-communication scanning is to be achieved without breaking encryption** [84]. As documented in the UK section above, the power remains **dormant**: no "accredited technology" has been designated, the government conceded no technology exists to do this without breaking encryption, and Signal and WhatsApp both said they would leave the UK rather than comply. Hollow would face the same choice, but so far the clause has never been activated against anyone.
 
-### European Union — The "Mere Conduit" Shield
+### European Union: The "Mere Conduit" Shield
 
 The EU gives a transit-only encrypted relay two layers of direct protection:
 
-- **e-Commerce Directive (2000/31/EC), Article 12 — "Mere Conduit":** a provider that transmits information is **not liable** for that information, provided it (a) does not initiate the transmission, (b) does not select the receiver, and (c) does not select or modify the information [85]. A RAM-only relay routing opaque blobs satisfies all three conditions by design — it cannot even *read* the content, let alone select or modify it. This protection is carried forward by the **DSA's "mere conduit" provisions** (Art. 4) for transit-only intermediaries.
-- **e-Commerce Directive, Article 15(1) — No General Monitoring:** Member States **may not impose** on conduit/caching/hosting providers any general obligation to monitor what they transmit, or to actively seek facts indicating illegal activity [85].
+- **e-Commerce Directive (2000/31/EC), Article 12, "Mere Conduit":** a provider that transmits information is **not liable** for that information, provided it (a) does not initiate the transmission, (b) does not select the receiver, and (c) does not select or modify the information [85]. A RAM-only relay routing opaque blobs satisfies all three conditions by design, since it cannot even *read* the content, let alone select or modify it. This protection is carried forward by the **DSA's "mere conduit" provisions** (Art. 4) for transit-only intermediaries.
+- **e-Commerce Directive, Article 15(1), No General Monitoring:** Member States **may not impose** on conduit/caching/hosting providers any general obligation to monitor what they transmit, or to actively seek facts indicating illegal activity [85].
 
-On the scanning mandate itself — the **CSA Regulation ("Chat Control")** — see the EU section above: the voluntary derogation expired April 2026, the permanent regulation remains in contested trilogue with Parliament excluding E2EE from any scanning, and no EU scanning mandate is in force.
+On the scanning mandate itself, the **CSA Regulation ("Chat Control")**, see the EU section above: the voluntary derogation expired April 2026, the permanent regulation remains in contested trilogue with Parliament excluding E2EE from any scanning, and no EU scanning mandate is in force.
 
 ### Precedent: The Line Is Knowledge and Control, Not "Encryption"
 
-The real-world prosecutions that people point to all turned on **actual knowledge, operational control, and refusal to cooperate** — not on the mere fact of running an encrypted or privacy-preserving service.
+The real-world prosecutions that people point to all turned on **actual knowledge, operational control, and refusal to cooperate,** not on the mere fact of running an encrypted or privacy-preserving service.
 
-- **Pavel Durov / Telegram (France, August 2024).** Durov was arrested on **24 August 2024** and indicted on **28 August 2024** on twelve counts including complicity in distributing child exploitation material, drug trafficking, money laundering, and fraud [86]. The charges rested on **platform negligence, "insufficient moderation," and refusal to cooperate with legal requests** — not on offering encryption. Critically, **Telegram is not end-to-end encrypted by default**: it has moderation capability and access to most content, which is exactly what gives it *knowledge and control* — and therefore exposure — that a genuine no-knowledge conduit does not have. Telegram is the *opposite* of Hollow's posture, not a comparable.
+- **Pavel Durov / Telegram (France, August 2024).** Durov was arrested on **24 August 2024** and indicted on **28 August 2024** on twelve counts including complicity in distributing child exploitation material, drug trafficking, money laundering, and fraud [86]. The charges rested on **platform negligence, "insufficient moderation," and refusal to cooperate with legal requests,** not on offering encryption. Critically, **Telegram is not end-to-end encrypted by default**: it has moderation capability and access to most content, which is exactly what gives it the *knowledge and control* (and therefore the exposure) that a no-knowledge conduit does not have. Telegram is the *opposite* of Hollow's posture, not a comparable.
 - **Roman Storm / Tornado Cash (US, 2025).** Storm was convicted of operating an unlicensed money-transmitting business; the DOJ's theory was that he **"continued to provide this service with knowledge"** that it was moving criminal proceeds and was "personally aware of numerous instances" of criminal use [87]. Again: liability flowed from *knowing facilitation*, the precise opposite of a service that cannot know its content.
 
-By contrast, **no operator of a genuinely E2EE, no-content-storage messaging service (Signal, Session, SimpleX, Briar) has been criminally charged or held liable for CSAM or other illegal content transmitted by its users.** The doctrinal line is clear:
+By contrast, **no operator of a default-E2EE, no-content-storage messaging service (Signal, Session, SimpleX, Briar) has been criminally charged or held liable for CSAM or other illegal content transmitted by its users.** The doctrinal line is clear:
 
 | Posture | Example | Liable? |
 |---------|---------|---------|
@@ -463,11 +463,11 @@ By contrast, **no operator of a genuinely E2EE, no-content-storage messaging ser
 
 ### Staying on the Safe Side: No Capability ≠ Willful Blindness
 
-The one thing to get right is the difference between **"no capability to know"** (lawful) and **"willful blindness"** (deliberately avoiding knowledge of specific activity you've been alerted to). A no-content relay is on the safe side *by architecture* — it isn't avoiding knowledge, it structurally cannot obtain it. The way to make that unambiguous, and to demonstrate good faith rather than evasion, is:
+The one thing to get right is the difference between **"no capability to know"** (lawful) and **"willful blindness"** (deliberately avoiding knowledge of specific activity you've been alerted to). A no-content relay is on the safe side *by architecture*: it isn't avoiding knowledge, it structurally cannot obtain it. The way to make that unambiguous, and to demonstrate good faith rather than evasion, is:
 
-1. **A clear Acceptable Use Policy / Terms** explicitly prohibiting CSAM and illegal content. (Hollow's Terms of Use already do — CSAM is named.)
-2. **A reachable abuse/legal contact**, so the project is demonstrably *willing* to act on anything it can act on, rather than structured to dodge all contact. A no-content service that *still* offers an abuse channel is the gold standard — it answers the "willful blindness" question before it is asked.
-3. **No mechanism that creates knowledge or capability.** The strength is the genuine *absence* of capability. Don't add scanning, logging, accounts, or content access — protect the thing that makes the defense real.
+1. **A clear Acceptable Use Policy / Terms** explicitly prohibiting CSAM and illegal content. (Hollow's Terms of Use already do this; CSAM is named.)
+2. **A reachable abuse/legal contact**, so the project is demonstrably *willing* to act on anything it can act on, rather than structured to dodge all contact. A no-content service that *still* offers an abuse channel is the gold standard: it answers the "willful blindness" question before it is asked.
+3. **No mechanism that creates knowledge or capability.** The strength is the *absence* of capability. Don't add scanning, logging, accounts, or content access; protect the thing that makes the defense real.
 
 (Doctrinally, the "AUP + abuse contact establishes good faith" framing is a reasonable inference from how the willful-blindness line is drawn in the precedents above rather than a single black-letter rule; it is the consistent practice of the lawful E2EE peers and the conservative posture.)
 
@@ -481,7 +481,7 @@ The one thing to get right is the difference between **"no capability to know"**
 
 2. **No master key exists.** Unlike Lavabit [63], there is no single key that decrypts all traffic. Each user has their own Ed25519 keypair. The relay literally cannot comply with a decryption order.
 
-3. **Zero metadata.** No accounts, no emails, no phone numbers, no IP logging, no connection timestamps. Less data than Signal (which at least has phone numbers and two timestamps) [31].
+3. **Zero metadata.** No accounts, no emails, no phone numbers, no IP logging, no connection timestamps. Less data than Signal, which at least has phone numbers and two timestamps [31].
 
 4. **Explicit legal carve-outs protect private messaging.** KOSA exempts direct messaging services [1]. The DSA excludes interpersonal communication from "online platform" definitions [44]. State age verification laws target social media with algorithmic curation [5][6].
 
@@ -497,36 +497,36 @@ The one thing to get right is the difference between **"no capability to know"**
 
 3. **EU Chat Control 2.0.** If the final regulation includes E2EE scanning mandates (Parliament opposes [39], Council retreated [37]), it could affect EU operations. Still under negotiation.
 
-4. **Legal harassment.** Even with perfect legal standing, a provider can be dragged through proceedings (Windscribe: 2 years before acquittal [28]). This is the realistic risk — not liability, but cost of defense.
+4. **Legal harassment.** Even with perfect legal standing, a provider can be dragged through proceedings (Windscribe: 2 years before acquittal [28]). This is the realistic risk: not liability, but cost of defense.
 
 5. **Public channels feature.** Content visible to unlimited recipients could partially fall under "online platform" definitions in the DSA [44]. The private messaging portion remains excluded.
 
-6. **Future legislation.** The legal landscape could change. Maintaining zero-knowledge architecture is the best hedge.
+6. **Future legislation.** The law could change. Maintaining zero-knowledge architecture is the best hedge.
 
 ### The "Dumb Pipe" Defense
 
 Hollow's relay has protection under both US and EU law:
 
-**US — Section 230:** "No provider or user of an interactive computer service shall be treated as the publisher or speaker of any information provided by another information content provider." [18] A relay transmitting encrypted blobs it cannot read is the textbook conduit.
+**US, Section 230:** "No provider or user of an interactive computer service shall be treated as the publisher or speaker of any information provided by another information content provider." [18] A relay transmitting encrypted blobs it cannot read is the textbook conduit.
 
-**EU — E-Commerce Directive, Article 12 ("Mere Conduit"):** A service provider is not liable for transmitted information when it [46]:
+**EU, E-Commerce Directive, Article 12 ("Mere Conduit"):** A service provider is not liable for transmitted information when it [46]:
 1. Did not initiate the transmission
 2. Did not select the receiver
 3. Did not select or modify the information
 
-Hollow's relay meets all three conditions by design — it cannot even inspect the information, let alone select or modify it.
+Hollow's relay meets all three conditions by design. It cannot even inspect the information, let alone select or modify it.
 
 ---
 
 ## Recommendations
 
-1. **Transparency report page on hollow.anonlisten.com.** "We have received 0 legal requests. Our relay architecture stores no user data." Signal does this [31] — it's cheap credibility and the single best response to skeptics.
+1. **Transparency report page on hollow.anonlisten.com.** "We have received 0 legal requests. Our relay architecture stores no user data." Signal does this [31]; it's cheap credibility and the single best response to skeptics.
 
 2. **Keep the Terms of Use and Privacy Policy updated.** They should clearly state the relay stores nothing and content cannot be accessed by anyone other than the intended recipients.
 
 3. **Maintain the zero-knowledge architecture.** The technical design is the strongest legal protection. Don't add logging, accounts, or metadata storage.
 
-4. **Don't implement age verification proactively.** No legal peer (Signal, Session, SimpleX) has. Doing so could increase legal obligations by implying acceptance of platform-level duties.
+4. **Don't implement age verification proactively.** No comparable peer (Signal, Session, SimpleX) has. Doing so could increase legal obligations by implying acceptance of platform-level duties.
 
 5. **Standard response template for legal requests:** "Hollow's relay is a transit-only service that does not store, log, or have the ability to decrypt any user communications. We have no data to provide. Please see our architecture documentation."
 
@@ -536,7 +536,7 @@ Hollow's relay meets all three conditions by design — it cannot even inspect t
    - California DAAA: January 2027 [10]
    - EU ProtectEU encryption roadmap: 2026 [56]
 
-7. **If ever served with a legal request**, the Windscribe/Signal playbook applies: "We designed it so we cannot comply. Here is the architecture. Here is the source code. We have nothing to hand over."
+7. **If ever served with a legal request,** the Windscribe/Signal playbook applies: "We designed it so we cannot comply. Here is the architecture. Here is the source code. We have nothing to hand over."
 
 ---
 

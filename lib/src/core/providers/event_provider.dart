@@ -28,6 +28,7 @@ import 'package:hollow/src/core/providers/typing_provider.dart';
 import 'package:hollow/src/core/providers/pinned_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
+import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/vault_status_provider.dart';
@@ -285,8 +286,15 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(typingProvider.notifier).clearTyping(fromPeer, fromPeer);
         // Track unread DM — only if not muted.
         // Window must be visible AND viewing this DM to count as "viewing".
+        // "Active" = desktop focused (alt-tabbed away ≠ reading) / mobile
+        // foreground (backgrounded ≠ reading, even if a chat is open — without
+        // this, sitting in a chat then backgrounding suppressed its OS notif).
         final windowVisible = ref.read(windowVisibleProvider);
+        final appActive = (Platform.isAndroid || Platform.isIOS)
+            ? !ref.read(appLifecycleProvider).isBackground
+            : ref.read(windowFocusedProvider);
         final isViewingDm = windowVisible &&
+            appActive &&
             ref.read(selectedPeerProvider) == dmMaster &&
             ref.read(selectedServerProvider) == null &&
             ref.read(chatAtBottomProvider);
@@ -303,6 +311,7 @@ class EventStreamNotifier extends Notifier<bool> {
                 fromPeerId: dmMaster,
                 text: text,
                 replyToMid: replyToMid,
+                messageId: messageId,
               );
         }
 
@@ -316,8 +325,14 @@ class EventStreamNotifier extends Notifier<bool> {
             );
         ref.read(typingProvider.notifier).clearTyping('$serverId:$channelId', fromPeer);
         // Track unread channel message — only if not muted.
-        // Must be visible, viewing this channel, AND scrolled to bottom.
+        // Must be visible, viewing this channel, AND scrolled to bottom. Also
+        // require the app to be active (desktop focused / mobile foreground) —
+        // see the DM gate above.
+        final chAppActive = (Platform.isAndroid || Platform.isIOS)
+            ? !ref.read(appLifecycleProvider).isBackground
+            : ref.read(windowFocusedProvider);
         final isViewingChannel = ref.read(windowVisibleProvider) &&
+            chAppActive &&
             ref.read(selectedServerProvider) == serverId &&
             ref.read(selectedChannelProvider) == channelId &&
             ref.read(chatAtBottomProvider);
@@ -350,7 +365,7 @@ class EventStreamNotifier extends Notifier<bool> {
         // System notification for channel message.
         if (!isViewingChannel && !isChannelMuted && !isMentionFiltered) {
           _notifyChannelWithName(
-              serverId, channelId, fromPeer, text, replyToMid);
+              serverId, channelId, fromPeer, text, replyToMid, messageId);
         }
 
       case NetworkEvent_SessionEstablished(:final peerId):
@@ -1669,7 +1684,7 @@ class EventStreamNotifier extends Notifier<bool> {
   /// When a session is (re-)established with a peer, clear any "Sync failed"
   /// Resolve channel name and show notification (async helper).
   Future<void> _notifyChannelWithName(String serverId, String channelId,
-      String fromPeer, String text, String? replyToMid) async {
+      String fromPeer, String text, String? replyToMid, String messageId) async {
     String? chName = ref.read(channelListProvider)[channelId]?.name;
     if (chName == null) {
       try {
@@ -1688,6 +1703,7 @@ class EventStreamNotifier extends Notifier<bool> {
           text: text,
           replyToMid: replyToMid,
           channelName: chName,
+          messageId: messageId,
         );
   }
 

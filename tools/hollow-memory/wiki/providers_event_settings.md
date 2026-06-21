@@ -699,30 +699,28 @@ State is a list of up to 3 `NotificationCard` objects (in-app overlay cards).
 
 ### SystemNotificationNotifier Methods
 
-**`init()`** -- Initializes `local_notifier` for native OS notifications. Called once at startup. Only runs on Windows/Linux/macOS. Sets `_nativeInitialized` flag.
+**`init()`** -- Initializes `DesktopNotificationService` (native OS toasts). Called once at startup. Only runs on Windows/Linux/macOS. Sets `_nativeInitialized` flag.
 
-**`notifyDm(fromPeerId, text, replyToMid)`**
-- Checks DM notification setting.
-- Resolves sender name from `profileProvider`.
-- If window is hidden (tray mode): uses native OS notification via `local_notifier`.
-- If window is visible but unfocused: adds in-app overlay card.
-- If window is visible and focused: does nothing (user is already looking at the app).
+**`notifyDm(fromPeerId, text, replyToMid, messageId?)`**
+- Checks DM notification setting; resolves sender name from `profileProvider`.
+- **Mobile (Android/iOS):** routes by `appLifecycleProvider`. Backgrounded -> real OS notification via `push.showLocalDmNotification` (reuses the FCM push UI). Foreground -> in-app overlay card.
+- **Desktop:** native OS toast fires when the window is **hidden (tray) OR unfocused** (`DesktopNotificationService.showDm`). The in-app overlay card fires whenever the window is **VISIBLE** (focused-on-another-chat OR unfocused). When focused-on-this-exact-chat, `event_provider` never calls this (gated by `isViewingDm`).
+- Avatar bytes fetched + cached via `getPushProfile` (`_avatarFor`).
 
-**`notifyChannel(serverId, channelId, fromPeerId, text, replyToMid, channelName?)`**
-- Checks notification level. If `nothing`: return. If `mentions`: checks for @mentions and replies.
-- Same window state logic as DM: hidden -> native, unfocused -> overlay, focused -> nothing.
+**`notifyChannel(serverId, channelId, fromPeerId, text, replyToMid, channelName?, messageId?)`**
+- Checks notification level. If `nothing`: return. If `mentions`: checks for @mentions/@everyone/reply.
+- Same mobile-lifecycle / desktop-window-state routing as DM. Channel toast uses the **sender's** avatar (a real peer id).
 
-**`dismissCard(sourceKey)`** -- Removes specific card from state.
+**`dismissCard(sourceKey)`** / **`dismissAll()`** -- Removes a card / clears all.
 
-**`dismissAll()`** -- Clears all cards.
+### DesktopNotificationService (`lib/src/core/services/desktop_notification_service.dart`)
+- **Windows = RICH toast** via `flutter_local_notifications_windows` (the FFI plugin, called DIRECTLY -- the unified `flutter_local_notifications` facade does NOT route Windows). Avatar app-logo-override (circle), sender name, ONE message line, inline **Reply** action (DMs only). Each message gets a FRESH toast id (`_toastCounter`) so a new message STACKS rather than replacing -- replacing would wipe a mid-typed reply. Brand icon next to "Hollow" = `WindowsInitializationSettings.iconPath` (bundled `hollow_logo_rounded.png` written to temp). Reply args encode the peer (`reply:<peerId>`); typed text in `response.data['replyText']`. Tap/Reply handlers registered in `hollow_shell._registerDesktopNotificationHandlers` (Reply -> `chatProvider.sendMessage`).
+- **macOS/Linux = plain** `local_notifier` (title + body + click).
 
-### Native OS Notifications
-- Uses `local_notifier` package.
-- `_showNativeNotification(title, body)` -- Closes any existing active notification, creates new `LocalNotification`, sets `onClick` to bring window to front via `windowManager.show()` + `windowManager.focus()`.
-
-### In-App Overlay
-- Maximum 3 cards visible at once. New cards are dropped if limit reached.
-- Cards are grouped by sourceKey. New messages from the same source append to existing card.
+### In-App Overlay (desktop = `NotificationOverlay`, mobile = `MobileInChatBanner`)
+- Provider state: up to 3 cards; new cards dropped at the limit; grouped by sourceKey; `withMessage` keeps the last 5 messages per card.
+- Desktop `NotificationOverlay`: bottom-right card stack.
+- **Mobile: the ONLY in-app banner is `MobileInChatBanner`** (shown WHILE inside a chat, for other conversations; top, below header, last 3 messages, 5s countdown ring, swipe/tap dismiss). The old top-tabs `MobileNotificationBanner` was REMOVED -- outside a chat, mobile relies on OS notifications.
 
 ---
 

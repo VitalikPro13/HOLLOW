@@ -41,6 +41,7 @@ import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_active_call_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_video_view.dart';
 import 'package:hollow/src/ui/mobile/mobile_member_panel.dart';
+import 'package:hollow/src/ui/mobile/mobile_notification_banner.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_message_actions.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
@@ -102,6 +103,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   Timer? _urlDebounce;
   bool _isRecordingVoice = false;
   bool _searchOpen = false;
+
+  // @mention autocomplete (server channels only). Candidate list is shown as a
+  // compact panel ABOVE the input bar; tapping a candidate inserts the mention.
+  List<_MobileMentionCandidate> _mentionCandidates = [];
+  int _mentionAtPosition = -1;
 
   String get _channelKey => '${widget.serverId}:${widget.channelId}';
   final _searchController = TextEditingController();
@@ -292,6 +298,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     _urlDebounce?.cancel();
     _urlDebounce = Timer(const Duration(milliseconds: 600), _detectUrl);
 
+    // @mention autocomplete (channels only — DMs have a single recipient).
+    if (!widget.isDm) _updateMentionAutocomplete(text);
+
     if (text.isEmpty) return;
     final now = DateTime.now();
     if (_lastTypingSent != null && now.difference(_lastTypingSent!).inSeconds < 3) return;
@@ -310,6 +319,162 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         );
       }
     } catch (_) {}
+  }
+
+  /// Scan backward from the cursor for an '@' that starts a mention token, build
+  /// matching candidates from server members (+ @everyone), and update the panel.
+  /// Mirrors the desktop ChannelChatPane logic.
+  void _updateMentionAutocomplete(String text) {
+    final cursor = _controller.selection.baseOffset;
+    if (cursor < 0 || widget.serverId == null) {
+      _dismissMention();
+      return;
+    }
+    int atPos = -1;
+    for (int i = cursor - 1; i >= 0; i--) {
+      final c = text[i];
+      if (c == '@') {
+        if (i == 0 || text[i - 1] == ' ' || text[i - 1] == '\n') atPos = i;
+        break;
+      }
+      if (c == ' ' || c == '\n') break;
+    }
+    if (atPos < 0) {
+      _dismissMention();
+      return;
+    }
+
+    final query = text.substring(atPos + 1, cursor).toLowerCase();
+    final membersAsync = ref.read(serverMembersProvider(widget.serverId!));
+    final profiles = ref.read(profileProvider);
+    final nicknames = ref.read(serverNicknamesProvider(widget.serverId!));
+    final candidates = <_MobileMentionCandidate>[];
+
+    membersAsync.whenData((members) {
+      for (final m in members) {
+        final displayName = serverDisplayNameFor(
+          profiles, m.peerId, nickname: nicknames[m.peerId] ?? '',
+        );
+        final serverNick = nicknames[m.peerId] ?? '';
+        final profileName = profiles[m.peerId]?.displayName ?? '';
+        final matches = query.isEmpty ||
+            displayName.toLowerCase().startsWith(query) ||
+            (serverNick.isNotEmpty &&
+                serverNick.toLowerCase().startsWith(query)) ||
+            (profileName.isNotEmpty &&
+                profileName.toLowerCase().startsWith(query));
+        if (matches) {
+          candidates.add(_MobileMentionCandidate(
+            peerId: m.peerId,
+            displayName: displayName,
+          ));
+        }
+      }
+    });
+
+    if (query.isEmpty || 'everyone'.startsWith(query)) {
+      candidates.insert(0,
+          const _MobileMentionCandidate(peerId: '', displayName: 'everyone'));
+    }
+
+    setState(() {
+      _mentionAtPosition = atPos;
+      _mentionCandidates = candidates.take(6).toList();
+    });
+  }
+
+  void _dismissMention() {
+    if (_mentionCandidates.isEmpty && _mentionAtPosition < 0) return;
+    setState(() {
+      _mentionCandidates = [];
+      _mentionAtPosition = -1;
+    });
+  }
+
+  void _acceptMention(_MobileMentionCandidate candidate) {
+    final text = _controller.text;
+    final cursor = _controller.selection.baseOffset;
+    if (_mentionAtPosition < 0 || cursor < _mentionAtPosition) {
+      _dismissMention();
+      return;
+    }
+    final replacement = '@${candidate.displayName} ';
+    final newText = text.replaceRange(_mentionAtPosition, cursor, replacement);
+    _controller.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(
+        offset: _mentionAtPosition + replacement.length,
+      ),
+    );
+    _dismissMention();
+  }
+
+  /// Compact mention-candidate panel rendered just above the input bar.
+  Widget _buildMentionPanel(HollowTheme hollow) {
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 200),
+      margin: const EdgeInsets.fromLTRB(
+          HollowSpacing.sm, 0, HollowSpacing.sm, HollowSpacing.xs),
+      decoration: BoxDecoration(
+        color: hollow.elevated,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        border: Border.all(color: hollow.border),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.3),
+            blurRadius: 12,
+            offset: const Offset(0, -2),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        child: ListView.builder(
+          shrinkWrap: true,
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          itemCount: _mentionCandidates.length,
+          itemBuilder: (ctx, i) {
+            final c = _mentionCandidates[i];
+            return HollowPressable(
+              onTap: () => _acceptMention(c),
+              padding: const EdgeInsets.symmetric(
+                horizontal: HollowSpacing.sm,
+                vertical: HollowSpacing.xs + 2,
+              ),
+              child: Row(
+                children: [
+                  if (c.peerId.isNotEmpty)
+                    HollowAvatar(peerId: c.peerId, size: 26)
+                  else
+                    Container(
+                      width: 26,
+                      height: 26,
+                      decoration: BoxDecoration(
+                        color: hollow.accent.withValues(alpha: 0.2),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(LucideIcons.atSign,
+                          size: 15, color: hollow.accent),
+                    ),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Expanded(
+                    child: Text(
+                      c.displayName,
+                      style: HollowTypography.bodySmall.copyWith(
+                        color: hollow.textPrimary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
   }
 
   Future<void> _handleSend() async {
@@ -334,6 +499,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       _stagedPreview = null;
       _stagedPreviewLoading = false;
       _stagedHollowLink = null;
+      _mentionCandidates = [];
+      _mentionAtPosition = -1;
     });
 
     if (filePath != null) {
@@ -802,6 +969,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                   ? widget.peerId!
                   : '${widget.serverId}:${widget.channelId}',
             ),
+            if (_mentionCandidates.isNotEmpty) _buildMentionPanel(hollow),
             if (_replyToMessageId != null)
               _ReplyPreview(
                 senderName: _replyToSenderName ?? '',
@@ -928,6 +1096,16 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     return Stack(
       children: [
         scaffold,
+        // Compact in-app banner for messages arriving in OTHER conversations
+        // while the user is reading this one. Offset below the status bar +
+        // chat header (~56px header + top padding) so it doesn't cover the
+        // header controls.
+        MobileInChatBanner(
+          currentPeerId: widget.peerId,
+          currentServerId: widget.serverId,
+          currentChannelId: widget.channelId,
+          topOffset: MediaQuery.paddingOf(context).top + 64,
+        ),
         const MobileActiveCallPill(),
         const MobileVoiceChannelPill(),
       ],
@@ -2714,5 +2892,15 @@ class _VoiceChannelStatusStrip extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// A single @mention autocomplete candidate (server member or @everyone).
+class _MobileMentionCandidate {
+  final String peerId; // empty for @everyone
+  final String displayName;
+  const _MobileMentionCandidate({
+    required this.peerId,
+    required this.displayName,
+  });
 }
 

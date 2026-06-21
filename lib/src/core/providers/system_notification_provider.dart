@@ -5,10 +5,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
+import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
-import 'package:local_notifier/local_notifier.dart';
+import 'package:hollow/src/core/services/desktop_notification_service.dart';
+import 'package:hollow/src/core/services/push_notification_service.dart'
+    as push;
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:window_manager/window_manager.dart';
 
 /// A single message within a notification card.
@@ -75,7 +79,10 @@ class NotificationCard {
 class SystemNotificationNotifier
     extends Notifier<List<NotificationCard>> {
   bool _nativeInitialized = false;
-  LocalNotification? _activeNativeNotification;
+
+  /// Cached avatar bytes per peer/server id for the native toast image. Avoids
+  /// re-fetching on every message in the same burst.
+  final Map<String, Uint8List?> _avatarCache = {};
 
   @override
   List<NotificationCard> build() => [];
@@ -83,16 +90,26 @@ class SystemNotificationNotifier
   /// Initialize native notifications. Call once at startup.
   Future<void> init() async {
     if (_nativeInitialized) return;
-    if (!(Platform.isWindows || Platform.isLinux || Platform.isMacOS)) return;
+    if (!DesktopNotificationService.isSupported) return;
     try {
-      await localNotifier.setup(
-        appName: 'Hollow',
-        shortcutPolicy: ShortcutPolicy.requireCreate,
-      );
+      await DesktopNotificationService.instance.init();
       _nativeInitialized = true;
     } catch (e) {
-      debugPrint('[HOLLOW] Failed to init local_notifier: $e');
+      debugPrint('[HOLLOW] Failed to init desktop notifications: $e');
     }
+  }
+
+  /// Fetch (and cache) the avatar bytes for a peer/server id via the push
+  /// profile FFI — same source the mobile push banner uses.
+  Future<Uint8List?> _avatarFor(String id) async {
+    if (_avatarCache.containsKey(id)) return _avatarCache[id];
+    Uint8List? bytes;
+    try {
+      final profile = await network_api.getPushProfile(peerId: id);
+      bytes = profile?.avatarBytes;
+    } catch (_) {}
+    _avatarCache[id] = bytes;
+    return bytes;
   }
 
   /// Show a notification for a new DM message.
@@ -100,6 +117,7 @@ class SystemNotificationNotifier
     required String fromPeerId,
     required String text,
     required String? replyToMid,
+    String? messageId,
   }) async {
     final notifSettings = ref.read(notificationSettingsProvider.notifier);
     if (!notifSettings.isDmEnabled(fromPeerId)) return;
@@ -107,14 +125,60 @@ class SystemNotificationNotifier
     final profiles = ref.read(profileProvider);
     final senderName = displayNameFor(profiles, fromPeerId);
 
+    // Mobile: route by lifecycle. Backgrounded-but-connected → real OS banner
+    // (the live node received this over WS; in-app banners can't draw while
+    // backgrounded). Foreground → fall through to the in-app card path below.
+    if (Platform.isAndroid || Platform.isIOS) {
+      final lifecycle = ref.read(appLifecycleProvider);
+      if (lifecycle.isBackground) {
+        final avatar = await _avatarFor(fromPeerId);
+        await push.showLocalDmNotification(
+          personKey: fromPeerId,
+          displayName: senderName,
+          messageId: messageId ?? '',
+          text: text,
+          avatarBytes: avatar,
+        );
+        return;
+      }
+      // Foreground on mobile: show the in-app card (MobileNotificationBanner /
+      // MobileInChatBanner watch these).
+      _addMessage(
+        sourceKey: fromPeerId,
+        title: senderName,
+        avatarId: fromPeerId,
+        isDm: true,
+        peerId: fromPeerId,
+        message: NotificationMessage(
+          senderPeerId: fromPeerId,
+          senderName: senderName,
+          text: text,
+          timestamp: DateTime.now(),
+        ),
+      );
+      return;
+    }
+
     final isHidden = await _isWindowHidden();
     final isFocused = isHidden ? false : await _isWindowFocused();
 
-    if (isHidden) {
-      // Window is hidden (tray) — use native OS notification.
-      _showNativeNotification(title: senderName, body: text);
-    } else if (!isFocused) {
-      // Window is visible but unfocused — use in-app overlay.
+    // event_provider already guarantees we're NOT viewing this exact chat
+    // (focused + selected + at-bottom). So:
+    //  • Native OS toast when the window is hidden (tray) OR unfocused.
+    //  • In-app card whenever the window is VISIBLE (focused-but-other-chat OR
+    //    unfocused) — this is the case that was broken: a card never showed
+    //    while the app was focused on a different conversation.
+    if (isHidden || !isFocused) {
+      final avatar = await _avatarFor(fromPeerId);
+      DesktopNotificationService.instance.showDm(
+        sourceKey: fromPeerId,
+        title: senderName,
+        body: text,
+        avatarBytes: avatar,
+      );
+    }
+
+    if (!isHidden) {
       _addMessage(
         sourceKey: fromPeerId,
         title: senderName,
@@ -139,6 +203,7 @@ class SystemNotificationNotifier
     required String text,
     required String? replyToMid,
     String? channelName,
+    String? messageId,
   }) async {
     final notifSettings = ref.read(notificationSettingsProvider.notifier);
     final level =
@@ -164,20 +229,61 @@ class SystemNotificationNotifier
     final serverName = servers[serverId]?.name ?? 'Server';
     final resolvedChannelName =
         channelName ?? _channelName(serverId, channelId);
+    final sourceKey = '$serverId:$channelId';
+
+    // Mobile: route by lifecycle (see notifyDm).
+    if (Platform.isAndroid || Platform.isIOS) {
+      final lifecycle = ref.read(appLifecycleProvider);
+      if (lifecycle.isBackground) {
+        await push.showLocalChannelNotification(
+          serverId: serverId,
+          channelId: channelId,
+          serverName: serverName,
+          channelName: resolvedChannelName,
+          senderName: senderName,
+          messageId: messageId ?? '',
+          text: text,
+        );
+        return;
+      }
+      _addMessage(
+        sourceKey: sourceKey,
+        title: '$serverName > #$resolvedChannelName',
+        avatarId: serverId,
+        isDm: false,
+        serverId: serverId,
+        channelId: channelId,
+        message: NotificationMessage(
+          senderPeerId: fromPeerId,
+          senderName: senderName,
+          text: text,
+          timestamp: DateTime.now(),
+        ),
+      );
+      return;
+    }
 
     final isHidden = await _isWindowHidden();
     final isFocused = isHidden ? false : await _isWindowFocused();
 
-    if (isHidden) {
-      // Window is hidden (tray) — use native OS notification.
-      _showNativeNotification(
-        title: '$senderName in $serverName',
-        body: text,
+    if (isHidden || !isFocused) {
+      // Native OS toast — channel line carries the sender name (multiple people
+      // post in a channel, unlike a DM). Use the SENDER's avatar (a real peer id;
+      // passing the serverId to getPushProfile would never resolve).
+      final avatar = await _avatarFor(fromPeerId);
+      DesktopNotificationService.instance.showChannel(
+        serverId: serverId,
+        channelId: channelId,
+        title: '$serverName • #$resolvedChannelName',
+        body: '$senderName: $text',
+        avatarBytes: avatar,
       );
-    } else if (!isFocused) {
-      // Window is visible but unfocused — use in-app overlay.
+    }
+
+    if (!isHidden) {
+      // Window visible (focused-on-other-chat OR unfocused) — show in-app card.
       _addMessage(
-        sourceKey: '$serverId:$channelId',
+        sourceKey: sourceKey,
         title: '$serverName > #$resolvedChannelName',
         avatarId: serverId,
         isDm: false,
@@ -237,29 +343,11 @@ class SystemNotificationNotifier
     state = cards;
   }
 
-  // ── Native OS notifications (tray mode) ───────────────────────
-
-  void _showNativeNotification({
-    required String title,
-    required String body,
-  }) {
-    if (!_nativeInitialized) return;
-    try {
-      _activeNativeNotification?.close();
-    } catch (_) {}
-
-    final notification = LocalNotification(
-      title: title,
-      body: body,
-    );
-    notification.onClick = () {
-      _bringWindowToFront();
-    };
-    _activeNativeNotification = notification;
-    notification.show();
-  }
-
   // ── Helpers ───────────────────────────────────────────────────
+
+  /// Bring the desktop window to the foreground (used when a native toast is
+  /// tapped). Public so the toast open-handler in the shell can call it.
+  Future<void> bringWindowToFront() => _bringWindowToFront();
 
   String _channelName(String serverId, String channelId) {
     final channels = ref.read(channelListProvider);

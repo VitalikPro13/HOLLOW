@@ -78,7 +78,17 @@ dependencies:
   # UIScene + raising the iOS floor to 15. See ios/Runner/AppDelegate.swift.
   firebase_core: ^3.15.2
   firebase_messaging: ^15.2.10
-  flutter_local_notifications: ^18.0.1
+  # Bumped 18→19 to share flutter_local_notifications_platform_interface ^9 with
+  # the Windows plugin below. v19's only breaking changes (dropped
+  # androidAllowWhileIdle, Flutter 3.13 floor) don't touch any path Hollow uses.
+  flutter_local_notifications: ^19.5.0
+  # Direct dep: the unified flutter_local_notifications facade does NOT route
+  # Windows, so desktop_notification_service.dart talks to the Windows FFI plugin
+  # directly (rich Action Center toasts: avatar + text + Reply).
+  flutter_local_notifications_windows: ^1.0.3
+  # Referenced directly for the NotificationResponse type the Windows toast
+  # callback delivers (not re-exported by the windows plugin).
+  flutter_local_notifications_platform_interface: ^9.0.0
 
 dev_dependencies:
   flutter_test:

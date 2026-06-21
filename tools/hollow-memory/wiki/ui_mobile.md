@@ -759,22 +759,21 @@ Uses `convertArchiveDmMessages()` / `convertArchiveChannelMessages()` from `arch
 ### Animation
 Staggered entrance (400ms): message preview fades+slides in first, then each action row with 0.15 offset. Exit handled by `showModalBottomSheet`'s built-in slide-down.
 
-## MobileNotificationBanner
+## MobileInChatBanner (in-app notification)
 
 **File:** `lib/src/ui/mobile/mobile_notification_banner.dart`
-**Class:** `MobileNotificationBanner extends ConsumerStatefulWidget`
-**Purpose:** Slide-down banner for incoming messages when viewing a different chat.
+**Class:** `MobileInChatBanner extends ConsumerStatefulWidget`
+**Purpose:** The ONLY mobile in-app notification banner. Shown WHILE the user is inside a chat, for messages arriving in OTHER conversations. (The old top-tabs `MobileNotificationBanner` was removed — outside a chat, mobile relies on OS notifications.)
 
-### Behavior
-- Watches `systemNotificationProvider` and filters out cards for the currently viewed conversation (via `selectedPeerProvider`/`selectedServerProvider`/`selectedChannelProvider`)
-- Slides down from top (300ms easeOutCubic), fades in
-- Auto-dismiss after 4s, swipe-up to dismiss
-- Tap navigates to source conversation (pushes `MobileChatRoute`, sets selection providers, clears in `.then()`)
-- One banner at a time (not stacked like desktop `NotificationOverlay`)
-- Wired into `MobileShell` Stack (above scaffold, below call pills)
+### Mounting & behavior
+- Mounted in `MobileChatRoute`'s return Stack with `currentPeerId`/`currentServerId`/`currentChannelId` (suppresses the conversation being read) and `topOffset = MediaQuery.paddingOf(context).top + 64` (clears the chat header).
+- Watches `systemNotificationProvider`; picks the newest card that isn't the current conversation.
+- Slides down from top (~280ms easeOutCubic) + fade. Body wrapped in `Material(type: transparency)` (avoids the yellow debug double-underline on a Positioned-in-Stack `Text`).
+- **Accumulation:** adopts the FRESH card when the same source grows (the cached `_currentCard` is an immutable snapshot — must re-point to it). Shows the last **3** messages (provider caps the stack at 5).
+- **Countdown ring (`_CountdownRing`):** depleting `CircularProgressIndicator` + remaining seconds (5→1) in the banner's right space, driven by a 5s `AnimationController` that auto-dismisses on complete. Swipe-up or tap also dismiss; tap navigates to the source conversation.
 
-### Layout
-Row: `HollowAvatar(32)` + Column(title, last message preview). Elevated container with accent border + shadow.
+### Mobile @mention autocomplete (channels)
+`mobile_chat_route.dart`: `_updateMentionAutocomplete` (from `_onTextChanged`, channels only) scans back from the cursor for an `@` at word-start, builds candidates from `serverMembersProvider` + `@everyone` (`serverDisplayNameFor`/`serverNicknamesProvider`), and renders `_buildMentionPanel` ABOVE the input bar (a Column child after `_TypingBar`, NOT an OverlayEntry). `_acceptMention` replaces `@query` with `@DisplayName `. Cleared on send. Class `_MobileMentionCandidate`.
 
 ## DM Long-Press Context Menu
 

@@ -1934,7 +1934,7 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] Detect no internet connection and show a warning
 - [X] Offline label in Server header doesn't change itself when somebody is online.
 - [X] NSFW label for server
-- [ ] Local notifications when desktop/mobile in background (proper ones)
+- [X] Local notifications when desktop/mobile in background (proper ones)
 - [ ] Camera front/back switching + double-side at the same time on mobile
 - [ ] Pill switching for mobile between screen and camera during calls
 - [ ] Calls are too quiet. They need proper normalization and testing. Maybe echo cancellation or noise suppression are the main suspects here

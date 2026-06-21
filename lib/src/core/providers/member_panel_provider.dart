@@ -12,6 +12,13 @@ final channelSearchOpenProvider = StateProvider<bool>((ref) => false);
 /// Updated by main.dart window/tray listeners.
 final windowVisibleProvider = StateProvider<bool>((ref) => true);
 
+/// Whether the main window currently has OS focus (desktop). Updated by
+/// main.dart's onWindowFocus/onWindowBlur listeners. Used to decide whether a
+/// new message should raise a native toast even for the conversation that's
+/// open: if the window is unfocused (alt-tabbed away), the user isn't really
+/// reading it, so notify. Defaults true.
+final windowFocusedProvider = StateProvider<bool>((ref) => true);
+
 /// Whether the active chat pane is scrolled to the bottom.
 /// Updated by ChannelChatPane / ChatPane on scroll position changes.
 /// Used by event_provider to decide if new messages count as read.

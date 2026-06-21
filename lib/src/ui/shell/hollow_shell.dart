@@ -46,6 +46,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/animations/ambient_background.dart';
 import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/services/desktop_notification_service.dart';
 import 'package:hollow/src/ui/chat/channel_chat_pane.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart';
 import 'package:hollow/src/ui/chat/voice_channel_pane.dart';
@@ -79,6 +80,7 @@ import 'package:hollow/src/ui/guides/help_panel.dart';
 import 'package:hollow/src/ui/shell/bottom_bar.dart';
 import 'package:hollow/src/ui/shell/channel_sidebar.dart';
 import 'package:hollow/src/ui/shell/friends_bar.dart';
+import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/ui/shell/archive_dashboard.dart';
@@ -146,6 +148,65 @@ class _HollowShellState extends ConsumerState<HollowShell>
         .toList();
     final topics = <String>{channelId, ...unreadChannels}.toList();
     network_api.subscribeChannels(serverId: serverId, channelIds: topics);
+  }
+
+  /// Wire the desktop OS-toast callbacks (tap → open conversation, Reply → send
+  /// a DM). Registered once at startup; the handlers capture `ref` and reuse the
+  /// same navigation the in-app notification card uses.
+  void _registerDesktopNotificationHandlers() {
+    if (!DesktopNotificationService.isSupported) return;
+
+    DesktopNotificationService.registerOpenHandler((payload) async {
+      // Bring the window up first (a toast can be tapped while we're in the
+      // background / tray).
+      await ref.read(systemNotificationProvider.notifier).bringWindowToFront();
+      if (!mounted) return;
+      if (payload.startsWith('channel:')) {
+        final rest = payload.substring('channel:'.length);
+        final sep = rest.indexOf(':');
+        if (sep <= 0 || sep >= rest.length - 1) return;
+        await _openChannelFromNotification(
+            rest.substring(0, sep), rest.substring(sep + 1));
+      } else {
+        _openDmFromNotification(payload);
+      }
+    });
+
+    DesktopNotificationService.registerReplyHandler((peerId, text) {
+      // Inline Reply from a DM toast → send straight away (no window focus
+      // needed). Reuses the standard send + local-echo path.
+      ref.read(chatProvider.notifier).sendMessage(peerId, text);
+    });
+  }
+
+  void _openDmFromNotification(String peerId) {
+    ref.read(archiveTabOpenProvider.notifier).state = false;
+    ref.read(shareTabOpenProvider.notifier).state = false;
+    ref.read(selectedPeerProvider.notifier).state = peerId;
+    ref.read(selectedServerProvider.notifier).state = null;
+    ref.read(channelListProvider.notifier).clear();
+    ref.read(selectedChannelProvider.notifier).state = null;
+    ref.read(serverSettingsOpenProvider.notifier).state = false;
+    ref.read(unreadProvider.notifier).markDmSeen(peerId, null);
+  }
+
+  Future<void> _openChannelFromNotification(
+      String serverId, String channelId) async {
+    final channels = await ChannelListNotifier.fetchChannels(serverId);
+    final layout = await ChannelLayoutNotifier.fetchLayout(serverId);
+    if (!mounted) return;
+    ref.read(archiveTabOpenProvider.notifier).state = false;
+    ref.read(shareTabOpenProvider.notifier).state = false;
+    ref.read(selectedPeerProvider.notifier).state = null;
+    ref.read(serverSettingsOpenProvider.notifier).state = false;
+    ref.read(channelListProvider.notifier).setChannels(channels);
+    ref.read(channelLayoutProvider.notifier).setLayout(layout);
+    ref.read(selectedChannelProvider.notifier).state = channelId;
+    ref.read(selectedServerProvider.notifier).state = serverId;
+    final map =
+        Map<String, String>.from(ref.read(lastChannelPerServerProvider));
+    map[serverId] = channelId;
+    ref.read(lastChannelPerServerProvider.notifier).state = map;
   }
 
   @override
@@ -856,8 +917,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Load verified peers from local DB.
     await ref.read(verifiedPeersProvider.notifier).load();
 
-    // Initialize native notifications (for tray mode).
+    // Initialize native notifications (tray + unfocused-background toasts).
     await ref.read(systemNotificationProvider.notifier).init();
+    _registerDesktopNotificationHandlers();
 
     // Multi-device: the user chose "Link a device" on the welcome screen. The node
     // is now connected on a throwaway identity — open the enter-code flow so they
@@ -910,7 +972,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
   @override
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (!_initialized || !(Platform.isAndroid || Platform.isIOS)) return;
+    if (!(Platform.isAndroid || Platform.isIOS)) return;
+    // Mirror the lifecycle state so event routing can choose OS notification vs
+    // in-app banner. Set BEFORE the _initialized guard so it's always current.
+    ref.read(appLifecycleProvider.notifier).state = state;
+    if (!_initialized) return;
     if (state == AppLifecycleState.resumed) {
       debugPrint('[HOLLOW] App resumed — rejoining rooms + WiFi lock');
       acquireWifiLock();

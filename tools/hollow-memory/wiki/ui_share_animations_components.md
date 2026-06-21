@@ -817,9 +817,9 @@ File: `lib/src/ui/components/call_video_view.dart`
 
 File: `lib/src/ui/components/notification_overlay.dart`
 
-`ConsumerWidget`. Bottom-right notification card stack showing up to 3 cards.
+`ConsumerWidget`. Bottom-right notification card stack showing up to 3 cards. Desktop-only (mobile's in-app banner is `MobileInChatBanner`).
 
-**Data:** Watches `systemNotificationProvider` which returns `List<NotificationCard>`.
+**Data:** Watches `systemNotificationProvider`. Cards are populated by `notifyDm`/`notifyChannel` whenever the desktop window is VISIBLE (focused-on-another-chat OR unfocused); a native OS toast additionally fires when hidden/unfocused. See the System Notification Provider wiki entry.
 
 **Layout:** Stack with `AnimatedPositioned` cards. Cards stacked vertically from bottom (newest at bottom, oldest at top). Card height ~100px + 4px gap. Positioned at right: `HollowSpacing.lg`, bottom: `HollowSpacing.lg + (cards.length - 1 - i) * (cardHeight + gap)`.
 

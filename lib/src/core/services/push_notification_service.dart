@@ -131,6 +131,66 @@ Future<void> clearNotificationLines(String? sender) async {
   } catch (_) {}
 }
 
+// ── Foreground-isolate local notifications ──────────────────────────────────
+// Posted by the LIVE node (app backgrounded but still connected to the relay)
+// so a DM/channel message surfaces as a real OS banner — the same look as the
+// FCM-fetch path, but driven by the message we already received over the live
+// WS (no fetch/decrypt needed). The caller (event_provider) already has the
+// decrypted text + resolved sender name + avatar bytes, so these just render
+// and accumulate the inbox-style stack. Keyed per person/channel exactly like
+// the push path so opening the chat (dismissPeerNotification /
+// dismissChannelNotification) clears them and edits/sends don't double-notify.
+
+/// Post a local DM banner from the foreground isolate. [personKey] is the
+/// sender's MASTER id (one card per person). [messageId] lets edits replace a
+/// line in place. [avatarBytes] is optional (null → no large icon).
+Future<void> showLocalDmNotification({
+  required String personKey,
+  required String displayName,
+  required String messageId,
+  required String text,
+  Uint8List? avatarBytes,
+}) async {
+  if (!Platform.isAndroid && !Platform.isIOS) return;
+  final preview = text.isEmpty || text.startsWith('[file:')
+      ? '📷 Image'
+      : (text.length > 200 ? '${text.substring(0, 200)}...' : text);
+  final texts = await _accumulateLines(personKey, [MapEntry(messageId, preview)]);
+  await _showNotification(
+    sender: personKey,
+    title: displayName,
+    body: texts.last,
+    lines: texts,
+    avatarBytes: avatarBytes,
+  );
+}
+
+/// Post a local channel banner from the foreground isolate. [serverId]/
+/// [channelId] match the push path's keying so dismissal/grouping line up.
+Future<void> showLocalChannelNotification({
+  required String serverId,
+  required String channelId,
+  required String serverName,
+  required String channelName,
+  required String senderName,
+  required String messageId,
+  required String text,
+}) async {
+  if (!Platform.isAndroid && !Platform.isIOS) return;
+  final raw = text.isEmpty || text.startsWith('[file:')
+      ? '📷 Image'
+      : (text.length > 200 ? '${text.substring(0, 200)}...' : text);
+  final texts = await _accumulateLines(
+      _channelLineKey(serverId, channelId), [MapEntry(messageId, '$senderName: $raw')]);
+  await _showChannelNotification(
+    server: serverId,
+    channel: channelId,
+    title: '${serverName.isNotEmpty ? serverName : 'Server'} • #$channelName',
+    body: texts.isNotEmpty ? texts.last : '$senderName: $raw',
+    lines: texts,
+  );
+}
+
 Future<void> _pushLog(String msg) async {
   try {
     final dir = await getApplicationDocumentsDirectory();
