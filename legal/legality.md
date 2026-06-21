@@ -1,8 +1,10 @@
 # Hollow — Legal Landscape Research
 
-*Last updated: May 26, 2026*
+*Last updated: Jun 21, 2026*
 
-Comprehensive research into age verification laws, encryption regulations, and legal liability for encrypted messaging infrastructure providers. Covers the US, UK, and EU.
+Comprehensive research into age verification laws, illegal-content/CSAM, encryption regulations, and legal liability for encrypted messaging infrastructure providers. Covers the US, UK, and EU.
+
+> **This is not legal advice.** It is research. A qualified attorney should validate jurisdiction-specific current status before any operational reliance.
 
 ---
 
@@ -35,9 +37,19 @@ Comprehensive research into age verification laws, encryption regulations, and l
    - [Tornado Cash (2024-2025)](#tornado-cash-2024-2025)
    - [The Tor Project](#the-tor-project)
 6. [How E2EE Peers Are Handling This](#how-e2ee-peers-are-handling-this)
-7. [Hollow's Legal Position](#hollows-legal-position)
-8. [Recommendations](#recommendations)
-9. [Sources](#sources)
+7. [Illegal Content and CSAM Liability](#illegal-content-and-csam-liability)
+   - [US — The Reporting Duty (§ 2258A)](#united-states--the-reporting-duty-18-usc--2258a)
+   - [US — The Criminal CSAM Statutes (§ 2252 / § 2252A)](#united-states--the-criminal-csam-statutes--2252--2252a)
+   - [US — Section 230 Does Not Change This](#united-states--section-230-does-not-change-this-and-doesnt-need-to)
+   - [US — The EARN IT Act](#united-states--the-forward-looking-threat-the-earn-it-act)
+   - [Client-Side Scanning: The Trap, Not the Solution](#client-side-scanning-the-trap-not-the-solution)
+   - [UK — OSA §121/§122 (Dormant)](#united-kingdom--osa-121122-dormant)
+   - [EU — The "Mere Conduit" Shield](#european-union--the-mere-conduit-shield)
+   - [Precedent: Knowledge and Control, Not "Encryption"](#precedent-the-line-is-knowledge-and-control-not-encryption)
+   - [No Capability ≠ Willful Blindness](#staying-on-the-safe-side-no-capability--willful-blindness)
+8. [Hollow's Legal Position](#hollows-legal-position)
+9. [Recommendations](#recommendations)
+10. [Sources](#sources)
 
 ---
 
@@ -357,6 +369,110 @@ None of these have implemented age verification. None have been fined or banned.
 
 ---
 
+## Illegal Content and CSAM Liability
+
+Age verification is a *regulatory* question (who counts as a regulated platform). Illegal content — above all CSAM (child sexual abuse material), but also terrorism content, drug trafficking, and illegal marketplaces — is a *criminal liability* question, and it has a different and harsher legal structure. It does not ask "are you a platform?" It asks three narrower questions:
+
+1. **Do you knowingly transmit, store, or facilitate it?**
+2. **Do you have actual knowledge and fail to report?**
+3. **Are you under a specific legal duty to detect it?**
+
+The short answer for a service like Hollow is that **every operative criminal and reporting statute in the US, UK, and EU hinges on *knowledge* or *control* that an operator of a genuinely no-content, no-decryption relay cannot have.** A relay that routes only opaque ciphertext it cannot read is in the same legal posture as a telephone switch, an ISP carrying TLS traffic, or Signal — none of which scan, and none of which has been charged for content they could not see.
+
+This section documents the law behind that conclusion, and — just as importantly — why the most-suggested "solution" (voluntary client-side CSAM scanning) would *destroy* this posture rather than strengthen it.
+
+### United States — The Reporting Duty (18 U.S.C. § 2258A)
+
+The central US statute is **18 U.S.C. § 2258A**, the law that requires providers to report CSAM to NCMEC's CyberTipline. Two features of it answer the question directly:
+
+1. **The duty is triggered only by *actual knowledge*.** § 2258A(a) requires a provider to report only when it "obtains actual knowledge of any facts or circumstances" indicating an apparent violation [74]. A provider that handles only encrypted blobs it cannot decrypt never obtains that knowledge, and so never triggers the duty. (If a provider *does* somehow learn of CSAM — e.g. through a user abuse report it can act on — it must then report it. Hollow's relay has no content to act on; the report path is the AUP/abuse channel, see below.)
+
+2. **There is NO affirmative duty to monitor, search, or scan.** § 2258A(f) ("Protection of Privacy") states that nothing in the section requires a provider to "monitor any user... monitor the content of any communication... or affirmatively search, screen, or scan for" facts or circumstances [74]. **Congress wrote the no-duty-to-scan rule directly into the statute.** You are not legally required to look.
+
+The penalty in § 2258A(e) attaches only to a provider that **"knowingly and willfully fails to make a report"** it was required to make — first violation up to $600,000 (under 100M monthly active users) or $850,000 (100M+); subsequent violations higher [74]. A provider with no actual knowledge has no report to make and so cannot incur this penalty.
+
+A major law firm's plain-language summary matches the statute exactly: "online service providers have no affirmative obligation to scan for CSAM, but if they choose to or otherwise learn of CSAM on their service, they must report it under federal law (18 U.S.C. § 2258A)." [75]
+
+### United States — The Criminal CSAM Statutes (§ 2252 / § 2252A)
+
+The underlying crimes are in **18 U.S.C. § 2252 and § 2252A**, and every operative subsection requires a **"knowing"** mental state:
+
+- § 2252A(a)(1) — **knowingly** mails, transports, or ships CSAM
+- § 2252A(a)(2) — **knowingly** receives or distributes CSAM
+- § 2252A(a)(5) — **knowingly** possesses, or knowingly accesses with intent to view, CSAM [76]
+
+Knowledge of the actual content is therefore a required element of every offense. **A relay that transmits ciphertext it cannot decrypt cannot "knowingly" receive, distribute, or possess the content** — it has no knowledge of, and no possession of, the underlying material. This is the conduit/common-carrier posture: a phone company that carries a call in which a crime is discussed has not "knowingly" committed the crime. The relay is even further removed — it cannot even perceive the content, encrypted or not.
+
+### United States — Section 230 Does Not Change This (and Doesn't Need To)
+
+Section 230's immunity does **not** extend to federal criminal law — § 230(e)(1) carves it out, so the government may still bring federal criminal CSAM prosecutions [77]. This is sometimes raised as a gotcha, but it changes nothing for a no-knowledge conduit: **the protection comes from the underlying statute's "knowing" mens rea, not from Section 230.** Courts have read the § 230(e)(1) carve-out to preserve federal criminal *prosecution* (not to open the door to civil suits premised on federal criminal law) [77]. A conduit with no knowledge is protected at the level of the crime's own elements, with or without Section 230.
+
+### United States — The Forward-Looking Threat: The EARN IT Act
+
+The one US development worth tracking is the **EARN IT Act** (Eliminating Abusive and Rampant Neglect of Interactive Technologies Act). It has been introduced three times — 2020, 2022, and most recently as **S.1207 in April 2023** (Sens. Graham and Blumenthal) — and **has died in committee every time. It is not law as of mid-2026** [78][79].
+
+Why it matters if it ever passes:
+
+- It **strips Section 230 immunity** specifically for child-sexual-exploitation claims, enabling state criminal prosecutions and private plaintiff lawsuits against providers [78][80].
+- It effectively **lowers the liability threshold** from the federal "knowing" standard toward state-law negligence/recklessness standards, by letting state laws (with their lower mens rea) reach providers [79]. Stanford's Riana Pfefferkorn described the mechanism as "opening the courthouse door and lowering the threshold to get through that door" [78].
+- **Encryption-as-evidence problem.** A 2020 amendment says offering encryption cannot be an *independent* basis for liability — but critics (CDT, CyberScoop) note it still allows the *offering of E2EE* to be used as **evidence of negligence**. The practical effect, per CDT, is that an encrypted provider would face "lengthy and expensive litigation to prove they were not liable for content they could not have known about because of their encryption design" [79][78].
+
+The risk EARN IT poses is therefore not a clean ban — it is **litigation cost and the reframing of encryption itself as suspect.** This is the same wedge as Chat Control and UK §122 (below): the danger is not a court order Hollow can't satisfy, but a legal climate that treats "we built it so we can't see content" as recklessness rather than principle. The defense remains the architecture itself plus the absence of any scanning capability to point to.
+
+### Client-Side Scanning: The Trap, Not the Solution
+
+The most common proposal — including from people who mean well — is to voluntarily add **client-side CSAM scanning**: hash-match each image on the device against a known-CSAM database (the Apple NeuralHash / Microsoft PhotoDNA model) before it is encrypted. **For a privacy tool this is the single most damaging thing you could build, and the legal reasons are as strong as the ethical ones.**
+
+1. **It manufactures the capability you currently lack.** Today, "we cannot comply, we have no ability to see content" is a complete answer — the same answer Signal gives. The moment you ship scanning, you have *proven* the capability exists. Every future demand ("scan for this too," "expand the hash list," "report these matches") now has a mechanism to attach to, and the "we can't" defense is gone. You would be voluntarily building the exact pre-condition that EU Chat Control and UK §122 are trying to force.
+
+2. **The hash databases are access-restricted — an independent developer cannot legally obtain them.** The IWF Image Hash List and PhotoDNA hashes are distributed only to **vetted, licensed members** who pass IWF vetting checks; access is membership-gated and contractually controlled, with the lists served through NCMEC/IWF member channels [81]. A small independent project cannot lawfully hold them. So client-side scanning is not even an option Hollow *could* legitimately implement — and that very inaccessibility reinforces the "no capability to scan" position.
+
+3. **It doesn't even work reliably — Apple proved this publicly.** Apple announced on-device NeuralHash scanning of iCloud Photos in **August 2021** and **abandoned it entirely on December 7, 2022**, concluding child protection is achievable "without companies combing through personal data" [82]. Within days of the 2021 announcement, researchers reverse-engineered NeuralHash out of iOS and **produced a hash collision** — two different images with the same hash — demonstrating the false-positive/false-accusation surface that makes on-device matching a surveillance and framing risk, not a safety feature [83]. The most resourced company on earth tried this, got it wrong, and walked it back.
+
+The principled position — and the legally strongest one — is the one Signal, Session, SimpleX, and Briar all take: **do not scan.** For a privacy tool, not scanning is not a loophole; it is the foundation that the entire legal and ethical case rests on.
+
+### United Kingdom — OSA §121/§122 (Dormant)
+
+The UK Online Safety Act 2023 imposes **CSEA (child sexual exploitation and abuse) and illegal-content duties** on user-to-user services, and **§121** ("Notices to deal with terrorism content or CSEA content") gives Ofcom a *conditional* power to require "accredited technology" to identify such content — including, under §121(2)(a)(iii), in **private** communications (the provision that implicates E2EE) [84]. This is the same power often referred to as the "§122 spy clause."
+
+Crucially, it is a **conditional notice power, exercisable only where Ofcom considers it "necessary and proportionate"** — not an automatic scanning mandate — and **the statutory text says nothing about how private-communication scanning is to be achieved without breaking encryption** [84]. As documented in the UK section above, the power remains **dormant**: no "accredited technology" has been designated, the government conceded no technology exists to do this without breaking encryption, and Signal and WhatsApp both said they would leave the UK rather than comply. Hollow would face the same choice — but so far the clause has never been activated against anyone.
+
+### European Union — The "Mere Conduit" Shield
+
+The EU gives a transit-only encrypted relay two layers of direct protection:
+
+- **e-Commerce Directive (2000/31/EC), Article 12 — "Mere Conduit":** a provider that transmits information is **not liable** for that information, provided it (a) does not initiate the transmission, (b) does not select the receiver, and (c) does not select or modify the information [85]. A RAM-only relay routing opaque blobs satisfies all three conditions by design — it cannot even *read* the content, let alone select or modify it. This protection is carried forward by the **DSA's "mere conduit" provisions** (Art. 4) for transit-only intermediaries.
+- **e-Commerce Directive, Article 15(1) — No General Monitoring:** Member States **may not impose** on conduit/caching/hosting providers any general obligation to monitor what they transmit, or to actively seek facts indicating illegal activity [85].
+
+On the scanning mandate itself — the **CSA Regulation ("Chat Control")** — see the EU section above: the voluntary derogation expired April 2026, the permanent regulation remains in contested trilogue with Parliament excluding E2EE from any scanning, and no EU scanning mandate is in force.
+
+### Precedent: The Line Is Knowledge and Control, Not "Encryption"
+
+The real-world prosecutions that people point to all turned on **actual knowledge, operational control, and refusal to cooperate** — not on the mere fact of running an encrypted or privacy-preserving service.
+
+- **Pavel Durov / Telegram (France, August 2024).** Durov was arrested on **24 August 2024** and indicted on **28 August 2024** on twelve counts including complicity in distributing child exploitation material, drug trafficking, money laundering, and fraud [86]. The charges rested on **platform negligence, "insufficient moderation," and refusal to cooperate with legal requests** — not on offering encryption. Critically, **Telegram is not end-to-end encrypted by default**: it has moderation capability and access to most content, which is exactly what gives it *knowledge and control* — and therefore exposure — that a genuine no-knowledge conduit does not have. Telegram is the *opposite* of Hollow's posture, not a comparable.
+- **Roman Storm / Tornado Cash (US, 2025).** Storm was convicted of operating an unlicensed money-transmitting business; the DOJ's theory was that he **"continued to provide this service with knowledge"** that it was moving criminal proceeds and was "personally aware of numerous instances" of criminal use [87]. Again: liability flowed from *knowing facilitation*, the precise opposite of a service that cannot know its content.
+
+By contrast, **no operator of a genuinely E2EE, no-content-storage messaging service (Signal, Session, SimpleX, Briar) has been criminally charged or held liable for CSAM or other illegal content transmitted by its users.** The doctrinal line is clear:
+
+| Posture | Example | Liable? |
+|---------|---------|---------|
+| **No technical capability to know** (cannot decrypt, stores nothing) | Signal, Hollow | The lawful conduit position |
+| **Willful blindness** (deliberately structuring to avoid knowledge of *specific known* activity) | — | Risk zone |
+| **Knowingly facilitating** (has knowledge/control, continues anyway) | Tornado Cash, Telegram | Charged |
+
+### Staying on the Safe Side: No Capability ≠ Willful Blindness
+
+The one thing to get right is the difference between **"no capability to know"** (lawful) and **"willful blindness"** (deliberately avoiding knowledge of specific activity you've been alerted to). A no-content relay is on the safe side *by architecture* — it isn't avoiding knowledge, it structurally cannot obtain it. The way to make that unambiguous, and to demonstrate good faith rather than evasion, is:
+
+1. **A clear Acceptable Use Policy / Terms** explicitly prohibiting CSAM and illegal content. (Hollow's Terms of Use already do — CSAM is named.)
+2. **A reachable abuse/legal contact**, so the project is demonstrably *willing* to act on anything it can act on, rather than structured to dodge all contact. A no-content service that *still* offers an abuse channel is the gold standard — it answers the "willful blindness" question before it is asked.
+3. **No mechanism that creates knowledge or capability.** The strength is the genuine *absence* of capability. Don't add scanning, logging, accounts, or content access — protect the thing that makes the defense real.
+
+(Doctrinally, the "AUP + abuse contact establishes good faith" framing is a reasonable inference from how the willful-blindness line is drawn in the precedents above rather than a single black-letter rule; it is the consistent practice of the lawful E2EE peers and the conservative posture.)
+
+---
+
 ## Hollow's Legal Position
 
 ### Why Hollow Is in the Clear
@@ -571,3 +687,31 @@ Hollow's relay meets all three conditions by design — it cannot even inspect t
 [72] Online Safety Act Explained Q&A — Ofcom (PDF). https://www.ofcom.org.uk/siteassets/resources/documents/online-safety/information-for-industry/other/online-safety-act-explained-qa-web.pdf
 
 [73] Questioning the Conventional Wisdom on Liability and Open Source Software — Lawfare. https://www.lawfaremedia.org/article/questioning-the-conventional-wisdom-on-liability-and-open-source-software
+
+[74] 18 U.S.C. § 2258A — Reporting requirements of providers (full text, incl. (a) actual-knowledge trigger, (e) penalties, (f) Protection of Privacy / no duty to monitor or scan) — Cornell Legal Information Institute. https://www.law.cornell.edu/uscode/text/18/2258A
+
+[75] Federal Legislation Seeks to Change Online Child Safety Reporting Obligations — Perkins Coie. https://perkinscoie.com/insights/update/federal-legislation-seeks-change-online-child-safety-reporting-obligations-and
+
+[76] 18 U.S.C. § 2252A — Certain activities relating to material constituting or containing child pornography ("knowingly" mens rea in (a)(1)/(a)(2)/(a)(5)) — Cornell Legal Information Institute. https://www.law.cornell.edu/uscode/text/18/2252A
+
+[77] CRS Report R46751 — Section 230 Overview (§ 230(e)(1) federal-criminal-law carve-out) — Congressional Research Service. https://www.congress.gov/crs-product/R46751
+
+[78] EARN IT Act Returns, Still Threatening Encryption and Privacy — CyberScoop (quotes Riana Pfefferkorn, Stanford). https://cyberscoop.com/earn-it-stop-csam-encryption-privacy/
+
+[79] The New EARN IT Act Still Threatens Encryption and Child Exploitation Prosecutions — Center for Democracy & Technology (CDT). https://cdt.org/insights/the-new-earn-it-act-still-threatens-encryption-and-child-exploitation-prosecutions/
+
+[80] EARN IT Act — Wikipedia (introduction history 2020/2022/2023, died in committee, not law). https://en.wikipedia.org/wiki/EARN_IT_Act
+
+[81] Image Hash List — Internet Watch Foundation (membership-gated, vetted access; PhotoDNA via Microsoft / NCMEC member channels). https://www.iwf.org.uk/our-technology/our-services/image-hash-list/
+
+[82] Apple Abandons Its Controversial Plans to Detect Known CSAM in iCloud Photos — MacRumors, December 7, 2022. https://www.macrumors.com/2022/12/07/apple-abandons-icloud-csam-detection/
+
+[83] Apple Explains How NeuralHash Collisions Don't Compromise Its CSAM System (researchers reverse-engineered NeuralHash and produced a hash collision) — MacRumors, August 18, 2021. https://www.macrumors.com/2021/08/18/apple-explains-neuralhash-collisions-not-csam-system/
+
+[84] Online Safety Act 2023, Section 121 — Notices to deal with terrorism content or CSEA content (conditional Ofcom "accredited technology" power, incl. private communications) — legislation.gov.uk. https://www.legislation.gov.uk/ukpga/2023/50/section/121
+
+[85] EU E-Commerce Directive 2000/31/EC, Article 12 ("Mere Conduit") and Article 15 (No General Obligation to Monitor) — EUR-Lex. https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:32000L0031
+
+[86] Arrest and Indictment of Pavel Durov (twelve counts, Aug 24/28 2024; complicity, insufficient moderation, refusal to cooperate) — Wikipedia. https://en.wikipedia.org/wiki/Arrest_and_indictment_of_Pavel_Durov
+
+[87] Founder of Tornado Cash Crypto Mixing Service Convicted of Knowingly Transmitting Criminal Proceeds — U.S. Attorney's Office, SDNY (DOJ). https://www.justice.gov/usao-sdny/pr/founder-tornado-cash-crypto-mixing-service-convicted-knowingly-transmitting-criminal

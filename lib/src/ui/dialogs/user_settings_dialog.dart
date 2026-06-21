@@ -91,7 +91,11 @@ void showUserSettingsDialog(BuildContext context, WidgetRef ref, {bool openSyste
         displayNameController: displayNameController,
         statusController: statusController,
         aboutMeController: aboutMeController,
-        initialTab: openUpdatesTab ? _SettingsTab.updates : openSystemTab ? _SettingsTab.system : _SettingsTab.profile,
+        initialTab: openUpdatesTab
+            ? _SettingsCategory.updates
+            : openSystemTab
+                ? _SettingsCategory.appearance
+                : _SettingsCategory.profile,
       );
     },
   ).then((_) {
@@ -107,22 +111,94 @@ Color _bannerColorFromId(String id) {
   return HSLColor.fromAHSL(1.0, hue.toDouble(), 0.45, 0.35).toColor();
 }
 
-/// Settings tab enum.
-enum _SettingsTab { profile, system, security, updates, about }
+/// Settings category — one entry per side-rail item. The old monolithic
+/// "System" and "Security" tabs were split into focused categories so each
+/// view fits without a giant scroll (the System tab alone used to hold 8
+/// sections). Each category renders as a list of [_SettingsCard]s.
+enum _SettingsCategory {
+  profile,
+  appearance,
+  network,
+  files,
+  audio,
+  shortcuts,
+  security,
+  devices,
+  backup,
+  updates,
+  about,
+}
+
+extension _SettingsCategoryMeta on _SettingsCategory {
+  IconData get icon => switch (this) {
+        _SettingsCategory.profile => LucideIcons.user,
+        _SettingsCategory.appearance => LucideIcons.palette,
+        _SettingsCategory.network => LucideIcons.globe,
+        _SettingsCategory.files => LucideIcons.hardDrive,
+        _SettingsCategory.audio => LucideIcons.mic,
+        _SettingsCategory.shortcuts => LucideIcons.keyboard,
+        _SettingsCategory.security => LucideIcons.shield,
+        _SettingsCategory.devices => LucideIcons.smartphone,
+        _SettingsCategory.backup => LucideIcons.archive,
+        _SettingsCategory.updates => LucideIcons.download,
+        _SettingsCategory.about => LucideIcons.info,
+      };
+
+  String get label => switch (this) {
+        _SettingsCategory.profile => 'Profile',
+        _SettingsCategory.appearance => 'Appearance',
+        _SettingsCategory.network => 'Network',
+        _SettingsCategory.files => 'Files & Storage',
+        _SettingsCategory.audio => 'Audio & Video',
+        _SettingsCategory.shortcuts => 'Shortcuts',
+        _SettingsCategory.security => 'Security',
+        _SettingsCategory.devices => 'Devices',
+        _SettingsCategory.backup => 'Backup',
+        _SettingsCategory.updates => 'Updates',
+        _SettingsCategory.about => 'About',
+      };
+
+  /// Lowercase keywords used by the rail search filter so a query can match a
+  /// category even when the user types the name of a setting that lives inside
+  /// it (e.g. "theme" → Appearance, "relay" → Network).
+  String get searchTerms => switch (this) {
+        _SettingsCategory.profile =>
+          'profile display name status about me avatar banner twitch connection',
+        _SettingsCategory.appearance =>
+          'appearance theme dark light mode accent color background image layout '
+              'dock classic animations transitions invisible',
+        _SettingsCategory.network => 'network relay server domain connection',
+        _SettingsCategory.files =>
+          'files storage auto download threshold cache size data location folder '
+              'media image quality webp',
+        _SettingsCategory.audio =>
+          'audio video voice microphone mic speaker camera gain quality test '
+              'ringtone devices',
+        _SettingsCategory.shortcuts => 'shortcuts keyboard keys hotkeys chat input',
+        _SettingsCategory.security =>
+          'security app lock password device protection keychain recovery phrase '
+              'mnemonic encrypt',
+        _SettingsCategory.devices =>
+          'devices linked multi device link sync revoke remove reset',
+        _SettingsCategory.backup => 'backup export proof verify signature',
+        _SettingsCategory.updates => 'updates version install download release',
+        _SettingsCategory.about => 'about version contact legal licenses follow support',
+      };
+}
 
 class _UserSettingsContent extends ConsumerStatefulWidget {
   final String localPeerId;
   final TextEditingController displayNameController;
   final TextEditingController statusController;
   final TextEditingController aboutMeController;
-  final _SettingsTab initialTab;
+  final _SettingsCategory initialTab;
 
   const _UserSettingsContent({
     required this.localPeerId,
     required this.displayNameController,
     required this.statusController,
     required this.aboutMeController,
-    this.initialTab = _SettingsTab.profile,
+    this.initialTab = _SettingsCategory.profile,
   });
 
   @override
@@ -141,37 +217,20 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   bool _avatarChanged = false;
   bool _bannerChanged = false;
 
-  // Active tab.
-  late _SettingsTab _activeTab;
+  // Active category + rail search filter.
+  late _SettingsCategory _activeTab;
+  final _searchController = TextEditingController();
+  String _searchQuery = '';
 
-  // Pending toggle states (applied only on Save).
-  late bool _pendingDarkMode;
-  bool _pendingMinimizeToTray = true;
-  bool _initialMinimizeToTray = true;
-  bool _trayInitialized = false;
-  bool _pendingProxy = false;
-  bool _initialProxy = false;
-  bool _proxyInitialized = false;
-  bool _pendingDockMode = true;
-  bool _initialDockMode = true;
-  bool _layoutInitialized = false;
-  bool _pendingDisableAnimations = false;
-  bool _initialDisableAnimations = false;
-  bool _animInitialized = false;
-  bool _pendingInvisible = false;
-  bool _initialInvisible = false;
-  bool _invisibleInitialized = false;
-  int _pendingAutoDownloadThreshold = 169;
-  int _initialAutoDownloadThreshold = 169;
-  bool _thresholdInitialized = false;
-  int _pendingCacheCap = 1024;
-  int _initialCacheCap = 1024;
-  bool _cacheCapInitialized = false;
-  double _initialAccentHue = defaultAccentHue;
+  // Relay selection (Network category — applied via explicit Apply & Restart).
   late String _initialRelayDomain;
   late String _selectedRelay;
   bool _showAddRelay = false;
   final _newRelayController = TextEditingController();
+
+  // Whether the profile has unsaved edits (Profile keeps an explicit Save —
+  // everything else auto-saves on change). Tracks text fields + image changes.
+  bool _profileDirty = false;
 
   @override
   void initState() {
@@ -181,60 +240,10 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     _liveStatus = widget.statusController.text;
     widget.displayNameController.addListener(_onFieldChanged);
     widget.statusController.addListener(_onFieldChanged);
-    _initialAccentHue = ref.read(accentHueProvider);
+    widget.aboutMeController.addListener(_onProfileEdited);
 
     _initialRelayDomain = ref.read(relayDomainProvider);
     _selectedRelay = _initialRelayDomain;
-
-    _pendingDarkMode =
-        ref.read(themeModeProvider) == ThemeMode.dark;
-
-    // If already loaded, use the value directly.
-    final trayAsync = ref.read(minimizeToTrayProvider);
-    if (trayAsync.hasValue) {
-      _pendingMinimizeToTray = trayAsync.value!;
-      _initialMinimizeToTray = _pendingMinimizeToTray;
-      _trayInitialized = true;
-    }
-
-    final proxyAsync = ref.read(proxyEnabledProvider);
-    if (proxyAsync.hasValue) {
-      _pendingProxy = proxyAsync.value!;
-      _initialProxy = _pendingProxy;
-      _proxyInitialized = true;
-    }
-
-    final layoutAsync = ref.read(layoutModeProvider);
-    if (layoutAsync.hasValue) {
-      _pendingDockMode = layoutAsync.value! == LayoutMode.dock;
-      _initialDockMode = _pendingDockMode;
-      _layoutInitialized = true;
-    }
-
-    final animAsync = ref.read(disableAnimationsProvider);
-    if (animAsync.hasValue) {
-      _pendingDisableAnimations = animAsync.value!;
-      _initialDisableAnimations = _pendingDisableAnimations;
-      _animInitialized = true;
-    }
-
-    _pendingInvisible = ref.read(invisibleModeProvider);
-    _initialInvisible = _pendingInvisible;
-    _invisibleInitialized = true;
-
-    final thresholdAsync = ref.read(autoDownloadThresholdProvider);
-    if (thresholdAsync.hasValue) {
-      _pendingAutoDownloadThreshold = thresholdAsync.value!;
-      _initialAutoDownloadThreshold = _pendingAutoDownloadThreshold;
-      _thresholdInitialized = true;
-    }
-
-    final cacheCapAsync = ref.read(vaultCacheCapProvider);
-    if (cacheCapAsync.hasValue) {
-      _pendingCacheCap = cacheCapAsync.value!;
-      _initialCacheCap = _pendingCacheCap;
-      _cacheCapInitialized = true;
-    }
   }
 
   void _onFieldChanged() {
@@ -242,6 +251,11 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       _liveDisplayName = widget.displayNameController.text;
       _liveStatus = widget.statusController.text;
     });
+    _onProfileEdited();
+  }
+
+  void _onProfileEdited() {
+    if (!_profileDirty && mounted) setState(() => _profileDirty = true);
   }
 
   Future<void> _pickAvatar() async {
@@ -262,6 +276,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       setState(() {
         _pendingAvatarBytes = Uint8List.fromList(raw);
         _avatarChanged = true;
+        _profileDirty = true;
       });
       return;
     }
@@ -279,6 +294,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       setState(() {
         _pendingAvatarBytes = processed;
         _avatarChanged = true;
+        _profileDirty = true;
       });
     } catch (e) {
       if (mounted) HollowToast.show(context, 'Failed to process image', type: HollowToastType.error);
@@ -289,6 +305,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     setState(() {
       _pendingAvatarBytes = Uint8List(0);
       _avatarChanged = true;
+      _profileDirty = true;
     });
   }
 
@@ -310,6 +327,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       setState(() {
         _pendingBannerBytes = Uint8List.fromList(raw);
         _bannerChanged = true;
+        _profileDirty = true;
       });
       return;
     }
@@ -327,6 +345,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       setState(() {
         _pendingBannerBytes = processed;
         _bannerChanged = true;
+        _profileDirty = true;
       });
     } catch (e) {
       if (mounted) HollowToast.show(context, 'Failed to process image', type: HollowToastType.error);
@@ -337,6 +356,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     setState(() {
       _pendingBannerBytes = Uint8List(0);
       _bannerChanged = true;
+      _profileDirty = true;
     });
   }
 
@@ -344,77 +364,20 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   void dispose() {
     widget.displayNameController.removeListener(_onFieldChanged);
     widget.statusController.removeListener(_onFieldChanged);
+    widget.aboutMeController.removeListener(_onProfileEdited);
     _newRelayController.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
-  Future<void> _onSave() async {
+  /// Save the Profile category. Profile keeps an explicit Save button (text
+  /// fields + cropped images benefit from a single commit); every other
+  /// category auto-saves on change. Does NOT close the dialog — the user can
+  /// keep browsing other categories afterward.
+  Future<void> _saveProfile() async {
     final displayName = widget.displayNameController.text.trim();
     final status = widget.statusController.text.trim();
     final aboutMe = widget.aboutMeController.text.trim();
-
-    // Apply theme change.
-    ref.read(themeModeProvider.notifier).setMode(
-        _pendingDarkMode ? ThemeMode.dark : ThemeMode.light);
-
-    // Apply minimize to tray change.
-    if (_pendingMinimizeToTray != _initialMinimizeToTray) {
-      await ref
-          .read(minimizeToTrayProvider.notifier)
-          .setEnabled(_pendingMinimizeToTray);
-    }
-
-    // Apply proxy change.
-    final proxyChanged = _pendingProxy != _initialProxy;
-    if (proxyChanged) {
-      await ref
-          .read(proxyEnabledProvider.notifier)
-          .setEnabled(_pendingProxy);
-    }
-
-    // Apply layout mode change.
-    if (_pendingDockMode != _initialDockMode) {
-      await ref.read(layoutModeProvider.notifier).setMode(
-            _pendingDockMode ? LayoutMode.dock : LayoutMode.classic,
-          );
-    }
-
-    // Apply auto-download threshold change.
-    if (_pendingAutoDownloadThreshold != _initialAutoDownloadThreshold) {
-      await ref
-          .read(autoDownloadThresholdProvider.notifier)
-          .setThreshold(_pendingAutoDownloadThreshold);
-    }
-
-    // Apply cache cap change.
-    if (_pendingCacheCap != _initialCacheCap) {
-      await ref
-          .read(vaultCacheCapProvider.notifier)
-          .setCap(_pendingCacheCap);
-    }
-
-    // Apply animation toggle.
-    if (_pendingDisableAnimations != _initialDisableAnimations) {
-      await ref
-          .read(disableAnimationsProvider.notifier)
-          .setEnabled(_pendingDisableAnimations);
-      HollowDurations.animationsDisabled = _pendingDisableAnimations;
-      SharedTickers.instance.disabled = _pendingDisableAnimations;
-      if (_pendingDisableAnimations) {
-        SharedTickers.instance.pause();
-      } else {
-        // Re-enable: start tickers if they were never started, else resume.
-        SharedTickers.instance.start();
-        SharedTickers.instance.resume();
-      }
-    }
-
-    // Apply invisible mode toggle.
-    if (_pendingInvisible != _initialInvisible) {
-      await ref
-          .read(invisibleModeProvider.notifier)
-          .setInvisible(_pendingInvisible);
-    }
 
     // Save profile (include Twitch username if connected).
     String twitchUsername = '';
@@ -432,119 +395,58 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
         );
 
     if (!mounted) return;
-    Navigator.of(context).pop();
-
-    // Show restart prompt if proxy setting changed.
-    if (proxyChanged && mounted) {
-      _showRestartDialog(context);
-    }
+    setState(() {
+      _profileDirty = false;
+      _avatarChanged = false;
+      _bannerChanged = false;
+    });
+    HollowToast.show(context, 'Profile saved', type: HollowToastType.success);
   }
 
-  void _showRestartDialog(BuildContext parentContext) {
-    showHollowDialog(
-      context: parentContext,
-      builder: (ctx) => _RestartPrompt(),
-    );
+  /// Categories matching the current search query. When the query is empty,
+  /// all categories are shown.
+  List<_SettingsCategory> get _filteredCategories {
+    if (_searchQuery.isEmpty) return _SettingsCategory.values;
+    final q = _searchQuery.toLowerCase();
+    return _SettingsCategory.values
+        .where((c) => c.label.toLowerCase().contains(q) || c.searchTerms.contains(q))
+        .toList();
   }
 
   @override
   Widget build(BuildContext context) {
-    // Update pending minimize-to-tray once the async value resolves.
-    if (!_trayInitialized) {
-      ref.listen(minimizeToTrayProvider, (prev, next) {
-        if (next.hasValue && !_trayInitialized) {
-          setState(() {
-            _pendingMinimizeToTray = next.value!;
-            _initialMinimizeToTray = _pendingMinimizeToTray;
-            _trayInitialized = true;
-          });
-        }
-      });
-    }
-
-    // Update pending proxy once the async value resolves.
-    if (!_proxyInitialized) {
-      ref.listen(proxyEnabledProvider, (prev, next) {
-        if (next.hasValue && !_proxyInitialized) {
-          setState(() {
-            _pendingProxy = next.value!;
-            _initialProxy = _pendingProxy;
-            _proxyInitialized = true;
-          });
-        }
-      });
-    }
-
-    // Update pending layout mode once the async value resolves.
-    if (!_layoutInitialized) {
-      ref.listen(layoutModeProvider, (prev, next) {
-        if (next.hasValue && !_layoutInitialized) {
-          setState(() {
-            _pendingDockMode = next.value! == LayoutMode.dock;
-            _initialDockMode = _pendingDockMode;
-            _layoutInitialized = true;
-          });
-        }
-      });
-    }
-
-    // Update pending disable-animations once the async value resolves.
-    if (!_animInitialized) {
-      ref.listen(disableAnimationsProvider, (prev, next) {
-        if (next.hasValue && !_animInitialized) {
-          setState(() {
-            _pendingDisableAnimations = next.value!;
-            _initialDisableAnimations = _pendingDisableAnimations;
-            _animInitialized = true;
-          });
-        }
-      });
-    }
-
-    // Update pending auto-download threshold once the async value resolves.
-    if (!_thresholdInitialized) {
-      ref.listen(autoDownloadThresholdProvider, (prev, next) {
-        if (next.hasValue && !_thresholdInitialized) {
-          setState(() {
-            _pendingAutoDownloadThreshold = next.value!;
-            _initialAutoDownloadThreshold = _pendingAutoDownloadThreshold;
-            _thresholdInitialized = true;
-          });
-        }
-      });
-    }
-
-    // Update pending cache cap once the async value resolves.
-    if (!_cacheCapInitialized) {
-      ref.listen(vaultCacheCapProvider, (prev, next) {
-        if (next.hasValue && !_cacheCapInitialized) {
-          setState(() {
-            _pendingCacheCap = next.value!;
-            _initialCacheCap = _pendingCacheCap;
-            _cacheCapInitialized = true;
-          });
-        }
-      });
-    }
-
     final hollow = HollowTheme.of(context);
     final radius = BorderRadius.circular(hollow.radiusLg);
+    final screen = MediaQuery.of(context).size;
+
+    // Responsive dialog — grows with the window but stays comfortable. The old
+    // fixed 680x540 box was the main source of the "everything's cramped"
+    // feeling; this gives the rail + cards room to breathe.
+    final dialogWidth = screen.width * 0.9 < 920.0 ? screen.width * 0.9 : 920.0;
+    final dialogHeight = screen.height * 0.86 < 680.0 ? screen.height * 0.86 : 680.0;
+
+    final filtered = _filteredCategories;
+    // If the active category was filtered out, fall back to the first match so
+    // the content area never goes blank while typing.
+    final activeForContent =
+        filtered.contains(_activeTab) ? _activeTab : (filtered.isNotEmpty ? filtered.first : _activeTab);
 
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
+        padding: const EdgeInsets.all(HollowSpacing.lg),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            maxWidth: 680,
-            maxHeight: 540,
-            minHeight: 540,
-            minWidth: 400,
+          constraints: BoxConstraints(
+            maxWidth: dialogWidth,
+            maxHeight: dialogHeight,
+            minHeight: 420,
+            minWidth: 360,
           ),
           child: Material(
             color: Colors.transparent,
             child: Container(
+              clipBehavior: Clip.antiAlias,
               decoration: BoxDecoration(
-                color: hollow.elevated.withValues(alpha: 0.92),
+                color: hollow.elevated.withValues(alpha: 0.96),
                 borderRadius: radius,
                 border: Border.all(
                   color: hollow.accent.withValues(alpha: 0.15),
@@ -556,135 +458,103 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                   ),
                 ],
               ),
-              child: Column(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  // Header
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                      HollowSpacing.xl,
-                      HollowSpacing.xl,
-                      HollowSpacing.xl,
-                      0,
-                    ),
-                    child: Row(
+                  // ── Left: searchable category rail ──
+                  Container(
+                    width: 188,
+                    color: hollow.surface.withValues(alpha: 0.4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Text(
-                          'Settings',
-                          style: HollowTypography.heading
-                              .copyWith(color: hollow.textPrimary),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(
+                            HollowSpacing.md,
+                            HollowSpacing.lg,
+                            HollowSpacing.md,
+                            HollowSpacing.sm,
+                          ),
+                          child: Text(
+                            'Settings',
+                            style: HollowTypography.heading.copyWith(
+                              color: hollow.textPrimary,
+                              fontSize: 18,
+                            ),
+                          ),
+                        ),
+                        // Search filter.
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(
+                            HollowSpacing.sm,
+                            HollowSpacing.sm,
+                            HollowSpacing.sm,
+                            HollowSpacing.md,
+                          ),
+                          child: HollowTextField(
+                            controller: _searchController,
+                            hintText: 'Search settings',
+                            isDense: true,
+                            prefixIcon:
+                                Icon(LucideIcons.search, size: 14, color: hollow.textSecondary),
+                            borderRadius: hollow.radiusSm,
+                            onChanged: (v) =>
+                                setState(() => _searchQuery = v.trim()),
+                          ),
+                        ),
+                        Expanded(
+                          child: ListView(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: HollowSpacing.sm,
+                              vertical: HollowSpacing.xxs,
+                            ),
+                            children: [
+                              if (filtered.isEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.all(HollowSpacing.md),
+                                  child: Text(
+                                    'No matching settings',
+                                    style: HollowTypography.caption.copyWith(
+                                      color: hollow.textSecondary,
+                                    ),
+                                  ),
+                                ),
+                              for (final cat in filtered) ...[
+                                _TabItem(
+                                  icon: cat.icon,
+                                  label: cat.label,
+                                  isActive: cat == activeForContent,
+                                  onTap: () =>
+                                      setState(() => _activeTab = cat),
+                                ),
+                                const SizedBox(height: HollowSpacing.xxs),
+                              ],
+                            ],
+                          ),
                         ),
                       ],
                     ),
                   ),
 
-                  const SizedBox(height: HollowSpacing.lg),
+                  // Vertical divider.
+                  Container(width: 1, color: hollow.border),
 
-                  // Tab rail + content
+                  // ── Right: content area (cards) + close button ──
                   Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: HollowSpacing.xl,
-                      ),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          // Left: tab rail
-                          SizedBox(
-                            width: 140,
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                _TabItem(
-                                  icon: LucideIcons.user,
-                                  label: 'Profile',
-                                  isActive:
-                                      _activeTab == _SettingsTab.profile,
-                                  onTap: () => setState(() =>
-                                      _activeTab = _SettingsTab.profile),
-                                ),
-                                const SizedBox(height: HollowSpacing.xxs),
-                                _TabItem(
-                                  icon: LucideIcons.monitor,
-                                  label: 'System',
-                                  isActive:
-                                      _activeTab == _SettingsTab.system,
-                                  onTap: () => setState(() =>
-                                      _activeTab = _SettingsTab.system),
-                                ),
-                                const SizedBox(height: HollowSpacing.xxs),
-                                _TabItem(
-                                  icon: LucideIcons.shield,
-                                  label: 'Security',
-                                  isActive:
-                                      _activeTab == _SettingsTab.security,
-                                  onTap: () => setState(() =>
-                                      _activeTab = _SettingsTab.security),
-                                ),
-                                const SizedBox(height: HollowSpacing.xxs),
-                                _TabItem(
-                                  icon: LucideIcons.download,
-                                  label: 'Updates',
-                                  isActive:
-                                      _activeTab == _SettingsTab.updates,
-                                  onTap: () => setState(() =>
-                                      _activeTab = _SettingsTab.updates),
-                                ),
-                                const SizedBox(height: HollowSpacing.xxs),
-                                _TabItem(
-                                  icon: LucideIcons.info,
-                                  label: 'About',
-                                  isActive:
-                                      _activeTab == _SettingsTab.about,
-                                  onTap: () => setState(() =>
-                                      _activeTab = _SettingsTab.about),
-                                ),
-                              ],
-                            ),
-                          ),
-
-                          const SizedBox(width: HollowSpacing.lg),
-
-                          // Vertical divider
-                          Container(
-                            width: 1,
-                            color: hollow.border,
-                          ),
-
-                          const SizedBox(width: HollowSpacing.xl),
-
-                          // Right: content area
-                          Expanded(
-                            child: switch (_activeTab) {
-                              _SettingsTab.profile => _buildProfileTab(hollow),
-                              _SettingsTab.system => _buildSystemTab(hollow),
-                              _SettingsTab.security => _SecurityTab(),
-                              _SettingsTab.updates => _UpdatesTab(),
-                              _SettingsTab.about => const _AboutTab(),
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-
-                  // Actions
-                  Padding(
-                    padding: const EdgeInsets.all(HollowSpacing.xl),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
+                    child: Stack(
                       children: [
-                        HollowButton.ghost(
-                          onPressed: () {
-                            // Revert accent color to what it was before opening
-                            ref.read(accentHueProvider.notifier).setHue(_initialAccentHue);
-                            Navigator.of(context).pop();
-                          },
-                          child: const Text('Cancel'),
-                        ),
-                        const SizedBox(width: HollowSpacing.sm),
-                        HollowButton.filled(
-                          onPressed: _onSave,
-                          child: const Text('Save'),
+                        _buildCategoryContent(hollow, activeForContent),
+                        Positioned(
+                          top: HollowSpacing.sm,
+                          right: HollowSpacing.sm,
+                          child: HollowPressable(
+                            onTap: () => Navigator.of(context).pop(),
+                            subtle: true,
+                            borderRadius: BorderRadius.circular(hollow.radiusMd),
+                            padding: const EdgeInsets.all(HollowSpacing.xs),
+                            child: Icon(LucideIcons.x,
+                                size: 18, color: hollow.textSecondary),
+                          ),
                         ),
                       ],
                     ),
@@ -696,6 +566,258 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
         ),
       ),
     );
+  }
+
+  /// Builds the scrollable card content for the active category. Standalone
+  /// widget categories (Security/Updates/About) keep their own scroll views;
+  /// the split-from-System categories return a list of [_SettingsCard]s.
+  Widget _buildCategoryContent(HollowTheme hollow, _SettingsCategory cat) {
+    final Widget body = switch (cat) {
+      _SettingsCategory.profile => _buildProfileTab(hollow),
+      _SettingsCategory.appearance => _cardList(hollow, _appearanceCards(hollow)),
+      _SettingsCategory.network => _cardList(hollow, _networkCards(hollow)),
+      _SettingsCategory.files => _cardList(hollow, _filesCards(hollow)),
+      _SettingsCategory.audio => _cardList(hollow, _audioCards(hollow)),
+      _SettingsCategory.shortcuts => _cardList(hollow, _shortcutCards(hollow)),
+      _SettingsCategory.security => const _SecurityTab(),
+      _SettingsCategory.devices => const _DevicesCategory(),
+      _SettingsCategory.backup => const _BackupCategory(),
+      _SettingsCategory.updates => const _UpdatesTab(),
+      _SettingsCategory.about => const _AboutTab(),
+    };
+    return Padding(
+      key: ValueKey(cat),
+      // Extra top padding so content clears the floating close button.
+      padding: const EdgeInsets.fromLTRB(
+        HollowSpacing.xl,
+        44,
+        HollowSpacing.xl,
+        HollowSpacing.xl,
+      ),
+      child: body,
+    );
+  }
+
+  /// Wraps a list of cards in a scroll view with a heading.
+  Widget _cardList(HollowTheme hollow, List<Widget> cards) {
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (int i = 0; i < cards.length; i++) ...[
+            if (i > 0) const SizedBox(height: HollowSpacing.lg),
+            cards[i],
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ── Appearance category ──────────────────────────────────────────
+  List<Widget> _appearanceCards(HollowTheme hollow) {
+    final isDark = ref.watch(themeModeProvider) == ThemeMode.dark;
+    final dockMode =
+        (ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock) ==
+            LayoutMode.dock;
+    final disableAnims = ref.watch(disableAnimationsProvider).valueOrNull ?? false;
+    final invisible = ref.watch(invisibleModeProvider);
+    final isDesktop = Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+    final tray = ref.watch(minimizeToTrayProvider).valueOrNull ?? true;
+    return [
+      _SettingsCard(
+        title: 'Theme',
+        children: [
+          _ToggleRow(
+            icon: isDark ? LucideIcons.moon : LucideIcons.sun,
+            label: 'Dark Mode',
+            value: isDark,
+            onChanged: (v) => ref
+                .read(themeModeProvider.notifier)
+                .setMode(v ? ThemeMode.dark : ThemeMode.light),
+          ),
+          const SizedBox(height: HollowSpacing.lg),
+          _AccentColorPicker(hollow: hollow),
+        ],
+      ),
+      _SettingsCard(
+        title: 'Background',
+        children: [_BackgroundPicker(hollow: hollow)],
+      ),
+      _SettingsCard(
+        title: 'Layout',
+        children: [
+          _ToggleRow(
+            icon: LucideIcons.layoutDashboard,
+            label: 'Dock Mode',
+            subtitle: 'Bottom bar with friends strip',
+            value: dockMode,
+            onChanged: (v) => ref.read(layoutModeProvider.notifier).setMode(
+                  v ? LayoutMode.dock : LayoutMode.classic,
+                ),
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          _ToggleRow(
+            icon: LucideIcons.zap,
+            label: 'Disable Animations',
+            subtitle: 'Turn off UI transitions and effects',
+            value: disableAnims,
+            onChanged: (v) => _setDisableAnimations(v),
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          _ToggleRow(
+            icon: LucideIcons.eyeOff,
+            label: 'Appear Invisible',
+            subtitle: 'Show as offline to other users',
+            value: invisible,
+            onChanged: (v) =>
+                ref.read(invisibleModeProvider.notifier).setInvisible(v),
+          ),
+          if (isDesktop) ...[
+            const SizedBox(height: HollowSpacing.md),
+            _ToggleRow(
+              icon: LucideIcons.minimize2,
+              label: 'Minimize to Tray',
+              subtitle: 'Keep running in the background when closed',
+              value: tray,
+              onChanged: (v) =>
+                  ref.read(minimizeToTrayProvider.notifier).setEnabled(v),
+            ),
+          ],
+        ],
+      ),
+    ];
+  }
+
+  Future<void> _setDisableAnimations(bool value) async {
+    await ref.read(disableAnimationsProvider.notifier).setEnabled(value);
+    HollowDurations.animationsDisabled = value;
+    SharedTickers.instance.disabled = value;
+    if (value) {
+      SharedTickers.instance.pause();
+    } else {
+      SharedTickers.instance.start();
+      SharedTickers.instance.resume();
+    }
+  }
+
+  // ── Network category ─────────────────────────────────────────────
+  List<Widget> _networkCards(HollowTheme hollow) {
+    return [
+      _SettingsCard(
+        title: 'Relay',
+        children: [
+          Text(
+            'Your relay determines your network. Friends and servers on a '
+            'different relay won\'t be reachable.',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary,
+              fontSize: 11,
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          for (final domain in ref.watch(savedRelayListProvider)) ...[
+            _buildRelayRow(hollow, domain),
+            const SizedBox(height: HollowSpacing.xs),
+          ],
+          if (_showAddRelay)
+            _buildAddRelayField(hollow)
+          else
+            Align(
+              alignment: Alignment.centerLeft,
+              child: HollowButton.ghost(
+                compact: true,
+                icon: const Icon(LucideIcons.plus, size: 14),
+                onPressed: () => setState(() => _showAddRelay = true),
+                child: const Text('Add Relay'),
+              ),
+            ),
+          if (_selectedRelay != _initialRelayDomain) ...[
+            const SizedBox(height: HollowSpacing.md),
+            SizedBox(
+              width: double.infinity,
+              child: HollowButton.filled(
+                onPressed: _applyRelayAndRestart,
+                child: const Text('Apply & Restart'),
+              ),
+            ),
+          ],
+        ],
+      ),
+    ];
+  }
+
+  Future<void> _applyRelayAndRestart() async {
+    await ref.read(relayDomainProvider.notifier).setDomain(_selectedRelay);
+    await ref.read(savedRelayListProvider.notifier).addRelay(_selectedRelay);
+    try {
+      await network_api.notifyShutdown();
+      await Future.delayed(const Duration(milliseconds: 200));
+    } catch (_) {}
+    final exe = Platform.resolvedExecutable;
+    await Process.start(exe, [], mode: ProcessStartMode.detached);
+    await Future.delayed(const Duration(milliseconds: 100));
+    exit(0);
+  }
+
+  // ── Files & Storage category ─────────────────────────────────────
+  List<Widget> _filesCards(HollowTheme hollow) {
+    return [
+      _SettingsCard(
+        title: 'Downloads',
+        children: [_buildAutoDownloadSlider(hollow)],
+      ),
+      _SettingsCard(
+        title: 'Cache',
+        children: [_buildCacheCapSlider(hollow)],
+      ),
+      _SettingsCard(
+        title: 'Data Location',
+        children: [_buildDataLocation(hollow)],
+      ),
+      _SettingsCard(
+        title: 'Media',
+        children: const [_ImageQualitySelector()],
+      ),
+    ];
+  }
+
+  // ── Audio & Video category ───────────────────────────────────────
+  List<Widget> _audioCards(HollowTheme hollow) {
+    return const [
+      _SettingsCard(
+        title: 'Devices',
+        children: [_AudioDeviceSettings()],
+      ),
+    ];
+  }
+
+  // ── Shortcuts category ───────────────────────────────────────────
+  List<Widget> _shortcutCards(HollowTheme hollow) {
+    return [
+      _SettingsCard(
+        title: 'General',
+        children: const [
+          _ShortcutRow(label: 'Open Settings', shortcut: 'Ctrl + ,'),
+          _ShortcutRow(label: 'Toggle Member Panel', shortcut: 'Ctrl + Shift + M'),
+          _ShortcutRow(label: 'Quick Search', shortcut: 'Ctrl + K'),
+          _ShortcutRow(label: 'Toggle Split View', shortcut: r'Ctrl + Shift + \'),
+          _ShortcutRow(label: 'Focus Left Pane', shortcut: 'Ctrl + 1'),
+          _ShortcutRow(label: 'Focus Right Pane', shortcut: 'Ctrl + 2'),
+        ],
+      ),
+      _SettingsCard(
+        title: 'Chat Input',
+        children: const [
+          _ShortcutRow(label: 'Send Message', shortcut: 'Enter'),
+          _ShortcutRow(label: 'New Line', shortcut: 'Shift + Enter'),
+          _ShortcutRow(label: 'Bold', shortcut: 'Ctrl + B'),
+          _ShortcutRow(label: 'Italic', shortcut: 'Ctrl + I'),
+          _ShortcutRow(label: 'Code', shortcut: 'Ctrl + E'),
+          _ShortcutRow(label: 'Strikethrough', shortcut: 'Ctrl + Shift + X'),
+          _ShortcutRow(label: 'Spoiler', shortcut: 'Ctrl + Shift + S'),
+        ],
+      ),
+    ];
   }
 
   // ── Profile tab ──────────────────────────────────────────────────
@@ -975,12 +1097,25 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       _FieldLabel(label: 'CONNECTIONS'),
       const SizedBox(height: HollowSpacing.sm),
       _TwitchConnectionRow(hollow: hollow),
+
+      // Profile keeps an explicit Save button — text fields and cropped
+      // images benefit from a single commit, unlike the auto-saving toggles
+      // in the other categories.
+      const SizedBox(height: HollowSpacing.xl),
+      Align(
+        alignment: Alignment.centerRight,
+        child: HollowButton.filled(
+          onPressed: _profileDirty ? _saveProfile : null,
+          icon: const Icon(LucideIcons.check, size: 16),
+          child: Text(_profileDirty ? 'Save Profile' : 'Saved'),
+        ),
+      ),
       ],
       ),
     );
   }
 
-  // ── System tab ───────────────────────────────────────────────────
+  // ── Network / Files slider builders (used by category cards) ─────
 
   Widget _buildRelayRow(HollowTheme hollow, String domain) {
     final isSelected = domain == _selectedRelay;
@@ -1160,430 +1295,262 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     }
   }
 
-  Widget _buildSystemTab(HollowTheme hollow) {
-    final isDesktop =
-        Platform.isWindows || Platform.isLinux || Platform.isMacOS;
-
-    return SingleChildScrollView(
-      key: const ValueKey('system'),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // ── Network ──
-          _SectionLabel(label: 'NETWORK'),
-          const SizedBox(height: HollowSpacing.xs),
-          Text(
-            'Your relay determines your network. Friends and servers on a different relay won\'t be reachable.',
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 11,
-            ),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-
-          // Relay list
-          for (final domain in ref.watch(savedRelayListProvider)) ...[
-            _buildRelayRow(hollow, domain),
-            const SizedBox(height: HollowSpacing.xs),
-          ],
-
-          // Add relay inline field
-          if (_showAddRelay)
-            _buildAddRelayField(hollow)
-          else
-            Align(
-              alignment: Alignment.centerLeft,
-              child: HollowButton.ghost(
-                compact: true,
-                icon: const Icon(LucideIcons.plus, size: 14),
-                onPressed: () => setState(() => _showAddRelay = true),
-                child: const Text('Add Relay'),
-              ),
-            ),
-
-          // Apply & Restart button (when selection differs from active)
-          if (_selectedRelay != _initialRelayDomain) ...[
-            const SizedBox(height: HollowSpacing.md),
-            SizedBox(
-              width: double.infinity,
-              child: HollowButton.filled(
-                onPressed: () async {
-                  // Persist the new relay domain and ensure it's in the saved list.
-                  await ref.read(relayDomainProvider.notifier).setDomain(_selectedRelay);
-                  await ref.read(savedRelayListProvider.notifier).addRelay(_selectedRelay);
-
-                  try {
-                    await network_api.notifyShutdown();
-                    await Future.delayed(const Duration(milliseconds: 200));
-                  } catch (_) {}
-
-                  final exe = Platform.resolvedExecutable;
-                  await Process.start(exe, [], mode: ProcessStartMode.detached);
-                  await Future.delayed(const Duration(milliseconds: 100));
-                  exit(0);
-                },
-                child: const Text('Apply & Restart'),
-              ),
-            ),
-          ],
-
-          const SizedBox(height: HollowSpacing.xl),
-
-          // ── Appearance ──
-          _SectionLabel(label: 'APPEARANCE'),
-          const SizedBox(height: HollowSpacing.sm),
-
-          // Theme toggle
-          _ToggleRow(
-            icon: _pendingDarkMode ? LucideIcons.moon : LucideIcons.sun,
-            label: 'Dark Mode',
-            value: _pendingDarkMode,
-            onChanged: (value) =>
-                setState(() => _pendingDarkMode = value),
-          ),
-
-          const SizedBox(height: HollowSpacing.lg),
-
-          // Accent color
-          _AccentColorPicker(hollow: hollow),
-
-          const SizedBox(height: HollowSpacing.lg),
-
-          // Background image
-          _BackgroundPicker(hollow: hollow),
-
-          const SizedBox(height: HollowSpacing.xl),
-
-          // ── Layout ──
-          _SectionLabel(label: 'LAYOUT'),
-          const SizedBox(height: HollowSpacing.sm),
-          _ToggleRow(
-            icon: LucideIcons.layoutDashboard,
-            label: 'Dock Mode',
-            subtitle: 'Bottom bar with friends strip',
-            value: _pendingDockMode,
-            onChanged: (value) =>
-                setState(() => _pendingDockMode = value),
-          ),
-          const SizedBox(height: HollowSpacing.md),
-          _ToggleRow(
-            icon: LucideIcons.zap,
-            label: 'Disable Animations',
-            subtitle: 'Turn off UI transitions and effects',
-            value: _pendingDisableAnimations,
-            onChanged: (value) =>
-                setState(() => _pendingDisableAnimations = value),
-          ),
-
-          const SizedBox(height: HollowSpacing.xl),
-
-          // ── System ──
-          _SectionLabel(label: 'SYSTEM'),
-          const SizedBox(height: HollowSpacing.sm),
-
-          // Invisible mode toggle
-          _ToggleRow(
-            icon: LucideIcons.eyeOff,
-            label: 'Appear Invisible',
-            subtitle: 'Show as offline to other users',
-            value: _pendingInvisible,
-            onChanged: (value) =>
-                setState(() => _pendingInvisible = value),
-          ),
-          const SizedBox(height: HollowSpacing.md),
-
-          // Minimize to tray toggle
-          if (isDesktop) ...[
-            _ToggleRow(
-              icon: LucideIcons.minimize2,
-              label: 'Minimize to Tray',
-              value: _pendingMinimizeToTray,
-              onChanged: (value) =>
-                  setState(() => _pendingMinimizeToTray = value),
-            ),
-            const SizedBox(height: HollowSpacing.md),
-          ],
-
-          const SizedBox(height: HollowSpacing.xl),
-
-          // ── Files ──
-          _SectionLabel(label: 'FILES'),
-          const SizedBox(height: HollowSpacing.sm),
-
-          Row(
-            children: [
-              Icon(LucideIcons.download, size: 16,
-                  color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Auto-Download Threshold',
+  /// Auto-download threshold slider (Files category). Applies immediately.
+  Widget _buildAutoDownloadSlider(HollowTheme hollow) {
+    final threshold =
+        ref.watch(autoDownloadThresholdProvider).valueOrNull ?? 169;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(LucideIcons.download, size: 16, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.sm),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Auto-Download Threshold',
                       style: HollowTypography.body
-                          .copyWith(color: hollow.textPrimary),
-                    ),
-                    Text(
-                      'Files up to $_pendingAutoDownloadThreshold MB auto-download',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 10,
-                      ),
-                    ),
-                  ],
-                ),
+                          .copyWith(color: hollow.textPrimary)),
+                  Text(
+                    'Files up to $threshold MB auto-download',
+                    style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary, fontSize: 10),
+                  ),
+                ],
               ),
+            ),
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+        SliderTheme(
+          data: SliderTheme.of(context).copyWith(
+            activeTrackColor: hollow.accent,
+            inactiveTrackColor: hollow.border,
+            thumbColor: hollow.accent,
+            overlayColor: hollow.accent.withValues(alpha: 0.1),
+            trackHeight: 3,
+            thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+          ),
+          child: Slider(
+            value: threshold.toDouble().clamp(34, 2048),
+            min: 34,
+            max: 2048,
+            divisions: 50,
+            label: '$threshold MB',
+            onChanged: (value) => ref
+                .read(autoDownloadThresholdProvider.notifier)
+                .setThreshold(value.round()),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('34 MB',
+                  style: HollowTypography.caption
+                      .copyWith(color: hollow.textSecondary, fontSize: 9)),
+              Text('2 GB',
+                  style: HollowTypography.caption
+                      .copyWith(color: hollow.textSecondary, fontSize: 9)),
             ],
           ),
-          const SizedBox(height: HollowSpacing.xs),
-          SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              activeTrackColor: hollow.accent,
-              inactiveTrackColor: hollow.border,
-              thumbColor: hollow.accent,
-              overlayColor: hollow.accent.withValues(alpha: 0.1),
-              trackHeight: 3,
-              thumbShape: const RoundSliderThumbShape(
-                  enabledThumbRadius: 6),
-            ),
-            child: Slider(
-              value: _pendingAutoDownloadThreshold.toDouble(),
-              min: 34,
-              max: 2048,
-              divisions: 50,
-              label: '$_pendingAutoDownloadThreshold MB',
-              onChanged: (value) => setState(() =>
-                  _pendingAutoDownloadThreshold = value.round()),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.xs),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text('34 MB',
-                    style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary, fontSize: 9)),
-                Text('2 GB',
-                    style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary, fontSize: 9)),
-              ],
-            ),
-          ),
+        ),
+      ],
+    );
+  }
 
-          const SizedBox(height: HollowSpacing.lg),
-
-          Row(
-            children: [
-              Icon(LucideIcons.hardDrive, size: 16,
-                  color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Cache Size Limit',
+  /// Cache size cap slider (Files category). Applies immediately.
+  Widget _buildCacheCapSlider(HollowTheme hollow) {
+    final cap = ref.watch(vaultCacheCapProvider).valueOrNull ?? 1024;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(LucideIcons.hardDrive, size: 16, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.sm),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Cache Size Limit',
                       style: HollowTypography.body
-                          .copyWith(color: hollow.textPrimary),
-                    ),
-                    Text(
-                      '${(_pendingCacheCap / 1024).toStringAsFixed(1)} GB — server file downloads are evicted when cache exceeds this',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 10,
-                      ),
-                    ),
-                  ],
-                ),
+                          .copyWith(color: hollow.textPrimary)),
+                  Text(
+                    '${(cap / 1024).toStringAsFixed(1)} GB — server file downloads are evicted when cache exceeds this',
+                    style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary, fontSize: 10),
+                  ),
+                ],
               ),
+            ),
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+        SliderTheme(
+          data: SliderTheme.of(context).copyWith(
+            activeTrackColor: hollow.accent,
+            inactiveTrackColor: hollow.border,
+            thumbColor: hollow.accent,
+            overlayColor: hollow.accent.withValues(alpha: 0.1),
+            trackHeight: 3,
+            thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+          ),
+          child: Slider(
+            value: cap.toDouble().clamp(256, 10240),
+            min: 256,
+            max: 10240,
+            divisions: 40,
+            label: cap >= 1024
+                ? '${(cap / 1024).toStringAsFixed(1)} GB'
+                : '$cap MB',
+            onChanged: (value) =>
+                ref.read(vaultCacheCapProvider.notifier).setCap(value.round()),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('256 MB',
+                  style: HollowTypography.caption
+                      .copyWith(color: hollow.textSecondary, fontSize: 9)),
+              Text('10 GB',
+                  style: HollowTypography.caption
+                      .copyWith(color: hollow.textSecondary, fontSize: 9)),
             ],
           ),
-          const SizedBox(height: HollowSpacing.xs),
-          SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              activeTrackColor: hollow.accent,
-              inactiveTrackColor: hollow.border,
-              thumbColor: hollow.accent,
-              overlayColor: hollow.accent.withValues(alpha: 0.1),
-              trackHeight: 3,
-              thumbShape: const RoundSliderThumbShape(
-                  enabledThumbRadius: 6),
-            ),
-            child: Slider(
-              value: _pendingCacheCap.toDouble(),
-              min: 256,
-              max: 10240,
-              divisions: 40,
-              label: _pendingCacheCap >= 1024
-                  ? '${(_pendingCacheCap / 1024).toStringAsFixed(1)} GB'
-                  : '$_pendingCacheCap MB',
-              onChanged: (value) => setState(() =>
-                  _pendingCacheCap = value.round()),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.xs),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text('256 MB',
-                    style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary, fontSize: 9)),
-                Text('10 GB',
-                    style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary, fontSize: 9)),
-              ],
-            ),
-          ),
+        ),
+      ],
+    );
+  }
 
-          const SizedBox(height: HollowSpacing.lg),
-
-          // Data location — where the identity key + encrypted DB + files live.
-          // Per-platform template (dirs::data_dir()/hollow in the Rust core).
-          Row(
+  /// Data location row + open-folder button (Files category).
+  Widget _buildDataLocation(HollowTheme hollow) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(LucideIcons.folder, size: 16, color: hollow.textSecondary),
+        const SizedBox(width: HollowSpacing.sm),
+        Expanded(
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(LucideIcons.folder, size: 16, color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Data Location',
-                      style: HollowTypography.body
-                          .copyWith(color: hollow.textPrimary),
-                    ),
-                    const SizedBox(height: 2),
-                    SelectableText(
-                      _dataLocationPath(),
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 10,
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Identity key, encrypted database, and downloaded files.',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 10,
-                      ),
-                    ),
-                  ],
+              SelectableText(
+                _dataLocationPath(),
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 10,
+                  fontFamily: 'monospace',
                 ),
               ),
-              const SizedBox(width: HollowSpacing.sm),
-              HollowButton.outline(
-                onPressed: _openDataFolder,
-                icon: const Icon(LucideIcons.externalLink, size: 14),
-                compact: true,
-                child: const Text('Open'),
+              const SizedBox(height: 2),
+              Text(
+                'Identity key, encrypted database, and downloaded files.',
+                style: HollowTypography.caption
+                    .copyWith(color: hollow.textSecondary, fontSize: 10),
               ),
             ],
           ),
-
-          const SizedBox(height: HollowSpacing.xl),
-
-          // ── Media ──
-          _SectionLabel(label: 'MEDIA'),
-          const SizedBox(height: HollowSpacing.sm),
-          const _ImageQualitySelector(),
-
-          const SizedBox(height: HollowSpacing.xl),
-
-          // ── Voice & Video ──
-          _SectionLabel(label: 'VOICE & VIDEO'),
-          const SizedBox(height: HollowSpacing.sm),
-          const _AudioDeviceSettings(),
-
-          const SizedBox(height: HollowSpacing.xl),
-
-          // ── Keyboard Shortcuts ──
-          _SectionLabel(label: 'KEYBOARD SHORTCUTS'),
-          const SizedBox(height: HollowSpacing.sm),
-
-          _ShortcutRow(
-            label: 'Open Settings',
-            shortcut: 'Ctrl + ,',
-          ),
-          _ShortcutRow(
-            label: 'Toggle Member Panel',
-            shortcut: 'Ctrl + Shift + M',
-          ),
-          _ShortcutRow(
-            label: 'Quick Search',
-            shortcut: 'Ctrl + K',
-          ),
-          _ShortcutRow(
-            label: 'Toggle Split View',
-            shortcut: r'Ctrl + Shift + \',
-          ),
-          _ShortcutRow(
-            label: 'Focus Left Pane',
-            shortcut: 'Ctrl + 1',
-          ),
-          _ShortcutRow(
-            label: 'Focus Right Pane',
-            shortcut: 'Ctrl + 2',
-          ),
-
-          const SizedBox(height: HollowSpacing.lg),
-
-          // Sub-section: Chat Input
-          Text(
-              'CHAT INPUT',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary.withValues(alpha: 0.5),
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.5,
-                fontSize: 9,
-              ),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-
-          _ShortcutRow(
-            label: 'Send Message',
-            shortcut: 'Enter',
-          ),
-          _ShortcutRow(
-            label: 'New Line',
-            shortcut: 'Shift + Enter',
-          ),
-          _ShortcutRow(
-            label: 'Bold',
-            shortcut: 'Ctrl + B',
-          ),
-          _ShortcutRow(
-            label: 'Italic',
-            shortcut: 'Ctrl + I',
-          ),
-          _ShortcutRow(
-            label: 'Code',
-            shortcut: 'Ctrl + E',
-          ),
-          _ShortcutRow(
-            label: 'Strikethrough',
-            shortcut: 'Ctrl + Shift + X',
-          ),
-          _ShortcutRow(
-            label: 'Spoiler',
-            shortcut: 'Ctrl + Shift + S',
-          ),
-        ],
-      ),
+        ),
+        const SizedBox(width: HollowSpacing.sm),
+        HollowButton.outline(
+          onPressed: _openDataFolder,
+          icon: const Icon(LucideIcons.externalLink, size: 14),
+          compact: true,
+          child: const Text('Open'),
+        ),
+      ],
     );
   }
 }
 
-/// Security tab — recovery phrase viewer + account backup.
+/// Passphrase prompt shared by App Lock (Security category) and Account
+/// Backup (Backup category). Returns the entered passphrase, or null if
+/// cancelled. When [confirm] is true a second field must match.
+Future<String?> askPassphraseDialog(BuildContext context, String title,
+    {bool confirm = false, String buttonLabel = 'Encrypt'}) async {
+  final controller = TextEditingController();
+  final confirmController = TextEditingController();
+  return showHollowDialog<String>(
+    context: context,
+    builder: (ctx) {
+      final hollow = HollowTheme.of(ctx);
+      return Center(
+        child: Material(
+          type: MaterialType.transparency,
+          child: Container(
+            width: 360,
+            padding: const EdgeInsets.all(HollowSpacing.xl),
+            decoration: BoxDecoration(
+              color: hollow.elevated,
+              borderRadius: BorderRadius.circular(hollow.radiusLg),
+              border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: HollowTypography.heading.copyWith(
+                  color: hollow.textPrimary, fontSize: 16,
+                )),
+                const SizedBox(height: HollowSpacing.lg),
+                HollowTextField(
+                  controller: controller,
+                  obscureText: true,
+                  autofocus: true,
+                  hintText: 'Enter passphrase',
+                  onSubmitted: confirm ? null : (val) {
+                    if (val.isNotEmpty) Navigator.of(ctx).pop(val);
+                  },
+                ),
+                if (confirm) ...[
+                  const SizedBox(height: HollowSpacing.sm),
+                  HollowTextField(
+                    controller: confirmController,
+                    obscureText: true,
+                    hintText: 'Confirm passphrase',
+                  ),
+                ],
+                const SizedBox(height: HollowSpacing.lg),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    HollowButton.ghost(
+                      onPressed: () => Navigator.of(ctx).pop(null),
+                      child: const Text('Cancel'),
+                    ),
+                    const SizedBox(width: HollowSpacing.sm),
+                    HollowButton.filled(
+                      onPressed: () {
+                        final pass = controller.text.trim();
+                        if (pass.isEmpty) return;
+                        if (confirm && pass != confirmController.text.trim()) {
+                          HollowToast.show(ctx, 'Passphrases don\'t match', type: HollowToastType.error);
+                          return;
+                        }
+                        Navigator.of(ctx).pop(pass);
+                      },
+                      child: Text(buttonLabel),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    },
+  );
+}
+
+/// Security category — App Lock + Device Protection + Recovery Phrase.
 class _SecurityTab extends StatefulWidget {
+  const _SecurityTab();
   @override
   State<_SecurityTab> createState() => _SecurityTabState();
 }
@@ -1591,8 +1558,6 @@ class _SecurityTab extends StatefulWidget {
 class _SecurityTabState extends State<_SecurityTab> {
   bool _revealed = false;
   bool _loading = true;
-  bool _includeVault = false;
-  bool _includeFiles = false;
   String? _mnemonic;
   String? _error;
   bool _hasPassword = false;
@@ -1620,21 +1585,6 @@ class _SecurityTabState extends State<_SecurityTab> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _protectionLoading = false);
-    }
-  }
-
-  Future<void> _resetDeviceLists() async {
-    try {
-      await network_api.resetDeviceLists();
-      if (!mounted) return;
-      HollowToast.show(
-        context,
-        'Device lists reset. Restart the app so siblings re-merge.',
-        type: HollowToastType.success,
-      );
-    } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(context, 'Reset failed: $e', type: HollowToastType.error);
     }
   }
 
@@ -1737,109 +1687,10 @@ class _SecurityTabState extends State<_SecurityTab> {
     }
   }
 
-  Future<void> _exportBackup() async {
-    // Ask for passphrase.
-    final passphrase = await _askPassphrase(context, 'Set Backup Passphrase', confirm: true);
-    if (passphrase == null || !mounted) return;
-
-    final result = await FilePicker.platform.saveFile(
-      dialogTitle: 'Export Backup',
-      fileName: 'hollow-backup.hollow',
-      type: FileType.custom,
-      allowedExtensions: ['hollow'],
-    );
-    if (result == null || !mounted) return;
-
-    try {
-      final size = await storage_api.exportBackup(
-        outputPath: result,
-        includeVault: _includeVault,
-        includeFiles: _includeFiles,
-        passphrase: passphrase,
-      );
-      if (!mounted) return;
-      final mb = (size.toDouble() / (1024 * 1024)).toStringAsFixed(1);
-      HollowToast.show(context, 'Backup exported ($mb MB)', type: HollowToastType.success);
-    } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(context, 'Export failed: $e', type: HollowToastType.error);
-    }
-  }
-
-  Future<String?> _askPassphrase(BuildContext context, String title, {bool confirm = false, String buttonLabel = 'Encrypt'}) async {
-    final controller = TextEditingController();
-    final confirmController = TextEditingController();
-    return showHollowDialog<String>(
-      context: context,
-      builder: (ctx) {
-        final hollow = HollowTheme.of(ctx);
-        return Center(
-          child: Material(
-            type: MaterialType.transparency,
-            child: Container(
-              width: 360,
-              padding: const EdgeInsets.all(HollowSpacing.xl),
-              decoration: BoxDecoration(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusLg),
-                border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title, style: HollowTypography.heading.copyWith(
-                    color: hollow.textPrimary, fontSize: 16,
-                  )),
-                  const SizedBox(height: HollowSpacing.lg),
-                  HollowTextField(
-                    controller: controller,
-                    obscureText: true,
-                    autofocus: true,
-                    hintText: 'Enter passphrase',
-                    onSubmitted: confirm ? null : (val) {
-                      if (val.isNotEmpty) Navigator.of(ctx).pop(val);
-                    },
-                  ),
-                  if (confirm) ...[
-                    const SizedBox(height: HollowSpacing.sm),
-                    HollowTextField(
-                      controller: confirmController,
-                      obscureText: true,
-                      hintText: 'Confirm passphrase',
-                    ),
-                  ],
-                  const SizedBox(height: HollowSpacing.lg),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      HollowButton.ghost(
-                        onPressed: () => Navigator.of(ctx).pop(null),
-                        child: const Text('Cancel'),
-                      ),
-                      const SizedBox(width: HollowSpacing.sm),
-                      HollowButton.filled(
-                        onPressed: () {
-                          final pass = controller.text.trim();
-                          if (pass.isEmpty) return;
-                          if (confirm && pass != confirmController.text.trim()) {
-                            HollowToast.show(ctx, 'Passphrases don\'t match', type: HollowToastType.error);
-                            return;
-                          }
-                          Navigator.of(ctx).pop(pass);
-                        },
-                        child: Text(buttonLabel),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
+  Future<String?> _askPassphrase(BuildContext context, String title,
+          {bool confirm = false, String buttonLabel = 'Encrypt'}) =>
+      askPassphraseDialog(context, title,
+          confirm: confirm, buttonLabel: buttonLabel);
 
   @override
   Widget build(BuildContext context) {
@@ -2180,132 +2031,6 @@ class _SecurityTabState extends State<_SecurityTab> {
 
           const SizedBox(height: HollowSpacing.xl),
 
-          // ── Account Backup ──
-          _SectionLabel(label: 'ACCOUNT BACKUP'),
-          const SizedBox(height: HollowSpacing.sm),
-
-          Text(
-            'Exports your identity, profile, servers, friends, and messages.',
-            style: HollowTypography.body.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 12,
-            ),
-          ),
-
-          const SizedBox(height: HollowSpacing.md),
-
-          // Include vault checkbox
-          GestureDetector(
-            onTap: () => setState(() => _includeFiles = !_includeFiles),
-            child: Row(
-              children: [
-                Container(
-                  width: 18,
-                  height: 18,
-                  decoration: BoxDecoration(
-                    color: _includeFiles ? hollow.accent : Colors.transparent,
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(
-                      color: _includeFiles ? hollow.accent : hollow.border,
-                      width: 1.5,
-                    ),
-                  ),
-                  child: _includeFiles
-                      ? Icon(LucideIcons.check, size: 12, color: Colors.white)
-                      : null,
-                ),
-                const SizedBox(width: HollowSpacing.sm),
-                Text(
-                  'Include downloaded files',
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontSize: 13,
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: HollowSpacing.sm),
-
-          GestureDetector(
-            onTap: () => setState(() => _includeVault = !_includeVault),
-            child: Row(
-              children: [
-                Container(
-                  width: 18,
-                  height: 18,
-                  decoration: BoxDecoration(
-                    color: _includeVault ? hollow.accent : Colors.transparent,
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(
-                      color: _includeVault ? hollow.accent : hollow.border,
-                      width: 1.5,
-                    ),
-                  ),
-                  child: _includeVault
-                      ? Icon(LucideIcons.check, size: 12, color: Colors.white)
-                      : null,
-                ),
-                const SizedBox(width: HollowSpacing.sm),
-                Text(
-                  'Include vault shard data',
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontSize: 13,
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: HollowSpacing.md),
-
-          HollowButton.filled(
-            onPressed: _exportBackup,
-            icon: Icon(LucideIcons.download, size: 16),
-            child: const Text('Export Backup'),
-          ),
-
-          const SizedBox(height: HollowSpacing.xl),
-
-          // ── Your devices (Step 8) ──
-          _SectionLabel(label: 'YOUR DEVICES'),
-          const SizedBox(height: HollowSpacing.sm),
-          const _DevicesSection(),
-          const SizedBox(height: HollowSpacing.xl),
-
-          // ── Multi-device maintenance ──
-          _SectionLabel(label: 'MULTI-DEVICE'),
-          const SizedBox(height: HollowSpacing.sm),
-          Text(
-            'Link another device to this account. Show a code here, then enter it '
-            'on your other (empty) device to copy your messages, friends and '
-            'profile across. Keep both devices online during the transfer.',
-            style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-          HollowButton.filled(
-            onPressed: () => showDeviceLinkDialog(context, mode: DeviceLinkMode.showCode),
-            icon: Icon(LucideIcons.smartphone, size: 16),
-            child: const Text('Link a device'),
-          ),
-          const SizedBox(height: HollowSpacing.lg),
-          Text(
-            'If a device you removed still shows as linked, reset the device '
-            'list. It rebuilds from your devices that are currently online. '
-            'Restart the app afterward.',
-            style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
-          ),
-          const SizedBox(height: HollowSpacing.sm),
-          HollowButton.outline(
-            onPressed: _resetDeviceLists,
-            icon: Icon(LucideIcons.refreshCw, size: 16),
-            child: const Text('Reset Device List'),
-          ),
-
-          const SizedBox(height: HollowSpacing.xl),
-
           // ── Verify a Proof ──
           const _VerifyProofSection(),
         ],
@@ -2361,6 +2086,236 @@ class _SecurityTabState extends State<_SecurityTab> {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// Devices category — the "Your Devices" list + multi-device link/reset tools.
+/// Split out of the old Security tab so device management has its own home.
+class _DevicesCategory extends ConsumerStatefulWidget {
+  const _DevicesCategory();
+  @override
+  ConsumerState<_DevicesCategory> createState() => _DevicesCategoryState();
+}
+
+class _DevicesCategoryState extends ConsumerState<_DevicesCategory> {
+  Future<void> _resetDeviceLists() async {
+    try {
+      await network_api.resetDeviceLists();
+      if (!mounted) return;
+      HollowToast.show(
+        context,
+        'Device lists reset. Restart the app so siblings re-merge.',
+        type: HollowToastType.success,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Reset failed: $e', type: HollowToastType.error);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _SettingsCard(
+            title: 'Your Devices',
+            children: const [_DevicesSection()],
+          ),
+          const SizedBox(height: HollowSpacing.lg),
+          _SettingsCard(
+            title: 'Link a Device',
+            children: [
+              Text(
+                'Link another device to this account. Show a code here, then '
+                'enter it on your other (empty) device to copy your messages, '
+                'friends and profile across. Keep both devices online during '
+                'the transfer.',
+                style: HollowTypography.caption
+                    .copyWith(color: hollow.textSecondary),
+              ),
+              const SizedBox(height: HollowSpacing.sm),
+              HollowButton.filled(
+                onPressed: () => showDeviceLinkDialog(context,
+                    mode: DeviceLinkMode.showCode),
+                icon: const Icon(LucideIcons.smartphone, size: 16),
+                child: const Text('Link a device'),
+              ),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.lg),
+          _SettingsCard(
+            title: 'Maintenance',
+            children: [
+              Text(
+                'If a device you removed still shows as linked, reset the device '
+                'list. It rebuilds from your devices that are currently online. '
+                'Restart the app afterward.',
+                style: HollowTypography.caption
+                    .copyWith(color: hollow.textSecondary),
+              ),
+              const SizedBox(height: HollowSpacing.sm),
+              HollowButton.outline(
+                onPressed: _resetDeviceLists,
+                icon: const Icon(LucideIcons.refreshCw, size: 16),
+                child: const Text('Reset Device List'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Backup category — account backup export + proof verification. Split out of
+/// the old Security tab.
+class _BackupCategory extends StatefulWidget {
+  const _BackupCategory();
+  @override
+  State<_BackupCategory> createState() => _BackupCategoryState();
+}
+
+class _BackupCategoryState extends State<_BackupCategory> {
+  bool _includeVault = false;
+  bool _includeFiles = false;
+
+  Future<void> _exportBackup() async {
+    final passphrase =
+        await askPassphraseDialog(context, 'Set Backup Passphrase', confirm: true);
+    if (passphrase == null || !mounted) return;
+
+    final result = await FilePicker.platform.saveFile(
+      dialogTitle: 'Export Backup',
+      fileName: 'hollow-backup.hollow',
+      type: FileType.custom,
+      allowedExtensions: ['hollow'],
+    );
+    if (result == null || !mounted) return;
+
+    try {
+      final size = await storage_api.exportBackup(
+        outputPath: result,
+        includeVault: _includeVault,
+        includeFiles: _includeFiles,
+        passphrase: passphrase,
+      );
+      if (!mounted) return;
+      final mb = (size.toDouble() / (1024 * 1024)).toStringAsFixed(1);
+      HollowToast.show(context, 'Backup exported ($mb MB)',
+          type: HollowToastType.success);
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Export failed: $e', type: HollowToastType.error);
+    }
+  }
+
+  Widget _checkbox(HollowTheme hollow, bool value, String label, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Row(
+        children: [
+          Container(
+            width: 18,
+            height: 18,
+            decoration: BoxDecoration(
+              color: value ? hollow.accent : Colors.transparent,
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(
+                color: value ? hollow.accent : hollow.border,
+                width: 1.5,
+              ),
+            ),
+            child: value
+                ? const Icon(LucideIcons.check, size: 12, color: Colors.white)
+                : null,
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+          Text(
+            label,
+            style: HollowTypography.body
+                .copyWith(color: hollow.textPrimary, fontSize: 13),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _SettingsCard(
+            title: 'Account Backup',
+            children: [
+              Text(
+                'Exports your identity, profile, servers, friends, and messages.',
+                style: HollowTypography.body
+                    .copyWith(color: hollow.textSecondary, fontSize: 12),
+              ),
+              const SizedBox(height: HollowSpacing.md),
+              _checkbox(hollow, _includeFiles, 'Include downloaded files',
+                  () => setState(() => _includeFiles = !_includeFiles)),
+              const SizedBox(height: HollowSpacing.sm),
+              _checkbox(hollow, _includeVault, 'Include vault shard data',
+                  () => setState(() => _includeVault = !_includeVault)),
+              const SizedBox(height: HollowSpacing.md),
+              HollowButton.filled(
+                onPressed: _exportBackup,
+                icon: const Icon(LucideIcons.download, size: 16),
+                child: const Text('Export Backup'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A titled, bordered card grouping related settings in the content area.
+/// This is the visual unit Vitalik asked for — each category is a short stack
+/// of these instead of one undifferentiated scroll.
+class _SettingsCard extends StatelessWidget {
+  final String title;
+  final List<Widget> children;
+
+  const _SettingsCard({required this.title, required this.children});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(HollowSpacing.lg),
+      decoration: BoxDecoration(
+        color: hollow.surface.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(hollow.radiusLg),
+        border: Border.all(color: hollow.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            title.toUpperCase(),
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.5,
+              fontSize: 10,
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          ...children,
+        ],
+      ),
     );
   }
 }
@@ -4185,101 +4140,6 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
           ),
         ),
       ],
-    );
-  }
-}
-
-/// Restart prompt dialog shown after proxy setting changes.
-class _RestartPrompt extends ConsumerWidget {
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    final radius = BorderRadius.circular(hollow.radiusMd);
-
-    return Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 340),
-        child: Material(
-          color: Colors.transparent,
-          child: Container(
-            decoration: BoxDecoration(
-              color: hollow.elevated.withValues(alpha: 0.95),
-              borderRadius: radius,
-              border: Border.all(
-                color: hollow.accent.withValues(alpha: 0.15),
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.25),
-                  blurRadius: 20,
-                ),
-              ],
-            ),
-            padding: const EdgeInsets.all(HollowSpacing.xl),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  LucideIcons.rotateCcw,
-                  size: 32,
-                  color: hollow.accent,
-                ),
-                const SizedBox(height: HollowSpacing.md),
-                Text(
-                  'Restart Required',
-                  style: HollowTypography.subheading.copyWith(
-                    color: hollow.textPrimary,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: HollowSpacing.sm),
-                Text(
-                  'The proxy setting requires a restart to take effect.',
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textSecondary,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: HollowSpacing.xl),
-                Row(
-                  children: [
-                    Expanded(
-                      child: HollowButton.ghost(
-                        onPressed: () => Navigator.of(context).pop(),
-                        child: const Text('Restart Later'),
-                      ),
-                    ),
-                    const SizedBox(width: HollowSpacing.sm),
-                    Expanded(
-                      child: HollowButton.filled(
-                        onPressed: () async {
-                          // Graceful shutdown: notify peers, stop node.
-                          try {
-                            await network_api.notifyShutdown();
-                            await Future.delayed(
-                                const Duration(milliseconds: 200));
-                          } catch (_) {}
-
-                          // Spawn new instance before exiting.
-                          final exe = Platform.resolvedExecutable;
-                          await Process.start(exe, [],
-                              mode: ProcessStartMode.detached);
-
-                          // Small delay to let the OS fully detach the child.
-                          await Future.delayed(
-                              const Duration(milliseconds: 100));
-                          exit(0);
-                        },
-                        child: const Text('Restart Now'),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
     );
   }
 }

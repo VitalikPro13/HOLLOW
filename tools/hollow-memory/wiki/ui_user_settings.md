@@ -1,24 +1,33 @@
 # UserSettingsDialog — Application Settings
 
-Source: `lib/src/ui/dialogs/user_settings_dialog.dart` (5235 lines)
+Source: `lib/src/ui/dialogs/user_settings_dialog.dart` (~5600 lines)
 
-The largest UI file in the project. A full-screen modal dialog with five tabs: Profile, System, Security, Updates, and About. Opened via `showUserSettingsDialog()`, which acts as a toggle (re-calling while open closes the dialog). All settings use a deferred-save pattern: changes are staged in local state and only committed to providers on Save. Cancel reverts everything (including accent color).
+The largest UI file in the project. **Redesigned 2026-06-21** from a fixed 680×540 dialog with 5 lopsided tabs into a responsive (~920×680, 90% of window) dialog with a **searchable side rail of 10 focused categories** and **card-based content**. Opened via `showUserSettingsDialog()`, which acts as a toggle (re-calling while open closes the dialog).
+
+**Auto-save model (the key behavioral change):** the old global Save/Cancel footer is GONE. Every setting now applies immediately on change (most already did — accent, background, image quality, audio devices, and all of Security were always immediate; the redesign converted the remaining 8 deferred toggles to match). **Profile is the one exception** — it keeps its own explicit "Save Profile" button (text fields + cropped images benefit from a single commit); the button is disabled and reads "Saved" until an edit dirties it. There is no accent-revert-on-cancel anymore (accent persists live, consistent with everything else).
 
 ---
 
 ## Entry Point and Toggle Behavior
 
-`showUserSettingsDialog(BuildContext context, WidgetRef ref, {bool openSystemTab, bool openUpdatesTab})` is the public entry. A module-level `bool _settingsDialogOpen` tracks whether the dialog is currently showing. If already open, calling this function pops the existing dialog (toggle behavior). On open, it reads the current profile (display name, status, aboutMe) from `profileProvider` and creates `TextEditingController`s for each. The `initialTab` parameter allows deep-linking to System or Updates tab.
+`showUserSettingsDialog(BuildContext context, WidgetRef ref, {bool openSystemTab, bool openUpdatesTab})` is the public entry. A module-level `bool _settingsDialogOpen` tracks whether the dialog is currently showing. If already open, calling this function pops the existing dialog (toggle behavior). On open, it reads the current profile (display name, status, aboutMe) from `profileProvider` and creates `TextEditingController`s for each. The `initialTab` parameter deep-links: `openUpdatesTab`→Updates, `openSystemTab`→Appearance (the old "System" tab's first split-off), else Profile.
 
 Helper: `_bannerColorFromId(String id)` generates a deterministic HSL color from a peer ID's hash code, shifted 40 degrees from the avatar hue, used as fallback banner gradient.
 
 ---
 
-## Tab Navigation System
+## Category Navigation System
 
-`enum _SettingsTab { profile, system, security, updates, about }`
+`enum _SettingsCategory { profile, appearance, network, files, audio, shortcuts, security, devices, backup, updates, about }` with a `_SettingsCategoryMeta` extension providing each category's `icon`, `label`, and `searchTerms` (keywords so the rail search matches settings *inside* a category, e.g. "theme"→Appearance, "relay"→Network, "recovery"→Security).
 
-The dialog uses a left-side rail (140px wide) with five `_TabItem` widgets, separated by a 1px vertical divider from the content area. Tab switching is immediate via `setState()`. The content area uses a Dart 3 `switch` expression on `_activeTab`. Profile and System tabs are built inline by `_buildProfileTab()` and `_buildSystemTab()`. Security, Updates, and About are standalone widget classes (`_SecurityTab`, `_UpdatesTab`, `_AboutTab`).
+The old monolithic "System" tab (8 sections) split into **Appearance / Network / Files & Storage / Audio & Video / Shortcuts**; the old "Security" tab (7 sections) split into **Security / Devices / Backup**.
+
+The 188px-wide left rail has: "Settings" heading, a `HollowTextField` **search filter** (updates `_searchQuery`, filters via `_filteredCategories`), then a scrolling `ListView` of `_TabItem`s for the matching categories. If the active category gets filtered out mid-type, `activeForContent` falls back to the first match so the content area never goes blank. The content area is a `Stack`: `_buildCategoryContent()` + a floating top-right X close button (`Positioned`, no tooltip).
+
+`_buildCategoryContent()` dispatches via a Dart 3 `switch`: Profile → `_buildProfileTab()`; Appearance/Network/Files/Audio/Shortcuts → `_cardList(_xxxCards())` (lists of `_SettingsCard`); Security/Devices/Backup/Updates/About → standalone widgets (`_SecurityTab`, `_DevicesCategory`, `_BackupCategory`, `_UpdatesTab`, `_AboutTab`). Content padding is `fromLTRB(xl, 44, xl, xl)` — the 44px top clears the floating X.
+
+### _SettingsCard
+The visual unit of the redesign. `StatelessWidget` with `title` + `children`. Renders an uppercase caption title + a bordered, `surface`-tinted rounded container. Categories are short stacks of these instead of one undifferentiated scroll.
 
 ### _TabItem
 Stateless widget. Props: `icon` (IconData), `label` (String), `isActive` (bool), `onTap` (VoidCallback). Renders a `HollowPressable` with `subtle: true`, icon + label in a Row. Active state: icon uses `hollow.accent`, label uses `hollow.textPrimary` with `FontWeight.w600`. Inactive: icon and label use `hollow.textSecondary`.
@@ -27,19 +36,17 @@ Stateless widget. Props: `icon` (IconData), `label` (String), `isActive` (bool),
 
 ## Dialog Chrome and Layout
 
-`_UserSettingsContent` is a `ConsumerStatefulWidget`. The dialog container: `ConstrainedBox` with maxWidth 680, maxHeight 540, minHeight 540, minWidth 400. Decorated with `hollow.elevated` at 0.92 alpha, accent-tinted border, 24px blur shadow. Structure top-to-bottom:
-
-1. **Header** — "Settings" heading text, padded xl on sides and top.
-2. **Tab rail + content** — `Row` with 140px rail column, 1px divider, expanded content area.
-3. **Actions footer** — Cancel (ghost button) and Save (filled button), right-aligned.
-
-Cancel reverts the accent hue to `_initialAccentHue` via `accentHueProvider.notifier.setHue()`. Save calls `_onSave()`.
+`_UserSettingsContent` is a `ConsumerStatefulWidget`. The dialog container: `ConstrainedBox` sized responsively — `maxWidth = min(screenW*0.9, 920)`, `maxHeight = min(screenH*0.86, 680)`, minHeight 420, minWidth 360. Decorated with `hollow.elevated` at 0.96 alpha, accent-tinted border, 24px blur shadow, `clipBehavior: antiAlias`. Structure is a single `Row`: 188px rail column (header + search + category list) | 1px divider | expanded content `Stack` (cards + floating X). No footer — there is no global Save/Cancel.
 
 ---
 
-## State Management and Deferred Save Pattern
+## State Management (Auto-Save)
 
-`_UserSettingsContentState` maintains pending state for every toggle and slider. Each setting follows the pattern: `_pending*` (current UI value), `_initial*` (value when dialog opened), `_*Initialized` (whether the async provider has loaded). During `initState()`, synchronous providers are read immediately. Async providers are initialized lazily via `ref.listen()` in `build()` — when the first value arrives, `_*Initialized` is set true and `_pending*`/`_initial*` are synchronized.
+`_UserSettingsContentState` no longer holds `_pending*`/`_initial*`/`_*Initialized` fields for the toggles — those were removed when the deferred-save model was dropped. Toggle/slider cards read provider values directly (`ref.watch(...).valueOrNull`) and write via the notifier in `onChanged` (e.g. dark mode, dock mode, animations, invisible, minimize-to-tray, auto-download threshold, cache cap). The state class now only tracks: `_activeTab` (`_SettingsCategory`), `_searchController`/`_searchQuery`, relay selection (`_initialRelayDomain`/`_selectedRelay`/`_showAddRelay`/`_newRelayController`), `_profileDirty` (+ the avatar/banner/live-name fields for the Profile preview). `_saveProfile()` commits the profile and clears `_profileDirty`; it does NOT close the dialog.
+
+Disable-animations applies immediately via `_setDisableAnimations()` (sets `HollowDurations.animationsDisabled` + `SharedTickers.instance` pause/resume). Relay change uses an explicit "Apply & Restart" button (`_applyRelayAndRestart()`) since it requires a process restart.
+
+### Legacy (pre-2026-06-21) deferred-save fields — REMOVED:
 
 ### Pending state fields:
 - `_pendingDarkMode` (bool) — from `themeModeProvider`
@@ -123,7 +130,19 @@ Separated by 1px divider + spacing. Header: `_FieldLabel(label: 'CONNECTIONS')`.
 
 ---
 
-## System Tab
+## Categories split from the old "System" tab
+
+The old `_buildSystemTab()` is gone. Its sections now live in per-category card builders, all returning `List<Widget>` of `_SettingsCard`s:
+
+- **Appearance** (`_appearanceCards`): Theme card (dark mode + `_AccentColorPicker`), Background card (`_BackgroundPicker`), Layout card (dock mode, disable-animations, appear-invisible, + minimize-to-tray on desktop). All apply immediately.
+- **Network** (`_networkCards`): Relay card — relay list (`_buildRelayRow`), add-relay field (`_buildAddRelayField`), and "Apply & Restart" when the selection differs from the active relay.
+- **Files & Storage** (`_filesCards`): Downloads card (`_buildAutoDownloadSlider`), Cache card (`_buildCacheCapSlider`), Data Location card (`_buildDataLocation` + open-folder), Media card (`_ImageQualitySelector`). Sliders read/write providers directly.
+- **Audio & Video** (`_audioCards`): Devices card wrapping `_AudioDeviceSettings`.
+- **Shortcuts** (`_shortcutCards`): General + Chat Input cards of `_ShortcutRow`s.
+
+The sub-widgets (`_AccentColorPicker`, `_BackgroundPicker`, `_AudioDeviceSettings`, `_ImageQualitySelector`, `_ShortcutRow`, `_ToggleRow`) are unchanged and documented below.
+
+### (Legacy) System Tab sections — for reference
 
 Built by `_buildSystemTab(HollowTheme hollow)`. A `SingleChildScrollView` with sections: Appearance, Layout, System, Files, Media, Voice & Video, Keyboard Shortcuts.
 
@@ -335,7 +354,17 @@ Laid out as a single full-width `Row` (so Preview sits on the LEFT, Cancel/Save 
 
 ---
 
-## Security Tab (_SecurityTab)
+## Security / Devices / Backup categories (split from the old Security tab)
+
+The old `_SecurityTab` (which held App Lock, Device Protection, Recovery Phrase, Account Backup, Your Devices, Multi-Device, Verify a Proof) split into three categories:
+
+- **`_SecurityTab`** (Security category) — now just **App Lock + Device Protection + Recovery Phrase + Verify a Proof** (the proof verifier moved here, at the bottom, per 2026-06-21 feedback). Still a `StatefulWidget`.
+- **`_DevicesCategory`** (`ConsumerStatefulWidget`) — Your Devices card (`_DevicesSection`), Link a Device card (`showDeviceLinkDialog`), Maintenance card (`_resetDeviceLists` → `network_api.resetDeviceLists()`). Each in a `_SettingsCard`.
+- **`_BackupCategory`** (`StatefulWidget`) — Account Backup card only (`_includeVault`/`_includeFiles` checkboxes + `_exportBackup`).
+
+The passphrase prompt is now a **top-level** `askPassphraseDialog(context, title, {confirm, buttonLabel})` shared by App Lock and Account Backup (was a private method on `_SecurityTabState`).
+
+### Security category (`_SecurityTab`)
 
 `StatefulWidget` (not Consumer — uses `storage_api` directly).
 

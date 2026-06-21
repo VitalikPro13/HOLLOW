@@ -145,11 +145,35 @@ class MobileSettingsTab extends ConsumerWidget {
         ),
         const SizedBox(height: HollowSpacing.sm),
         _SettingsNavTile(
-          icon: LucideIcons.settings,
-          title: 'System',
-          subtitle: 'Appearance, network, audio, files & ringtone',
-          onTap: () => _push(
-              context, 'System', const _SystemTab(key: ValueKey('system'))),
+          icon: LucideIcons.palette,
+          title: 'Appearance',
+          subtitle: 'Theme, accent, background & layout',
+          onTap: () => _push(context, 'Appearance',
+              const _AppearanceTab(key: ValueKey('appearance'))),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        _SettingsNavTile(
+          icon: LucideIcons.globe,
+          title: 'Network',
+          subtitle: 'Relay & peer ID',
+          onTap: () => _push(context, 'Network',
+              const _NetworkTab(key: ValueKey('network'))),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        _SettingsNavTile(
+          icon: LucideIcons.mic,
+          title: 'Audio & Video',
+          subtitle: 'Quality, mic gain & ringtone',
+          onTap: () => _push(context, 'Audio & Video',
+              const _AudioTab(key: ValueKey('audio'))),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        _SettingsNavTile(
+          icon: LucideIcons.hardDrive,
+          title: 'Files & Storage',
+          subtitle: 'Image quality & cache',
+          onTap: () => _push(context, 'Files & Storage',
+              const _FilesTab(key: ValueKey('files'))),
         ),
         const SizedBox(height: HollowSpacing.sm),
         _SettingsNavTile(
@@ -158,6 +182,22 @@ class MobileSettingsTab extends ConsumerWidget {
           subtitle: 'App lock & recovery phrase',
           onTap: () => _push(context, 'Security',
               const _SecurityTab(key: ValueKey('security'))),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        _SettingsNavTile(
+          icon: LucideIcons.smartphone,
+          title: 'Devices',
+          subtitle: 'Linked devices & multi-device tools',
+          onTap: () => _push(context, 'Devices',
+              const _DevicesTab(key: ValueKey('devices'))),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        _SettingsNavTile(
+          icon: LucideIcons.archive,
+          title: 'Backup',
+          subtitle: 'Export account & verify proofs',
+          onTap: () => _push(context, 'Backup',
+              const _BackupTab(key: ValueKey('backup'))),
         ),
         const SizedBox(height: HollowSpacing.sm),
         _SettingsNavTile(
@@ -922,14 +962,14 @@ class _TwitchRowState extends ConsumerState<_TwitchRow> {
 // System Tab
 // ─────────────────────────────────────────────────
 
-class _SystemTab extends ConsumerStatefulWidget {
-  const _SystemTab({super.key});
+class _NetworkTab extends ConsumerStatefulWidget {
+  const _NetworkTab({super.key});
 
   @override
-  ConsumerState<_SystemTab> createState() => _SystemTabState();
+  ConsumerState<_NetworkTab> createState() => _NetworkTabState();
 }
 
-class _SystemTabState extends ConsumerState<_SystemTab> {
+class _NetworkTabState extends ConsumerState<_NetworkTab> {
   bool _showAddRelay = false;
   String _selectedRelay = '';
   late String _initialRelay;
@@ -996,50 +1036,6 @@ class _SystemTabState extends ConsumerState<_SystemTab> {
         _SectionLabel(label: 'Network'),
         const SizedBox(height: HollowSpacing.sm),
         _buildRelaySection(hollow),
-
-        const SizedBox(height: HollowSpacing.xl),
-
-        // ── Appearance ──
-        _SectionLabel(label: 'Appearance'),
-        const SizedBox(height: HollowSpacing.sm),
-        const _ThemeToggleRow(),
-        const SizedBox(height: HollowSpacing.md),
-        const _AccentHueSection(),
-        const SizedBox(height: HollowSpacing.md),
-        const _BackgroundSection(),
-        const SizedBox(height: HollowSpacing.md),
-        const _AnimationsToggleRow(),
-        const SizedBox(height: HollowSpacing.md),
-        const _InvisibleToggleRow(),
-
-        const SizedBox(height: HollowSpacing.xl),
-
-        // ── Voice & Audio ──
-        _SectionLabel(label: 'Voice & Audio'),
-        const SizedBox(height: HollowSpacing.sm),
-        _AudioQualityPicker(),
-        const SizedBox(height: HollowSpacing.md),
-        _MicGainSlider(),
-        const SizedBox(height: HollowSpacing.md),
-        _AudioProcessingInfo(),
-
-        const SizedBox(height: HollowSpacing.xl),
-
-        // ── Files ──
-        _SectionLabel(label: 'Files'),
-        const SizedBox(height: HollowSpacing.sm),
-        const _ImageQualityPicker(),
-        const SizedBox(height: HollowSpacing.md),
-        const _CacheCapSlider(),
-
-        const SizedBox(height: HollowSpacing.xl),
-
-        // ── Ringtone ──
-        _SectionLabel(label: 'Ringtone'),
-        const SizedBox(height: HollowSpacing.sm),
-        _RingtonePicker(),
-        const SizedBox(height: HollowSpacing.md),
-        _RingtoneVolumeSlider(),
 
         const SizedBox(height: HollowSpacing.xl),
       ],
@@ -1225,6 +1221,163 @@ class _SystemTabState extends ConsumerState<_SystemTab> {
           ),
         ],
 
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────
+// Category sub-pages (split from the old monolithic System/Security tabs to
+// mirror the desktop category rail). Each composes the already-modular
+// section widgets below.
+// ─────────────────────────────────────────────────
+
+class _AppearanceTab extends StatelessWidget {
+  const _AppearanceTab({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.all(HollowSpacing.lg),
+      children: const [
+        _SectionLabel(label: 'Theme'),
+        SizedBox(height: HollowSpacing.sm),
+        _ThemeToggleRow(),
+        SizedBox(height: HollowSpacing.md),
+        _AccentHueSection(),
+        SizedBox(height: HollowSpacing.xl),
+        _SectionLabel(label: 'Background'),
+        SizedBox(height: HollowSpacing.sm),
+        _BackgroundSection(),
+        SizedBox(height: HollowSpacing.xl),
+        _SectionLabel(label: 'Layout'),
+        SizedBox(height: HollowSpacing.sm),
+        _AnimationsToggleRow(),
+        SizedBox(height: HollowSpacing.md),
+        _InvisibleToggleRow(),
+        SizedBox(height: HollowSpacing.xl),
+      ],
+    );
+  }
+}
+
+class _AudioTab extends StatelessWidget {
+  const _AudioTab({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.all(HollowSpacing.lg),
+      children: [
+        _SectionLabel(label: 'Voice & Audio'),
+        const SizedBox(height: HollowSpacing.sm),
+        _AudioQualityPicker(),
+        const SizedBox(height: HollowSpacing.md),
+        _MicGainSlider(),
+        const SizedBox(height: HollowSpacing.md),
+        _AudioProcessingInfo(),
+        const SizedBox(height: HollowSpacing.xl),
+        _SectionLabel(label: 'Ringtone'),
+        const SizedBox(height: HollowSpacing.sm),
+        _RingtonePicker(),
+        const SizedBox(height: HollowSpacing.md),
+        _RingtoneVolumeSlider(),
+        const SizedBox(height: HollowSpacing.xl),
+      ],
+    );
+  }
+}
+
+class _FilesTab extends StatelessWidget {
+  const _FilesTab({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.all(HollowSpacing.lg),
+      children: const [
+        _SectionLabel(label: 'Downloads'),
+        SizedBox(height: HollowSpacing.sm),
+        _AutoDownloadSlider(),
+        SizedBox(height: HollowSpacing.xl),
+        _SectionLabel(label: 'Media'),
+        SizedBox(height: HollowSpacing.sm),
+        _ImageQualityPicker(),
+        SizedBox(height: HollowSpacing.xl),
+        _SectionLabel(label: 'Cache'),
+        SizedBox(height: HollowSpacing.sm),
+        _CacheCapSlider(),
+        SizedBox(height: HollowSpacing.xl),
+      ],
+    );
+  }
+}
+
+class _DevicesTab extends ConsumerWidget {
+  const _DevicesTab({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    return ListView(
+      padding: const EdgeInsets.all(HollowSpacing.lg),
+      children: [
+        _SectionLabel(label: 'Your Devices'),
+        const SizedBox(height: HollowSpacing.sm),
+        const _DevicesSectionMobile(),
+        const SizedBox(height: HollowSpacing.xl),
+        _SectionLabel(label: 'Link a Device'),
+        const SizedBox(height: HollowSpacing.sm),
+        Text(
+          'Link another device to this account. Show a code here, then enter it '
+          'on your other (empty) device to copy your messages, friends and '
+          'profile across. Keep both devices online during the transfer.',
+          style: HollowTypography.body
+              .copyWith(color: hollow.textSecondary, fontSize: 12),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        const _LinkDeviceButton(),
+        const SizedBox(height: HollowSpacing.lg),
+        Text(
+          'If a device you removed still shows as linked, reset the device '
+          'list. It rebuilds from your devices that are currently online. '
+          'Restart the app afterward.',
+          style: HollowTypography.body
+              .copyWith(color: hollow.textSecondary, fontSize: 12),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        const _ResetDeviceListButton(),
+      ],
+    );
+  }
+}
+
+class _BackupTab extends StatelessWidget {
+  const _BackupTab({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return ListView(
+      padding: const EdgeInsets.all(HollowSpacing.lg),
+      children: [
+        _SectionLabel(label: 'Account Backup'),
+        const SizedBox(height: HollowSpacing.sm),
+        Text(
+          'Export an encrypted backup of your identity and messages. '
+          'To restore it, reinstall and choose "Restore from backup" on '
+          'the welcome screen.',
+          style: HollowTypography.body
+              .copyWith(color: hollow.textSecondary, fontSize: 12),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        const _BackupExportButton(),
+        if (Platform.isIOS) ...[
+          const SizedBox(height: HollowSpacing.xl),
+          _SectionLabel(label: 'Push Diagnostics'),
+          const SizedBox(height: HollowSpacing.sm),
+          const _ExportPushDiagnosticsButton(),
+        ],
       ],
     );
   }
@@ -2226,68 +2379,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         _SectionLabel(label: 'Recovery'),
         const SizedBox(height: HollowSpacing.sm),
         _RecoveryPhraseButton(),
-
-        // Account backup — export the encrypted .hollow file (identity + DB).
-        // Import lives in the first-launch welcome dialog (it must run before
-        // the node starts, since it overwrites the data directory).
         const SizedBox(height: HollowSpacing.xl),
-        _SectionLabel(label: 'Account Backup'),
-        const SizedBox(height: HollowSpacing.sm),
-        Text(
-          'Export an encrypted backup of your identity and messages. '
-          'To restore it, reinstall and choose "Restore from backup" on '
-          'the welcome screen.',
-          style: HollowTypography.body.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 12,
-          ),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        const _BackupExportButton(),
-
-        // Your devices (Step 8).
-        const SizedBox(height: HollowSpacing.xl),
-        _SectionLabel(label: 'Your Devices'),
-        const SizedBox(height: HollowSpacing.sm),
-        const _DevicesSectionMobile(),
-
-        // Multi-device (Phase 6 / Step 4): link another device, + reset the
-        // accumulated device list.
-        const SizedBox(height: HollowSpacing.xl),
-        _SectionLabel(label: 'Multi-Device'),
-        const SizedBox(height: HollowSpacing.sm),
-        Text(
-          'Link another device to this account. Show a code here, then enter it '
-          'on your other (empty) device to copy your messages, friends and '
-          'profile across. Keep both devices online during the transfer.',
-          style: HollowTypography.body.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 12,
-          ),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        const _LinkDeviceButton(),
-        const SizedBox(height: HollowSpacing.lg),
-        Text(
-          'If a device you removed still shows as linked, reset the device '
-          'list. It rebuilds from your devices that are currently online. '
-          'Restart the app afterward.',
-          style: HollowTypography.body.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 12,
-          ),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        const _ResetDeviceListButton(),
-
-        // iOS push diagnostics — exports the NSE memory footprint + push logs so
-        // we can validate the Notification Service Extension fits its memory cap.
-        if (Platform.isIOS) ...[
-          const SizedBox(height: HollowSpacing.xl),
-          _SectionLabel(label: 'Push Diagnostics'),
-          const SizedBox(height: HollowSpacing.sm),
-          const _ExportPushDiagnosticsButton(),
-        ],
       ],
     );
   }

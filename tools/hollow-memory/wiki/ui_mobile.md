@@ -347,11 +347,11 @@ Name field (max 24) + 9 preset color circles. `crdt_api.createLabel()`.
 ### Root List (`MobileSettingsTab` — `ConsumerWidget`)
 - "Settings" heading + **profile card** (HollowAvatar 48px, display name via `displayNameFor`, "Name, status, avatar & banner" caption, chevron) → pushes the Profile subpage.
 - Divider (`hollow.textSecondary` @ 0.35 alpha) separates the profile card from the nav tiles.
-- `_SettingsNavTile` rows (accent icon box 36px + title + subtitle + chevron): **System**, **Security**, **About**.
+- `_SettingsNavTile` rows (accent icon box 36px + title + subtitle + chevron). **Restructured 2026-06-21** to mirror the desktop category split: **Help**, **Appearance**, **Network**, **Audio & Video**, **Files & Storage**, **Security**, **Devices**, **Backup**, **About**. (The old single "System" and "Security" tiles were split.)
 - `_push()` → `Navigator.push(MaterialPageRoute(_SettingsSubPage(title, child)))`.
 
 ### _SettingsSubPage
-Full-screen scaffold matching MobileServerSettingsRoute chrome: `SafeArea > Column[back-arrow header row (HollowPressable + heading), Divider, Expanded(child)]`. The four bodies are the unchanged `_ProfileTab`/`_SystemTab`/`_SecurityTab`/`_AboutTab` widgets.
+Full-screen scaffold matching MobileServerSettingsRoute chrome: `SafeArea > Column[back-arrow header row (HollowPressable + heading), Divider, Expanded(child)]`. The bodies are: `_ProfileTab`, `_AppearanceTab`, `_NetworkTab` (formerly `_SystemTab`, trimmed to Peer ID + relay), `_AudioTab`, `_FilesTab`, `_SecurityTab` (trimmed to App Lock + Device Protection + Recovery), `_DevicesTab`, `_BackupTab`, `_AboutTab`. The new tabs (`_AppearanceTab`/`_AudioTab`/`_FilesTab`/`_DevicesTab`/`_BackupTab`) are thin compositions of the same already-modular section widgets (`_ThemeToggleRow`, `_AccentHueSection`, `_BackgroundSection`, `_AudioQualityPicker`, `_RingtonePicker`, `_ImageQualityPicker`, `_AutoDownloadSlider`, `_CacheCapSlider`, `_DevicesSectionMobile`, `_LinkDeviceButton`, `_ResetDeviceListButton`, `_BackupExportButton`). `_AutoDownloadSlider` (previously unused) is now wired into `_FilesTab`.
 
 ### Profile Tab
 - **Live preview card** — bordered container (`surface` bg, `border` outline, `radiusMd`) with:

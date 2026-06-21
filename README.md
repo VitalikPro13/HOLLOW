@@ -103,7 +103,7 @@ In the Hollow app, enter your relay domain during setup or in Settings. See [rel
 - [Terms of Use](legal/TERMS_OF_USE.md) -- plain-language terms
 - [Relay Documentation](relay-uws/README.md) -- relay architecture, benchmarks, deployment
 - [Mobile Port Plan](MobilePort_Plan.md) -- Android/iOS build setup, OpenSSL cross-compilation, contributor guide
-- [Legality Research](legal/legality.md) -- age verification laws, encryption regulations, legal precedents (US/UK/EU)
+- [Legality Research](legal/legality.md) -- age verification, illegal-content/CSAM liability, encryption regulations, legal precedents (US/UK/EU)
 - [Transparency Report](legal/transparency_report.md) -- legal requests received and data disclosure
 
 ## Building from Source
