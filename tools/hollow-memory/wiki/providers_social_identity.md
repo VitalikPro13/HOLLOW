@@ -264,11 +264,14 @@ Only use the full-map variants (`displayNameFor`) in list builders that iterate 
 
 Purely local, never synced. Maps peer_id to a user-chosen nickname. Stored in `app_settings` table under key `'local_nicknames'` as JSON. Loaded during bootstrap via `localNicknameProvider.notifier.loadAll()`.
 
-A static reference `_localNicknames` in `profile_provider.dart` is kept in sync via `setLocalNicknamesRef()`, called twice:
-1. During bootstrap after `loadAll()` completes.
-2. In the shell via `ref.listenManual(localNicknameProvider)` to stay reactive (side-effect only, doesn't trigger shell rebuild).
+A static reference `_localNicknames` in `profile_provider.dart` is kept in sync via `setLocalNicknamesRef()`. This avoids passing `localNicknameProvider` state through every `displayNameFor()` call site. It is synced from three places:
+1. Inside `LocalNicknameNotifier.loadAll`/`setNickname`/`clearNickname` themselves (the source of truth) — so the static is fresh on EVERY platform the moment a nickname changes, regardless of which shell is mounted. (Previously the sync was ONLY in `hollow_shell.dart`'s listener, so on MobileShell a nickname edit went stale until a tab switch.)
+2. During bootstrap after `loadAll()` completes.
+3. In the desktop shell via `ref.listenManual(localNicknameProvider)`.
 
-This avoids passing `localNicknameProvider` state through every `displayNameFor()` call site.
+**Live rebuild caveat:** a fresh static is necessary but NOT sufficient for an instant UI rebuild — a widget calling `displayNameFor` must also be WATCHING something that changes. A nickname edit doesn't touch `profileProvider`, so widgets that must update live (e.g. the mobile chat header title) add `ref.watch(localNicknameProvider)`.
+
+**Profile card "real name" subtitle:** a card showing "local nickname on top + the friend's real name below" must compute the subtitle from RAW `profile.displayName` (fallback short peer ID), NOT `displayNameFor()` — the latter prefers the local nickname and would duplicate the top line.
 
 ---
 
@@ -356,7 +359,21 @@ The `label` getter returns a human-readable string per stage:
 
 ### RelayConnectionStatus
 
-Enum: `disconnected`, `connecting`, `connected`, `reconnecting`. Updated via `onRelayStatusChanged(status)` which maps string values from Rust events to enum variants. The `relayLabel` getter produces human-readable text for the dashboard.
+Enum: `disconnected`, `connecting`, `connected`, `reconnecting`. Default is `connecting` (so the UI reads "Connecting…" before the first WS connect resolves — never a false "Disconnected" or "Connected"). Updated via `onRelayStatusChanged(status)` which maps string values from Rust events to enum variants. The `relayLabel` getter produces human-readable text for the dashboard.
+
+Fed by REAL relay-WebSocket events from Rust (the relay WS connection is the ground truth for "am I actually online" — a live WSS link proves working internet, so no `connectivity_plus` package is used):
+- `NetworkEvent_RelayConnected` → `'connected'`
+- `NetworkEvent_RelayConnecting { reconnecting }` → `'reconnecting'` if reconnecting else `'connecting'`
+- `NetworkEvent_RelayDisconnected` → `'disconnected'`
+
+These are emitted from `swarm.rs` (`WsEvent::Connected`/`Connecting`) and `ws_client.rs`. Before this, the visible "Connected" came from `nodeProvider` (set the instant the LOCAL node starts, unrelated to the relay) so it showed "Connected" even with no internet.
+
+### overallConnectionProvider
+
+**File:** `lib/src/core/providers/connection_status_provider.dart`
+**Provider:** `overallConnectionProvider` — `Provider<OverallConnection>`
+
+Single source of truth for the TOP-LEVEL connection indicators (user bar, Home network card, the Home profile "Online/Offline" dot). Combines the LOCAL node lifecycle (`nodeProvider`) with the REAL `relayStatus`: node `error`/`loading`/`starting` wins (→ Error/Connecting…); once the node is up, the relay state decides. Enum `OverallConnection { loading, error, connecting, reconnecting, connected, offline }` with `.label` (human text) and `.isOnline` (true only when `connected` — the only state that renders green). `disconnected` relay maps to `offline` ("No connection"). Use this — NOT `nodeProvider.status` — for any "are we connected" indicator.
 
 ### Connection Stage Transitions (event mapping)
 

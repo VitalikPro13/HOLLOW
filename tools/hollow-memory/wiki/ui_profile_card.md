@@ -114,6 +114,8 @@ Priority resolution for the primary displayed name:
 
 Both are centered and single-line with ellipsis overflow.
 
+**Mobile twin (`mobile_profile_sheet.dart` `MobileProfileSheet`):** same two-line behavior. NOTE (fixed 2026-06-21): the secondary "real name" line MUST be computed from raw `profile.displayName` (fallback short peer ID), NOT `displayNameFor()` — `displayNameFor` folds in the local nickname and would duplicate the top line. (Desktop's `shownName` was already correct via raw `displayName`.)
+
 #### Role Badge
 Shown only when `role != null && role.isNotEmpty && role != 'member'`. Renders a pill badge:
 - Background: role color at 0.15 alpha

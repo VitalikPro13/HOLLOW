@@ -36,7 +36,7 @@ When `StartupRevealScope.interval()` returns non-null, each column is wrapped in
 
 **Providers read:**
 - `identityProvider` — `identity.peerId`, `identity.mnemonic`
-- `nodeProvider` — `nodeState.status` for online detection
+- `overallConnectionProvider` — `.isOnline` for the profile online/offline dot (real relay-WS state, not just node-started)
 - `profileProvider` — `profiles[localPeerId]` for display name, avatar, status text, about me
 - `invisibleModeProvider` — `amInvisible` flag
 
@@ -127,7 +127,7 @@ Fields: `peerId` (String), `lastMessage` (ChatMessage?), `timestamp` (DateTime),
 `home_dashboard.dart:_NetworkColumn` is a `ConsumerWidget` (width constrained to 260px by parent). Shows connection status, friend categorization, relay stats, news, and online user count.
 
 **Providers read:**
-- `nodeProvider` — `nodeState.status` for connection state
+- `overallConnectionProvider` — node + real relay-WS connection state for the node-status card (was `nodeProvider.status`)
 - `peersProvider` — peer count, per-peer online detection
 - `friendsProvider` — accepted friends list
 - `profileProvider` — display names and avatars for connection rows
@@ -136,10 +136,12 @@ Fields: `peerId` (String), `lastMessage` (ChatMessage?), `timestamp` (DateTime),
 
 **Header:** Row with `LucideIcons.activity` (18px) + "Network" (`HollowTypography.subheading`, w600).
 
-**Node status card:** Full-width container with `hollow.surface` background, `radiusMd` corners, `hollow.border` border. Contains:
-- `StatusDot` (8px): green + pulse when online, `hollow.warning` when not
-- Status label: "Connected" when online, otherwise maps `NodeStatus` via `_nodeLabel()`: starting -> "Starting...", loading -> "Loading...", error -> "Error"
+**Node status card:** Full-width container with `hollow.surface` background, `radiusMd` corners, `hollow.border` border. Driven by `overallConnectionProvider` (combines local node + REAL relay-WS state — NOT raw `nodeProvider.status`, which used to falsely show "Connected" with no internet). Contains:
+- `StatusDot` (8px): green + pulse only when `overall.isOnline` (relay actually connected); warning for offline/error; textSecondary while connecting
+- Status label: `overall.label` — "Connected" / "Connecting…" / "Reconnecting…" / "No connection" / "Error" / "Loading…"
 - Peer count: `"N peer(s) reachable"` (pluralized)
+
+The same profile-header "Online/Offline" dot (in `_ProfileColumn`) also reads `overallConnectionProvider.isOnline` now (so it can't say "Online" while the relay is unreachable).
 
 **Friend categorization:** Accepted friends are split into three buckets. **Multi-device (Phase 6) — the categorization must resolve through device links.** `peersProvider` and `connectionStatusProvider` are keyed by the relay-reported **DEVICE** peer_id, but a friend is `f.peerId` = their **MASTER** id. Looking up `peers[f.peerId]` / `connStatus.peers[f.peerId]` directly (the old code) NEVER matches a friend who is online via a non-master device → the friend gets stuck showing "connecting" forever even though DMs work. The loop now scans for ANY of the friend's devices using `links.identityOf(e.key) == f.peerId` (`links = ref.watch(deviceLinkProvider)`); single-device collapses to the old direct lookup.
 
@@ -488,9 +490,9 @@ Used for "Encrypted" (success green, `LucideIcons.shieldCheck`) and "Offline" (t
 ## Provider Dependency Summary
 
 **HomeDashboard subtree reads:**
-- `identityProvider`, `nodeProvider`, `profileProvider`, `invisibleModeProvider` — _ProfileColumn
+- `identityProvider`, `overallConnectionProvider`, `profileProvider`, `invisibleModeProvider` — _ProfileColumn
 - `friendsProvider`, `chatProvider`, `profileProvider`, `peersProvider`, `invisiblePeersProvider`, `unreadProvider` — _RecentConversationsColumn
-- `nodeProvider`, `peersProvider`, `friendsProvider`, `profileProvider`, `relayStatsProvider`, `connectionStatusProvider` — _NetworkColumn
+- `overallConnectionProvider`, `peersProvider`, `friendsProvider`, `profileProvider`, `relayStatsProvider`, `connectionStatusProvider`, `deviceLinkProvider` — _NetworkColumn
 - `newsProvider`, `updaterProvider`, `hasUpdateProvider` — _NewsPanel
 
 **FriendsBar subtree reads:**

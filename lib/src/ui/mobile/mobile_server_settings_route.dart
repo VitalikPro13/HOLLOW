@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
@@ -31,6 +32,7 @@ import 'package:hollow/src/ui/mobile/mobile_labels_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_twitch_settings_route.dart';
 import 'package:hollow/src/ui/settings/server_template.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:atlas_icons/atlas_icons.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileServerSettingsRoute extends ConsumerStatefulWidget {
@@ -48,8 +50,13 @@ class _MobileServerSettingsRouteState
   late final TextEditingController _nameController;
   late final TextEditingController _descController;
   late final TextEditingController _nicknameController;
+  late final TextEditingController _maxMembersController;
   bool _saving = false;
   bool _savingNickname = false;
+
+  bool _isPrivate = false;
+  bool _isNsfw = false;
+  bool _savingAccess = false;
 
   @override
   void initState() {
@@ -58,8 +65,76 @@ class _MobileServerSettingsRouteState
     _nameController = TextEditingController(text: server?.name ?? '');
     _descController = TextEditingController();
     _nicknameController = TextEditingController();
+    _maxMembersController = TextEditingController();
     _loadDescription();
     _loadNickname();
+    _loadAccessSettings();
+  }
+
+  Future<void> _loadAccessSettings() async {
+    try {
+      final sid = widget.serverId;
+      final isPrivate =
+          await crdt_api.getServerSetting(serverId: sid, key: 'is_private');
+      final isNsfw =
+          await crdt_api.getServerSetting(serverId: sid, key: 'is_nsfw');
+      final maxMembers =
+          await crdt_api.getServerSetting(serverId: sid, key: 'max_members');
+      if (mounted) {
+        setState(() {
+          _isPrivate = isPrivate == 'true';
+          _isNsfw = isNsfw == 'true';
+          // 0 / empty = unlimited; leave the field blank in that case.
+          _maxMembersController.text =
+              (maxMembers.isEmpty || maxMembers == '0') ? '' : maxMembers;
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _saveAccessSettings() async {
+    setState(() => _savingAccess = true);
+    try {
+      final sid = widget.serverId;
+      final raw = _maxMembersController.text.trim();
+      final parsed = int.tryParse(raw) ?? 0;
+
+      // A finite cap can't be set below the current member count.
+      if (parsed > 0) {
+        final members = await crdt_api.getServerMembers(serverId: sid);
+        if (parsed < members.length) {
+          if (mounted) {
+            HollowToast.show(
+              context,
+              'Max can\'t be below the current member count (${members.length}).',
+              type: HollowToastType.error,
+            );
+            setState(() => _savingAccess = false);
+          }
+          return;
+        }
+      }
+
+      final maxValue = parsed > 0 ? parsed.toString() : '0';
+      await crdt_api.updateServerSetting(
+          serverId: sid, key: 'is_private', value: _isPrivate ? 'true' : 'false');
+      await crdt_api.updateServerSetting(
+          serverId: sid, key: 'is_nsfw', value: _isNsfw ? 'true' : 'false');
+      await crdt_api.updateServerSetting(
+          serverId: sid, key: 'max_members', value: maxValue);
+      if (mounted) {
+        _maxMembersController.text = maxValue == '0' ? '' : maxValue;
+        HollowToast.show(context, 'Access settings saved',
+            type: HollowToastType.success);
+      }
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(context, 'Failed to save: $e',
+            type: HollowToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _savingAccess = false);
+    }
   }
 
   Future<void> _loadDescription() async {
@@ -92,6 +167,7 @@ class _MobileServerSettingsRouteState
     _nameController.dispose();
     _descController.dispose();
     _nicknameController.dispose();
+    _maxMembersController.dispose();
     super.dispose();
   }
 
@@ -528,6 +604,112 @@ class _MobileServerSettingsRouteState
                       alignment: Alignment.centerRight,
                       child: HollowButton.filled(
                         onPressed: _saving ? null : _saveDescription,
+                        compact: true,
+                        child: const Text('Save'),
+                      ),
+                    ),
+                    const SizedBox(height: HollowSpacing.xl),
+                  ],
+
+                  // Access (admin only) — private / NSFW / member cap
+                  if (canManage) ...[
+                    _SectionDivider(label: 'Access'),
+                    const SizedBox(height: HollowSpacing.sm),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(LucideIcons.globeLock,
+                                      size: 15, color: hollow.textSecondary),
+                                  const SizedBox(width: HollowSpacing.sm),
+                                  Text('Private server',
+                                      style: HollowTypography.body.copyWith(
+                                          color: hollow.textPrimary)),
+                                ],
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                'New members can\'t join via the link.',
+                                style: HollowTypography.caption.copyWith(
+                                  color: hollow.textSecondary, fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: HollowSpacing.md),
+                        HollowToggle(
+                          value: _isPrivate,
+                          onChanged: (v) => setState(() => _isPrivate = v),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: HollowSpacing.md),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(Atlas.adult_18,
+                                      size: 15, color: hollow.textSecondary),
+                                  const SizedBox(width: HollowSpacing.sm),
+                                  Text('NSFW server',
+                                      style: HollowTypography.body.copyWith(
+                                          color: hollow.textPrimary)),
+                                ],
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                'Members must confirm before joining. For adult '
+                                'or sensitive content.',
+                                style: HollowTypography.caption.copyWith(
+                                  color: hollow.textSecondary, fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: HollowSpacing.md),
+                        HollowToggle(
+                          value: _isNsfw,
+                          onChanged: (v) => setState(() => _isNsfw = v),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: HollowSpacing.md),
+                    Text(
+                      'Max members',
+                      style: HollowTypography.label
+                          .copyWith(color: hollow.textSecondary),
+                    ),
+                    const SizedBox(height: HollowSpacing.sm),
+                    HollowTextField(
+                      controller: _maxMembersController,
+                      hintText: 'Unlimited',
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                      isDense: true,
+                    ),
+                    const SizedBox(height: HollowSpacing.xs),
+                    Text(
+                      'Leave blank for no limit. Existing members are never '
+                      'removed.',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary, fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(height: HollowSpacing.sm),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: HollowButton.filled(
+                        onPressed: _savingAccess ? null : _saveAccessSettings,
                         compact: true,
                         child: const Text('Save'),
                       ),
@@ -1320,6 +1502,34 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     }
   }
 
+  /// Set who can SEE a channel (everyone / moderator / admin). Mirrors desktop's
+  /// visibility _AccessChip: optimistic local update then the CRDT op.
+  Future<void> _setChannelVisibility(String channelId, String visibility) async {
+    final old = _channels[channelId];
+    if (old != null && mounted) {
+      setState(() => _channels[channelId] = old.copyWith(visibility: visibility));
+    }
+    await crdt_api.setChannelVisibility(
+      serverId: widget.serverId,
+      channelId: channelId,
+      visibility: visibility,
+    );
+  }
+
+  /// Set who can POST in a channel (everyone / moderator / admin). Mirrors
+  /// desktop's posting _AccessChip.
+  Future<void> _setChannelPosting(String channelId, String posting) async {
+    final old = _channels[channelId];
+    if (old != null && mounted) {
+      setState(() => _channels[channelId] = old.copyWith(posting: posting));
+    }
+    await crdt_api.setChannelPosting(
+      serverId: widget.serverId,
+      channelId: channelId,
+      posting: posting,
+    );
+  }
+
   void _renameChannel(int index, String channelId, String currentName) {
     final controller = TextEditingController(text: currentName);
     showHollowDialog(
@@ -1652,54 +1862,86 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
           color: hollow.elevated,
           borderRadius: BorderRadius.circular(hollow.radiusSm),
         ),
-        child: Row(
+        child: Column(
           children: [
-            ReorderableDragStartListener(
-              index: index,
-              child: Icon(LucideIcons.gripVertical,
-                  size: 20, color: hollow.textSecondary),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            Icon(
-              isVoice ? LucideIcons.volume2 : LucideIcons.hash,
-              size: 16,
-              color: hollow.textSecondary,
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            Expanded(
-              child: Text(
-                name,
-                style: HollowTypography.body
-                    .copyWith(color: hollow.textPrimary),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            // Public-channel toggle (text channels only) — mirrors desktop's
-            // channels_tab globe. Accent = public, grey = private. Gated by the
-            // MANAGE_CHANNELS permission that already wraps this whole editor.
-            if (!isVoice)
-              HollowPressable(
-                onTap: () =>
-                    _toggleChannelPublic(item.channelId, ch?.isPublic ?? false),
-                padding: const EdgeInsets.all(HollowSpacing.xs),
-                child: Icon(
-                  LucideIcons.globe,
+            Row(
+              children: [
+                ReorderableDragStartListener(
+                  index: index,
+                  child: Icon(LucideIcons.gripVertical,
+                      size: 20, color: hollow.textSecondary),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                Icon(
+                  isVoice ? LucideIcons.volume2 : LucideIcons.hash,
                   size: 16,
-                  color: (ch?.isPublic ?? false)
-                      ? hollow.accent
-                      : hollow.textSecondary,
+                  color: hollow.textSecondary,
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                Expanded(
+                  child: Text(
+                    name,
+                    style: HollowTypography.body
+                        .copyWith(color: hollow.textPrimary),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                // Public-channel toggle (text channels only) — mirrors desktop's
+                // channels_tab globe. Accent = public, grey = private. Gated by the
+                // MANAGE_CHANNELS permission that already wraps this whole editor.
+                if (!isVoice)
+                  HollowPressable(
+                    onTap: () =>
+                        _toggleChannelPublic(item.channelId, ch?.isPublic ?? false),
+                    padding: const EdgeInsets.all(HollowSpacing.xs),
+                    child: Icon(
+                      LucideIcons.globe,
+                      size: 16,
+                      color: (ch?.isPublic ?? false)
+                          ? hollow.accent
+                          : hollow.textSecondary,
+                    ),
+                  ),
+                HollowPressable(
+                  onTap: () => _renameChannel(index, item.channelId, name),
+                  padding: const EdgeInsets.all(HollowSpacing.xs),
+                  child: Icon(LucideIcons.pencil, size: 16, color: hollow.textSecondary),
+                ),
+                HollowPressable(
+                  onTap: () => _deleteChannel(index, item.channelId, name),
+                  padding: const EdgeInsets.all(HollowSpacing.xs),
+                  child: Icon(LucideIcons.trash2, size: 16, color: hollow.error),
+                ),
+              ],
+            ),
+            // Visibility + posting access controls — mirror desktop's _AccessChip
+            // pair. Only meaningful for PRIVATE (MLS) channels: a public channel
+            // is plaintext for everyone, so who-can-see/post is moot. Voice
+            // channels have no posting/visibility gating either.
+            if (!isVoice && !(ch?.isPublic ?? false)) ...[
+              const SizedBox(height: HollowSpacing.xs),
+              Padding(
+                // Align the chips under the "#" channel icon (drag handle 20 +
+                // sm gap 8), not under the channel name.
+                padding: const EdgeInsets.only(left: 28),
+                child: Row(
+                  children: [
+                    _MobileAccessChip(
+                      icon: LucideIcons.eye,
+                      value: ch?.visibility ?? 'everyone',
+                      onChanged: (v) =>
+                          _setChannelVisibility(item.channelId, v),
+                    ),
+                    const SizedBox(width: HollowSpacing.sm),
+                    _MobileAccessChip(
+                      icon: LucideIcons.messageSquare,
+                      value: ch?.posting ?? 'everyone',
+                      onChanged: (v) => _setChannelPosting(item.channelId, v),
+                    ),
+                  ],
                 ),
               ),
-            HollowPressable(
-              onTap: () => _renameChannel(index, item.channelId, name),
-              padding: const EdgeInsets.all(HollowSpacing.xs),
-              child: Icon(LucideIcons.pencil, size: 16, color: hollow.textSecondary),
-            ),
-            HollowPressable(
-              onTap: () => _deleteChannel(index, item.channelId, name),
-              padding: const EdgeInsets.all(HollowSpacing.xs),
-              child: Icon(LucideIcons.trash2, size: 16, color: hollow.error),
-            ),
+            ],
           ],
         ),
       );
@@ -1729,6 +1971,90 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
             child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Compact popup chip for channel visibility or posting access on mobile.
+/// Mirrors the desktop `_AccessChip` (channels_tab): tap → Everyone / Mod+ /
+/// Admin+. Restricted values render in the warning color.
+class _MobileAccessChip extends StatelessWidget {
+  final IconData icon;
+  final String value;
+  final Future<void> Function(String) onChanged;
+
+  const _MobileAccessChip({
+    required this.icon,
+    required this.value,
+    required this.onChanged,
+  });
+
+  String get _label => switch (value) {
+        'moderator' => 'Mod+',
+        'admin' => 'Admin+',
+        _ => 'All',
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final isRestricted = value != 'everyone';
+
+    return PopupMenuButton<String>(
+      tooltip: '',
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(),
+      color: hollow.elevated,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        side: BorderSide(color: hollow.border),
+      ),
+      onSelected: onChanged,
+      itemBuilder: (_) => [
+        _item('everyone', 'Everyone', hollow),
+        _item('moderator', 'Mod+', hollow),
+        _item('admin', 'Admin+', hollow),
+      ],
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: isRestricted
+              ? hollow.warning.withValues(alpha: 0.15)
+              : hollow.border.withValues(alpha: 0.3),
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon,
+                size: 12,
+                color: isRestricted ? hollow.warning : hollow.textSecondary),
+            const SizedBox(width: 4),
+            Text(
+              _label,
+              style: HollowTypography.caption.copyWith(
+                fontSize: 11,
+                color: isRestricted ? hollow.warning : hollow.textSecondary,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  PopupMenuItem<String> _item(String val, String label, HollowTheme hollow) {
+    final selected = val == value;
+    return PopupMenuItem(
+      value: val,
+      child: Text(
+        label,
+        style: HollowTypography.body.copyWith(
+          color: selected ? hollow.accent : hollow.textPrimary,
+          fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+        ),
       ),
     );
   }

@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/models/node_status.dart';
+import 'package:hollow/src/core/providers/node_provider.dart';
 
 /// Granular connection stage for a peer.
 enum PeerConnectionStage {
@@ -76,7 +78,10 @@ class ConnectionStatusState {
 
   const ConnectionStatusState({
     this.peers = const {},
-    this.relayStatus = RelayConnectionStatus.disconnected,
+    // Start as "connecting" so the UI shows "Connecting…" before the first WS
+    // connect resolves — not a false "Disconnected" (and never a false
+    // "Connected", which only the real RelayConnected event sets).
+    this.relayStatus = RelayConnectionStatus.connecting,
   });
 
   ConnectionStatusState copyWithPeer(
@@ -255,3 +260,46 @@ class ConnectionStatusNotifier extends Notifier<ConnectionStatusState> {
 final connectionStatusProvider =
     NotifierProvider<ConnectionStatusNotifier, ConnectionStatusState>(
         ConnectionStatusNotifier.new);
+
+/// The single source of truth for "am I actually connected", combining the
+/// LOCAL node lifecycle (`nodeProvider`) with the REAL relay-WebSocket state
+/// (`connectionStatusProvider.relayStatus`).
+///
+/// The local node reaches `connected` the instant it starts, even with no
+/// internet — so it must NOT drive the connection indicator on its own. The
+/// node phase only gates loading/error; once the node is up, the relay state
+/// decides Connected / Connecting / Reconnecting / Offline.
+enum OverallConnection { loading, error, connecting, reconnecting, connected, offline }
+
+extension OverallConnectionLabel on OverallConnection {
+  String get label => switch (this) {
+        OverallConnection.loading => 'Loading…',
+        OverallConnection.error => 'Error',
+        OverallConnection.connecting => 'Connecting…',
+        OverallConnection.reconnecting => 'Reconnecting…',
+        OverallConnection.connected => 'Connected',
+        OverallConnection.offline => 'No connection',
+      };
+
+  /// True only when fully connected to the relay — the only state that should
+  /// render a green/"online" indicator.
+  bool get isOnline => this == OverallConnection.connected;
+}
+
+/// Combined node + relay connection state for the top-level status indicators
+/// (user bar, Home network card). Node error/loading wins; otherwise the real
+/// relay WS state drives the label.
+final overallConnectionProvider = Provider<OverallConnection>((ref) {
+  final node = ref.watch(nodeProvider).status;
+  if (node == NodeStatus.error) return OverallConnection.error;
+  if (node == NodeStatus.loading || node == NodeStatus.starting) {
+    return OverallConnection.connecting;
+  }
+  // Node is up — the relay WS connection is the ground truth.
+  return switch (ref.watch(connectionStatusProvider).relayStatus) {
+    RelayConnectionStatus.connected => OverallConnection.connected,
+    RelayConnectionStatus.connecting => OverallConnection.connecting,
+    RelayConnectionStatus.reconnecting => OverallConnection.reconnecting,
+    RelayConnectionStatus.disconnected => OverallConnection.offline,
+  };
+});

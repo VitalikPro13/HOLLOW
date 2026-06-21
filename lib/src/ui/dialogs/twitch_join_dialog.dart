@@ -92,6 +92,87 @@ void showJoinRejectedDialog(
   );
 }
 
+/// NSFW join-consent gate. Shown when an NSFW-flagged server rejects a join
+/// with the `nsfw_confirm:` reason. On "Proceed" the caller re-joins with
+/// `nsfwConfirmed: true`. Works for every join entry point because the gate is
+/// server-side reject-then-retry (mirrors the Twitch/private gates).
+void showNsfwConfirmDialog(
+  BuildContext context, {
+  required String serverName,
+  required VoidCallback onProceed,
+}) {
+  showHollowDialog(
+    context: context,
+    builder: (ctx) {
+      final hollow = HollowTheme.of(ctx);
+      return HollowDialog(
+        title: 'Sensitive content warning',
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(LucideIcons.alertTriangle, size: 20, color: hollow.warning),
+                const SizedBox(width: HollowSpacing.md),
+                Expanded(
+                  child: RichText(
+                    text: TextSpan(
+                      style: HollowTypography.body.copyWith(
+                        color: hollow.textSecondary,
+                        fontSize: 13,
+                        height: 1.4,
+                      ),
+                      children: [
+                        TextSpan(
+                          text: serverName,
+                          style: TextStyle(
+                            color: hollow.textPrimary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const TextSpan(
+                          text: ' is marked NSFW. It may contain adult or '
+                              'disturbing content.',
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: HollowSpacing.md),
+            Text(
+              'This server is moderated only by its own moderators. Hollow does '
+              'not host, review, or take responsibility for its content. '
+              'Proceed at your own risk.',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+                height: 1.4,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          HollowButton.ghost(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          HollowButton.danger(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              onProceed();
+            },
+            compact: true,
+            child: const Text('Join'),
+          ),
+        ],
+      );
+    },
+  );
+}
+
 enum _JoinStep { requirements, connect, verifying, success, failed }
 
 class _TwitchJoinDialog extends StatefulWidget {
@@ -221,6 +302,7 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
       crdt_api.joinServer(
         serverId: widget.serverId,
         twitchProofJson: proof,
+        nsfwConfirmed: false,
       );
       // Stay on verifying — _onJoinResult will be called by event_provider
       // with either ServerJoined or TwitchJoinRejected.

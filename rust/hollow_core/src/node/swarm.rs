@@ -510,7 +510,7 @@ async fn run_event_loop(
 
     // Track server_ids we're trying to join (waiting for SyncResponse from existing members).
     // Value is the optional Twitch proof JSON to attach to join requests.
-    let mut pending_server_joins: HashMap<String, Option<String>> = HashMap::new();
+    let mut pending_server_joins: HashMap<String, PendingJoin> = HashMap::new();
     // Pending friend requests: peer_id → requested_at timestamp.
     // Queued when peer isn't reachable (no shared rooms), sent when they appear.
     let mut pending_friend_requests: HashMap<String, i64> = HashMap::new();
@@ -769,11 +769,11 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
-                    NodeCommand::JoinServer { server_id, twitch_proof_json } => {
+                    NodeCommand::JoinServer { server_id, twitch_proof_json, nsfw_confirmed } => {
                         sync_handler::handle_join_server(
                             &mut pending_server_joins, &mls, &ws_cmd_tx,
                             &ws_room_peers, &sig_cmd_tx, &cmd_tx,
-                            server_id, twitch_proof_json,
+                            server_id, twitch_proof_json, nsfw_confirmed,
                             &crdt_store,
                         ).await;
                     }
@@ -1712,8 +1712,14 @@ async fn run_event_loop(
             Some(ws_event) = ws_event_rx.recv() => {
                 use super::ws_client::WsEvent;
                 match ws_event {
+                    WsEvent::Connecting { reconnecting } => {
+                        let _ = event_tx.send(NetworkEvent::RelayConnecting { reconnecting }).await;
+                    }
                     WsEvent::Connected => {
                         hollow_log!("[HOLLOW-WS] Relay connected — joining inbox + server + DM rooms");
+                        // Pure UI signal — the room-join side effects below are
+                        // unchanged. Tells Dart to show real "Connected".
+                        let _ = event_tx.send(NetworkEvent::RelayConnected).await;
                         // Join personal inbox room (for receiving friend requests from strangers).
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                             room_code: format!("inbox:{}", local_peer_str),
@@ -2279,7 +2285,8 @@ async fn run_event_loop(
                                         &ws_cmd_tx, &ws_room_peers,
                                         &peer_id, HavenMessage::ServerJoinRequest {
                                             server_id: room.clone(),
-                                            twitch_proof_json: pending_server_joins.get(&room).cloned().flatten(),
+                                            twitch_proof_json: pending_server_joins.get(&room).and_then(|p| p.twitch_proof_json.clone()),
+                                            nsfw_confirmed: pending_server_joins.get(&room).map(|p| p.nsfw_confirmed).unwrap_or(false),
                                         },
                                     );
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {peer_id} for {room}");
@@ -2726,7 +2733,8 @@ async fn run_event_loop(
                                         &ws_cmd_tx, &ws_room_peers,
                                         pid_str, HavenMessage::ServerJoinRequest {
                                             server_id: room.clone(),
-                                            twitch_proof_json: pending_server_joins.get(&room).cloned().flatten(),
+                                            twitch_proof_json: pending_server_joins.get(&room).and_then(|p| p.twitch_proof_json.clone()),
+                                            nsfw_confirmed: pending_server_joins.get(&room).map(|p| p.nsfw_confirmed).unwrap_or(false),
                                         },
                                     );
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {pid_str} for {room}");
@@ -4120,7 +4128,7 @@ async fn handle_incoming_request(
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     master_peer_str: &str,
     device_peer_id: &str,
-    pending_server_joins: &mut HashMap<String, Option<String>>,
+    pending_server_joins: &mut HashMap<String, PendingJoin>,
     pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
     mls: &mut Option<MlsManager>,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
@@ -6940,7 +6948,7 @@ async fn handle_incoming_request(
             }
         }
 
-        HavenMessage::ServerJoinRequest { server_id, twitch_proof_json } => {
+        HavenMessage::ServerJoinRequest { server_id, twitch_proof_json, nsfw_confirmed } => {
             hollow_log!("[HOLLOW-CRDT] ServerJoinRequest from {peer_str} for server {server_id}");
 
             if let Some(state) = server_states.get_mut(&server_id) {
@@ -7060,6 +7068,25 @@ async fn handle_incoming_request(
                             peer_str, HavenMessage::ServerJoinRejected {
                                 server_id,
                                 reason: format!("server_private:{}", state.name()),
+                            },
+                        );
+                        return;
+                    }
+
+                    // NSFW consent gate: an NSFW-flagged server requires the joiner
+                    // to accept a "proceed at your own risk" prompt first. Unlike
+                    // private/full this is not a hard rejection — we reject ONCE with
+                    // an `nsfw_confirm:` reason carrying the server name; the joiner's
+                    // client shows the consent dialog and re-sends with
+                    // `nsfw_confirmed=true`. Ordered after private/full so we never
+                    // ask consent for a server they can't enter. Siblings exempt.
+                    if !is_sibling && state.is_nsfw() && !nsfw_confirmed {
+                        hollow_log!("[HOLLOW-CRDT] NSFW consent required for {peer_str} joining {server_id}");
+                        send_message_to_peer(
+                            ws_cmd_tx, ws_room_peers,
+                            peer_str, HavenMessage::ServerJoinRejected {
+                                server_id,
+                                reason: format!("nsfw_confirm:{}", state.name()),
                             },
                         );
                         return;
@@ -7639,7 +7666,9 @@ async fn handle_incoming_request(
             // Lightweight inline join (mirrors handle_join_server): join the rooms +
             // send a ServerJoinRequest to the announcer, which same-identity fast-paths
             // us (serves the snapshot + adds our MLS leaf). No twitch proof for a co-owner.
-            pending_server_joins.insert(server_id.clone(), None);
+            // Same-identity join: bypasses the gates anyway (the receiver's NSFW
+            // gate is `!is_sibling`), so no twitch proof and nsfw pre-confirmed.
+            pending_server_joins.insert(server_id.clone(), PendingJoin { twitch_proof_json: None, nsfw_confirmed: true });
             let _ = sig_cmd_tx.send(SignalingCmd::SetRoom { room_code: server_id.clone() }).await;
             let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap { room_code: server_id.clone() }).await;
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: server_id.clone() });
@@ -7648,6 +7677,7 @@ async fn handle_incoming_request(
                 &peer_str, HavenMessage::ServerJoinRequest {
                     server_id: server_id.clone(),
                     twitch_proof_json: None,
+                    nsfw_confirmed: true,
                 },
             );
         }

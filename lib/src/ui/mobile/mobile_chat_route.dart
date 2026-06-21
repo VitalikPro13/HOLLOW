@@ -12,6 +12,8 @@ import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/local_nickname_provider.dart';
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -29,6 +31,7 @@ import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
 import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
+import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
@@ -1704,6 +1707,9 @@ class _MobileChatHeader extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final profiles = ref.watch(profileProvider);
+    // Watch local nicknames so the DM title rebuilds the moment one is set/cleared
+    // (displayNameFor reads a static cache that doesn't trigger a rebuild on its own).
+    ref.watch(localNicknameProvider);
     final isDm = peerId != null;
 
     String title;
@@ -1770,13 +1776,30 @@ class _MobileChatHeader extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text(
-                    title,
-                    style: HollowTypography.body.copyWith(
-                      fontWeight: FontWeight.w600,
-                      color: hollow.textPrimary,
-                    ),
-                    overflow: TextOverflow.ellipsis,
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          title,
+                          style: HollowTypography.body.copyWith(
+                            fontWeight: FontWeight.w600,
+                            color: hollow.textPrimary,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      // NSFW badge (channels only), left of the status.
+                      if (!isDm &&
+                          serverId != null &&
+                          (ref
+                                  .watch(serverIsNsfwProvider(serverId!))
+                                  .valueOrNull ??
+                              false)) ...[
+                        const SizedBox(width: HollowSpacing.sm),
+                        const _MobileNsfwBadge(),
+                      ],
+                    ],
                   ),
                   if (isDm)
                     Text(
@@ -1801,6 +1824,11 @@ class _MobileChatHeader extends ConsumerWidget {
           if (isDm) ...[
             _DmCallButtons(peerId: peerId!),
             _DmMuteButton(peerId: peerId!),
+          ],
+          // Channel encryption/connection status (Encrypted / Offline).
+          if (!isDm && serverId != null) ...[
+            _MobileChannelStatus(serverId: serverId!),
+            const SizedBox(width: HollowSpacing.xs),
           ],
           if (!isDm && serverId != null)
             HollowPressable(
@@ -1984,6 +2012,73 @@ class _MobileChatHeader extends ConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Small "NSFW" pill shown in the mobile channel header (mirrors the desktop
+/// channel-header badge).
+class _MobileNsfwBadge extends StatelessWidget {
+  const _MobileNsfwBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: hollow.error.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+      ),
+      child: Text(
+        'NSFW',
+        style: HollowTypography.caption.copyWith(
+          color: hollow.error,
+          fontWeight: FontWeight.w700,
+          fontSize: 9,
+          letterSpacing: 0.5,
+        ),
+      ),
+    );
+  }
+}
+
+/// Encrypted / Offline status for the mobile channel header. Mirrors the desktop
+/// `_ChannelConnectionStatus`: a server channel is "Encrypted" when any other
+/// member is online (MLS group broadcast), else Offline (or Custom Network on a
+/// self-hosted relay). Members are master-keyed, so collapse devices→master.
+class _MobileChannelStatus extends ConsumerWidget {
+  final String serverId;
+
+  const _MobileChannelStatus({required this.serverId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final online = ref.watch(onlineIdentitiesProvider);
+    final membersAsync = ref.watch(serverMembersProvider(serverId));
+    final localPeerId = ref.watch(identityProvider).peerId;
+
+    return membersAsync.when(
+      data: (members) {
+        final anyOnline = members.any((m) =>
+            m.peerId != localPeerId && online.contains(m.peerId));
+        final isCustomRelay =
+            ref.watch(relayDomainProvider) != kDefaultRelayDomain;
+        final ConnectionStage stage;
+        if (anyOnline) {
+          stage = ConnectionStage.encrypted;
+        } else if (isCustomRelay) {
+          stage = ConnectionStage.customNetwork;
+        } else {
+          stage = ConnectionStage.offline;
+        }
+        return ConnectionProgress(
+          key: ValueKey('mob-chan-conn-$serverId-${stage.index}'),
+          stage: stage,
+        );
+      },
+      loading: () => const SizedBox.shrink(),
+      error: (_, _) => const SizedBox.shrink(),
     );
   }
 }

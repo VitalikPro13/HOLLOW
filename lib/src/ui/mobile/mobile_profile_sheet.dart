@@ -90,7 +90,12 @@ class MobileProfileSheet extends ConsumerWidget {
     final localNicknames = ref.watch(localNicknameProvider);
     final localNick = localNicknames[peerId];
     final name = localNick ?? displayNameFor(profiles, peerId);
-    final profileName = displayNameFor(profiles, peerId);
+    // The friend's OWN name (their profile display name), NOT folded through the
+    // local nickname — so the subtitle under a local nickname shows the real
+    // name, not a duplicate. Falls back to short peer ID when unset.
+    final profileName = (profile != null && profile.displayName.isNotEmpty)
+        ? profile.displayName
+        : (peerId.length > 8 ? '${peerId.substring(0, 8)}...' : peerId);
     final isOnline = identityIsOnline(ref, peerId);
     final bannerBytes = ref.watch(bannerProvider(peerId)).valueOrNull;
     final bannerColor = bannerColorFromId(peerId);

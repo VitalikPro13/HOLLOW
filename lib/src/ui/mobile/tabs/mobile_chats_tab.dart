@@ -1461,7 +1461,7 @@ class _NewConversationDialogState
     }
 
     Navigator.of(context).pop();
-    crdt_api.joinServer(serverId: serverId);
+    crdt_api.joinServer(serverId: serverId, nsfwConfirmed: false);
     HollowToast.show(context, 'Joining server...',
         type: HollowToastType.info);
   }

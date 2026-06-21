@@ -1,9 +1,8 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/models/node_status.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
-import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/room_budget_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -30,7 +29,6 @@ class UserBar extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final identity = ref.watch(identityProvider);
-    final nodeState = ref.watch(nodeProvider);
     final selectedServerId = ref.watch(selectedServerProvider);
 
     final localPeerId = identity.peerId;
@@ -99,10 +97,16 @@ class UserBar extends ConsumerWidget {
           statusPulse = false;
       }
     } else {
-      // No server selected — fall back to node-level status.
-      statusText = _statusText(nodeState.status);
-      statusColor = _statusColor(hollow, nodeState.status);
-      statusPulse = nodeState.status == NodeStatus.connected;
+      // No server selected — show the REAL relay connection state (node started
+      // + relay WS connected), not just "the local node booted".
+      final overall = ref.watch(overallConnectionProvider);
+      statusText = overall == OverallConnection.connected ? 'Online' : overall.label;
+      statusColor = switch (overall) {
+        OverallConnection.connected => hollow.success,
+        OverallConnection.offline || OverallConnection.error => hollow.warning,
+        _ => hollow.textSecondary,
+      };
+      statusPulse = overall.isOnline;
     }
 
     final roomBudget = ref.watch(roomBudgetProvider);
@@ -236,24 +240,6 @@ class UserBar extends ConsumerWidget {
     ),
       ],
     );
-  }
-
-  Color _statusColor(HollowTheme hollow, NodeStatus status) {
-    return switch (status) {
-      NodeStatus.connected => hollow.success,
-      NodeStatus.starting => hollow.warning,
-      NodeStatus.loading => hollow.textSecondary,
-      NodeStatus.error => hollow.error,
-    };
-  }
-
-  String _statusText(NodeStatus status) {
-    return switch (status) {
-      NodeStatus.connected => 'Online',
-      NodeStatus.starting => 'Connecting...',
-      NodeStatus.loading => 'Loading...',
-      NodeStatus.error => 'Error',
-    };
   }
 }
 

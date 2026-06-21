@@ -83,6 +83,9 @@ pub enum WsCommand {
 pub enum WsEvent {
     Connected,
     Disconnected,
+    /// A connect attempt is starting. `reconnecting` is true for backoff retries
+    /// after a drop, false for the very first attempt.
+    Connecting { reconnecting: bool },
     PeerJoined { room: String, peer_id: String },
     PeerLeft { room: String, peer_id: String },
     RoomMembers { room: String, peers: Vec<String> },
@@ -214,6 +217,9 @@ async fn ws_client_loop(
 
     loop {
         hollow_log!("[HOLLOW-WS] Connecting to {relay_url}...");
+        // backoff_secs > 1 means a prior connection dropped (it resets to 1 on
+        // success), so this attempt is a reconnect rather than the first connect.
+        let _ = event_tx.send(WsEvent::Connecting { reconnecting: backoff_secs > 1 });
 
         match connect_and_auth(&relay_url, &peer_id, &keypair_proto, &pub_key_b64, license_key.as_deref(), fetch).await {
             Ok(ws_stream) => {

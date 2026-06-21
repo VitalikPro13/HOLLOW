@@ -220,6 +220,48 @@ class MobileSettingsTab extends ConsumerWidget {
         // converge across a person's devices; channel messages are lazy-paged
         // per device and intentionally not counted (they'd diverge).
         const _MobileStatsCard(),
+
+        const SizedBox(height: HollowSpacing.md),
+        // Relay "Online" counter — mirrors the desktop Home shell's bottom
+        // online-users row (relay-reported peers currently connected).
+        const _MobileOnlineCounter(),
+      ],
+    );
+  }
+}
+
+/// Relay online-users counter — a port of the desktop Home shell's bottom
+/// "Online … N" row (users icon + shimmer divider + live count from the relay
+/// /server-stats poll).
+class _MobileOnlineCounter extends ConsumerWidget {
+  const _MobileOnlineCounter();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final relayStats = ref.watch(relayStatsProvider);
+    return Row(
+      children: [
+        Icon(LucideIcons.users, size: 13, color: hollow.textSecondary),
+        const SizedBox(width: HollowSpacing.xs),
+        Text(
+          'Online',
+          style: HollowTypography.caption.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 11,
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.sm),
+        Expanded(child: _MobileShimmerLine(hollow: hollow)),
+        const SizedBox(width: HollowSpacing.sm),
+        Text(
+          '${relayStats.onlineUsers}',
+          style: HollowTypography.body.copyWith(
+            color: hollow.textPrimary,
+            fontWeight: FontWeight.w600,
+            fontSize: 12,
+          ),
+        ),
       ],
     );
   }
@@ -3373,7 +3415,7 @@ class _AboutTab extends ConsumerWidget {
                   Container(
                     width: 8, height: 8,
                     decoration: BoxDecoration(
-                      color: relayStats.fetchCount > 0
+                      color: relayStats.isFresh
                           ? const Color(0xFF4CAF50)
                           : hollow.textSecondary,
                       shape: BoxShape.circle,

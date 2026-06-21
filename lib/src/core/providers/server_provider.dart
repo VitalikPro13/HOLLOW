@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/server_info.dart';
-import 'package:hollow/src/core/providers/peers_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 
@@ -142,19 +142,28 @@ final serverMembersProvider =
   (ref, serverId) => crdt_api.getServerMembers(serverId: serverId),
 );
 
+/// Whether a server is flagged NSFW (from CRDT settings). Drives the header
+/// badge. Invalidated on ServerUpdated so it reflects a live toggle.
+final serverIsNsfwProvider = FutureProvider.family<bool, String>(
+  (ref, serverId) async {
+    final v = await crdt_api.getServerSetting(serverId: serverId, key: 'is_nsfw');
+    return v == 'true';
+  },
+);
+
 /// Returns the set of online member peer IDs for a server.
-/// Excludes invisible peers.
+///
+/// Server members are master-keyed (ServerState.members), but presence is
+/// device-keyed. `onlineIdentitiesProvider` collapses devices→master and
+/// already excludes invisible peers, so a multi-device member counts as online
+/// via any of their devices.
 final onlineMembersProvider =
     Provider.family<Set<String>, String>((ref, serverId) {
-  final connectedPeers = ref.watch(peersProvider);
-  final invisiblePeers = ref.watch(invisiblePeersProvider);
+  final online = ref.watch(onlineIdentitiesProvider);
   final membersAsync = ref.watch(serverMembersProvider(serverId));
   return membersAsync.when(
-    data: (members) => members
-        .where((m) => connectedPeers.containsKey(m.peerId) &&
-            !invisiblePeers.contains(m.peerId))
-        .map((m) => m.peerId)
-        .toSet(),
+    data: (members) =>
+        members.where((m) => online.contains(m.peerId)).map((m) => m.peerId).toSet(),
     loading: () => {},
     error: (_, _) => {},
   );

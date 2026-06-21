@@ -744,6 +744,16 @@ impl ServerState {
             .unwrap_or(false)
     }
 
+    /// Whether the server is flagged NSFW (adult/sensitive content). Defaults to
+    /// false. Stored in `settings["is_nsfw"]` as "true"/"false". Used to gate
+    /// joining with a "proceed at your own risk" consent prompt.
+    pub fn is_nsfw(&self) -> bool {
+        self.settings
+            .get("is_nsfw")
+            .map(|reg| reg.read() == "true")
+            .unwrap_or(false)
+    }
+
     /// Owner-configured max member count. `None` = unlimited (default).
     /// Stored in `settings["max_members"]`; 0 or unparseable = unlimited.
     pub fn max_members(&self) -> Option<u32> {

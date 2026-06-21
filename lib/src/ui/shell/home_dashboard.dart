@@ -8,7 +8,6 @@ import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
-import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
@@ -19,7 +18,6 @@ import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
-import 'package:hollow/src/core/models/node_status.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -183,7 +181,6 @@ class _ProfileColumn extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final identity = ref.watch(identityProvider);
-    final nodeState = ref.watch(nodeProvider);
     final localPeerId = identity.peerId;
     final localProfile = localPeerId != null
         ? ref.watch(profileProvider.select((p) => p[localPeerId]))
@@ -195,7 +192,9 @@ class _ProfileColumn extends ConsumerWidget {
     final profile = localProfile;
     final statusText = profile?.status ?? '';
     final aboutMe = profile?.aboutMe ?? '';
-    final isOnline = nodeState.status == NodeStatus.connected;
+    // "Online" here means actually reachable (relay connected), not merely that
+    // the local node started — otherwise you'd show Online with no internet.
+    final isOnline = ref.watch(overallConnectionProvider).isOnline;
     final amInvisible =
         ref.watch(invisibleModeProvider);
 
@@ -916,7 +915,6 @@ class _NetworkColumn extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final nodeState = ref.watch(nodeProvider);
     final peers = ref.watch(peersProvider);
     // Multi-device: a friend can be online via a device whose peer_id differs
     // from their master friend.peerId, so the master key won't be in `peers`.
@@ -924,7 +922,8 @@ class _NetworkColumn extends ConsumerWidget {
     final friends = ref.watch(friendsProvider);
     final relayStats = ref.watch(relayStatsProvider);
 
-    final isOnline = nodeState.status == NodeStatus.connected;
+    // Real connection state (local node + relay WS), not just "node started".
+    final overall = ref.watch(overallConnectionProvider);
 
     // Friends connection status (granular via connectionStatusProvider).
     final connStatus = ref.watch(connectionStatusProvider);
@@ -1012,9 +1011,14 @@ class _NetworkColumn extends ConsumerWidget {
           child: Row(
             children: [
               StatusDot(
-                color: isOnline ? hollow.success : hollow.warning,
+                color: overall.isOnline
+                    ? hollow.success
+                    : (overall == OverallConnection.offline ||
+                            overall == OverallConnection.error
+                        ? hollow.warning
+                        : hollow.textSecondary),
                 size: 8,
-                pulse: isOnline,
+                pulse: overall.isOnline,
               ),
               const SizedBox(width: HollowSpacing.sm),
               Expanded(
@@ -1022,7 +1026,7 @@ class _NetworkColumn extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      isOnline ? 'Connected' : _nodeLabel(nodeState.status),
+                      overall.label,
                       style: HollowTypography.body.copyWith(
                         color: hollow.textPrimary,
                         fontWeight: FontWeight.w500,
@@ -1143,15 +1147,6 @@ class _NetworkColumn extends ConsumerWidget {
         ),
       ],
     );
-  }
-
-  String _nodeLabel(NodeStatus status) {
-    return switch (status) {
-      NodeStatus.connected => 'Connected',
-      NodeStatus.starting => 'Starting...',
-      NodeStatus.loading => 'Loading...',
-      NodeStatus.error => 'Error',
-    };
   }
 }
 

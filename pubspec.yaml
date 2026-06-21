@@ -32,6 +32,7 @@ dependencies:
     sdk: flutter
 
   lucide_icons_flutter: ^3.1.14
+  atlas_icons: ^0.0.12
   flutter_svg: ^2.0.17
   hollow_core:
     path: rust_builder

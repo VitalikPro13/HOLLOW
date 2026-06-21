@@ -19,6 +19,7 @@ import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/settings/server_template.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:atlas_icons/atlas_icons.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 
@@ -53,6 +54,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
   bool _savingTwitch = false;
 
   bool _isPrivate = false;
+  bool _isNsfw = false;
   late final TextEditingController _maxMembersController;
   bool _savingAccess = false;
 
@@ -77,11 +79,14 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       final sid = widget.server.serverId;
       final isPrivate =
           await crdt_api.getServerSetting(serverId: sid, key: 'is_private');
+      final isNsfw =
+          await crdt_api.getServerSetting(serverId: sid, key: 'is_nsfw');
       final maxMembers =
           await crdt_api.getServerSetting(serverId: sid, key: 'max_members');
       if (mounted) {
         setState(() {
           _isPrivate = isPrivate == 'true';
+          _isNsfw = isNsfw == 'true';
           // 0 / empty = unlimited; leave the field blank in that case.
           _maxMembersController.text =
               (maxMembers.isEmpty || maxMembers == '0') ? '' : maxMembers;
@@ -120,6 +125,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       final maxValue = parsed > 0 ? parsed.toString() : '0';
       await crdt_api.updateServerSetting(
           serverId: sid, key: 'is_private', value: _isPrivate ? 'true' : 'false');
+      await crdt_api.updateServerSetting(
+          serverId: sid, key: 'is_nsfw', value: _isNsfw ? 'true' : 'false');
       await crdt_api.updateServerSetting(
           serverId: sid, key: 'max_members', value: maxValue);
       if (mounted) {
@@ -522,9 +529,16 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Private server',
-                        style: HollowTypography.body
-                            .copyWith(color: hollow.textPrimary)),
+                    Row(
+                      children: [
+                        Icon(LucideIcons.globeLock,
+                            size: 15, color: hollow.textSecondary),
+                        const SizedBox(width: HollowSpacing.sm),
+                        Text('Private server',
+                            style: HollowTypography.body
+                                .copyWith(color: hollow.textPrimary)),
+                      ],
+                    ),
                     const SizedBox(height: 2),
                     Text(
                       'New members can\'t join via the link.',
@@ -539,6 +553,41 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               HollowToggle(
                 value: _isPrivate,
                 onChanged: (v) => setState(() => _isPrivate = v),
+              ),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Atlas.adult_18,
+                            size: 15, color: hollow.textSecondary),
+                        const SizedBox(width: HollowSpacing.sm),
+                        Text('NSFW server',
+                            style: HollowTypography.body
+                                .copyWith(color: hollow.textPrimary)),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Members must confirm before joining. For adult or '
+                      'sensitive content.',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary, fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.md),
+              HollowToggle(
+                value: _isNsfw,
+                onChanged: (v) => setState(() => _isNsfw = v),
               ),
             ],
           ),

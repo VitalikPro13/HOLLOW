@@ -1002,7 +1002,9 @@ Provider: `relayStatsProvider` -- `NotifierProvider<RelayStatsNotifier, RelaySta
 - `rxMbps`, `txMbps` -- Network bandwidth.
 - `bandwidthCapMbps` -- Default 400 Mbps.
 - `onlineUsers` -- Currently connected users.
-- `fetchCount` -- Increments per successful fetch (used for UI refresh detection).
+- `fetchCount` -- Increments per successful fetch (used only for the pulse-animation refresh, NOT for the status dot).
+- `lastSuccessAt` -- `DateTime?` of the last successful fetch.
+- `isFresh` -- Computed: a fetch succeeded in the last ~20s (3 missed 7s polls). Status dots use THIS, not `fetchCount > 0` (which stayed green forever after the first ever fetch even when the relay later went unreachable).
 - `memUsagePercent` -- Computed: `memUsedKb / memTotalKb`.
 - `bandwidthUsagePercent` -- Computed: `(rxMbps + txMbps) / bandwidthCapMbps`.
 - `memLabel` -- Formatted string: `"X / Y MB"`.
@@ -1012,7 +1014,7 @@ Provider: `relayStatsProvider` -- `NotifierProvider<RelayStatsNotifier, RelaySta
 - Polls `https://{relayDomain}/server-stats` every 7 seconds via `Timer.periodic`. Domain read from `relayDomainProvider`.
 - Uses raw `HttpClient` (not http package) with 10-second timeout.
 - Initial fetch fires immediately via `Future.microtask`.
-- On error: silently keeps last known state.
+- On error: keeps last known stats but RE-EMITS state each interval (so `isFresh` recomputes and time-based status dots flip grey when polls stop — a failing poll otherwise produced no new state and the dot never updated).
 - Disposes timer and client on provider disposal.
 - Parses JSON response fields: `mem_total_kb`, `mem_used_kb`, `rx_mbps`, `tx_mbps`, `bandwidth_cap_mbps`, `online_users`.
 

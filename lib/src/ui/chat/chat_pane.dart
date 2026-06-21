@@ -883,40 +883,54 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             children: [
               HollowAvatar(peerId: widget.peerId, size: 28),
               const SizedBox(width: HollowSpacing.sm),
-              Builder(builder: (_) {
-                final isOnline = identityIsOnline(ref, widget.peerId);
-                return StatusDot(
-                  color: isOnline ? hollow.success : hollow.textSecondary,
-                  size: 8,
-                  pulse: isOnline,
-                );
-              }),
-              const SizedBox(width: HollowSpacing.sm),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      displayNameForPeer(ref.watch(profileProvider.select((p) => p[widget.peerId])), widget.peerId),
-                      style: HollowTypography.body.copyWith(
-                        color: hollow.textPrimary,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 13,
+                child: Builder(builder: (_) {
+                  // Header names (status dot dropped — the ConnectionProgress on
+                  // the right already conveys online/offline):
+                  //  • local nickname set  → local nickname on top, the friend's
+                  //    own profile name (their "real nickname") below — falling
+                  //    back to the short peer ID if they set no profile name.
+                  //  • no local nickname   → just the profile name (or short peer
+                  //    ID), no subline.
+                  final profile =
+                      ref.watch(profileProvider.select((p) => p[widget.peerId]));
+                  final localNick =
+                      ref.watch(localNicknameProvider.select((m) => m[widget.peerId]));
+                  final shortId = widget.peerId.length > 16
+                      ? '${widget.peerId.substring(0, 16)}...'
+                      : widget.peerId;
+                  final realName =
+                      (profile != null && profile.displayName.isNotEmpty)
+                          ? profile.displayName
+                          : shortId;
+                  final hasLocalNick = localNick != null && localNick.isNotEmpty;
+                  final topLine = hasLocalNick ? localNick : realName;
+                  final subLine = hasLocalNick ? realName : null;
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        topLine,
+                        style: HollowTypography.body.copyWith(
+                          color: hollow.textPrimary,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    Text(
-                      widget.peerId.length > 16
-                          ? '${widget.peerId.substring(0, 16)}...'
-                          : widget.peerId,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 10,
-                      ),
-                    ),
-                  ],
-                ),
+                      if (subLine != null)
+                        Text(
+                          subLine,
+                          style: HollowTypography.caption.copyWith(
+                            color: hollow.textSecondary,
+                            fontSize: 10,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                    ],
+                  );
+                }),
               ),
               Builder(builder: (_) {
                 // Multi-device: `widget.peerId` is the friend's MASTER id, but

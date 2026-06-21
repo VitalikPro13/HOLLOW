@@ -184,6 +184,12 @@ pub(crate) enum NetworkEvent {
     NicknameResolveFailed { nickname: String, error: String },
     // -- Relay connection events --
     RelayDisconnected,
+    /// The WS relay connection was (re)established and authenticated. The UI
+    /// shows real "Connected" only after this — not on local node start.
+    RelayConnected,
+    /// A WS connect attempt is in progress. `reconnecting` is true when this
+    /// follows a prior drop (backoff retry), false for the initial connect.
+    RelayConnecting { reconnecting: bool },
     ChannelNotificationHint {
         server_id: String, channel_id: String, from_peer: String,
         message_id: String,
@@ -472,6 +478,16 @@ pub(crate) struct VaultUploadFilePayload {
     pub content_id: String,
 }
 
+/// In-flight server-join state, keyed by server_id in `pending_server_joins`.
+/// Carries the gate-bypass tokens needed when (re-)sending a ServerJoinRequest.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PendingJoin {
+    /// Twitch verification proof (if the server requires it).
+    pub(crate) twitch_proof_json: Option<String>,
+    /// True once the user accepted the NSFW "proceed at your own risk" prompt.
+    pub(crate) nsfw_confirmed: bool,
+}
+
 /// Commands the FFI layer can send into the swarm event loop.
 pub(crate) enum NodeCommand {
     SendMessage { peer_id: String, text: String, message_id: String, reply_to_mid: Option<String>, link_preview: Option<LinkPreviewRef> },
@@ -485,7 +501,7 @@ pub(crate) enum NodeCommand {
     RenameChannel { server_id: String, channel_id: String, new_name: String },
     UpdateServerSetting { server_id: String, key: String, value: String },
     DeleteServer { server_id: String },
-    JoinServer { server_id: String, twitch_proof_json: Option<String> },
+    JoinServer { server_id: String, twitch_proof_json: Option<String>, nsfw_confirmed: bool },
     RequestChannelSync { server_id: String, channel_id: String },
     ChangeRole { server_id: String, peer_id: String, new_role: String },
     KickMember { server_id: String, peer_id: String },
@@ -747,6 +763,10 @@ pub(crate) enum HavenMessage {
         server_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         twitch_proof_json: Option<String>,
+        /// Set by the joiner after they accept the NSFW "proceed at your own
+        /// risk" prompt, so the receiver's NSFW gate lets them through.
+        #[serde(default)]
+        nsfw_confirmed: bool,
     },
 
     #[serde(rename = "join_rejected")]

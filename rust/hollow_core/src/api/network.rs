@@ -185,6 +185,11 @@ pub enum NetworkEvent {
     NicknameResolveFailed { nickname: String, error: String },
     // -- Relay connection events --
     RelayDisconnected,
+    /// The WS relay connection was (re)established and authenticated.
+    RelayConnected,
+    /// A WS connect attempt is in progress. `reconnecting` distinguishes a
+    /// backoff retry (after a drop) from the initial connect.
+    RelayConnecting { reconnecting: bool },
     ChannelNotificationHint {
         server_id: String, channel_id: String, from_peer: String,
         message_id: String,
@@ -587,6 +592,12 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::RelayDisconnected => {
             hollow_log!("[HOLLOW] Relay disconnected event emitted");
         }
+        node::NetworkEvent::RelayConnected => {
+            hollow_log!("[HOLLOW] Relay connected event emitted");
+        }
+        node::NetworkEvent::RelayConnecting { reconnecting } => {
+            hollow_log!("[HOLLOW] Relay connecting event emitted (reconnecting={reconnecting})");
+        }
         node::NetworkEvent::ChannelNotificationHint { server_id, channel_id, from_peer, .. } => {
             hollow_log!("[HOLLOW] Notification hint for {channel_id} in {server_id} from {from_peer}");
         }
@@ -771,6 +782,12 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::RelayDisconnected => {
             NetworkEvent::RelayDisconnected
+        }
+        node::NetworkEvent::RelayConnected => {
+            NetworkEvent::RelayConnected
+        }
+        node::NetworkEvent::RelayConnecting { reconnecting } => {
+            NetworkEvent::RelayConnecting { reconnecting }
         }
         node::NetworkEvent::ChannelNotificationHint {
             server_id, channel_id, from_peer, message_id, has_everyone, mentioned_names, is_reply,

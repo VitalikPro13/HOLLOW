@@ -103,11 +103,15 @@ Future<Uint8List?> getServerAvatar({required String serverId}) =>
 
 /// Join a server via invite link. Connects to the server's signaling room and
 /// requests membership from existing members.
-Future<void> joinServer({required String serverId, String? twitchProofJson}) =>
-    RustLib.instance.api.crateApiCrdtJoinServer(
-      serverId: serverId,
-      twitchProofJson: twitchProofJson,
-    );
+Future<void> joinServer({
+  required String serverId,
+  String? twitchProofJson,
+  required bool nsfwConfirmed,
+}) => RustLib.instance.api.crateApiCrdtJoinServer(
+  serverId: serverId,
+  twitchProofJson: twitchProofJson,
+  nsfwConfirmed: nsfwConfirmed,
+);
 
 /// Get the local user's role in a server.
 /// Returns "owner", "admin", "moderator", or "member".

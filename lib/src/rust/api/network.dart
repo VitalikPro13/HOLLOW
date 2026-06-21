@@ -1182,6 +1182,14 @@ sealed class NetworkEvent with _$NetworkEvent {
   }) = NetworkEvent_NicknameResolveFailed;
   const factory NetworkEvent.relayDisconnected() =
       NetworkEvent_RelayDisconnected;
+
+  /// The WS relay connection was (re)established and authenticated.
+  const factory NetworkEvent.relayConnected() = NetworkEvent_RelayConnected;
+
+  /// A WS connect attempt is in progress. `reconnecting` distinguishes a
+  /// backoff retry (after a drop) from the initial connect.
+  const factory NetworkEvent.relayConnecting({required bool reconnecting}) =
+      NetworkEvent_RelayConnecting;
   const factory NetworkEvent.channelNotificationHint({
     required String serverId,
     required String channelId,

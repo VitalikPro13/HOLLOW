@@ -343,7 +343,11 @@ pub fn get_server_avatar(server_id: String) -> Result<Option<Vec<u8>>, String> {
 /// Join a server via invite link. Connects to the server's signaling room and
 /// requests membership from existing members.
 #[frb]
-pub fn join_server(server_id: String, twitch_proof_json: Option<String>) -> Result<(), String> {
+pub fn join_server(
+    server_id: String,
+    twitch_proof_json: Option<String>,
+    nsfw_confirmed: bool,
+) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;
@@ -352,7 +356,7 @@ pub fn join_server(server_id: String, twitch_proof_json: Option<String>) -> Resu
     rt.block_on(
         state
             .cmd_tx
-            .send(node::NodeCommand::JoinServer { server_id, twitch_proof_json }),
+            .send(node::NodeCommand::JoinServer { server_id, twitch_proof_json, nsfw_confirmed }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
 

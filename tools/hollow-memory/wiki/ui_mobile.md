@@ -349,6 +349,7 @@ Name field (max 24) + 9 preset color circles. `crdt_api.createLabel()`.
 - Divider (`hollow.textSecondary` @ 0.35 alpha) separates the profile card from the nav tiles.
 - `_SettingsNavTile` rows (accent icon box 36px + title + subtitle + chevron). **Restructured 2026-06-21** to mirror the desktop category split: **Help**, **Appearance**, **Network**, **Audio & Video**, **Files & Storage**, **Security**, **Devices**, **Backup**, **About**. (The old single "System" and "Security" tiles were split.)
 - `_push()` → `Navigator.push(MaterialPageRoute(_SettingsSubPage(title, child)))`.
+- **Bottom of the list:** `_MobileStatsCard` ("Your Stats" — Friends / Servers / DM messages / Devices online, mirrors the desktop Home `_SyncStatsCard` for eyeball multi-device sync comparison), followed by `_MobileOnlineCounter` (a port of the desktop Home shell's bottom "Online … N" row — users icon + `_MobileShimmerLine` divider + live `relayStats.onlineUsers`).
 
 ### _SettingsSubPage
 Full-screen scaffold matching MobileServerSettingsRoute chrome: `SafeArea > Column[back-arrow header row (HollowPressable + heading), Divider, Expanded(child)]`. The bodies are: `_ProfileTab`, `_AppearanceTab`, `_NetworkTab` (formerly `_SystemTab`, trimmed to Peer ID + relay), `_AudioTab`, `_FilesTab`, `_SecurityTab` (trimmed to App Lock + Device Protection + Recovery), `_DevicesTab`, `_BackupTab`, `_AboutTab`. The new tabs (`_AppearanceTab`/`_AudioTab`/`_FilesTab`/`_DevicesTab`/`_BackupTab`) are thin compositions of the same already-modular section widgets (`_ThemeToggleRow`, `_AccentHueSection`, `_BackgroundSection`, `_AudioQualityPicker`, `_RingtonePicker`, `_ImageQualityPicker`, `_AutoDownloadSlider`, `_CacheCapSlider`, `_DevicesSectionMobile`, `_LinkDeviceButton`, `_ResetDeviceListButton`, `_BackupExportButton`). `_AutoDownloadSlider` (previously unused) is now wired into `_FilesTab`.
@@ -822,7 +823,7 @@ List of channels with current level badge. Tap → bottom sheet with 4 options: 
 `_InfoRow` widgets: Version (0.4.2), Platform (`Platform.operatingSystem` — dynamic), License (AGPL-3.0).
 
 ### Relay Stats Card
-Container with status dot (green if fetchCount > 0), relay domain, online users count, RAM usage bar (`_StatBar`), bandwidth bar. Watches `relayStatsProvider` (7s polling).
+Container with status dot (green if `relayStats.isFresh` — a fetch succeeded in the last ~20s; was `fetchCount > 0` which stayed green forever after the first fetch), relay domain, online users count, RAM usage bar (`_StatBar`), bandwidth bar. Watches `relayStatsProvider` (7s polling).
 
 ### News Section
 Latest 3 posts from `newsProvider`. Cards show title + date + a 4-line plain-text teaser (`_plainTeaser()` strips markdown markers so `**`/`#`/`[]()` don't show raw). Tap opens `showHollowDialog` with the full body rendered as real markdown via `MarkdownBody` (same `flutter_markdown_plus` + stylesheet as the desktop `home_dashboard` news, with `onTapLink` → external browser), title, date, and X close button. Previously the expanded body was plain `Text(post.body)` — markdown rendering was added to match desktop.

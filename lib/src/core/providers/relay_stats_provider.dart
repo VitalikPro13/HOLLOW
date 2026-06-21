@@ -14,6 +14,11 @@ class RelayStats {
   final int onlineUsers;
   final int fetchCount;
 
+  /// Wall-clock time of the last SUCCESSFUL fetch. Null until the first one
+  /// lands. Drives [isFresh] — the relay dot must reflect current reachability,
+  /// not "has ever connected".
+  final DateTime? lastSuccessAt;
+
   const RelayStats({
     this.memTotalKb = 0,
     this.memUsedKb = 0,
@@ -22,7 +27,14 @@ class RelayStats {
     this.bandwidthCapMbps = 400,
     this.onlineUsers = 0,
     this.fetchCount = 0,
+    this.lastSuccessAt,
   });
+
+  /// True iff a fetch succeeded recently. The poll interval is 7s, so ~3 missed
+  /// polls (20s) means the relay is unreachable (offline / no internet).
+  bool get isFresh =>
+      lastSuccessAt != null &&
+      DateTime.now().difference(lastSuccessAt!) < const Duration(seconds: 20);
 
   double get memUsagePercent =>
       memTotalKb > 0 ? (memUsedKb / memTotalKb).clamp(0.0, 1.0) : 0.0;
@@ -84,10 +96,23 @@ class RelayStatsNotifier extends Notifier<RelayStats> {
               (json['bandwidth_cap_mbps'] as num?)?.toInt() ?? 400,
           onlineUsers: (json['online_users'] as num?)?.toInt() ?? 0,
           fetchCount: state.fetchCount + 1,
+          lastSuccessAt: DateTime.now(),
         );
       }
     } catch (_) {
-      // Silently keep last known state on failure.
+      // Keep last known stats on failure, but re-emit so `isFresh` recomputes
+      // — otherwise the dot would stay green forever after connectivity drops
+      // (a failed poll never produces a new state on its own).
+      state = RelayStats(
+        memTotalKb: state.memTotalKb,
+        memUsedKb: state.memUsedKb,
+        rxMbps: state.rxMbps,
+        txMbps: state.txMbps,
+        bandwidthCapMbps: state.bandwidthCapMbps,
+        onlineUsers: state.onlineUsers,
+        fetchCount: state.fetchCount,
+        lastSuccessAt: state.lastSuccessAt,
+      );
     }
   }
 }

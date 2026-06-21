@@ -101,8 +101,9 @@ Uses `scrollable_positioned_list` package with sentinel pattern: `itemCount: mes
 
 1. **Hash icon** -- `LucideIcons.hash`, 20px, textSecondary color.
 2. **Channel name** -- `widget.channelName` in `HollowTypography.subheading`, bold.
-3. **Connection status** -- `_ChannelConnectionStatus` widget (see below).
-4. **Spacer**.
+3. **NSFW badge** -- `_NsfwBadge` (small red "NSFW" pill), only when `serverIsNsfwProvider(serverId)` is true.
+4. **Connection status** -- `_ChannelConnectionStatus` widget (see below).
+5. **Spacer**.
 5. **Pinned messages button** -- only shown when `pinnedIds.isNotEmpty`. Shows pin icon + count. Tooltip shows count. Taps open `_showPinnedMessages()` dialog.
 6. **Search button** -- toggles `channelSearchOpenProvider`. Icon tints accent when search is open.
 7. **Member panel toggle** -- toggles `memberPanelProvider`. Icon tints accent when panel is open.
@@ -110,7 +111,11 @@ Uses `scrollable_positioned_list` package with sentinel pattern: `itemCount: mes
 
 ## Connection and Sync Status Display
 
-`_ChannelConnectionStatus`: Watches `peersProvider` (connected peers map), `serverMembersProvider(serverId)`, `identityProvider`, `relayDomainProvider`. Determines connection stage: if any other server members are in the connected peers map, stage is `ConnectionStage.encrypted` (MLS group = always encrypted). If on a custom (non-default) relay and no online members, stage is `ConnectionStage.customNetwork`. Otherwise `ConnectionStage.offline`. Renders `ConnectionProgress` widget + sync/vault indicators when encrypted.
+`_ChannelConnectionStatus`: Watches `onlineIdentitiesProvider` (NOT raw `peersProvider`), `serverMembersProvider(serverId)`, `identityProvider`, `relayDomainProvider`. Determines connection stage: if any other server member's MASTER identity is online, stage is `ConnectionStage.encrypted` (MLS group = always encrypted). If on a custom (non-default) relay and no online members, stage is `ConnectionStage.customNetwork`. Otherwise `ConnectionStage.offline`. Renders `ConnectionProgress` widget + sync/vault indicators when encrypted.
+
+**Multi-device fix (2026-06-21):** members are MASTER-keyed (`ServerState.members`) but presence is DEVICE-keyed, so a raw `connectedPeers.containsKey(m.peerId)` NEVER matched a multi-device member → the header was stuck "Offline". Now uses `onlineIdentitiesProvider` (collapses device→master, also excludes invisible). Same fix applied to `onlineMembersProvider` in `server_provider.dart`.
+
+Mobile has its own equivalent: `_MobileChannelStatus` in `mobile_chat_route.dart` (the mobile channel header gained Encrypted/Offline status + the NSFW badge `_MobileNsfwBadge` on the left, 2026-06-21).
 
 `_SyncIndicator`: Watches `serverSyncStatusProvider(serverId)` and `syncProgressProvider[serverId]`. Four states:
 - **syncing** -- accent color spinning refresh icon, label "Syncing N/M..." (or just "Syncing...").

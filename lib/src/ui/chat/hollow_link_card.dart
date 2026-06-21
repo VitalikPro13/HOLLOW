@@ -237,7 +237,7 @@ class _ServerInviteCard extends ConsumerWidget {
   }
 
   void _handleJoin(BuildContext context) {
-    crdt_api.joinServer(serverId: link.id);
+    crdt_api.joinServer(serverId: link.id, nsfwConfirmed: false);
     HollowToast.show(context, 'Joining server...', type: HollowToastType.info);
   }
 }

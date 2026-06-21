@@ -1074,7 +1074,7 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
 
     // --- Joiner joins the server ---
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
         .unwrap();
 
@@ -1149,6 +1149,114 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
 }
 
 // ---------------------------------------------------------------------------
+// Relay connection status (Item 1939): a node emits a real RelayConnected event
+// once its WS connection is up — the signal the UI uses to show a truthful
+// "Connected" instead of the stale "node started" status.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn node_emits_relay_connected_on_ws_connect() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    let mut n = spawn_node_with_friends(&relay, 110, 110, &[]).await;
+
+    let connected = wait_event(&mut n, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::RelayConnected)
+    })
+    .await;
+    assert!(connected, "node must emit RelayConnected once its WS link is up");
+}
+
+// ---------------------------------------------------------------------------
+// NSFW join-consent gate: an NSFW-flagged server rejects a first join attempt
+// with an `nsfw_confirm:` reason (carried on TwitchJoinRejected, the shared
+// join-reject event), then accepts the retry that carries nsfw_confirmed=true.
+// This guards Item 1941 — the server-side reject-then-retry consent flow that
+// every join entry point rides for free.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn nsfw_server_gates_join_until_confirmed() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 90;
+    const J_MASTER: u8 = 100;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1500).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+
+    // Owner creates a server and flags it NSFW via the settings CRDT.
+    let server_id = create_server_and_wait(&mut o, "Adult Server").await;
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting {
+            server_id: server_id.clone(),
+            key: "is_nsfw".to_string(),
+            value: "true".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(500).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // First join attempt (no consent) → rejected with the nsfw_confirm reason.
+    j.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    let rejected = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::TwitchJoinRejected { server_id: sid, reason }
+            if *sid == server_id && reason.starts_with("nsfw_confirm:"))
+    })
+    .await;
+    assert!(rejected, "first NSFW join must be rejected with nsfw_confirm:");
+
+    // The joiner did NOT become a member.
+    assert!(
+        !j.raw_crdt_member_keys(&server_id).contains(&j_master),
+        "joiner must not be a member before confirming NSFW consent"
+    );
+    drain_events(&mut j);
+
+    // Retry WITH consent → join completes.
+    j.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: true,
+        })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should join after confirming NSFW consent");
+    sleep_ms(500).await;
+    assert!(
+        j.raw_crdt_member_keys(&server_id).contains(&j_master),
+        "joiner is a member after confirming NSFW consent"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Channel typing indicator round-trips over the MLS server group and is
 // attributed to the sender's MASTER identity on the receiver. Guards the path
 // behind the mobile fix where a phone never SENT channel typing (Dart only
@@ -1186,7 +1294,7 @@ async fn channel_typing_roundtrips_master_attributed() {
     drain_events(&mut j);
 
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -1679,7 +1787,7 @@ async fn voice_channel_join_leave_and_signal_routing() {
     // J joins the server (so both hold server_states with each other as members —
     // the precondition for the plaintext VC path; MLS-formed not required here).
     j.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
         .unwrap();
     let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
@@ -1889,7 +1997,7 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
     sleep_ms(200).await;
 
     b.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
         .unwrap();
     let b_joined = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
@@ -1951,7 +2059,7 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
     sleep_ms(500).await; // let C re-run its connect flow
 
     c.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
         .unwrap();
     let c_joined = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
@@ -2055,7 +2163,7 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
 
     // V joins the server.
     v.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
         .unwrap();
     let v_joined = wait_event(&mut v, std::time::Duration::from_secs(8), |ev| {
@@ -2067,7 +2175,7 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
 
     // C (B's sibling) joins so it holds the server CRDT state as a member of M.
     c.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
         .unwrap();
     let c_joined = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
@@ -2269,7 +2377,7 @@ async fn sibling_nickname_fans_directly_with_no_relayer() {
     let server_id = create_server_and_wait(&mut b, "Solo Server").await;
     sleep_ms(500).await;
     c.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
         .unwrap();
     let joined = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
@@ -2335,7 +2443,7 @@ async fn offline_member_reconciles_server_deletion_on_reconnect() {
     let server_id = create_server_and_wait(&mut o, "Doomed Server").await;
     sleep_ms(300).await;
     m.cmd_tx
-        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None })
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
         .unwrap();
     let joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 const _storageKey = 'local_nicknames';
@@ -18,6 +19,7 @@ class LocalNicknameNotifier extends Notifier<Map<String, String>> {
       if (json != null && json.isNotEmpty) {
         final map = Map<String, String>.from(jsonDecode(json) as Map);
         state = map;
+        setLocalNicknamesRef(state);
       }
     } catch (e) {
       debugPrint('[HOLLOW] Failed to load local nicknames: $e');
@@ -32,6 +34,10 @@ class LocalNicknameNotifier extends Notifier<Map<String, String>> {
       updated[peerId] = nickname;
     }
     state = updated;
+    // Keep the static cache `displayNameFor()` reads in sync immediately, so
+    // names refresh live everywhere (chat title, lists) on both platforms — not
+    // only after a tab switch re-triggers the shell's listener.
+    setLocalNicknamesRef(state);
     await _save();
   }
 
@@ -40,6 +46,7 @@ class LocalNicknameNotifier extends Notifier<Map<String, String>> {
     final updated = Map<String, String>.from(state);
     updated.remove(peerId);
     state = updated;
+    setLocalNicknamesRef(state);
     await _save();
   }
 

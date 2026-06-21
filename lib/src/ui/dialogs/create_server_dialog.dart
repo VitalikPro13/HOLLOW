@@ -209,7 +209,7 @@ void _handleJoin(BuildContext context, TextEditingController controller) {
 
   final overlayContext = Navigator.of(context).context;
   Navigator.of(context).pop();
-  crdt_api.joinServer(serverId: serverId);
+  crdt_api.joinServer(serverId: serverId, nsfwConfirmed: false);
   HollowToast.show(overlayContext, 'Joining server...',
       type: HollowToastType.info);
 }

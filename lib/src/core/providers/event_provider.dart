@@ -54,7 +54,7 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
-import 'package:hollow/src/ui/dialogs/twitch_join_dialog.dart' show showTwitchJoinDialog, handleTwitchJoinResult, showJoinRejectedDialog;
+import 'package:hollow/src/ui/dialogs/twitch_join_dialog.dart' show showTwitchJoinDialog, handleTwitchJoinResult, showJoinRejectedDialog, showNsfwConfirmDialog;
 
 /// Listens to the Rust event stream and dispatches events
 /// to the appropriate providers.
@@ -199,6 +199,7 @@ class EventStreamNotifier extends Notifier<bool> {
   void _refreshServerState(String serverId) {
     ref.read(serverListProvider.notifier).onServerUpdated(serverId);
     ref.invalidate(serverMembersProvider(serverId));
+    ref.invalidate(serverIsNsfwProvider(serverId));
     ref.invalidate(myPermissionsProvider(serverId));
     ref.invalidate(myRoleProvider(serverId));
     if (ref.read(selectedServerProvider) == serverId) {
@@ -816,6 +817,16 @@ class EventStreamNotifier extends Notifier<bool> {
             .read(connectionStatusProvider.notifier)
             .onRelayStatusChanged('disconnected');
 
+      case NetworkEvent_RelayConnected():
+        ref
+            .read(connectionStatusProvider.notifier)
+            .onRelayStatusChanged('connected');
+
+      case NetworkEvent_RelayConnecting(:final reconnecting):
+        ref
+            .read(connectionStatusProvider.notifier)
+            .onRelayStatusChanged(reconnecting ? 'reconnecting' : 'connecting');
+
       // -- Channel notification hints (unsubscribed channel awareness) --
       case NetworkEvent_ChannelNotificationHint(
             :final serverId, :final channelId, :final fromPeer,
@@ -1370,6 +1381,17 @@ class EventStreamNotifier extends Notifier<bool> {
                   'reached its member limit${max.isEmpty ? '' : ' ($max members)'}.',
             );
           }
+        } else if (reason.startsWith('nsfw_confirm:')) {
+          // Format: "nsfw_confirm:{server_name}". Not a hard rejection — show
+          // the consent gate; on "Proceed" re-join with nsfwConfirmed: true.
+          final serverName = reason.substring('nsfw_confirm:'.length);
+          showNsfwConfirmDialog(
+            ctx,
+            serverName: serverName.isEmpty ? 'This server' : serverName,
+            onProceed: () {
+              crdt_api.joinServer(serverId: serverId, nsfwConfirmed: true);
+            },
+          );
         } else {
           final handled = handleTwitchJoinResult(success: false, error: reason);
           if (!handled) {

@@ -122,7 +122,7 @@ Current variants that correctly emit `ServerUpdated`: `ServerSettingChanged`, `S
 
 **Why:** CrdtStore is a fire-and-forget actor that batches writes via mpsc. When the `ServerUpdated` event fires (triggered by the CRDT broadcast), the DB write may not be flushed yet. The `_refreshServerState()` handler in `event_provider.dart` calls `loadForServer()` which reads from the DB -- if the write hasn't landed, it reads stale data and the UI reverts briefly. The 50ms delay on `loadForServer` in `_refreshServerState()` mitigates this but optimistic update is the primary fix.
 
-**Where:** `lib/src/ui/settings/channels_tab.dart` -- `_ChannelRow` visibility/posting `_AccessChip` and the globe (is_public) toggle. Also `event_provider.dart:_refreshServerState()`.
+**Where:** `lib/src/ui/settings/channels_tab.dart` -- `_ChannelRow` visibility/posting `_AccessChip` and the globe (is_public) toggle. Mobile twin (2026-06-21): `mobile_server_settings_route.dart` `_ChannelLayoutEditor` ChannelItem row -- `_MobileAccessChip` (visibility eye + posting message-square popups, shown only for private/non-public text channels) + the globe toggle. Also `event_provider.dart:_refreshServerState()`.
 
 **Correct approach:** Call `channelListProvider.updateChannel()` with the new property value immediately, then fire the FFI call. The 50ms delay in `_refreshServerState` lets CrdtStore flush before the server-state reload.
 

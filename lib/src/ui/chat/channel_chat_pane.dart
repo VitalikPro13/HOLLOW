@@ -18,7 +18,6 @@ import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -1303,6 +1302,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                   fontWeight: FontWeight.w600,
                 ),
               ),
+              if (ref.watch(serverIsNsfwProvider(widget.serverId)).valueOrNull ??
+                  false) ...[
+                const SizedBox(width: HollowSpacing.sm),
+                const _NsfwBadge(),
+              ],
               const SizedBox(width: HollowSpacing.md),
               _ChannelConnectionStatus(
                 serverId: widget.serverId,
@@ -2295,6 +2299,32 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   }
 }
 
+/// Small "NSFW" pill shown beside the channel name for NSFW-flagged servers.
+class _NsfwBadge extends StatelessWidget {
+  const _NsfwBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: hollow.error.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+      ),
+      child: Text(
+        'NSFW',
+        style: HollowTypography.caption.copyWith(
+          color: hollow.error,
+          fontWeight: FontWeight.w700,
+          fontSize: 10,
+          letterSpacing: 0.5,
+        ),
+      ),
+    );
+  }
+}
+
 /// Unified connection + encryption + sync status for channel headers.
 /// Shows: progress bar (Connecting → Encrypting) → lock + "Encrypted" + sync status.
 class _ChannelConnectionStatus extends ConsumerWidget {
@@ -2308,7 +2338,11 @@ class _ChannelConnectionStatus extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final connectedPeers = ref.watch(peersProvider);
+    // Presence is device-keyed (peersProvider), but server members are
+    // master-keyed (ServerState.members). Use the master-collapsing
+    // onlineIdentitiesProvider so a multi-device member counts as online via
+    // any of their devices — otherwise the header is stuck on "Offline".
+    final online = ref.watch(onlineIdentitiesProvider);
     final membersAsync = ref.watch(serverMembersProvider(serverId));
     final localPeerId = ref.watch(identityProvider).peerId;
 
@@ -2318,7 +2352,7 @@ class _ChannelConnectionStatus extends ConsumerWidget {
             members.where((m) => m.peerId != localPeerId).toList();
 
         final onlineMembers = otherMembers
-            .where((m) => connectedPeers.containsKey(m.peerId))
+            .where((m) => online.contains(m.peerId))
             .toList();
 
         // With MLS, online members in a WS room are already encrypted (MLS group broadcast).
