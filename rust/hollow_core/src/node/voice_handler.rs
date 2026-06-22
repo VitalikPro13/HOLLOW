@@ -292,6 +292,24 @@ pub(crate) async fn handle_voice_channel_join(
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
     hollow_log!("[HOLLOW-VC] Join voice channel {channel_id} in server {server_id}");
+
+    // Restricted channel guard: a member whose role doesn't satisfy the channel's
+    // visibility tier must not be able to JOIN a restricted voice channel at all
+    // (the UI hides it, but a modified client could try). Reject before we announce
+    // the join or touch SFrame. `can_see_channel` collapses device→master.
+    let restricted = server_states
+        .get(&server_id)
+        .is_some_and(|s| s.channel_uses_subgroup(&channel_id));
+    if restricted {
+        let allowed = server_states
+            .get(&server_id)
+            .is_some_and(|s| s.can_see_channel(local_peer_str, &channel_id));
+        if !allowed {
+            hollow_log!("[HOLLOW-VC] Rejecting join to restricted channel {channel_id} — not permitted");
+            return;
+        }
+    }
+
     // MLS broadcast + always plaintext — voice joins must arrive even with stale MLS epochs.
     let envelope = MessageEnvelope::VoiceChannelJoin {
         sid: server_id.clone(),
@@ -316,20 +334,49 @@ pub(crate) async fn handle_voice_channel_join(
         .insert(local_peer_str.to_string());
     // Emit current MLS epoch key BEFORE the join event — Dart caches it,
     // then applies it after creating the VoiceChannelService.
-    match mls.as_ref() {
+    //
+    // For a RESTRICTED voice channel the SFrame key is derived from the channel's
+    // own MLS SUBGROUP (`subgroup_id`), NOT the server-wide group — so a
+    // non-qualifying member can't derive the key. The emitted event carries
+    // `channel_id: Some(cid)` so Dart routes the key to that channel's cryptor.
+    //
+    // CAUTION: the subgroup may not exist on our side yet (we just became a
+    // participant / were recently promoted). In that case we must NOT fall back to
+    // the server-group key (that would defeat the cryptographic isolation). Instead
+    // we pull ourselves into the subgroup via the same bootstrap path text uses —
+    // the resulting Welcome → MlsEpochChanged{channel_id} delivers the key.
+    let group_key = if restricted {
+        crate::crypto::subgroup_id(&server_id, &channel_id)
+    } else {
+        server_id.clone()
+    };
+    let emit_cid = if restricted { Some(channel_id.clone()) } else { None };
+    match mls.as_mut() {
         Some(mls_mgr) => {
-            let has_group = mls_mgr.has_group(&server_id);
-            hollow_log!("[HOLLOW-VC-SFRAME] MLS exists, has_group({server_id})={has_group}");
+            let has_group = mls_mgr.has_group(&group_key);
+            hollow_log!("[HOLLOW-VC-SFRAME] MLS exists, has_group({group_key})={has_group}");
             if has_group {
-                match mls_mgr.export_secret(&server_id, "sframe", b"", 32) {
+                match mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
                     Ok(sframe_key) => {
-                        let epoch = mls_mgr.epoch(&server_id).unwrap_or(0);
-                        hollow_log!("[HOLLOW-VC-SFRAME] Emitting SFrame key for epoch {epoch}");
+                        let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
+                        hollow_log!("[HOLLOW-VC-SFRAME] Emitting SFrame key for {group_key} epoch {epoch}");
                         let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
                             server_id: server_id.clone(), epoch, sframe_key,
+                            channel_id: emit_cid,
                         }).await;
                     }
                     Err(e) => hollow_log!("[HOLLOW-VC-SFRAME] export_secret FAILED: {e}"),
+                }
+            } else if restricted {
+                // We qualify (guard above passed) but don't hold the subgroup yet.
+                // Pull our KeyPackage to the subgroup coordinator; the Welcome it
+                // sends back fires MlsEpochChanged with our channel_id.
+                if let Some(state) = server_states.get(&server_id) {
+                    hollow_log!("[HOLLOW-VC-SFRAME] Subgroup {group_key} not held — requesting bootstrap");
+                    super::crypto_handler::request_subgroup_bootstrap(
+                        mls_mgr, ws_cmd_tx, ws_room_peers,
+                        state, &server_id, &channel_id, local_peer_str,
+                    );
                 }
             }
         }
@@ -403,6 +450,62 @@ pub(crate) async fn handle_voice_channel_leave(
         voice_channel_participants, voice_channel_gossip_mode,
         gossip_overlays, local_peer_str, event_tx,
     ).await;
+}
+
+// ── Auto-leave on lost visibility ────────────────────────────────────
+
+/// After a role/visibility/kick/ban op applies, leave any voice channel we're
+/// currently IN but can no longer SEE (visibility raised above our tier, or we
+/// were demoted / kicked / banned). Mirrors the text-channel UI eviction, but for
+/// the active call: a participant who loses access must drop the call (and rotate
+/// the SFrame key for the rest via the subgroup removal that already ran). Runs on
+/// the affected node itself, so it works regardless of which screen is focused and
+/// on both platforms via the normal `handle_voice_channel_leave` teardown.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn auto_leave_invisible_voice_channels(
+    mls: &mut Option<MlsManager>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
+    bundle_keypair: &NativeKeypair,
+    crypto_store: &CryptoStore,
+    voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
+    voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    gossip_overlays: &HashMap<String, super::gossip::GossipOverlay>,
+    local_peer_str: &str,
+    server_id: &str,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+) {
+    // Which voice channels of THIS server are we currently a participant in?
+    let prefix = format!("{server_id}:");
+    let leaving: Vec<String> = voice_channel_participants
+        .iter()
+        .filter(|(vc_key, members)| {
+            vc_key.starts_with(&prefix) && members.contains(local_peer_str)
+        })
+        .filter_map(|(vc_key, _)| vc_key.strip_prefix(&prefix).map(|c| c.to_string()))
+        .filter(|cid| {
+            // Leave if we were removed from the server entirely (kick/ban → not a
+            // member, so we can't be in any of its calls), OR a restricted channel's
+            // visibility now excludes us (demotion / tier raised). `is_member` /
+            // `can_see_channel` collapse device→master.
+            server_states.get(server_id).is_some_and(|s| {
+                !s.is_member(local_peer_str)
+                    || (s.channel_uses_subgroup(cid) && !s.can_see_channel(local_peer_str, cid))
+            })
+        })
+        .collect();
+
+    for cid in leaving {
+        hollow_log!("[HOLLOW-VC] Auto-leaving restricted voice channel {cid} in {server_id} — visibility lost");
+        handle_voice_channel_leave(
+            server_id.to_string(), cid,
+            mls, ws_cmd_tx, ws_room_peers,
+            server_states, bundle_keypair, crypto_store,
+            voice_channel_participants, voice_channel_gossip_mode,
+            gossip_overlays, local_peer_str, event_tx,
+        ).await;
+    }
 }
 
 // ── VoiceChannelSendSignal ───────────────────────────────────────────

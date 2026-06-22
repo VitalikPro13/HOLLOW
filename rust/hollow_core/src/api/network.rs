@@ -319,10 +319,14 @@ pub enum NetworkEvent {
         gossip_neighbors: Vec<String>,
     },
     /// MLS epoch changed — SFrame key for voice E2EE.
+    /// `channel_id` is set when the key belongs to a restricted channel's MLS
+    /// subgroup (per-channel subgroups voice); Dart routes it to that voice
+    /// channel's cryptor only. `None` = the server-wide group key.
     MlsEpochChanged {
         server_id: String,
         epoch: u64,
         sframe_key: Vec<u8>,
+        channel_id: Option<String>,
     },
     // -- Recovery pool events (Evidence Recovery) --
     RecoveryPoolCreated { server_id: String, invite_link: String },
@@ -941,8 +945,8 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::VoiceChannelModeChanged { server_id, channel_id, mode, gossip_neighbors } => {
             NetworkEvent::VoiceChannelModeChanged { server_id, channel_id, mode, gossip_neighbors }
         }
-        node::NetworkEvent::MlsEpochChanged { server_id, epoch, sframe_key } => {
-            NetworkEvent::MlsEpochChanged { server_id, epoch, sframe_key }
+        node::NetworkEvent::MlsEpochChanged { server_id, epoch, sframe_key, channel_id } => {
+            NetworkEvent::MlsEpochChanged { server_id, epoch, sframe_key, channel_id }
         }
         // -- Recovery pool events --
         node::NetworkEvent::RecoveryPoolCreated { server_id, invite_link } => {
@@ -1322,35 +1326,18 @@ pub fn get_device_links() -> Vec<DeviceLink> {
         .collect()
 }
 
-/// Wipe all persisted device lists + the in-memory resolver (multi-device,
-/// Phase 6). Testing/maintenance aid: union-merge never removes a device id, so
-/// repeated wipe+reimport cycles leave ghost devices accumulating in the
-/// published list. Calling this lets the device set rebuild from currently-live
-/// siblings on the next profile exchange. Restart the node afterward (or just
-/// reconnect) so siblings re-merge. Production single-device removal = Step 7
-/// revocation, not this blunt reset.
+/// Full sibling teardown ("Reset Device List"): tombstone EVERY device except the
+/// one we're running on, in a single master-signed version bump, and PROPAGATE it —
+/// friends converge and drop the revoked siblings (and can never un-revoke them),
+/// each revoked sibling self-nukes (wipe + relaunch) on ingest, and we drop their
+/// Olm sessions + MLS leaves. This is the permanent fix for accumulated ghost
+/// devices from link/re-link cycles (the old version did a blunt LOCAL wipe of the
+/// device-list table, which the grow-only union-merge simply regrew from siblings
+/// on the next profile exchange — so ghosts came right back). Requires the node to
+/// be running. After this, only THIS device remains; re-link others fresh.
 #[frb]
 pub fn reset_device_lists() -> Result<(), String> {
-    let id = identity::load_or_create_identity()?;
-    let proto = id
-        .keypair
-        .to_protobuf_encoding()
-        .map_err(|e| format!("Failed to encode keypair: {e}"))?;
-    let key_bytes = &proto[..32.min(proto.len())];
-    let passphrase = hex::encode(key_bytes);
-
-    let hollow_dir = crate::identity::data_dir()?;
-    let db_path = hollow_dir
-        .join("messages.db")
-        .to_str()
-        .ok_or("Invalid path encoding")?
-        .to_string();
-
-    let store = MessageStore::open(&db_path, &passphrase)?;
-    store.clear_all_device_lists()?;
-    crate::node::resolver::clear_all();
-    hollow_log!("[HOLLOW-MULTIDEV] Device lists + resolver reset (manual)");
-    Ok(())
+    send_node_command(node::NodeCommand::ResetDeviceLists)
 }
 
 /// The transport peer_id of the device this app is RUNNING on (Step 8). Distinct

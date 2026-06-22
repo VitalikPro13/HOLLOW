@@ -3010,6 +3010,244 @@ async fn restricted_channel_subgroup_enforces_visibility() {
 }
 
 // ---------------------------------------------------------------------------
+// Per-channel MLS subgroups — PHASE 2 (VOICE). A RESTRICTED voice channel derives
+// its SFrame media key from the channel's own MLS SUBGROUP, not the server-wide
+// group. The harness can't drive the WebRTC media plane, so it verifies the
+// KEY LAYER: only members whose role satisfies the channel's visibility tier are
+// leaves of the voice subgroup (== the only nodes that can `export_secret` the
+// SFrame key). A non-qualifying Member is excluded → can't derive the key → would
+// decode nothing; the Rust VC-join guard additionally REJECTS its join outright.
+// Promotion adds it to the subgroup; demotion removes it (mid-call re-key / fwd
+// secrecy). Mirrors the text test but on a `voice` channel.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // O = owner, A = promoted to Admin, M = stays a plain Member.
+    const O_MASTER: u8 = 80;
+    const A_MASTER: u8 = 81;
+    const M_MASTER: u8 = 82;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&a_master, &m_master]).await;
+    sleep_ms(1500).await;
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&o_master, &m_master]).await;
+    sleep_ms(1500).await;
+    let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master, &a_master]).await;
+    sleep_ms(5000).await;
+    drain_events(&mut o);
+    drain_events(&mut a);
+    drain_events(&mut m);
+
+    // --- Owner creates a server; A and M join. ---
+    let server_id = create_server_and_wait(&mut o, "Voice Subgroup Server").await;
+    sleep_ms(500).await;
+
+    for (node, who) in [(&mut a, "A"), (&mut m, "M")] {
+        node.cmd_tx
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+            .await
+            .unwrap();
+        let joined = wait_event(node, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await;
+        assert!(joined, "{who} should join the server");
+        sleep_ms(2500).await;
+    }
+    // Wait until ALL THREE distinct identities are leaves of the server-wide MLS
+    // group — the precondition for an MLS-broadcast ChannelAdded op to reach them.
+    // (Batch-add commits happen on a 2s timer; give it room.)
+    let mut srv_ok = false;
+    for _ in 0..12 {
+        sleep_ms(2000).await;
+        let leaves = o.mls_members(&server_id).await;
+        if leaves.contains(&o.device_id)
+            && leaves.contains(&a.device_id)
+            && leaves.contains(&m.device_id)
+        {
+            srv_ok = true;
+            break;
+        }
+    }
+    assert!(srv_ok, "all three members must join the server-wide MLS group");
+    drain_events(&mut o);
+    drain_events(&mut a);
+    drain_events(&mut m);
+
+    // --- Owner creates a VOICE channel, makes it Admin+ restricted. ---
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            name: "war-room".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut voice_cid = None;
+    let made = wait_event(&mut o, std::time::Duration::from_secs(5), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, channel_type, name, .. } = ev {
+            if channel_type == "voice" && name == "war-room" {
+                voice_cid = Some(channel_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(made, "owner should create the voice channel");
+    let voice_cid = voice_cid.expect("voice channel id");
+
+    // Ensure the ChannelAdded op actually reaches A and M's STATE before we
+    // restrict it (poll the store — the event may already be consumed/buffered).
+    let mut chan_ok = false;
+    for _ in 0..10 {
+        sleep_ms(1000).await;
+        if a.channel_visibility(&server_id, &voice_cid).is_some()
+            && m.channel_visibility(&server_id, &voice_cid).is_some()
+        {
+            chan_ok = true;
+            break;
+        }
+    }
+    assert!(chan_ok, "A and M must receive the new voice channel");
+
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibility {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            visibility: "admin".to_string(), // AdminPlus
+        })
+        .await
+        .unwrap();
+    sleep_ms(6000).await; // owner forms the subgroup (no qualifying member yet besides owner)
+
+    let subgroup = crate::crypto::subgroup_id(&server_id, &voice_cid);
+
+    // --- Pre-promotion: only the OWNER is a subgroup leaf (== SFrame holder). ---
+    let leaves0 = o.mls_members(&subgroup).await;
+    assert!(
+        leaves0.contains(&o.device_id),
+        "owner must hold the voice subgroup leaf, got {leaves0:?}"
+    );
+    assert!(
+        !leaves0.contains(&a.device_id) && !leaves0.contains(&m.device_id),
+        "plain Members A/M must NOT be voice-subgroup leaves pre-promotion, got {leaves0:?}"
+    );
+    // M must actually HAVE the channel (propagated) and see it as restricted —
+    // otherwise `can_see_channel` would be false simply because the channel is
+    // unknown, which is NOT the property we're testing.
+    assert_eq!(
+        m.channel_visibility(&server_id, &voice_cid).as_deref(),
+        Some("admin"),
+        "M must have the voice channel with admin visibility before the rejection test"
+    );
+    assert!(
+        !m.can_see_channel(&server_id, &voice_cid, &m.device_id),
+        "plain Member M must not be permitted to see the restricted voice channel"
+    );
+
+    // --- M (Member) tries to JOIN the restricted voice channel → REJECTED. ---
+    // The Rust VC-join guard returns early; M emits no local VoiceChannelJoined and
+    // the owner never sees M enter. (M also never holds the subgroup, so even a
+    // modified client that bypassed the guard could not derive the SFrame key.)
+    drain_events(&mut m);
+    drain_events(&mut o);
+    m.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+        })
+        .await
+        .unwrap();
+    let m_self_joined = wait_event(&mut m, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, .. } if *channel_id == voice_cid)
+    })
+    .await;
+    assert!(!m_self_joined, "non-qualifying Member M's join to a restricted voice channel must be rejected");
+    let o_saw_m = wait_event(&mut o, std::time::Duration::from_secs(2), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, .. } if *channel_id == voice_cid)
+    })
+    .await;
+    assert!(!o_saw_m, "owner must not see a rejected member enter the restricted voice channel");
+
+    // --- Promote A to Admin → reconciler adds A to the voice subgroup. ---
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole {
+            server_id: server_id.clone(),
+            peer_id: a_master.clone(),
+            new_role: "admin".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(6000).await;
+
+    let leaves1 = o.mls_members(&subgroup).await;
+    assert!(
+        leaves1.contains(&a.device_id),
+        "after promotion A must be a voice-subgroup leaf (SFrame holder), got {leaves1:?}"
+    );
+    assert!(
+        a.mls_members(&subgroup).await.contains(&a.device_id),
+        "after promotion A must hold the voice subgroup itself (can export SFrame)"
+    );
+    assert!(
+        !leaves1.contains(&m.device_id),
+        "M (still Member) must remain excluded from the voice subgroup, got {leaves1:?}"
+    );
+
+    // A must see the channel as restricted (admin) so its VC-join derives the
+    // SFrame key from the SUBGROUP, not the server group.
+    assert_eq!(
+        a.channel_visibility(&server_id, &voice_cid).as_deref(),
+        Some("admin"),
+        "A must see the voice channel as admin-restricted before joining"
+    );
+
+    // --- A (Admin) now joins the voice channel — allowed; participates. ---
+    drain_events(&mut o);
+    a.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+        })
+        .await
+        .unwrap();
+    let a_joined = wait_event(&mut a, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, .. } if *channel_id == voice_cid)
+    })
+    .await;
+    assert!(a_joined, "promoted Admin A must be allowed to join the restricted voice channel");
+
+    // --- Demote A back to Member → reconciler removes A's leaf (mid-call re-key). ---
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole {
+            server_id: server_id.clone(),
+            peer_id: a_master.clone(),
+            new_role: "member".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(6000).await;
+
+    let leaves2 = o.mls_members(&subgroup).await;
+    assert!(
+        !leaves2.contains(&a.device_id),
+        "after demotion A's voice-subgroup leaf must be removed (loses SFrame key), got {leaves2:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Real-time channel visibility/posting propagation to a REMOTE member. The UI
 // reads channel visibility/posting + role from the local DB (get_server_channels
 // / getMyRole) and recomputes visibleChannelsProvider / canPostInChannelProvider.

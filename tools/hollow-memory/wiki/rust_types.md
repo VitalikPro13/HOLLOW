@@ -154,7 +154,7 @@ Emitted via `StreamSink` from the Rust event loop to Dart. Consumed by `EventStr
 - **`VoiceChannelLeft { server_id, channel_id, peer_id }`** — a peer left a voice channel.
 - **`VoiceChannelSignal { server_id, channel_id, peer_id, signal_type, payload }`** — voice channel WebRTC signaling forwarded to Dart.
 - **`VoiceChannelModeChanged { server_id, channel_id, mode, gossip_neighbors }`** — voice channel topology changed between "mesh" and "gossip". `gossip_neighbors` lists peers for gossip relay tree.
-- **`MlsEpochChanged { server_id, epoch, sframe_key }`** — MLS epoch rotated; Dart must update SFrame encryption key for voice/video.
+- **`MlsEpochChanged { server_id, epoch, sframe_key, channel_id }`** — MLS epoch rotated; Dart must update the SFrame encryption key for voice/video. `channel_id` (serde-default `Option<String>`) is `Some(cid)` when the key belongs to a restricted channel's per-channel MLS SUBGROUP (Phase 2 voice) — Dart routes it to that voice channel's cryptor only; `None` = the server-wide group key. Defined in BOTH `node::types` and `crate::api::network` — an FFI change requiring codegen.
 
 ### Gossip Relay Tree
 

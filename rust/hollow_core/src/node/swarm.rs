@@ -858,6 +858,22 @@ async fn run_event_loop(
                         }
                     }
 
+                    NodeCommand::ResetDeviceLists => {
+                        if let Some(revoked) = sync_handler::handle_reset_device_lists(
+                            &event_tx, &ws_cmd_tx, &ws_room_peers, &master_keypair,
+                            &master_peer_str, &local_peer_str, &device_peer_id,
+                            is_invisible, &db_path, &db_passphrase,
+                        ).await {
+                            // Drop Olm sessions to every revoked sibling + (coordinator)
+                            // remove their MLS leaves from shared servers — same path a
+                            // friend runs ingesting the tombstones.
+                            enforce_device_revocations(
+                                &revoked, &mut olm, &crypto_store, mls.as_ref(),
+                                &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
+                            );
+                        }
+                    }
+
                     NodeCommand::RequestStateSync { source_device_id } => {
                         // Manual sync: ask a chosen SOURCE sibling to push us its
                         // servers + friends. SECURITY: only meaningful for our own
@@ -3306,6 +3322,17 @@ async fn run_event_loop(
                                         continue;
                                     }
                                     persist_mls_state(mls_mgr, &crypto_store);
+                                    // Rotate SFrame for remaining participants (forward
+                                    // secrecy). For a restricted VOICE channel mid-call,
+                                    // a demotion removal must re-key the voice cryptor so
+                                    // the removed member can't decode further audio.
+                                    if let Ok(sframe_key) = mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
+                                        let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
+                                        let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
+                                            server_id: server_id.clone(), epoch, sframe_key,
+                                            channel_id: channel_id.clone(),
+                                        }).await;
+                                    }
                                     let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
                                     if let Some(state) = server_states.get(&server_id) {
                                         let commit_msg = HavenMessage::MlsCommit {
@@ -3363,13 +3390,15 @@ async fn run_event_loop(
                                         continue;
                                     }
                                     persist_mls_state(mls_mgr, &crypto_store);
-                                    // Emit epoch change for SFrame key rotation. (Voice
+                                    // Emit epoch change for SFrame key rotation. Voice
                                     // SFrame keys are derived per group key — a restricted
-                                    // voice channel will key off its subgroup in Phase 2.)
+                                    // voice channel keys off its SUBGROUP, so a subgroup
+                                    // add/remove must reach that channel's voice cryptor.
                                     if let Ok(sframe_key) = mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
                                         let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
                                         let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
                                             server_id: server_id.clone(), epoch, sframe_key,
+                                            channel_id: channel_id.clone(),
                                         }).await;
                                     }
 
@@ -7058,6 +7087,15 @@ async fn handle_incoming_request(
                                 state, &server_id, local_peer_str, only.as_deref(),
                             );
                         }
+                        // If this op revoked OUR access to a voice channel we're in,
+                        // drop the call (the subgroup removal above already rotates the
+                        // SFrame key for the remaining participants).
+                        voice_handler::auto_leave_invisible_voice_channels(
+                            mls, ws_cmd_tx, ws_room_peers, server_states,
+                            bundle_keypair, crypto_store,
+                            voice_channel_participants, voice_channel_gossip_mode,
+                            gossip_overlays, local_peer_str, &server_id, event_tx,
+                        ).await;
                     }
                 }
             }
@@ -7835,9 +7873,12 @@ async fn handle_incoming_request(
                                     state, cid, &local_peer_str, ws_room_peers,
                                 ).filter(|c| c != &local_peer_str),
                                 None => {
-                                    let members: Vec<String> = state.members.keys().cloned().collect();
-                                    elect_coordinator(&members, &local_peer_str, ws_room_peers)
-                                        .filter(|c| c != &local_peer_str)
+                                    // Server group: target the OWNER (always holds the
+                                    // group) when online — single authoritative re-adder.
+                                    // Fall back to lowest-master only if owner is offline.
+                                    crate::node::crypto_handler::server_bootstrap_target(
+                                        state, &local_peer_str, ws_room_peers,
+                                    )
                                 }
                             };
                             if may_bootstrap {
@@ -7961,12 +8002,52 @@ async fn handle_incoming_request(
                             // -- Phase 6 new MLS dispatch branches --
 
                             MessageEnvelope::CrdtOp { sid, op_json } => {
+                                // Detect a membership/visibility op BEFORE applying so we
+                                // can reconcile subgroups + auto-leave invisible voice
+                                // channels afterwards. This op may arrive via MLS *or*
+                                // plaintext (we now send both); whichever wins the race
+                                // applies it and the other no-ops — so BOTH paths must run
+                                // the reconcile/auto-leave, else neither fires when MLS wins.
+                                let affects_subgroups = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json)
+                                    .ok()
+                                    .map(|o| matches!(
+                                        o.payload,
+                                        crate::crdt::operations::CrdtPayload::RoleChanged { .. }
+                                            | crate::crdt::operations::CrdtPayload::ChannelVisibilityChanged { .. }
+                                            | crate::crdt::operations::CrdtPayload::MemberRemoved { .. }
+                                            | crate::crdt::operations::CrdtPayload::MemberBanned { .. }
+                                    ))
+                                    .unwrap_or(false);
+                                let only_cid = if affects_subgroups {
+                                    serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json).ok().and_then(|o| {
+                                        if let crate::crdt::operations::CrdtPayload::ChannelVisibilityChanged { channel_id, .. } = o.payload {
+                                            Some(channel_id)
+                                        } else { None }
+                                    })
+                                } else { None };
+
                                 sync_handler::handle_envelope_crdt_op(
                                     server_states, bundle_keypair, event_tx,
-                                    sid, op_json,
+                                    sid.clone(), op_json,
                                     crdt_store,
                                     ws_cmd_tx,
                                 ).await;
+
+                                if affects_subgroups {
+                                    if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&sid)) {
+                                        crate::node::crypto_handler::reconcile_subgroups_for_server(
+                                            mls_mgr, ws_cmd_tx, ws_room_peers,
+                                            pending_mls_key_packages, pending_mls_removals,
+                                            state, &sid, local_peer_str, only_cid.as_deref(),
+                                        );
+                                    }
+                                    voice_handler::auto_leave_invisible_voice_channels(
+                                        mls, ws_cmd_tx, ws_room_peers, server_states,
+                                        bundle_keypair, crypto_store,
+                                        voice_channel_participants, voice_channel_gossip_mode,
+                                        gossip_overlays, local_peer_str, &sid, event_tx,
+                                    ).await;
+                                }
                             }
 
                             MessageEnvelope::ServerDelete { sid } => {
@@ -8171,46 +8252,55 @@ async fn handle_incoming_request(
                             | MessageEnvelope::VoiceChannelRenegOffer { .. }
                             | MessageEnvelope::VoiceChannelRenegAnswer { .. }
                             | MessageEnvelope::VoiceChannelCameraState { .. }
-                            if !voice_handler::vc_rate_check(vc_signal_rate_tokens, &sender_peer_id) => {
+                            if !voice_handler::vc_rate_check(vc_signal_rate_tokens, peer_str) => {
                                 // Rate limited — drop silently (already logged).
                             }
 
+                            // VC participants/signaling are keyed by the ROUTABLE WS
+                            // sender (`peer_str`), NOT the MLS leaf credential
+                            // (`sender_peer_id`). For a multi-device sender these can
+                            // differ — the leaf credential is not a live socket, so
+                            // using it would (a) add a PHANTOM second participant that
+                            // can never connect (the cause of "two ALs" in the VC list)
+                            // and (b) make every SDP/ICE reply Olm-target an unreachable
+                            // id. The plaintext VC path already uses the routable sender;
+                            // matching it here lets the Set dedup the two arrivals.
                             MessageEnvelope::VoiceChannelJoin { sid, cid } => {
                                 voice_handler::handle_envelope_voice_channel_join(
                                     server_states, voice_channel_participants,
                                     voice_channel_gossip_mode, gossip_overlays,
-                                    event_tx, local_peer_str, sender_peer_id, sid, cid,
+                                    event_tx, local_peer_str, peer_str.to_string(), sid, cid,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelLeave { sid, cid } => {
                                 voice_handler::handle_envelope_voice_channel_leave(
                                     voice_channel_participants, voice_channel_gossip_mode,
                                     gossip_overlays, event_tx, local_peer_str,
-                                    sender_peer_id, sid, cid,
+                                    peer_str.to_string(), sid, cid,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelSdpOffer { sid, cid, sdp, .. } => {
                                 voice_handler::handle_envelope_voice_channel_sdp_offer(
                                     voice_channel_participants, event_tx,
-                                    sender_peer_id, sid, cid, sdp,
+                                    peer_str.to_string(), sid, cid, sdp,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelSdpAnswer { sid, cid, sdp, .. } => {
                                 voice_handler::handle_envelope_voice_channel_sdp_answer(
                                     voice_channel_participants, event_tx,
-                                    sender_peer_id, sid, cid, sdp,
+                                    peer_str.to_string(), sid, cid, sdp,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelIce { sid, cid, candidate, sdp_mid, sdp_mline_index, .. } => {
                                 voice_handler::handle_envelope_voice_channel_ice(
                                     voice_channel_participants, event_tx,
-                                    sender_peer_id, sid, cid, candidate, sdp_mid, sdp_mline_index,
+                                    peer_str.to_string(), sid, cid, candidate, sdp_mid, sdp_mline_index,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelAudioState { sid, cid, muted, deafened, .. } => {
                                 voice_handler::handle_envelope_voice_channel_audio_state(
                                     voice_channel_participants, event_tx,
-                                    sender_peer_id, sid, cid, muted, deafened,
+                                    peer_str.to_string(), sid, cid, muted, deafened,
                                 ).await;
                             }
 
@@ -8218,25 +8308,25 @@ async fn handle_incoming_request(
                             MessageEnvelope::VoiceChannelScreenOffer { sid, cid, sdp, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_offer(
                                     voice_channel_participants, event_tx,
-                                    sender_peer_id, sid, cid, sdp,
+                                    peer_str.to_string(), sid, cid, sdp,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelScreenAnswer { sid, cid, sdp, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_answer(
                                     voice_channel_participants, event_tx,
-                                    sender_peer_id, sid, cid, sdp,
+                                    peer_str.to_string(), sid, cid, sdp,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelScreenIce { sid, cid, candidate, sdp_mid, sdp_mline_index, role, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_ice(
                                     voice_channel_participants, event_tx,
-                                    sender_peer_id, sid, cid, candidate, sdp_mid, sdp_mline_index, role,
+                                    peer_str.to_string(), sid, cid, candidate, sdp_mid, sdp_mline_index, role,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelScreenState { sid, cid, enabled, quality, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_state(
                                     voice_channel_participants, event_tx,
-                                    sender_peer_id, sid, cid, enabled, quality,
+                                    peer_str.to_string(), sid, cid, enabled, quality,
                                 ).await;
                             }
 
@@ -8244,19 +8334,19 @@ async fn handle_incoming_request(
                             MessageEnvelope::VoiceChannelRenegOffer { sid, cid, sdp, .. } => {
                                 voice_handler::handle_envelope_voice_channel_reneg_offer(
                                     voice_channel_participants, event_tx,
-                                    sender_peer_id, sid, cid, sdp,
+                                    peer_str.to_string(), sid, cid, sdp,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelRenegAnswer { sid, cid, sdp, .. } => {
                                 voice_handler::handle_envelope_voice_channel_reneg_answer(
                                     voice_channel_participants, event_tx,
-                                    sender_peer_id, sid, cid, sdp,
+                                    peer_str.to_string(), sid, cid, sdp,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelCameraState { sid, cid, enabled, .. } => {
                                 voice_handler::handle_envelope_voice_channel_camera_state(
                                     voice_channel_participants, event_tx,
-                                    sender_peer_id, sid, cid, enabled,
+                                    peer_str.to_string(), sid, cid, enabled,
                                 ).await;
                             }
 
@@ -8316,6 +8406,34 @@ async fn handle_incoming_request(
                             }
                         }
 
+                        // Server group: ALSO request a CRDT op-log sync — on a SHORTER
+                        // dedup than the message sync above. A WrongEpoch failure usually
+                        // means the sender is ahead (it advanced the epoch + may have
+                        // broadcast new CRDT ops — a freshly created channel, a visibility
+                        // change — that we can't decrypt and would otherwise never learn
+                        // about, since per-channel message sync only covers channels we
+                        // already know). Several such ops can arrive back-to-back (create
+                        // then restrict), so a 1s dedup lets each trigger a fresh op-log
+                        // delta rather than the 5s message-sync window swallowing the rest.
+                        if msg_channel_id.is_none() {
+                            let op_dedup = format!("mls_fail_opsync:{group_key}:{peer_str}");
+                            if !channel_sync_sent.get(&op_dedup).is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+                                channel_sync_sent.insert(op_dedup, std::time::Instant::now());
+                                if let Some(state) = server_states.get(&server_id) {
+                                    let our_vector = StateVector::from_server_state(state);
+                                    if let Ok(sv) = serde_json::to_string(&our_vector) {
+                                        send_message_to_peer(
+                                            ws_cmd_tx, ws_room_peers,
+                                            peer_str, HavenMessage::SyncRequest {
+                                                server_id: server_id.clone(),
+                                                state_vector_json: sv,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
                         // Track consecutive failures — trigger recovery after 3.
                         let count = mls_decrypt_failures.entry(group_key.clone()).or_insert(0);
                         *count += 1;
@@ -8349,9 +8467,11 @@ async fn handle_incoming_request(
                                             state, cid, &local_peer, ws_room_peers,
                                         ).filter(|c| c != &local_peer),
                                         None => {
-                                            let members: Vec<String> = state.members.keys().cloned().collect();
-                                            elect_coordinator(&members, &local_peer, ws_room_peers)
-                                                .filter(|c| c != &local_peer)
+                                            // Server group: recover from the OWNER (always
+                                            // holds the group) when online; else lowest master.
+                                            crate::node::crypto_handler::server_bootstrap_target(
+                                                state, &local_peer, ws_room_peers,
+                                            )
                                         }
                                     };
                                     if let Some(coordinator) = coordinator {
@@ -8453,7 +8573,20 @@ async fn handle_incoming_request(
                         .into_iter()
                         .filter(|p| !super::resolver::same_identity(p, peer_str))
                         .collect();
-                    let coordinator = elect_coordinator(&members, local_peer_str, &ws_room_peers);
+                    // Server group: prefer the OWNER as the single authoritative
+                    // committer (linear epochs; avoids the non-owner-committer
+                    // fan-out-miss divergence with 3+ distinct members). Subgroup
+                    // with a group: deterministic lowest-master election.
+                    let coordinator = if kp_channel_id.is_none() {
+                        server_states.get(&server_id).map_or_else(
+                            || elect_coordinator(&members, local_peer_str, &ws_room_peers),
+                            |s| crate::node::crypto_handler::elect_server_coordinator(
+                                s, &members, local_peer_str, &ws_room_peers,
+                            ),
+                        )
+                    } else {
+                        elect_coordinator(&members, local_peer_str, &ws_room_peers)
+                    };
                     if coordinator.as_deref() != Some(local_peer_str) {
                         hollow_log!("[HOLLOW-MLS] Not MLS coordinator for {group_key} (excluding sender identity), skipping KeyPackage");
                         return;
@@ -8578,6 +8711,41 @@ async fn handle_incoming_request(
                         mls_decrypt_failures.remove(&group_key);
                         hollow_log!("[HOLLOW-MLS] Joined MLS group {group_key}");
 
+                        // Emit the SFrame key for this group — if we joined a
+                        // restricted VOICE channel's subgroup (e.g. via VC-join
+                        // bootstrap), this delivers the key to its voice cryptor.
+                        // For the server group / text-only subgroups Dart just
+                        // caches it (no active cryptor for that channel).
+                        if let Ok(sframe_key) = mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
+                            let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
+                            let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
+                                server_id: server_id.clone(), epoch, sframe_key,
+                                channel_id: wl_channel_id.clone(),
+                            }).await;
+                        }
+
+                        // After SERVER-GROUP recovery, also catch up on CRDT OPS we
+                        // missed while at a stale epoch (new channels, visibility, role
+                        // changes). An op broadcast via MLS at an epoch we couldn't
+                        // decrypt was dropped with no plaintext fallback — without this
+                        // SyncRequest a channel created during our skew is lost forever
+                        // (we never learn it exists, so per-channel sync can't recover
+                        // it). The responder serves the op-log delta via SyncResponse.
+                        if wl_channel_id.is_none() {
+                            if let Some(state) = server_states.get(&server_id) {
+                                let our_vector = StateVector::from_server_state(state);
+                                if let Ok(sv) = serde_json::to_string(&our_vector) {
+                                    send_message_to_peer(
+                                        ws_cmd_tx, ws_room_peers,
+                                        &peer_str, HavenMessage::SyncRequest {
+                                            server_id: server_id.clone(),
+                                            state_vector_json: sv,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+
                         // After MLS recovery, sync channels — server group: ALL channels
                         // (not just empty ones; the DB has gaps from the stale epoch).
                         // Subgroup: just the one restricted channel it serves.
@@ -8638,11 +8806,13 @@ async fn handle_incoming_request(
                     Ok(()) => {
                         persist_mls_state(mls_mgr, crypto_store);
                         hollow_log!("[HOLLOW-MLS] Processed commit for {group_key}");
-                        // Emit epoch change for SFrame key rotation.
+                        // Emit epoch change for SFrame key rotation. For a subgroup
+                        // (restricted voice channel), route it to that channel's cryptor.
                         if let Ok(sframe_key) = mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
                             let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
                             let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
                                 server_id: server_id.clone(), epoch, sframe_key,
+                                channel_id: cm_channel_id.clone(),
                             }).await;
                         }
                     }

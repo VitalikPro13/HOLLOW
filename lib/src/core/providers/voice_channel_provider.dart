@@ -245,10 +245,29 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Key: "incoming:peerId" or "outgoing:peerId"
   final Map<String, List<Map<String, dynamic>>> _earlyScreenIce = {};
 
-  /// Cached SFrame key from last MLS epoch change — applied when service is (re)created.
-  int? _lastSframeEpoch;
-  Uint8List? _lastSframeKey;
-  String? _lastSframeServerId;
+  /// Cached SFrame keys from MLS epoch changes — applied when the service is
+  /// (re)created. Keyed by `_sframeCacheKey(serverId, channelId)`:
+  ///   * channelId == null → the server-wide MLS group key (non-restricted voice
+  ///     channels). Applies to ANY non-restricted channel in that server.
+  ///   * channelId != null → a restricted channel's MLS SUBGROUP key (per-channel
+  ///     subgroups / "Option B"). Applies ONLY to that voice channel, so a
+  ///     non-qualifying member who never receives it can't decode the audio.
+  final Map<String, ({int epoch, Uint8List key})> _sframeKeys = {};
+
+  /// Cache key for an SFrame secret. A subgroup key is scoped to its channel; the
+  /// server-group key uses a sentinel so it can't collide with any channel id.
+  static String _sframeCacheKey(String serverId, String? channelId) =>
+      '$serverId ${channelId ?? ''}';
+
+  /// Whether a channel is cryptographically isolated in its own MLS subgroup
+  /// (per-channel subgroups / "Option B"): restricted visibility AND not a public
+  /// channel. Mirrors Rust `ServerState::channel_uses_subgroup`. Such a channel's
+  /// voice SFrame key comes ONLY from its subgroup, never the server-wide group.
+  bool _channelUsesSubgroup(String channelId) {
+    final ch = ref.read(channelListProvider)[channelId];
+    if (ch == null) return false;
+    return !ch.isPublic && ch.visibility != 'everyone';
+  }
 
   /// Shared screen capture stream (captured once, shared across outgoing PCs).
   MediaStream? _screenCaptureStream;
@@ -468,9 +487,19 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     });
 
     // Apply cached SFrame key (may have arrived before the service was created).
-    if (_lastSframeKey != null && _lastSframeEpoch != null && _lastSframeServerId == serverId) {
-      debugPrint('[HOLLOW-VC] Applying cached SFrame key (epoch=$_lastSframeEpoch) to new service');
-      await _service!.setSframeKey(_lastSframeEpoch!, Uint8List.fromList(_lastSframeKey!));
+    // A RESTRICTED channel (per-channel MLS subgroup) uses ONLY its subgroup key
+    // (serverId, channelId) — never the server-group key, which would defeat the
+    // cryptographic isolation. A non-restricted channel uses the server-group key.
+    final usesSubgroup = _channelUsesSubgroup(channelId);
+    final cached = _sframeKeys[_sframeCacheKey(serverId, channelId)] ??
+        (usesSubgroup ? null : _sframeKeys[_sframeCacheKey(serverId, null)]);
+    if (cached != null) {
+      debugPrint('[HOLLOW-VC] Applying cached SFrame key (epoch=${cached.epoch}) to new service');
+      await _service!.setSframeKey(cached.epoch, Uint8List.fromList(cached.key));
+    } else if (usesSubgroup) {
+      // Subgroup key not delivered yet — the Welcome/Commit → MlsEpochChanged
+      // (channelId) will rotate it in. Until then this channel has no SFrame key.
+      debugPrint('[HOLLOW-VC] Restricted channel $channelId — awaiting subgroup SFrame key');
     }
 
     // Connect to existing participants in this channel.
@@ -611,6 +640,16 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
 
     // Now clean up (best-effort — errors won't block leave).
+    await _teardownCall();
+
+    _leaving = false;
+  }
+
+  /// Tear down all live call media: camera/screen renderers, screen audio, and
+  /// the WebRTC service (closes every PC + stops mic/camera streams). Idempotent
+  /// — safe to call when nothing is active. Shared by the user-initiated
+  /// `leaveChannel()` and the server-forced leave path in `onLocalLeft()`.
+  Future<void> _teardownCall() async {
     try {
       // Dispose local camera renderer.
       if (_localCameraRenderer != null) {
@@ -645,16 +684,25 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         _service = null;
       }
     } catch (e) {
-      debugPrint('[HOLLOW-VC] leaveChannel cleanup error: $e');
+      debugPrint('[HOLLOW-VC] call teardown error: $e');
       _service = null;
     }
-
-    _leaving = false;
   }
 
   /// Called after the local leave event arrives to update state.
+  ///
+  /// Two callers: (1) the user pressed leave → `leaveChannel()` already ran the
+  /// media teardown and nulled `_service`; or (2) Rust FORCED us out (lost channel
+  /// visibility / demoted / kicked) by emitting `VoiceChannelLeft` directly — in
+  /// that case `_service` is still live and the call is still running, so we MUST
+  /// run the teardown here. Detect the forced case by a non-null `_service`.
   void onLocalLeft() {
     _leaving = false;
+    if (_service != null) {
+      // Server-forced leave — the user-initiated path never ran. Hang up for real.
+      debugPrint('[HOLLOW-VC] Forced leave — tearing down live call');
+      unawaited(_teardownCall());
+    }
     // Restore the default audio route (mobile) so the next call doesn't
     // inherit a stale speakerphone state.
     if (_isMobile) {
@@ -1413,17 +1461,28 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// Handle MLS epoch change — rotate SFrame key for voice E2EE.
+  ///
+  /// `channelId == null` is the server-wide group key (non-restricted voice
+  /// channels); `channelId != null` is a restricted channel's MLS subgroup key
+  /// (per-channel subgroups), which applies only to that voice channel.
   Future<void> onEpochChanged(
-      String serverId, int epoch, Uint8List sframeKey) async {
+      String serverId, int epoch, Uint8List sframeKey,
+      {String? channelId}) async {
     // Always cache — the event may arrive before onLocalJoined sets currentServerId.
-    _lastSframeEpoch = epoch;
-    _lastSframeKey = Uint8List.fromList(sframeKey);
-    _lastSframeServerId = serverId;
+    _sframeKeys[_sframeCacheKey(serverId, channelId)] =
+        (epoch: epoch, key: Uint8List.fromList(sframeKey));
 
     if (state.currentServerId != serverId) return;
     if (!state.isInVoiceChannel || _service == null) return;
 
-    debugPrint('[HOLLOW-VC] MLS epoch changed: $epoch — rotating SFrame key');
+    // Only apply a key that belongs to the channel we're actually in: a subgroup
+    // key (channelId set) must match the current channel; the server-group key
+    // (channelId null) applies to whatever non-restricted channel we're in.
+    if (channelId != null && state.currentChannelId != channelId) return;
+
+    debugPrint('[HOLLOW-VC] MLS epoch changed: $epoch '
+        '(${channelId == null ? "server group" : "subgroup $channelId"}) '
+        '— rotating SFrame key');
     await _service!.setSframeKey(epoch, sframeKey);
   }
 

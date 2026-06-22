@@ -1438,10 +1438,14 @@ sealed class NetworkEvent with _$NetworkEvent {
   }) = NetworkEvent_VoiceChannelModeChanged;
 
   /// MLS epoch changed — SFrame key for voice E2EE.
+  /// `channel_id` is set when the key belongs to a restricted channel's MLS
+  /// subgroup (per-channel subgroups voice); Dart routes it to that voice
+  /// channel's cryptor only. `None` = the server-wide group key.
   const factory NetworkEvent.mlsEpochChanged({
     required String serverId,
     required BigInt epoch,
     required Uint8List sframeKey,
+    String? channelId,
   }) = NetworkEvent_MlsEpochChanged;
   const factory NetworkEvent.recoveryPoolCreated({
     required String serverId,

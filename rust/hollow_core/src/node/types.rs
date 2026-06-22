@@ -336,10 +336,14 @@ pub(crate) enum NetworkEvent {
         gossip_neighbors: Vec<String>,
     },
     /// MLS epoch changed — SFrame key needs rotation.
+    /// `channel_id` is `Some(cid)` when the key belongs to a restricted channel's
+    /// MLS SUBGROUP (per-channel subgroups / "Option B" voice) — Dart applies it
+    /// only to that voice channel's cryptor. `None` = the server-wide group key.
     MlsEpochChanged {
         server_id: String,
         epoch: u64,
         sframe_key: Vec<u8>,
+        channel_id: Option<String>,
     },
     // -- Recovery pool events (Evidence Recovery) --
     RecoveryPoolCreated { server_id: String, invite_link: String },
@@ -566,6 +570,11 @@ pub(crate) enum NodeCommand {
     /// device list with the device tombstoned, drops our Olm session to it, and (where
     /// we coordinate) removes its MLS leaf from shared servers. Manual-only.
     RevokeDevice { device_peer_id: String },
+    /// Full sibling teardown ("Reset Device List"): tombstone EVERY device except
+    /// the one we're running on, in one version bump, propagate to friends, and
+    /// nuke each revoked sibling. The propagating, permanent counterpart to the old
+    /// blunt local-wipe reset (which the grow-only merge just regrew).
+    ResetDeviceLists,
     /// Multi-device MANUAL state sync (Security → Your Devices "Sync from this
     /// device"). Ask the chosen SOURCE sibling to re-announce all its servers +
     /// re-share its friends to US. `source_device_id` is that device's peer_id.

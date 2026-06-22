@@ -213,6 +213,54 @@ class EventStreamNotifier extends Notifier<bool> {
     //     selected server (so channelListProvider can't help it). Both target the
     //     same DB; the ramp lets the eventually-consistent write land.
     _reloadChannelsWithRetry(serverId);
+    _evictVoiceIfInvisible(serverId);
+  }
+
+  /// If we're currently in a VOICE channel on [serverId] that we can no longer
+  /// SEE (visibility tier raised, or we were demoted/kicked), hang up the call —
+  /// the UI equivalent of pressing Disconnect. Belt-and-suspenders next to the
+  /// Rust-side auto-leave: this runs the exact `leaveChannel()` teardown the
+  /// button does, so the call genuinely ends (closes PCs, stops mic/audio),
+  /// regardless of whether the Rust force-leave event lands. Re-checks on a short
+  /// ramp because role/channel state lands via the fire-and-forget CrdtStore.
+  void _evictVoiceIfInvisible(String serverId) {
+    const rolePriority = {'owner': 3, 'admin': 2, 'moderator': 1, 'member': 0};
+    const delays = [Duration(milliseconds: 150), Duration(milliseconds: 600),
+        Duration(milliseconds: 1400)];
+    for (final d in delays) {
+      Future.delayed(d, () {
+        final vc = ref.read(voiceChannelProvider);
+        if (!vc.isInVoiceChannel) return;
+        if (vc.currentServerId != serverId) return;
+        final cid = vc.currentChannelId;
+        if (cid == null) return;
+
+        final channels = ref.read(serverChannelsProvider(serverId)).valueOrNull;
+        if (channels == null) return; // not loaded yet — a later tick re-checks
+        final ch = channels[cid];
+        // Channel gone (deleted / we were kicked so we hold no channels) OR
+        // visibility now excludes us → leave.
+        final myRole = ref.read(myRoleProvider(serverId)).valueOrNull ?? 'member';
+        final priority = rolePriority[myRole] ?? 0;
+        bool canSee;
+        if (ch == null) {
+          canSee = false;
+        } else {
+          switch (ch.visibility) {
+            case 'moderator':
+              canSee = priority >= 1;
+            case 'admin':
+              canSee = priority >= 2;
+            default:
+              canSee = true;
+          }
+        }
+        if (!canSee) {
+          debugPrint('[HOLLOW-VC] Lost visibility to active voice channel $cid — hanging up');
+          ref.read(voiceChannelProvider.notifier).leaveChannel();
+        }
+      });
+    }
   }
 
   /// Re-read channels for a server on a short ramp to defeat the CrdtStore
@@ -1211,9 +1259,10 @@ class EventStreamNotifier extends Notifier<bool> {
               serverId, channelId, mode, gossipNeighbors);
 
       case NetworkEvent_MlsEpochChanged(
-            :final serverId, :final epoch, :final sframeKey):
+            :final serverId, :final epoch, :final sframeKey, :final channelId):
         ref.read(voiceChannelProvider.notifier).onEpochChanged(
-              serverId, epoch.toInt(), Uint8List.fromList(sframeKey));
+              serverId, epoch.toInt(), Uint8List.fromList(sframeKey),
+              channelId: channelId);
 
       // -- Recovery pool events --
       case NetworkEvent_RecoveryPoolCreated(:final serverId, :final inviteLink):

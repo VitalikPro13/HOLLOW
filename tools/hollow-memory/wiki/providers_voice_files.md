@@ -106,11 +106,13 @@ Called by event_provider after the Rust event arrives. This is the real initiali
 Guarded by `_leaving` flag. Order matters:
 1. Captures server/channel IDs before any state changes.
 2. Sends `voiceChannelLeave` FFI to Rust FIRST (ensures server knows even if cleanup fails).
-3. Best-effort cleanup: disposes local camera renderer, disposes all remote camera renderers, calls `_cleanupAllScreenShares()`, calls `_service.closeAll()`, nullifies service.
+3. Best-effort cleanup via `_teardownCall()` (shared with the forced-leave path): disposes local camera renderer, disposes all remote camera renderers, `_cleanupAllScreenShares()`, stops screen-audio, `_service.closeAll()`, nullifies service.
 4. Resets `_leaving` flag.
 
+**`_teardownCall()`** — extracted shared media teardown (renderers, screen share/audio, `_service.closeAll()`). Idempotent. Called by `leaveChannel()` AND by `onLocalLeft()` when the leave was server-forced.
+
 **`onLocalLeft()`**
-Called by event_provider after the leave event. Resets `_leaving` and calls `copyWith(clearCurrent: true)`.
+Called by event_provider on the `VoiceChannelLeft` event for the local peer. Two cases: (1) the USER pressed leave → `leaveChannel()` already ran teardown and nulled `_service`; or (2) Rust FORCED us out (lost channel visibility / demoted / kicked) by emitting `VoiceChannelLeft` directly — `_service` is still live and the call still running, so `onLocalLeft` runs `_teardownCall()` to actually hang up. Detects the forced case by `_service != null`. Then resets `_leaving`, restores mobile audio route, `copyWith(clearCurrent: true)`.
 
 ### Methods: Peer Events
 
@@ -207,7 +209,9 @@ Incoming screen share offer handler:
 
 ### Methods: MLS/Gossip
 
-**`onEpochChanged(serverId, epoch, sframeKey)`** -- called when MLS epoch rotates. Forwards the new SFrame key to the voice channel service for E2EE key rotation.
+**`onEpochChanged(serverId, epoch, sframeKey, {channelId})`** -- called when an MLS epoch rotates (`NetworkEvent_MlsEpochChanged`). `channelId == null` = the server-wide group key (non-restricted voice channels); `channelId != null` = a restricted channel's per-channel MLS SUBGROUP key. Caches every key in `_sframeKeys` keyed by `_sframeCacheKey(serverId, channelId)`, then applies it to the live `FrameCryptorService` ONLY if it belongs to the channel we're actually in (a subgroup key must match `currentChannelId`; the server-group key applies to whatever non-restricted channel we're in). On join, the cached key is applied: a restricted channel (`_channelUsesSubgroup`, mirrors Rust `channel_uses_subgroup` via `channelListProvider` visibility/isPublic) uses ONLY its subgroup key — it NEVER falls back to the server-group key (that would defeat the cryptographic isolation); if no subgroup key is cached yet it awaits the Welcome/Commit → MlsEpochChanged(channelId).
+
+**Voice eviction on lost visibility** (`event_provider._evictVoiceIfInvisible`, called from `_refreshServerState`): on a role/visibility change, if the user is in a voice channel on that server they can no longer see (`can_see` recomputed from `serverChannelsProvider` + `myRoleProvider`, on a 150/600/1400ms ramp to defeat the CrdtStore write race), it calls `voiceChannelProvider.leaveChannel()` — the real hangup. Belt-and-suspenders alongside the Rust `auto_leave_invisible_voice_channels`.
 
 **`onModeChanged(serverId, channelId, mode, gossipNeighbors)`**
 Handles voice topology changes:

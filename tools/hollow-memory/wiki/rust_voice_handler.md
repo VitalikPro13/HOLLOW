@@ -95,12 +95,18 @@ Incoming path: All incoming Call* HavenMessages are processed directly in `swarm
 Called when the local user joins a server voice channel (`NodeCommand::VoiceChannelJoin`).
 
 Steps:
+0. **Restricted-channel guard (Phase 2 subgroups):** if `server.channel_uses_subgroup(channel_id)` (restricted, non-public), REJECT the join when `!can_see_channel(local_peer)` — return before announcing or touching SFrame. A modified client can't join a channel its role can't see.
 1. **Always-plaintext broadcast (MLS + plaintext simultaneously):** Constructs `MessageEnvelope::VoiceChannelJoin { sid, cid }` and sends MLS broadcast if available, PLUS always sends plaintext `HavenMessage::VoiceChannelJoin` to each reachable server member regardless of MLS success. Both paths fire unconditionally — MLS provides forward secrecy, plaintext ensures delivery survives stale MLS epochs. Receivers deduplicate via `HashSet::insert` (idempotent) and `_peerConnections.containsKey` guard.
 2. **Track participant locally:** Adds own peer ID to `voice_channel_participants["{server_id}:{channel_id}"]` (HashMap<String, HashSet<String>>).
-3. **Emit local event:** Sends `NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id }` so the local UI updates immediately (own join is not received back from the network).
-4. **Check mode transition:** Calls `check_voice_mode_transition()` to evaluate mesh/gossip threshold.
+3. **Emit SFrame key:** the group key is the channel's SUBGROUP (`subgroup_id(server, channel)`) when restricted, else the bare `server_id`. Emits `NetworkEvent::MlsEpochChanged { server_id, epoch, sframe_key, channel_id }` (channel_id = `Some(cid)` for a restricted channel so Dart routes the key to that channel's cryptor). If restricted but we don't hold the subgroup yet (just promoted / just joined), calls `crypto_handler::request_subgroup_bootstrap` — the resulting Welcome → MlsEpochChanged delivers the key. NEVER falls back to the server-group key for a restricted channel.
+4. **Emit local event:** Sends `NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id }` so the local UI updates immediately (own join is not received back from the network).
+5. **Check mode transition:** Calls `check_voice_mode_transition()` to evaluate mesh/gossip threshold.
 
 The `vc_key` format throughout the module is `"{server_id}:{channel_id}"`.
+
+**`auto_leave_invisible_voice_channels()`** — after a role/visibility/kick/ban CRDT op applies, leaves any voice channel the local node is in but can no longer SEE (`!can_see_channel`, or no longer a member). Runs the normal `handle_voice_channel_leave` teardown. Invoked from BOTH the plaintext `CrdtOpBroadcast` apply path AND the MLS `CrdtOp` apply path in swarm.rs (the MLS path usually wins the apply race and previously ran no reconcile/auto-leave).
+
+**MLS-path VC handlers key on the routable WS sender, not the MLS leaf credential.** In the swarm.rs MLS envelope dispatch, all `VoiceChannel*` handlers receive `peer_str.to_string()` (the relay-reported sender), NOT `sender_peer_id` (the MLS leaf credential). For a multi-device sender these differ; the leaf credential is not a live socket, so using it adds a phantom 2nd participant and makes SDP/ICE replies Olm-target an unreachable id. The plaintext VC path already uses the routable sender — matching it lets the participant Set dedup the two arrivals.
 
 ---
 

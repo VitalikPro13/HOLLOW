@@ -10098,10 +10098,12 @@ impl SseDecode for crate::api::network::NetworkEvent {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_epoch = <u64>::sse_decode(deserializer);
                 let mut var_sframeKey = <Vec<u8>>::sse_decode(deserializer);
+                let mut var_channelId = <Option<String>>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::MlsEpochChanged {
                     server_id: var_serverId,
                     epoch: var_epoch,
                     sframe_key: var_sframeKey,
+                    channel_id: var_channelId,
                 };
             }
             97 => {
@@ -13033,11 +13035,13 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 server_id,
                 epoch,
                 sframe_key,
+                channel_id,
             } => [
                 96.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 epoch.into_into_dart().into_dart(),
                 sframe_key.into_into_dart().into_dart(),
+                channel_id.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::RecoveryPoolCreated {
@@ -15385,11 +15389,13 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 server_id,
                 epoch,
                 sframe_key,
+                channel_id,
             } => {
                 <i32>::sse_encode(96, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <u64>::sse_encode(epoch, serializer);
                 <Vec<u8>>::sse_encode(sframe_key, serializer);
+                <Option<String>>::sse_encode(channel_id, serializer);
             }
             crate::api::network::NetworkEvent::RecoveryPoolCreated {
                 server_id,

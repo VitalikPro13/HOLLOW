@@ -1386,9 +1386,10 @@ class _DevicesTab extends ConsumerWidget {
         const _LinkDeviceButton(),
         const SizedBox(height: HollowSpacing.lg),
         Text(
-          'If a device you removed still shows as linked, reset the device '
-          'list. It rebuilds from your devices that are currently online. '
-          'Restart the app afterward.',
+          'If leftover or ghost devices still show as linked, reset the device '
+          'list. This permanently removes ALL your other devices (they get '
+          'signed out and your friends drop them); only this device remains. '
+          'Re-link any device you still want.',
           style: HollowTypography.body
               .copyWith(color: hollow.textSecondary, fontSize: 12),
         ),
@@ -3313,12 +3314,48 @@ class _ResetDeviceListButton extends StatelessWidget {
   }
 
   Future<void> _reset(BuildContext context) async {
+    final confirmed = await showHollowDialog<bool>(
+      context: context,
+      builder: (ctx) => HollowDialog(
+        title: 'Reset device list?',
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'This permanently removes ALL your other linked devices, not just '
+              'this one. Each is signed out and wiped, and your friends stop '
+              'seeing them. Only this device stays. To use another device again, '
+              'link it fresh.\n\nUse this to clean up leftover or ghost devices.',
+              style: HollowTypography.body.copyWith(
+                  color: HollowTheme.of(ctx).textSecondary),
+            ),
+            const SizedBox(height: HollowSpacing.lg),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                HollowButton.ghost(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                HollowButton.danger(
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  child: const Text('Reset'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != true) return;
     try {
       await network_api.resetDeviceLists();
       if (context.mounted) {
         HollowToast.show(
           context,
-          'Device lists reset. Restart the app so devices re-merge.',
+          'Device list reset. All other devices were removed.',
           type: HollowToastType.success,
         );
       }

@@ -406,6 +406,8 @@ SFrame key = MLS group.export_secret("sframe", context=[], key_length=32)
 
 Each MLS epoch produces a unique 32-byte SFrame key. When the epoch advances (member join/leave), the SFrame key rotates automatically.
 
+**Restricted voice channels** (visibility above the base tier, non-public) derive their SFrame key from the channel's *own* per-channel MLS subgroup rather than the server-wide group — the same Option B subgroup that encrypts the channel's text (see §5, Per-Channel Subgroups). Because only members whose role satisfies the channel's visibility tier hold the subgroup, a non-qualifying member cannot derive the channel's SFrame key and therefore cannot decode its audio/video/screen-share frames. Voice-channel access for a restricted channel is thus a cryptographic boundary, not merely a server-side authorization check: the key is the gate. A member who is demoted, removed, or loses access mid-call triggers a subgroup epoch advance (remove-commit), which re-keys the remaining participants for forward secrecy and the now-unauthorized member is dropped from the call.
+
 **1:1 DM calls:** A random 32-byte key is generated per call and transmitted inside the Olm-encrypted `CallInvite` message.
 
 ### 6.2 Encryption

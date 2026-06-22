@@ -260,7 +260,13 @@ pub(crate) async fn handle_create_channel(
                     }
                 }
             }
-            if !sent_via_mls {
+            // Always ALSO broadcast the op as plaintext CrdtOpBroadcast (idempotent —
+            // op_log dedups; receiver re-validates author+permission). MLS broadcast is
+            // confidential but a receiver at a skewed epoch silently drops it with no
+            // recovery, permanently losing the op (e.g. a new channel it never learns
+            // exists). The plaintext copy guarantees server-metadata convergence.
+            {
+                let _ = sent_via_mls;
                 let local_peer = local_peer_str.to_string();
 broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
@@ -340,7 +346,13 @@ pub(crate) async fn handle_remove_channel(
                     }
                 }
             }
-            if !sent_via_mls {
+            // Always ALSO broadcast the op as plaintext CrdtOpBroadcast (idempotent —
+            // op_log dedups; receiver re-validates author+permission). MLS broadcast is
+            // confidential but a receiver at a skewed epoch silently drops it with no
+            // recovery, permanently losing the op (e.g. a new channel it never learns
+            // exists). The plaintext copy guarantees server-metadata convergence.
+            {
+                let _ = sent_via_mls;
                 let local_peer = local_peer_str.to_string();
 broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
@@ -405,7 +417,13 @@ pub(crate) async fn handle_rename_server(
                     }
                 }
             }
-            if !sent_via_mls {
+            // Always ALSO broadcast the op as plaintext CrdtOpBroadcast (idempotent —
+            // op_log dedups; receiver re-validates author+permission). MLS broadcast is
+            // confidential but a receiver at a skewed epoch silently drops it with no
+            // recovery, permanently losing the op (e.g. a new channel it never learns
+            // exists). The plaintext copy guarantees server-metadata convergence.
+            {
+                let _ = sent_via_mls;
                 let local_peer = local_peer_str.to_string();
 broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
@@ -474,7 +492,13 @@ pub(crate) async fn handle_rename_channel(
                     }
                 }
             }
-            if !sent_via_mls {
+            // Always ALSO broadcast the op as plaintext CrdtOpBroadcast (idempotent —
+            // op_log dedups; receiver re-validates author+permission). MLS broadcast is
+            // confidential but a receiver at a skewed epoch silently drops it with no
+            // recovery, permanently losing the op (e.g. a new channel it never learns
+            // exists). The plaintext copy guarantees server-metadata convergence.
+            {
+                let _ = sent_via_mls;
                 let local_peer = local_peer_str.to_string();
 broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
@@ -532,7 +556,13 @@ pub(crate) async fn handle_update_server_setting(
                     }
                 }
             }
-            if !sent_via_mls {
+            // Always ALSO broadcast the op as plaintext CrdtOpBroadcast (idempotent —
+            // op_log dedups; receiver re-validates author+permission). MLS broadcast is
+            // confidential but a receiver at a skewed epoch silently drops it with no
+            // recovery, permanently losing the op (e.g. a new channel it never learns
+            // exists). The plaintext copy guarantees server-metadata convergence.
+            {
+                let _ = sent_via_mls;
                 let local_peer = local_peer_str.to_string();
 broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
@@ -865,6 +895,7 @@ pub(crate) async fn handle_kick_member(
                                     let epoch = mls_mgr.epoch(&server_id).unwrap_or(0);
                                     let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
                                         server_id: server_id.clone(), epoch, sframe_key,
+                                        channel_id: None,
                                     }).await;
                                 }
                                 let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
@@ -969,6 +1000,68 @@ pub(crate) async fn handle_revoke_device(
         master_peer_id: master_peer_str.to_string(),
     }).await;
     Some(target_device)
+}
+
+// ── 10a2. ResetDeviceLists (full sibling teardown) ───────────────────
+
+/// "Reset Device List" — tombstone EVERY sibling device in one version bump and
+/// propagate it: friends converge + drop them, and each revoked sibling self-nukes
+/// on ingest. Returns the device ids that were revoked (so the caller drops their
+/// Olm sessions + MLS leaves), or `None` if we were already the sole device.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_reset_device_lists(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    master_peer_str: &str,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    is_invisible: bool,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<Vec<String>> {
+    let (_signed, revoked) = match super::crypto_handler::revoke_all_other_devices(
+        master_keypair, device_peer_id, db_path, db_passphrase,
+    ) {
+        Some(r) => r,
+        None => {
+            // Nothing to revoke — still refresh the UI so it reflects the clean state.
+            let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
+                master_peer_id: master_peer_str.to_string(),
+            }).await;
+            return None;
+        }
+    };
+
+    // Push the v+1 tombstoned list to EACH revoked sibling FIRST (same ordering as
+    // single revoke) so its ingest fires SelfRevoked → wipe + relaunch, before the
+    // MLS-leaf removal drops it from our shared rooms.
+    for target in &revoked {
+        super::social::send_own_profile_to_peer(
+            ws_cmd_tx, ws_room_peers,
+            local_peer_str, master_keypair, device_peer_id, target,
+            is_invisible, db_path, db_passphrase,
+        );
+    }
+    // Then re-announce to every other peer we share a room with so friends converge
+    // and drop the revoked devices. Skip ourselves and the revoked targets.
+    let peers: Vec<String> = ws_room_peers.values().flat_map(|p| p.iter().cloned()).collect();
+    for pid in peers {
+        if pid == local_peer_str || pid == device_peer_id || revoked.contains(&pid) {
+            continue;
+        }
+        super::social::send_own_profile_to_peer(
+            ws_cmd_tx, ws_room_peers,
+            local_peer_str, master_keypair, device_peer_id, &pid,
+            is_invisible, db_path, db_passphrase,
+        );
+    }
+
+    let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
+        master_peer_id: master_peer_str.to_string(),
+    }).await;
+    Some(revoked)
 }
 
 // ── 10b. LeaveServer ─────────────────────────────────────────────────
@@ -1188,6 +1281,7 @@ pub(crate) async fn handle_ban_member(
                                     let epoch = mls_mgr.epoch(&server_id).unwrap_or(0);
                                     let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
                                         server_id: server_id.clone(), epoch, sframe_key,
+                                        channel_id: None,
                                     }).await;
                                 }
                                 let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
@@ -1278,7 +1372,13 @@ pub(crate) async fn handle_unban_member(
                     }
                 }
             }
-            if !sent_via_mls {
+            // Always ALSO broadcast the op as plaintext CrdtOpBroadcast (idempotent —
+            // op_log dedups; receiver re-validates author+permission). MLS broadcast is
+            // confidential but a receiver at a skewed epoch silently drops it with no
+            // recovery, permanently losing the op (e.g. a new channel it never learns
+            // exists). The plaintext copy guarantees server-metadata convergence.
+            {
+                let _ = sent_via_mls;
 broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
             )
@@ -1346,7 +1446,13 @@ pub(crate) async fn handle_label_op(
                     }
                 }
             }
-            if !sent_via_mls {
+            // Always ALSO broadcast the op as plaintext CrdtOpBroadcast (idempotent —
+            // op_log dedups; receiver re-validates author+permission). MLS broadcast is
+            // confidential but a receiver at a skewed epoch silently drops it with no
+            // recovery, permanently losing the op (e.g. a new channel it never learns
+            // exists). The plaintext copy guarantees server-metadata convergence.
+            {
+                let _ = sent_via_mls;
 broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
             )
@@ -1425,7 +1531,13 @@ pub(crate) async fn handle_set_channel_visibility(
                     }
                 }
             }
-            if !sent_via_mls {
+            // Always ALSO broadcast the op as plaintext CrdtOpBroadcast (idempotent —
+            // op_log dedups; receiver re-validates author+permission). MLS broadcast is
+            // confidential but a receiver at a skewed epoch silently drops it with no
+            // recovery, permanently losing the op (e.g. a new channel it never learns
+            // exists). The plaintext copy guarantees server-metadata convergence.
+            {
+                let _ = sent_via_mls;
 broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
             )
@@ -1489,7 +1601,13 @@ pub(crate) async fn handle_set_channel_posting(
                     }
                 }
             }
-            if !sent_via_mls {
+            // Always ALSO broadcast the op as plaintext CrdtOpBroadcast (idempotent —
+            // op_log dedups; receiver re-validates author+permission). MLS broadcast is
+            // confidential but a receiver at a skewed epoch silently drops it with no
+            // recovery, permanently losing the op (e.g. a new channel it never learns
+            // exists). The plaintext copy guarantees server-metadata convergence.
+            {
+                let _ = sent_via_mls;
 broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
             )
@@ -1553,7 +1671,13 @@ pub(crate) async fn handle_set_channel_public(
                     }
                 }
             }
-            if !sent_via_mls {
+            // Always ALSO broadcast the op as plaintext CrdtOpBroadcast (idempotent —
+            // op_log dedups; receiver re-validates author+permission). MLS broadcast is
+            // confidential but a receiver at a skewed epoch silently drops it with no
+            // recovery, permanently losing the op (e.g. a new channel it never learns
+            // exists). The plaintext copy guarantees server-metadata convergence.
+            {
+                let _ = sent_via_mls;
 broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
             )
@@ -1648,7 +1772,13 @@ pub(crate) async fn handle_change_role_permissions(
                     }
                 }
             }
-            if !sent_via_mls {
+            // Always ALSO broadcast the op as plaintext CrdtOpBroadcast (idempotent —
+            // op_log dedups; receiver re-validates author+permission). MLS broadcast is
+            // confidential but a receiver at a skewed epoch silently drops it with no
+            // recovery, permanently losing the op (e.g. a new channel it never learns
+            // exists). The plaintext copy guarantees server-metadata convergence.
+            {
+                let _ = sent_via_mls;
 broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
             )

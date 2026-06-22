@@ -500,15 +500,17 @@ This is the single most dangerous gotcha in the codebase. It has caused data los
 
 ## Cross-Cutting Couplings
 
-### Channel visibility is cryptographically enforced via per-channel MLS subgroups (Option B, text channels)
+### Channel visibility is cryptographically enforced via per-channel MLS subgroups (Option B, TEXT + VOICE)
 
-**Rule (UPDATED 2026-06-22 — Option B Phase 1 live):** A RESTRICTED text channel (`visibility != Everyone && !is_public`, i.e. `ServerState::channel_uses_subgroup`) is MLS-encrypted under its OWN subgroup keyed `crate::crypto::subgroup_id(server, channel)` = `"{server}#{channel}"`, NOT the server-wide group. Only members whose role satisfies the tier hold the subgroup key, so a non-qualifying member never receives a decryptable copy — visibility is now cryptographically enforced for text. `Everyone` channels stay on the server-wide group; public channels stay plaintext.
+**Rule (UPDATED 2026-06-22 — Option B Phase 1 TEXT + Phase 2 VOICE both live):** A RESTRICTED channel (`visibility != Everyone && !is_public`, i.e. `ServerState::channel_uses_subgroup`) is MLS-encrypted under its OWN subgroup keyed `crate::crypto::subgroup_id(server, channel)` = `"{server}#{channel}"`, NOT the server-wide group. Only members whose role satisfies the tier hold the subgroup key, so a non-qualifying member never receives a decryptable copy. `Everyone` channels stay on the server-wide group; public channels stay plaintext.
 
-**Posting** is still NOT cryptographically enforced (a posting-locked member can encrypt to the group, but the Rust `can_post_in_channel` rejects it server-side and the UI locks the input bar) — posting is an authorization gate, not a confidentiality boundary.
+**VOICE (Phase 2):** a restricted voice channel's SFrame media key is derived from the SUBGROUP `export_secret`, not the server group — a non-qualifying member can't derive it (decodes nothing) AND is rejected from joining outright (`handle_voice_channel_join` `can_see_channel` guard). `NetworkEvent::MlsEpochChanged` carries `channel_id: Option<String>` so Dart routes the key to that voice channel's cryptor; `voiceChannelProvider` caches SFrame keyed `(serverId, channelId)`. Mid-call demotion → subgroup remove-commit → MlsEpochChanged(cid) → forward-secrecy re-key for remaining participants + `auto_leave_invisible_voice_channels` hangs up the demoted member (runs on BOTH the plaintext AND MLS CrdtOp apply paths; Dart `_evictVoiceIfInvisible` is the belt-and-suspenders that calls `leaveChannel()`). VC participants key on the ROUTABLE WS sender, never the MLS leaf credential (multi-device: they differ → phantom participant).
 
-**Still UI-only:** the `visibility` of `Everyone` channels (no subgroup) and the membership FILTERING in the sidebar are UI conveniences; the cryptographic boundary is the subgroup itself.
+**Subgroup coordinator** prefers the OWNER when online (always `can_see_channel` → one globally-agreed coordinator; avoids split-brain where two qualifying masters fork the group), else lowest qualifying online leaf-holder.
 
-**Where:** `MlsManager` (opaque-string group keys), `crypto_handler::send_mls_broadcast_topic`/`reconcile_subgroups_for_server`, `message_ops.rs` send sites, swarm.rs MLS handlers (KeyPackage/Welcome/Commit decrypt resolve `channel_id`→group_key). Dart `visibleChannelsProvider`/`canPostInChannelProvider` are defense-in-depth + UX. See `project_per_channel_mls_subgroups` memory. KNOWN PARKED: Phase 2 restricted VOICE (SFrame from subgroup).
+**Posting** is still NOT cryptographically enforced (authorization gate, not a confidentiality boundary).
+
+**Where:** `MlsManager` (opaque-string group keys), `crypto_handler::send_mls_broadcast_topic`/`reconcile_subgroups_for_server`/`elect_subgroup_coordinator`/`request_subgroup_bootstrap`, `voice_handler.rs` (SFrame derivation + guard + auto-leave), `message_ops.rs` send sites, swarm.rs MLS handlers (KeyPackage/Welcome/Commit/decrypt resolve `channel_id`→group_key). Dart `visibleChannelsProvider`/`canPostInChannelProvider` + `voiceChannelProvider._channelUsesSubgroup` are defense-in-depth + UX. See `project_per_channel_mls_subgroups` memory.
 
 ### Channel visibility/posting UI reactivity must defeat the CrdtStore write race (desktop + mobile)
 

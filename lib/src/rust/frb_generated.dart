@@ -9947,6 +9947,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           serverId: dco_decode_String(raw[1]),
           epoch: dco_decode_u_64(raw[2]),
           sframeKey: dco_decode_list_prim_u_8_strict(raw[3]),
+          channelId: dco_decode_opt_String(raw[4]),
         );
       case 97:
         return NetworkEvent_RecoveryPoolCreated(
@@ -12423,10 +12424,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         var var_serverId = sse_decode_String(deserializer);
         var var_epoch = sse_decode_u_64(deserializer);
         var var_sframeKey = sse_decode_list_prim_u_8_strict(deserializer);
+        var var_channelId = sse_decode_opt_String(deserializer);
         return NetworkEvent_MlsEpochChanged(
           serverId: var_serverId,
           epoch: var_epoch,
           sframeKey: var_sframeKey,
+          channelId: var_channelId,
         );
       case 97:
         var var_serverId = sse_decode_String(deserializer);
@@ -14986,11 +14989,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         serverId: final serverId,
         epoch: final epoch,
         sframeKey: final sframeKey,
+        channelId: final channelId,
       ):
         sse_encode_i_32(96, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_u_64(epoch, serializer);
         sse_encode_list_prim_u_8_strict(sframeKey, serializer);
+        sse_encode_opt_String(channelId, serializer);
       case NetworkEvent_RecoveryPoolCreated(
         serverId: final serverId,
         inviteLink: final inviteLink,

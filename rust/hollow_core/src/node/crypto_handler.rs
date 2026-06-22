@@ -309,6 +309,80 @@ pub(crate) fn revoke_own_device(
     Some(signed)
 }
 
+/// Tombstone EVERY one of our devices EXCEPT the one we're running on — a single
+/// version bump that revokes all siblings at once. This is the real, propagating
+/// teardown behind the "Reset Device List" button: unlike a blunt local wipe (which
+/// the grow-only merge simply regrows on the next profile exchange), every sibling
+/// becomes a permanent `revoked` tombstone in our master-signed list, so friends
+/// converge and can never un-revoke them, and each revoked sibling self-nukes on
+/// receiving the v+1 list. Returns the re-signed list + the ids that were tombstoned
+/// this call (so the caller can push the list to each for `SelfRevoked`). `None` on
+/// a DB error or when there's nothing to revoke (already sole device).
+pub(crate) fn revoke_all_other_devices(
+    master: &crate::identity::native_identity::NativeKeypair,
+    local_device_peer_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<(SignedDeviceList, Vec<String>)> {
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let master_peer_id = master.peer_id();
+    let (mut devices, mut revoked, version): (Vec<String>, Vec<String>, u64) =
+        match store.load_device_list(&master_peer_id) {
+            Ok(Some(list)) => (list.devices.clone(), list.revoked.clone(), list.version),
+            _ => (vec![local_device_peer_id.to_string()], Vec::new(), 0),
+        };
+    // Fold in any resolver-known device ids of ours that haven't made it into the
+    // persisted list yet (live siblings, ghosts from re-link cycles) so they ALL get
+    // tombstoned — not just the ones already written down.
+    for d in super::resolver::devices_for(&master_peer_id) {
+        if d != local_device_peer_id && !devices.contains(&d) && !revoked.contains(&d) {
+            devices.push(d);
+        }
+    }
+    // Everything that isn't this device becomes a tombstone.
+    let to_revoke: Vec<String> = devices
+        .iter()
+        .filter(|d| d.as_str() != local_device_peer_id)
+        .cloned()
+        .collect();
+    if to_revoke.is_empty() {
+        hollow_log!("[HOLLOW-REVOKE] Reset device list: already the sole device, nothing to revoke");
+        return None;
+    }
+    for d in &to_revoke {
+        if !revoked.iter().any(|r| r == d) {
+            revoked.push(d.clone());
+        }
+    }
+    // Sole surviving device = us.
+    let devices = vec![local_device_peer_id.to_string()];
+    let next_version = version.saturating_add(1).max(1);
+    let signed = build_signed_device_list(master, next_version, devices, revoked);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let json = serde_json::to_string(&signed).ok()?;
+    if let Err(e) = store.save_device_list(
+        &signed.master_peer_id, &json, signed.version, &signed.devices, now,
+    ) {
+        hollow_log!("[HOLLOW-REVOKE] Reset device list: failed to persist: {e}");
+        return None;
+    }
+    // Prune every revoked id from the in-memory resolver + guard against phantom
+    // chats from any that are still momentarily alive, then re-seed our survivor.
+    for d in &to_revoke {
+        super::resolver::forget(d);
+    }
+    super::resolver::mark_revoked(&to_revoke);
+    super::resolver::seed_self(&signed.master_peer_id, &signed.devices);
+    hollow_log!(
+        "[HOLLOW-REVOKE] Reset device list: revoked {} sibling(s) → sole device (v{})",
+        to_revoke.len(), signed.version
+    );
+    Some((signed, to_revoke))
+}
+
 /// Union a single sibling device id into OUR OWN master-signed device list.
 ///
 /// Used by the inbox-proof path: a peer joining our own `inbox:{master}` room is,
@@ -1001,6 +1075,65 @@ pub(crate) fn elect_coordinator(
     masters.into_iter().next()
 }
 
+/// Server-group MLS coordinator with OWNER PREFERENCE. The owner always holds the
+/// server group and is the natural single authority, so when the owner is online,
+/// holds a leaf, and isn't the excluded sender, the owner is the sole committer for
+/// server-group adds. This keeps server-group epochs LINEAR and owner-authoritative
+/// — a non-owner committer can add a member and then fail to fan the Commit out to
+/// some other leaf (e.g. the owner), which then diverges permanently with no retry.
+/// (Distinct-identity 3+ member deadlock.) Falls back to the deterministic
+/// lowest-master election when the owner is offline / not a leaf / is the sender.
+pub(crate) fn elect_server_coordinator(
+    server: &crate::crdt::server_state::ServerState,
+    mls_members: &[String],
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> Option<String> {
+    // The owner master id (members are master-keyed).
+    let owner = server.members.keys().find(|m| {
+        server.roles.get(*m)
+            .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+            .unwrap_or(false)
+    });
+    if let Some(owner) = owner {
+        let owner_online = owner.as_str() == local_peer || peer_is_reachable(ws_room_peers, owner);
+        // The owner must be a candidate of THIS election: it holds a leaf AND isn't
+        // the excluded sender (the caller pre-filters the sender's identity out of
+        // `mls_members`, so an owner that sent the KP won't appear here).
+        let owner_is_candidate = mls_members.iter().any(|p| super::resolver::same_identity(p, owner));
+        if owner_online && owner_is_candidate {
+            return Some(owner.clone());
+        }
+    }
+    // Owner unavailable — deterministic lowest-master fallback.
+    elect_coordinator(mls_members, local_peer, ws_room_peers)
+}
+
+/// Where a member sends its server-group bootstrap/recovery KeyPackage. The OWNER
+/// always holds the server group, so it's the always-valid recovery target — when
+/// online (and not us) we target the owner; otherwise fall back to the lowest
+/// online master among CRDT members (excluding us). This pairs with
+/// `elect_server_coordinator` so the owner is both the committer and the recovery
+/// target, closing the 3+-distinct-member recovery deadlock.
+pub(crate) fn server_bootstrap_target(
+    server: &crate::crdt::server_state::ServerState,
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> Option<String> {
+    let owner = server.members.keys().find(|m| {
+        server.roles.get(*m)
+            .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+            .unwrap_or(false)
+    });
+    if let Some(owner) = owner {
+        if owner.as_str() != local_peer && peer_is_reachable(ws_room_peers, owner) {
+            return Some(owner.clone());
+        }
+    }
+    let members: Vec<String> = server.members.keys().cloned().collect();
+    elect_coordinator(&members, local_peer, ws_room_peers).filter(|c| c != local_peer)
+}
+
 pub(crate) fn is_mls_coordinator(
     mls: &MlsManager,
     server_id: &str,
@@ -1057,6 +1190,20 @@ pub(crate) fn elect_subgroup_coordinator(
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
 ) -> Option<String> {
+    // Prefer the OWNER (always qualifies — Owner sees every channel) when online: a
+    // globally-agreed single coordinator that needs no per-node leaf knowledge, so
+    // two nodes can't each elect themselves and fork the subgroup. Lowest-qualifying
+    // master only when the owner is offline.
+    let owner = server.members.keys().find(|m| {
+        server.roles.get(*m)
+            .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+            .unwrap_or(false)
+    });
+    if let Some(owner) = owner {
+        if owner.as_str() == local_peer || peer_is_reachable(ws_room_peers, owner) {
+            return Some(owner.clone());
+        }
+    }
     let mut masters: Vec<String> = server.members.keys()
         .filter(|m| server.can_see_channel(m, channel_id))
         .filter(|m| m.as_str() == local_peer || peer_is_reachable(ws_room_peers, m))
@@ -1145,18 +1292,40 @@ pub(crate) fn reconcile_subgroups_for_server(
         // (doesn't hold the group yet → can't add others without their KeyPackage).
         // If nobody holds the group yet (first restriction), fall back to the lowest
         // qualifying online master to bootstrap creation.
+        // Prefer the OWNER as the single subgroup coordinator when online. The owner
+        // ALWAYS qualifies (Owner sees every channel) and is a globally-agreed choice
+        // from the CRDT — no node needs to know who locally holds a subgroup leaf.
+        // This avoids SPLIT-BRAIN: the per-node leaf-holder heuristic below disagrees
+        // across nodes (each only knows its OWN MLS leaves), so two qualifying masters
+        // could each elect themselves and create divergent groups with the same id.
+        // Fall back to the leaf-holder/lowest-qualifying election only when the owner
+        // is offline.
         let coord = {
-            let leaf_masters: std::collections::HashSet<String> = mls.group_members(&group_key)
-                .iter().map(|l| super::resolver::resolve(l)).collect();
-            let mut holders: Vec<String> = server.members.keys()
-                .filter(|mm| server.can_see_channel(mm, &cid))
-                .filter(|mm| mm.as_str() == local_peer || peer_is_reachable(ws_room_peers, mm))
-                .filter(|mm| leaf_masters.contains(*mm))
-                .cloned()
-                .collect();
-            holders.sort();
-            holders.into_iter().next()
-                .or_else(|| elect_subgroup_coordinator(server, &cid, local_peer, ws_room_peers))
+            let owner = server.members.keys().find(|m| {
+                server.roles.get(*m)
+                    .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+                    .unwrap_or(false)
+            });
+            let owner_online = owner.is_some_and(|o| {
+                o.as_str() == local_peer || peer_is_reachable(ws_room_peers, o)
+            });
+            if owner_online {
+                owner.cloned()
+            } else {
+                // Owner offline: lowest online master who still QUALIFIES AND already
+                // holds a subgroup leaf (demotion-safe); else lowest qualifying master.
+                let leaf_masters: std::collections::HashSet<String> = mls.group_members(&group_key)
+                    .iter().map(|l| super::resolver::resolve(l)).collect();
+                let mut holders: Vec<String> = server.members.keys()
+                    .filter(|mm| server.can_see_channel(mm, &cid))
+                    .filter(|mm| mm.as_str() == local_peer || peer_is_reachable(ws_room_peers, mm))
+                    .filter(|mm| leaf_masters.contains(*mm))
+                    .cloned()
+                    .collect();
+                holders.sort();
+                holders.into_iter().next()
+                    .or_else(|| elect_subgroup_coordinator(server, &cid, local_peer, ws_room_peers))
+            }
         };
         if coord.as_deref() != Some(local_peer) { continue; }
 
@@ -1258,6 +1427,7 @@ pub(crate) async fn remove_identity_from_subgroups(
                     let epoch = mls.epoch(&group_key).unwrap_or(0);
                     let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
                         server_id: server_id.to_string(), epoch, sframe_key,
+                        channel_id: Some(cid.clone()),
                     }).await;
                 }
                 let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
