@@ -270,6 +270,16 @@ pub fn vault_cache_dir() -> PathBuf {
     dir
 }
 
+/// Get the downloaded-files directory path (`~/hollow/files`). Mirror of
+/// `vault_cache_dir()` — used by the Storage Manager's files-cache eviction.
+pub fn files_dir() -> PathBuf {
+    let dir = crate::identity::data_dir()
+        .unwrap_or_else(|_| PathBuf::from("hollow"))
+        .join("files");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// Get the cache file path for a content item.
 pub fn cache_path(content_id: &str, ext: &str) -> PathBuf {
     let safe_ext = if ext.is_empty() { "bin" } else { ext };
@@ -293,12 +303,17 @@ pub fn write_to_cache(content_id: &str, ext: &str, data: &[u8]) -> Result<PathBu
     Ok(path)
 }
 
-/// Evict oldest cache files until total size is under max_bytes * 0.8.
+/// Evict oldest files in `dir` until total size is under max_bytes * 0.8.
 /// Files in `exempt_paths` are skipped (e.g. currently playing video).
-/// Returns bytes freed. Does nothing if already under limit.
-pub fn evict_cache_if_needed(max_bytes: u64, exempt_paths: &HashSet<PathBuf>) -> Result<u64, String> {
-    let dir = vault_cache_dir();
-    let entries = std::fs::read_dir(&dir).map_err(|e| format!("Failed to read cache dir: {e}"))?;
+/// Returns `(deleted_absolute_paths, bytes_freed)`. Does nothing if already
+/// under limit. Dir-agnostic core shared by the vault cache and the
+/// downloaded-files cache (Storage Manager).
+pub fn evict_dir_if_needed(
+    dir: &std::path::Path,
+    max_bytes: u64,
+    exempt_paths: &HashSet<PathBuf>,
+) -> Result<(Vec<String>, u64), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("Failed to read dir: {e}"))?;
 
     let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
     let mut total_size: u64 = 0;
@@ -315,7 +330,7 @@ pub fn evict_cache_if_needed(max_bytes: u64, exempt_paths: &HashSet<PathBuf>) ->
     }
 
     if total_size <= max_bytes {
-        return Ok(0);
+        return Ok((Vec::new(), 0));
     }
 
     // Sort by modified time — oldest first (evict oldest)
@@ -323,6 +338,7 @@ pub fn evict_cache_if_needed(max_bytes: u64, exempt_paths: &HashSet<PathBuf>) ->
 
     let target = (max_bytes as f64 * 0.8) as u64;
     let mut freed: u64 = 0;
+    let mut deleted: Vec<String> = Vec::new();
 
     for (path, size, _) in &files {
         if total_size - freed <= target {
@@ -333,9 +349,19 @@ pub fn evict_cache_if_needed(max_bytes: u64, exempt_paths: &HashSet<PathBuf>) ->
         }
         if std::fs::remove_file(path).is_ok() {
             freed += size;
+            deleted.push(path.to_string_lossy().to_string());
         }
     }
 
+    Ok((deleted, freed))
+}
+
+/// Evict oldest vault-cache files until total size is under max_bytes * 0.8.
+/// Files in `exempt_paths` are skipped (e.g. currently playing video).
+/// Returns bytes freed. Does nothing if already under limit. Thin wrapper over
+/// `evict_dir_if_needed` for the vault cache directory.
+pub fn evict_cache_if_needed(max_bytes: u64, exempt_paths: &HashSet<PathBuf>) -> Result<u64, String> {
+    let (_deleted, freed) = evict_dir_if_needed(&vault_cache_dir(), max_bytes, exempt_paths)?;
     Ok(freed)
 }
 
@@ -652,5 +678,64 @@ mod tests {
     #[test]
     fn cache_check_nonexistent() {
         assert!(check_cache("nonexistent_content_id_12345", "bin").is_none());
+    }
+
+    // ── Generalized LRU evictor (Storage Manager) ────────────────────────
+
+    #[test]
+    fn evict_dir_removes_oldest_first_to_target() {
+        let dir = tempfile::tempdir().unwrap();
+        // Three 1000-byte files, written oldest→newest with distinct mtimes.
+        for name in ["old", "mid", "new"] {
+            std::fs::write(dir.path().join(name), vec![0u8; 1000]).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // Cap = 1500 bytes (total 3000). Evicts down to target = 1500*0.8 = 1200,
+        // i.e. removes the two oldest (3000→1000), leaving "new".
+        let (deleted, freed) =
+            evict_dir_if_needed(dir.path(), 1500, &HashSet::new()).unwrap();
+        assert_eq!(freed, 2000, "freed the two oldest 1000-byte files");
+        assert_eq!(deleted.len(), 2);
+        assert!(!dir.path().join("old").exists());
+        assert!(!dir.path().join("mid").exists());
+        assert!(dir.path().join("new").exists(), "newest file is kept");
+    }
+
+    #[test]
+    fn evict_dir_noop_when_under_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), vec![0u8; 100]).unwrap();
+        let (deleted, freed) =
+            evict_dir_if_needed(dir.path(), 10_000, &HashSet::new()).unwrap();
+        assert_eq!(freed, 0);
+        assert!(deleted.is_empty());
+        assert!(dir.path().join("a").exists());
+    }
+
+    #[test]
+    fn evict_dir_skips_exempt_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        // Oldest file is exempt — it must never be deleted even though it's the
+        // first eviction candidate; the evictor moves on to the next-oldest.
+        let exempt_path = dir.path().join("old_exempt");
+        std::fs::write(&exempt_path, vec![0u8; 1000]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.path().join("mid"), vec![0u8; 1000]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.path().join("new"), vec![0u8; 1000]).unwrap();
+
+        let mut exempt = HashSet::new();
+        exempt.insert(exempt_path.clone());
+
+        // Cap 1500 → target 1200. Total 3000; the exempt 1000 can't be touched,
+        // so it evicts both non-exempt files (2000) to get under target.
+        let (deleted, freed) =
+            evict_dir_if_needed(dir.path(), 1500, &exempt).unwrap();
+        assert_eq!(freed, 2000, "evicts both non-exempt files");
+        assert_eq!(deleted.len(), 2);
+        assert!(exempt_path.exists(), "exempt file is never deleted");
+        assert!(!dir.path().join("mid").exists());
+        assert!(!dir.path().join("new").exists());
     }
 }

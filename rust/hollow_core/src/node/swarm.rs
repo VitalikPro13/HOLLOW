@@ -279,6 +279,30 @@ async fn run_event_loop(
     // Key: transfer_id, Value: (peer_id, kind, id, source_path, total_size)
     let mut pending_webrtc_sends: HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)> = HashMap::new();
 
+    // Startup sweep: delete orphaned sender-side stream temps (`.stream_send_*`,
+    // `.stream_shard_*`) left in files/ by a previous run. These are always
+    // transient ciphertext artifacts of an in-flight send — none can legitimately
+    // exist on a fresh boot — so they're safe to remove. Reclaims leaks from the
+    // pre-fix WS-relay send path that never deleted its temp (doubled disk usage).
+    {
+        let files_dir = crate::node::file_transfer::files_dir();
+        if let Ok(entries) = std::fs::read_dir(&files_dir) {
+            let mut swept = 0u32;
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with(".stream_send_") || name.starts_with(".stream_shard_") {
+                    if std::fs::remove_file(entry.path()).is_ok() {
+                        swept += 1;
+                    }
+                }
+            }
+            if swept > 0 {
+                hollow_log!("[HOLLOW-FILE] Startup swept {swept} orphaned stream temp(s) from files/");
+            }
+        }
+    }
+
     // -- Profile sync state --
     // Flag: have we broadcast our profile on first connection?
     let mut profile_broadcast_done = false;
@@ -9321,6 +9345,14 @@ async fn handle_incoming_request(
                                                     &file_id, &temp_path, enc.ciphertext.len() as u64,
                                                 ).await;
                                                 hollow_log!("[HOLLOW-FILE] Streamed file {} to {peer_str}", file_id);
+                                            }
+                                            // Clean up the re-served ciphertext temp once the WS-relay
+                                            // stream is queued. A WebRTC send still in flight owns the
+                                            // temp (removed on WebRtcTransferComplete), so only delete
+                                            // when none is pending — otherwise this leaked a duplicate
+                                            // encrypted copy on every file re-request.
+                                            if !pending_webrtc_sends.contains_key(&file_id) {
+                                                let _ = std::fs::remove_file(&temp_path);
                                             }
                                     }
                                 }

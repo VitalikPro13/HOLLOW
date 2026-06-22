@@ -242,6 +242,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ShareEntry> dco_decode_list_share_entry(dynamic raw);
 
   @protected
+  List<StorageContextUsage> dco_decode_list_storage_context_usage(dynamic raw);
+
+  @protected
   List<StoredChannelMessage> dco_decode_list_stored_channel_message(
     dynamic raw,
   );
@@ -337,6 +340,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ShareLinkInfo dco_decode_share_link_info(dynamic raw);
+
+  @protected
+  StorageBreakdown dco_decode_storage_breakdown(dynamic raw);
+
+  @protected
+  StorageContextUsage dco_decode_storage_context_usage(dynamic raw);
 
   @protected
   StorageStatsFfi dco_decode_storage_stats_ffi(dynamic raw);
@@ -650,6 +659,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ShareEntry> sse_decode_list_share_entry(SseDeserializer deserializer);
 
   @protected
+  List<StorageContextUsage> sse_decode_list_storage_context_usage(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<StoredChannelMessage> sse_decode_list_stored_channel_message(
     SseDeserializer deserializer,
   );
@@ -775,6 +789,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ShareLinkInfo sse_decode_share_link_info(SseDeserializer deserializer);
+
+  @protected
+  StorageBreakdown sse_decode_storage_breakdown(SseDeserializer deserializer);
+
+  @protected
+  StorageContextUsage sse_decode_storage_context_usage(
+    SseDeserializer deserializer,
+  );
 
   @protected
   StorageStatsFfi sse_decode_storage_stats_ffi(SseDeserializer deserializer);
@@ -1194,6 +1216,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_storage_context_usage(
+    List<StorageContextUsage> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_stored_channel_message(
     List<StoredChannelMessage> self,
     SseSerializer serializer,
@@ -1351,6 +1379,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_share_link_info(ShareLinkInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_storage_breakdown(
+    StorageBreakdown self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_storage_context_usage(
+    StorageContextUsage self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_storage_stats_ffi(

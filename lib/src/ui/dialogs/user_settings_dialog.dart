@@ -25,6 +25,7 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/ui/settings/storage_section.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
@@ -119,7 +120,7 @@ enum _SettingsCategory {
   profile,
   appearance,
   network,
-  files,
+  storage,
   audio,
   shortcuts,
   security,
@@ -134,7 +135,7 @@ extension _SettingsCategoryMeta on _SettingsCategory {
         _SettingsCategory.profile => LucideIcons.user,
         _SettingsCategory.appearance => LucideIcons.palette,
         _SettingsCategory.network => LucideIcons.globe,
-        _SettingsCategory.files => LucideIcons.hardDrive,
+        _SettingsCategory.storage => LucideIcons.hardDrive,
         _SettingsCategory.audio => LucideIcons.mic,
         _SettingsCategory.shortcuts => LucideIcons.keyboard,
         _SettingsCategory.security => LucideIcons.shield,
@@ -148,7 +149,7 @@ extension _SettingsCategoryMeta on _SettingsCategory {
         _SettingsCategory.profile => 'Profile',
         _SettingsCategory.appearance => 'Appearance',
         _SettingsCategory.network => 'Network',
-        _SettingsCategory.files => 'Files & Storage',
+        _SettingsCategory.storage => 'Files & Storage',
         _SettingsCategory.audio => 'Audio & Video',
         _SettingsCategory.shortcuts => 'Shortcuts',
         _SettingsCategory.security => 'Security',
@@ -168,9 +169,10 @@ extension _SettingsCategoryMeta on _SettingsCategory {
           'appearance theme dark light mode accent color background image layout '
               'dock classic animations transitions invisible',
         _SettingsCategory.network => 'network relay server domain connection',
-        _SettingsCategory.files =>
-          'files storage auto download threshold cache size data location folder '
-              'media image quality webp',
+        _SettingsCategory.storage =>
+          'files storage disk space cache clear reclaim downloads breakdown '
+              'auto download threshold data location folder media image quality '
+              'webp shards vault size limit cleanup manage',
         _SettingsCategory.audio =>
           'audio video voice microphone mic speaker camera gain quality test '
               'ringtone devices',
@@ -576,7 +578,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       _SettingsCategory.profile => _buildProfileTab(hollow),
       _SettingsCategory.appearance => _cardList(hollow, _appearanceCards(hollow)),
       _SettingsCategory.network => _cardList(hollow, _networkCards(hollow)),
-      _SettingsCategory.files => _cardList(hollow, _filesCards(hollow)),
+      _SettingsCategory.storage => _cardList(hollow, _storageCards(hollow)),
       _SettingsCategory.audio => _cardList(hollow, _audioCards(hollow)),
       _SettingsCategory.shortcuts => _cardList(hollow, _shortcutCards(hollow)),
       _SettingsCategory.security => const _SecurityTab(),
@@ -759,24 +761,31 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     exit(0);
   }
 
-  // ── Files & Storage category ─────────────────────────────────────
-  List<Widget> _filesCards(HollowTheme hollow) {
+  // ── Files category ───────────────────────────────────────────────
+  // ── Storage category (usage dashboard + downloads/media/limits) ──────
+  List<Widget> _storageCards(HollowTheme hollow) {
     return [
-      _SettingsCard(
-        title: 'Downloads',
-        children: [_buildAutoDownloadSlider(hollow)],
+      const _SettingsCard(
+        title: 'Usage',
+        children: [StorageBreakdownView()],
       ),
       _SettingsCard(
-        title: 'Cache',
-        children: [_buildCacheCapSlider(hollow)],
-      ),
-      _SettingsCard(
-        title: 'Data Location',
-        children: [_buildDataLocation(hollow)],
+        title: 'Cache Limits',
+        children: [
+          _buildAutoDownloadSlider(hollow),
+          const SizedBox(height: HollowSpacing.lg),
+          _buildFilesCacheCapSlider(hollow),
+          const SizedBox(height: HollowSpacing.lg),
+          _buildCacheCapSlider(hollow),
+        ],
       ),
       _SettingsCard(
         title: 'Media',
         children: const [_ImageQualitySelector()],
+      ),
+      _SettingsCard(
+        title: 'Data Location',
+        children: [_buildDataLocation(hollow)],
       ),
     ];
   }
@@ -1376,11 +1385,11 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Cache Size Limit',
+                  Text('Vault Cache Limit',
                       style: HollowTypography.body
                           .copyWith(color: hollow.textPrimary)),
                   Text(
-                    '${(cap / 1024).toStringAsFixed(1)} GB — server file downloads are evicted when cache exceeds this',
+                    '${(cap / 1024).toStringAsFixed(1)} GB — cached vault video/file playback is evicted when this is exceeded',
                     style: HollowTypography.caption.copyWith(
                         color: hollow.textSecondary, fontSize: 10),
                   ),
@@ -1420,6 +1429,72 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                   style: HollowTypography.caption
                       .copyWith(color: hollow.textSecondary, fontSize: 9)),
               Text('10 GB',
+                  style: HollowTypography.caption
+                      .copyWith(color: hollow.textSecondary, fontSize: 9)),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Downloaded-files cache cap slider (Storage category). Applies immediately;
+  /// enforced after each download completes + via "Evict now".
+  Widget _buildFilesCacheCapSlider(HollowTheme hollow) {
+    final cap = ref.watch(filesCacheCapProvider).valueOrNull ?? 5120;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(LucideIcons.download, size: 16, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.sm),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Downloaded Files Limit',
+                      style: HollowTypography.body
+                          .copyWith(color: hollow.textPrimary)),
+                  Text(
+                    '${(cap / 1024).toStringAsFixed(1)} GB — oldest downloaded files are evicted when this is exceeded (messages stay re-downloadable)',
+                    style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary, fontSize: 10),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+        SliderTheme(
+          data: SliderTheme.of(context).copyWith(
+            activeTrackColor: hollow.accent,
+            inactiveTrackColor: hollow.border,
+            thumbColor: hollow.accent,
+            overlayColor: hollow.accent.withValues(alpha: 0.1),
+            trackHeight: 3,
+            thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+          ),
+          child: Slider(
+            value: cap.toDouble().clamp(512, 51200),
+            min: 512,
+            max: 51200,
+            divisions: 99,
+            label: '${(cap / 1024).toStringAsFixed(1)} GB',
+            onChanged: (value) =>
+                ref.read(filesCacheCapProvider.notifier).setCap(value.round()),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('512 MB',
+                  style: HollowTypography.caption
+                      .copyWith(color: hollow.textSecondary, fontSize: 9)),
+              Text('50 GB',
                   style: HollowTypography.caption
                       .copyWith(color: hollow.textSecondary, fontSize: 9)),
             ],

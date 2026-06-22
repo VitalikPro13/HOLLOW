@@ -21,6 +21,7 @@ import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/ui/settings/storage_section.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
@@ -171,9 +172,9 @@ class MobileSettingsTab extends ConsumerWidget {
         _SettingsNavTile(
           icon: LucideIcons.hardDrive,
           title: 'Files & Storage',
-          subtitle: 'Image quality & cache',
+          subtitle: 'Disk usage, downloads, cache & media',
           onTap: () => _push(context, 'Files & Storage',
-              const _FilesTab(key: ValueKey('files'))),
+              const _StorageTab(key: ValueKey('storage'))),
         ),
         const SizedBox(height: HollowSpacing.sm),
         _SettingsNavTile(
@@ -1330,25 +1331,29 @@ class _AudioTab extends StatelessWidget {
   }
 }
 
-class _FilesTab extends StatelessWidget {
-  const _FilesTab({super.key});
+class _StorageTab extends StatelessWidget {
+  const _StorageTab({super.key});
 
   @override
   Widget build(BuildContext context) {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: const [
-        _SectionLabel(label: 'Downloads'),
+        _SectionLabel(label: 'Usage'),
+        SizedBox(height: HollowSpacing.sm),
+        StorageBreakdownView(),
+        SizedBox(height: HollowSpacing.xl),
+        _SectionLabel(label: 'Cache Limits'),
         SizedBox(height: HollowSpacing.sm),
         _AutoDownloadSlider(),
+        SizedBox(height: HollowSpacing.lg),
+        _FilesCacheCapSlider(),
+        SizedBox(height: HollowSpacing.lg),
+        _CacheCapSlider(),
         SizedBox(height: HollowSpacing.xl),
         _SectionLabel(label: 'Media'),
         SizedBox(height: HollowSpacing.sm),
         _ImageQualityPicker(),
-        SizedBox(height: HollowSpacing.xl),
-        _SectionLabel(label: 'Cache'),
-        SizedBox(height: HollowSpacing.sm),
-        _CacheCapSlider(),
         SizedBox(height: HollowSpacing.xl),
       ],
     );
@@ -1911,7 +1916,7 @@ class _CacheCapSlider extends ConsumerWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('Cache Size Limit', style: HollowTypography.bodySmall.copyWith(
+            Text('Vault Cache Limit', style: HollowTypography.bodySmall.copyWith(
               color: hollow.textSecondary,
             )),
             Text(label, style: HollowTypography.caption.copyWith(
@@ -1929,7 +1934,52 @@ class _CacheCapSlider extends ConsumerWidget {
           onChanged: (v) =>
               ref.read(vaultCacheCapProvider.notifier).setCap(v.round()),
         ),
-        Text('LRU-evicted cache for vault files',
+        Text('LRU-evicted cache for vault file/video playback',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary, fontSize: 11,
+            )),
+      ],
+    );
+  }
+}
+
+class _FilesCacheCapSlider extends ConsumerWidget {
+  const _FilesCacheCapSlider();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final asyncVal = ref.watch(filesCacheCapProvider);
+    final value = asyncVal.valueOrNull ?? 5120;
+
+    final label = '${(value / 1024).toStringAsFixed(1)} GB';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('Downloaded Files Limit',
+                style: HollowTypography.bodySmall.copyWith(
+                  color: hollow.textSecondary,
+                )),
+            Text(label, style: HollowTypography.caption.copyWith(
+              color: hollow.accent, fontWeight: FontWeight.w600,
+            )),
+          ],
+        ),
+        Slider(
+          value: value.toDouble().clamp(512, 51200),
+          min: 512,
+          max: 51200,
+          divisions: 99,
+          activeColor: hollow.accent,
+          inactiveColor: hollow.border,
+          onChanged: (v) =>
+              ref.read(filesCacheCapProvider.notifier).setCap(v.round()),
+        ),
+        Text('Oldest downloads are evicted past this; messages stay re-downloadable',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary, fontSize: 11,
             )),

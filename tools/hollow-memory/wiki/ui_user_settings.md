@@ -18,9 +18,15 @@ Helper: `_bannerColorFromId(String id)` generates a deterministic HSL color from
 
 ## Category Navigation System
 
-`enum _SettingsCategory { profile, appearance, network, files, audio, shortcuts, security, devices, backup, updates, about }` with a `_SettingsCategoryMeta` extension providing each category's `icon`, `label`, and `searchTerms` (keywords so the rail search matches settings *inside* a category, e.g. "theme"→Appearance, "relay"→Network, "recovery"→Security).
+`enum _SettingsCategory { profile, appearance, network, storage, audio, shortcuts, security, devices, backup, updates, about }` with a `_SettingsCategoryMeta` extension providing each category's `icon`, `label`, and `searchTerms` (keywords so the rail search matches settings *inside* a category, e.g. "theme"→Appearance, "relay"→Network, "recovery"→Security).
 
 The old monolithic "System" tab (8 sections) split into **Appearance / Network / Files & Storage / Audio & Video / Shortcuts**; the old "Security" tab (7 sections) split into **Security / Devices / Backup**.
+
+### Files & Storage category (Storage Manager, 2026-06-22)
+
+The former separate `files` + `storage` categories are merged into one `storage` category labelled **"Files & Storage"** (`_storageCards`). Cards: **Usage** (the storage dashboard), **Cache Limits** (auto-download threshold + downloaded-files cap + vault-cache cap sliders), **Media** (image quality), **Data Location**. Mobile twin: a single `_StorageTab` (the old `_FilesTab` was removed) reached from one "Files & Storage" nav tile.
+
+The dashboard widgets live in `lib/src/ui/settings/storage_section.dart` (shared desktop+mobile): `StorageBreakdownView` renders a modern summary header — big "Storage used" total + a segmented proportional usage bar (Downloads = accent, Vault cache = warning, Held shards = success) + a legend, a "⋯" `_CleanupMenu` (PopupMenuButton: "Clear all downloads" / "Clear vault cache"; held shards intentionally absent — read-only, deleting them hurts group availability), then a per-conversation/server list of `_ContextRow`s (avatar/channel icon, name, "size · N files", hover-reveal red trash for scoped clear). Backed by `storage_provider.dart` (`storageBreakdownProvider` + `storageActionsProvider`) and `filesCacheCapProvider` in `settings_provider.dart`. FFI: `get_storage_breakdown`, `clear_all_file_bytes`, `clear_file_bytes_for_context`, `clear_vault_cache`, `evict_files_cache`, `enforce_storage_caps` (api/storage.rs). Caps are ENFORCED after each download via `enforce_storage_caps` in `event_provider`'s `FileCompleted` handler (both sliders were no-op before). Clearing bytes keeps the signed FileHeader rows so messages render as re-downloadable cards.
 
 The 188px-wide left rail has: "Settings" heading, a `HollowTextField` **search filter** (updates `_searchQuery`, filters via `_filteredCategories`), then a scrolling `ListView` of `_TabItem`s for the matching categories. If the active category gets filtered out mid-type, `activeForContent` falls back to the first match so the content area never goes blank. The content area is a `Stack`: `_buildCategoryContent()` + a floating top-right X close button (`Positioned`, no tooltip).
 

@@ -36,6 +36,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_active_call_pill.dart';
@@ -551,13 +552,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     final file = result.files.first;
     if (file.path == null) return;
 
-    const maxDmBytes = 34 * 1024 * 1024;
-    if (widget.isDm && (file.size) > maxDmBytes) {
-      if (mounted) {
-        HollowToast.show(context, 'File too large. DM limit is 34 MB.',
-            type: HollowToastType.error);
-      }
-      return;
+    // Over 34 MB (DM or channel): confirm hosting as a Hollow Share rather than
+    // rejecting (DMs) or silently auto-converting (channels).
+    if (file.size > kLargeFileThresholdBytes) {
+      final ok = mounted &&
+          await confirmLargeFileShare(context,
+              fileName: file.name, sizeBytes: file.size);
+      if (!ok) return;
     }
 
     // STAGE the file (don't auto-send) so the user can add a caption before
@@ -703,14 +704,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     final file = File(result.filePath);
     if (!await file.exists()) return;
     final size = await file.length();
-    const maxDmBytes = 34 * 1024 * 1024;
-    if (widget.isDm && size > maxDmBytes) {
-      if (mounted) {
-        HollowToast.show(context, 'Voice message too large (34 MB limit)',
-            type: HollowToastType.error);
+    if (size > kLargeFileThresholdBytes) {
+      final ok = mounted &&
+          await confirmLargeFileShare(context,
+              fileName: 'Voice message.ogg', sizeBytes: size);
+      if (!ok) {
+        try { await file.delete(); } catch (_) {}
+        return;
       }
-      try { await file.delete(); } catch (_) {}
-      return;
     }
     try {
       final messageId = DateTime.now().microsecondsSinceEpoch.toRadixString(36);

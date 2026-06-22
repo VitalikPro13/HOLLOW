@@ -3965,6 +3965,113 @@ impl MessageStore {
         Ok(count)
     }
 
+    // ── Storage Manager (downloaded-file disk usage) ────────────────────────
+
+    /// Per-context disk usage of downloaded files (Storage Manager breakdown).
+    /// Returns rows of `(context_type, context_id, total_size_bytes, file_count)`
+    /// for files that are completed AND still on disk. Cheap — backed by
+    /// `idx_files_context (context_type, context_id)`.
+    pub fn storage_breakdown(&self) -> Result<Vec<(String, String, u64, u32)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT context_type, context_id,
+                        COALESCE(SUM(size_bytes), 0) AS bytes,
+                        COUNT(*) AS cnt
+                 FROM files
+                 WHERE completed_at IS NOT NULL AND disk_path IS NOT NULL
+                 GROUP BY context_type, context_id",
+            )
+            .map_err(|e| format!("Failed to prepare storage_breakdown: {e}"))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                    row.get::<_, i64>(3)? as u32,
+                ))
+            })
+            .map_err(|e| format!("Failed to query storage_breakdown: {e}"))?;
+
+        let mut out = Vec::new();
+        for row in rows.flatten() {
+            out.push(row);
+        }
+        Ok(out)
+    }
+
+    /// Get the on-disk paths of completed files for a single conversation/server.
+    pub fn disk_paths_for_context(
+        &self,
+        context_type: &str,
+        context_id: &str,
+    ) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT disk_path FROM files
+                 WHERE context_type = ?1 AND context_id = ?2
+                   AND completed_at IS NOT NULL AND disk_path IS NOT NULL",
+            )
+            .map_err(|e| format!("Failed to prepare disk_paths_for_context: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params![context_type, context_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| format!("Failed to query disk_paths_for_context: {e}"))?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// Get every on-disk path of completed files (all conversations/servers).
+    pub fn all_on_disk_paths(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT disk_path FROM files
+                 WHERE completed_at IS NOT NULL AND disk_path IS NOT NULL",
+            )
+            .map_err(|e| format!("Failed to prepare all_on_disk_paths: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query all_on_disk_paths: {e}"))?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// Null the disk_path + completed_at for a single conversation/server's files
+    /// (so the message renders as a re-downloadable card). Returns rows affected.
+    pub fn null_disk_path_for_context(
+        &self,
+        context_type: &str,
+        context_id: &str,
+    ) -> Result<u32, String> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE files SET disk_path = NULL, completed_at = NULL
+                 WHERE context_type = ?1 AND context_id = ?2
+                   AND completed_at IS NOT NULL",
+                rusqlite::params![context_type, context_id],
+            )
+            .map_err(|e| format!("Failed to null disk paths for context: {e}"))?;
+        Ok(n as u32)
+    }
+
+    /// Null the disk_path + completed_at for ALL completed files. Returns rows
+    /// affected. Used by "Clear all cached file bytes".
+    pub fn null_disk_path_all(&self) -> Result<u32, String> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE files SET disk_path = NULL, completed_at = NULL
+                 WHERE completed_at IS NOT NULL",
+                [],
+            )
+            .map_err(|e| format!("Failed to null all disk paths: {e}"))?;
+        Ok(n as u32)
+    }
+
     /// Get file_ids for missing *image* files in a specific server.
     /// Used for late-joiner image sync in 6+ member servers where non-image files
     /// use vault erasure shards instead of P2P streaming.
@@ -4340,5 +4447,94 @@ mod tests {
             .map(|m| m.text)
             .collect();
         assert_eq!(order, vec!["first", "second"], "legacy NULL rows order by timestamp");
+    }
+
+    // ── Storage Manager ────────────────────────────────────────────────────
+
+    /// Insert a completed-on-disk file row for storage tests.
+    fn insert_completed_file(
+        store: &MessageStore,
+        file_id: &str,
+        ctype: &str,
+        cid: &str,
+        size: u64,
+        disk_path: &str,
+    ) {
+        store
+            .insert_file_metadata(
+                file_id, file_id, "bin", "application/octet-stream", size,
+                1, false, None, None, None, ctype, cid, "sender", false, 1000, None,
+            )
+            .unwrap();
+        store.mark_file_complete(file_id, disk_path).unwrap();
+    }
+
+    /// `storage_breakdown` groups completed-on-disk files by (context_type,
+    /// context_id) and sums their bytes + counts. Incomplete files are excluded.
+    #[test]
+    fn storage_breakdown_sums_per_context() {
+        let store = mem_store();
+        insert_completed_file(&store, "f1", "dm", "alice", 100, "/tmp/f1");
+        insert_completed_file(&store, "f2", "dm", "alice", 200, "/tmp/f2");
+        insert_completed_file(&store, "f3", "channel", "s1:c1", 50, "/tmp/f3");
+        // An incomplete file (no mark_file_complete) must NOT count.
+        store
+            .insert_file_metadata(
+                "f4", "f4", "bin", "application/octet-stream", 999,
+                1, false, None, None, None, "dm", "alice", "sender", false, 1000, None,
+            )
+            .unwrap();
+
+        let rows = store.storage_breakdown().unwrap();
+        let dm = rows.iter().find(|(t, c, _, _)| t == "dm" && c == "alice").unwrap();
+        assert_eq!(dm.2, 300, "DM bytes = 100+200, excludes incomplete 999");
+        assert_eq!(dm.3, 2, "DM file count = 2 completed");
+        let ch = rows.iter().find(|(t, c, _, _)| t == "channel" && c == "s1:c1").unwrap();
+        assert_eq!(ch.2, 50);
+        assert_eq!(ch.3, 1);
+    }
+
+    /// `null_disk_path_for_context` clears disk_path + completed_at for ONE
+    /// context only — the conversation's files become re-downloadable while
+    /// other contexts are untouched. `disk_paths_for_context` returns the paths
+    /// to delete first.
+    #[test]
+    fn clear_context_nulls_only_that_context() {
+        let store = mem_store();
+        insert_completed_file(&store, "f1", "dm", "alice", 100, "/tmp/f1");
+        insert_completed_file(&store, "f2", "dm", "bob", 200, "/tmp/f2");
+
+        let paths = store.disk_paths_for_context("dm", "alice").unwrap();
+        assert_eq!(paths, vec!["/tmp/f1".to_string()]);
+
+        let n = store.null_disk_path_for_context("dm", "alice").unwrap();
+        assert_eq!(n, 1);
+
+        // alice now has no completed-on-disk file; bob still does.
+        let rows = store.storage_breakdown().unwrap();
+        assert!(
+            !rows.iter().any(|(t, c, _, _)| t == "dm" && c == "alice"),
+            "alice's files were nulled → not in breakdown"
+        );
+        assert!(
+            rows.iter().any(|(t, c, _, _)| t == "dm" && c == "bob"),
+            "bob's files untouched"
+        );
+
+        // The metadata row survives (re-downloadable card).
+        let meta = store.get_file_metadata("f1").unwrap().unwrap();
+        assert!(meta.disk_path.is_none() && meta.completed_at.is_none());
+    }
+
+    /// `null_disk_path_all` clears every completed file (Clear all cached bytes).
+    #[test]
+    fn clear_all_nulls_every_context() {
+        let store = mem_store();
+        insert_completed_file(&store, "f1", "dm", "alice", 100, "/tmp/f1");
+        insert_completed_file(&store, "f2", "channel", "s1:c1", 50, "/tmp/f2");
+
+        let n = store.null_disk_path_all().unwrap();
+        assert_eq!(n, 2);
+        assert!(store.storage_breakdown().unwrap().is_empty());
     }
 }

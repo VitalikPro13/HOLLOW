@@ -460,6 +460,13 @@ pub(crate) async fn handle_send_file(
                         &file_id, &temp_path, enc.ciphertext.len() as u64,
                     ).await;
                     hollow_log!("[HOLLOW-FILE] Streaming {file_id} ({} bytes) to DM {peer_str}", enc.ciphertext.len());
+                    // Clean up the sender-side ciphertext temp once the WS-relay
+                    // stream is queued (awaited). A WebRTC send still in flight owns
+                    // the temp and removes it on WebRtcTransferComplete, so only
+                    // delete when no such send is pending — mirrors the channel path.
+                    if !pending_webrtc_sends.contains_key(&file_id) {
+                        let _ = tokio::fs::remove_file(&temp_path).await;
+                    }
                 }
             }
             } else if is_image {
@@ -735,6 +742,16 @@ pub(crate) async fn handle_send_file(
                                 &file_id, &temp_path, ct_size,
                             ).await;
                         }
+                    }
+                    // Clean up the sender-side ciphertext temp once all WS-relay
+                    // streams have been fully queued (ws_stream_send is awaited, so
+                    // by here the bytes are read). If a WebRTC send is still in
+                    // flight (entry present in pending_webrtc_sends), the temp is
+                    // owned by that path and removed on WebRtcTransferComplete —
+                    // don't delete it here. Without this the encrypted temp leaked
+                    // forever, doubling on-disk usage for every server file send.
+                    if !pending_webrtc_sends.contains_key(&file_id) {
+                        let _ = tokio::fs::remove_file(&temp_path).await;
                     }
                 }
             }

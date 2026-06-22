@@ -384,6 +384,35 @@ class VaultCacheCapNotifier extends AsyncNotifier<int> {
   }
 }
 
+/// Downloaded-files cache size cap in MB. Files downloaded in DMs/channels live
+/// in `~/hollow/files/`; oldest bytes are LRU-evicted when the directory exceeds
+/// this limit (signed headers are kept, so messages stay re-downloadable).
+/// Default: 5120 MB (5 GB). Surfaced + enforced by the Storage Manager.
+final filesCacheCapProvider =
+    AsyncNotifierProvider<FilesCacheCapNotifier, int>(
+        FilesCacheCapNotifier.new);
+
+class FilesCacheCapNotifier extends AsyncNotifier<int> {
+  @override
+  Future<int> build() async {
+    final val = await storage_api.loadSetting(key: 'files_cache_cap_mb');
+    if (val != null && val.isNotEmpty) {
+      final mb = int.tryParse(val);
+      if (mb != null && mb >= 512) return mb;
+    }
+    return 5120;
+  }
+
+  Future<void> setCap(int mb) async {
+    final clamped = mb.clamp(512, 51200);
+    await storage_api.saveSetting(
+      key: 'files_cache_cap_mb',
+      value: clamped.toString(),
+    );
+    state = AsyncData(clamped);
+  }
+}
+
 /// Whether the Shadowsocks proxy is enabled (for censored networks).
 /// Loaded from the local DB at startup.
 final proxyEnabledProvider =

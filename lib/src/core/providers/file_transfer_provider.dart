@@ -101,8 +101,10 @@ class FileTransferState {
 /// Context for a pending share-backed file send. Stored until ShareCreated
 /// fires, then the FileHeader is sent with share_ref.
 class _PendingShareSend {
-  final String serverId;
-  final String channelId;
+  /// DM target (null for channel sends).
+  final String? peerId;
+  final String? serverId;
+  final String? channelId;
   final String messageText;
   final String fileName;
   final String messageId;
@@ -110,8 +112,9 @@ class _PendingShareSend {
   final bool isVideo;
   final VideoThumbnailResult? videoThumb;
   _PendingShareSend({
-    required this.serverId,
-    required this.channelId,
+    this.peerId,
+    this.serverId,
+    this.channelId,
     required this.messageText,
     required this.fileName,
     required this.messageId,
@@ -184,13 +187,17 @@ class FileTransferNotifier
     }
 
     try {
-      // Large channel files (>34 MB): create a hidden Share for chunked P2P delivery,
-      // then send the FileHeader with share_ref so receivers download via Share.
+      // Large files (>34 MB) — DM or channel: host as a hidden Hollow Share for
+      // chunked P2P delivery, then send the FileHeader with share_ref so
+      // receivers download via Share. The caller has already shown the >34 MB
+      // confirmation dialog (see large_file_share_dialog.dart) before reaching
+      // here, so we always Share-route an oversized file (no silent reject).
       final fileSize = File(filePath).lengthSync();
       const maxDirectSize = 34 * 1024 * 1024;
-      if (fileSize > maxDirectSize && serverId != null && channelId != null) {
+      if (fileSize > maxDirectSize) {
         debugPrint('[HOLLOW] File >34 MB ($fileSize bytes) — creating hidden Share');
         _pendingShareSends[filePath] = _PendingShareSend(
+          peerId: peerId,
           serverId: serverId,
           channelId: channelId,
           messageText: messageText,
@@ -215,16 +222,6 @@ class FileTransferNotifier
           messageText: messageText,
           preExtractedThumb: videoThumb,
         );
-        return;
-      }
-
-      // Cap DM file size at 34 MB — no Share system for DMs yet, so large
-      // files would stream raw over P2P with no chunking/resume. Reject early.
-      if (serverId == null && fileSize > maxDirectSize) {
-        debugPrint('[HOLLOW] DM file too large: ${fileSize} bytes (max $maxDirectSize)');
-        final updated = Map<String, FileTransferState>.from(state);
-        updated.remove(messageId);
-        state = updated;
         return;
       }
 
@@ -433,7 +430,7 @@ class FileTransferNotifier
     info.then((decoded) async {
       final keyHex = _extractKeyHexFromLink(link);
       await network_api.sendFile(
-        peerId: null,
+        peerId: ctx.peerId,
         serverId: ctx.serverId,
         channelId: ctx.channelId,
         filePath: ctx.filePath,

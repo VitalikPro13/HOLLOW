@@ -52,6 +52,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -594,21 +595,15 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   }
 
   /// Stages a file dropped from the OS via desktop_drop.
-  /// Enforces the same 34 MB DM cap as [_pickAndStageFile].
-  void _handleDroppedFile(String path, String name, int sizeBytes) {
+  /// Files over 34 MB prompt to host as a Hollow Share (see [_pickAndStageFile]).
+  Future<void> _handleDroppedFile(String path, String name, int sizeBytes) async {
     if (!mounted) return;
 
-    // Enforce 34 MB limit for DMs.
-    const maxDmBytes = 34 * 1024 * 1024;
-    if (sizeBytes > maxDmBytes) {
-      final fileMb = (sizeBytes / (1024 * 1024)).toStringAsFixed(1);
-      HollowToast.show(
-        context,
-        'File too large (${fileMb}MB). DM limit is 34 MB.',
-        type: HollowToastType.error,
-        duration: const Duration(seconds: 4),
-      );
-      return;
+    // Over 34 MB: confirm hosting it as a Hollow Share rather than rejecting.
+    if (sizeBytes > kLargeFileThresholdBytes) {
+      final ok = await confirmLargeFileShare(context,
+          fileName: name, sizeBytes: sizeBytes);
+      if (!ok || !mounted) return;
     }
 
     final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
@@ -630,20 +625,15 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       final file = result.files.first;
       if (file.path == null) { _isPicking = false; return; }
 
-      // Enforce 34 MB limit for DMs (always on default relay).
-      const maxDmBytes = 34 * 1024 * 1024;
-      if (file.size > maxDmBytes) {
-        if (mounted) {
-          final fileMb = (file.size / (1024 * 1024)).toStringAsFixed(1);
-          HollowToast.show(
-            context,
-            'File too large (${fileMb}MB). DM limit is 34 MB.',
-            type: HollowToastType.error,
-            duration: const Duration(seconds: 4),
-          );
+      // Over 34 MB: confirm hosting it as a Hollow Share rather than rejecting.
+      if (file.size > kLargeFileThresholdBytes) {
+        final ok = mounted &&
+            await confirmLargeFileShare(context,
+                fileName: file.name, sizeBytes: file.size);
+        if (!ok) {
+          _isPicking = false;
+          return;
         }
-        _isPicking = false;
-        return;
       }
 
       final ext = file.name.contains('.')
@@ -675,21 +665,16 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       setState(() => _isRecordingVoice = false);
       return;
     }
-    const maxDmBytes = 34 * 1024 * 1024;
     final size = await file.length();
-    if (size > maxDmBytes) {
-      final fileMb = (size / (1024 * 1024)).toStringAsFixed(1);
-      if (mounted) {
-        HollowToast.show(
-          context,
-          'Voice message too large (${fileMb}MB). DM limit is 34 MB.',
-          type: HollowToastType.error,
-          duration: const Duration(seconds: 4),
-        );
+    if (size > kLargeFileThresholdBytes) {
+      final ok = mounted &&
+          await confirmLargeFileShare(context,
+              fileName: 'Voice message.ogg', sizeBytes: size);
+      if (!ok) {
+        try { await file.delete(); } catch (_) {}
+        if (mounted) setState(() => _isRecordingVoice = false);
+        return;
       }
-      try { await file.delete(); } catch (_) {}
-      setState(() => _isRecordingVoice = false);
-      return;
     }
     setState(() {
       _isRecordingVoice = false;

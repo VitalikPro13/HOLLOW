@@ -844,6 +844,227 @@ pub fn reset_stale_files() -> Result<u32, String> {
     ms.reset_stale_file_paths()
 }
 
+// ── Storage Manager (disk usage breakdown + reclaim) ────────────────────────
+
+/// Per-conversation/server disk usage of downloaded files.
+pub struct StorageContextUsage {
+    /// "dm" or "channel".
+    pub context_type: String,
+    /// DM = sender MASTER peer id; channel = "server_id:channel_id".
+    pub context_id: String,
+    /// Sum of `size_bytes` for completed-on-disk files in this context (from DB).
+    pub bytes_db: u64,
+    pub file_count: u32,
+}
+
+/// Full storage picture for the Storage Manager UI.
+pub struct StorageBreakdown {
+    /// Sum of size_bytes across all completed-on-disk files (from DB).
+    pub total_db_bytes: u64,
+    /// Actual `du` of the `files/` directory on disk (catches orphans/partials).
+    pub total_disk_bytes: u64,
+    /// Actual `du` of the `vault_cache/` directory.
+    pub vault_cache_bytes: u64,
+    /// Actual `du` of the `vault/` (held erasure shards) directory.
+    pub vault_shard_bytes: u64,
+    pub contexts: Vec<StorageContextUsage>,
+}
+
+/// Sum the byte sizes of regular files directly inside `dir` (non-recursive,
+/// matching how files/ and vault_cache/ are laid out — flat directories).
+/// Skips transient sender-side stream temps (`.stream_send_*`, `.stream_shard_*`)
+/// so an in-flight send doesn't inflate the reported usage.
+fn dir_size_bytes(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(".stream_send_") || name.starts_with(".stream_shard_") {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Get the storage usage breakdown for the Storage Manager UI.
+#[frb]
+pub fn get_storage_breakdown() -> Result<StorageBreakdown, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+
+    let rows = ms.storage_breakdown()?;
+    let mut total_db_bytes = 0u64;
+    let mut contexts = Vec::with_capacity(rows.len());
+    for (context_type, context_id, bytes_db, file_count) in rows {
+        total_db_bytes += bytes_db;
+        contexts.push(StorageContextUsage {
+            context_type,
+            context_id,
+            bytes_db,
+            file_count,
+        });
+    }
+
+    let total_disk_bytes = dir_size_bytes(&crate::vault::pipeline::files_dir());
+    let vault_cache_bytes = dir_size_bytes(&crate::vault::pipeline::vault_cache_dir());
+    let vault_shard_bytes = {
+        let dir = crate::identity::data_dir()?.join("vault");
+        dir_size_bytes(&dir)
+    };
+
+    Ok(StorageBreakdown {
+        total_db_bytes,
+        total_disk_bytes,
+        vault_cache_bytes,
+        vault_shard_bytes,
+        contexts,
+    })
+}
+
+/// Delete the file bytes for a single conversation/server (keep the signed
+/// FileHeader rows so messages render as re-downloadable). Returns bytes freed.
+#[frb]
+pub fn clear_file_bytes_for_context(context_type: String, context_id: String) -> Result<u64, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+
+    let paths = ms.disk_paths_for_context(&context_type, &context_id)?;
+    let mut freed = 0u64;
+    for p in &paths {
+        let path = std::path::Path::new(p);
+        if let Ok(meta) = std::fs::metadata(path) {
+            if std::fs::remove_file(path).is_ok() {
+                freed += meta.len();
+            }
+        }
+    }
+    // Null the rows so they show as not-on-disk (re-downloadable cards).
+    let _ = ms.null_disk_path_for_context(&context_type, &context_id)?;
+    Ok(freed)
+}
+
+/// Delete ALL downloaded file bytes (keep the signed FileHeader rows). Returns
+/// bytes freed. Removes every file in `files/` then nulls the matching rows.
+#[frb]
+pub fn clear_all_file_bytes() -> Result<u64, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+
+    let paths = ms.all_on_disk_paths()?;
+    let mut freed = 0u64;
+    for p in &paths {
+        let path = std::path::Path::new(p);
+        if let Ok(meta) = std::fs::metadata(path) {
+            if std::fs::remove_file(path).is_ok() {
+                freed += meta.len();
+            }
+        }
+    }
+    // Also sweep any orphan files in files/ not tracked by a row.
+    let files_dir = crate::vault::pipeline::files_dir();
+    if let Ok(entries) = std::fs::read_dir(&files_dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() && std::fs::remove_file(entry.path()).is_ok() {
+                    freed += meta.len();
+                }
+            }
+        }
+    }
+    let _ = ms.null_disk_path_all()?;
+    Ok(freed)
+}
+
+/// Enforce the downloaded-files LRU cap (`files/`), evicting oldest bytes until
+/// under `cap_mb`. Keeps signed headers; nulls the rows whose bytes were
+/// evicted (via `reset_stale_file_paths`). Returns bytes freed.
+#[frb]
+pub fn evict_files_cache(cap_mb: u64, exempt_paths: Vec<String>) -> Result<u64, String> {
+    let exempt: std::collections::HashSet<std::path::PathBuf> =
+        exempt_paths.iter().map(std::path::PathBuf::from).collect();
+    let (_deleted, freed) = crate::vault::pipeline::evict_dir_if_needed(
+        &crate::vault::pipeline::files_dir(),
+        cap_mb.saturating_mul(1024 * 1024),
+        &exempt,
+    )?;
+    // Null rows whose disk_path is now gone so cards render re-downloadable.
+    if freed > 0 {
+        let store = get_store();
+        if let Ok(guard) = store.lock() {
+            if let Some(ms) = guard.as_ref() {
+                let _ = ms.reset_stale_file_paths();
+            }
+        }
+    }
+    Ok(freed)
+}
+
+/// Clear the entire vault cache (`vault_cache/`) — pure cache, no signed headers
+/// live there. Returns bytes freed.
+#[frb]
+pub fn clear_vault_cache() -> Result<u64, String> {
+    let dir = crate::vault::pipeline::vault_cache_dir();
+    let mut freed = 0u64;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() && std::fs::remove_file(entry.path()).is_ok() {
+                    freed += meta.len();
+                }
+            }
+        }
+    }
+    Ok(freed)
+}
+
+/// Enforce BOTH cache caps (files/ + vault_cache/). Called after a download
+/// completes so the user-set caps are actually honored (the sliders were no-ops
+/// before this). Returns total bytes freed across both.
+#[frb]
+pub fn enforce_storage_caps(
+    files_cap_mb: u64,
+    vault_cache_cap_mb: u64,
+    exempt_paths: Vec<String>,
+) -> Result<u64, String> {
+    let exempt: std::collections::HashSet<std::path::PathBuf> =
+        exempt_paths.iter().map(std::path::PathBuf::from).collect();
+
+    let mut freed = 0u64;
+
+    let (_d1, f1) = crate::vault::pipeline::evict_dir_if_needed(
+        &crate::vault::pipeline::files_dir(),
+        files_cap_mb.saturating_mul(1024 * 1024),
+        &exempt,
+    )?;
+    freed += f1;
+    if f1 > 0 {
+        let store = get_store();
+        if let Ok(guard) = store.lock() {
+            if let Some(ms) = guard.as_ref() {
+                let _ = ms.reset_stale_file_paths();
+            }
+        }
+    }
+
+    let f2 = crate::vault::pipeline::evict_cache_if_needed(
+        vault_cache_cap_mb.saturating_mul(1024 * 1024),
+        &exempt,
+    )?;
+    freed += f2;
+
+    Ok(freed)
+}
+
 /// Get file IDs for missing images in a specific server.
 /// Used for late-joiner image sync in 6+ member servers.
 #[frb]

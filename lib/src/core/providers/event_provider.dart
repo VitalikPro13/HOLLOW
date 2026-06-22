@@ -986,6 +986,10 @@ class EventStreamNotifier extends Notifier<bool> {
               fileId, diskPath);
         // Reload the chat that contains this file to show the image.
         _reloadChatForFile(fileId);
+        // Enforce the disk caps so the user-set limits are actually honored
+        // (both sliders were no-ops before this). Keeps signed headers — only
+        // the oldest heavy bytes are evicted. Fire-and-forget.
+        _enforceStorageCaps();
 
       case NetworkEvent_FileFailed(:final fileId, :final error):
         debugPrint('[HOLLOW] File failed: $fileId — $error');
@@ -1661,6 +1665,27 @@ class EventStreamNotifier extends Notifier<bool> {
 
   /// When a file transfer completes, reload the chat that contains
   /// the file message so the image preview renders.
+  /// Enforce the downloaded-files + vault cache caps after a download completes.
+  /// Reads the user-set caps and evicts oldest bytes over the limit (signed
+  /// headers are kept, so messages stay re-downloadable). Best-effort.
+  void _enforceStorageCaps() {
+    final filesCap = ref.read(filesCacheCapProvider).valueOrNull ?? 5120;
+    final vaultCap = ref.read(vaultCacheCapProvider).valueOrNull ?? 1024;
+    storage_api
+        .enforceStorageCaps(
+          filesCapMb: BigInt.from(filesCap),
+          vaultCacheCapMb: BigInt.from(vaultCap),
+          exemptPaths: const [],
+        )
+        .then<void>((freed) {
+      if (freed > BigInt.zero) {
+        debugPrint('[HOLLOW-STORAGE] cap enforcement freed $freed bytes');
+      }
+    }).catchError((Object e) {
+      debugPrint('[HOLLOW-STORAGE] enforceStorageCaps failed: $e');
+    });
+  }
+
   Future<void> _reloadChatForFile(String fileId) async {
     try {
       final fileInfo = await storage_api.getFileMetadata(fileId: fileId);

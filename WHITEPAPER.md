@@ -972,7 +972,7 @@ Statistics are cached for 5 seconds to avoid excessive filesystem reads. This en
 
 ### 12.11 Self-Hosted Relay Configuration
 
-The relay domain is fully configurable, enabling decentralized operation:
+The relay domain is fully configurable, enabling self-hosted, relay-independent operation:
 
 - **Default relay:** `relay.anonlisten.com` (operated by AnonListen).
 - **Custom relay:** Clients can select an alternative relay domain at first launch or in settings. All WebSocket, STUN, TURN, and signaling URLs are derived from the configured relay domain.

@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'network.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `derive_db_key_public`, `derive_db_key`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `pending_link_blob_path`, `pending_link_code_path`, `pending_wipe_marker_path`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`
+// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `pending_link_blob_path`, `pending_link_code_path`, `pending_wipe_marker_path`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`
 
 /// Open the encrypted message database. Must be called after identity is loaded.
 /// Typically called once at app start (after `load_or_create_identity`).
@@ -291,6 +291,54 @@ Future<List<String>> getMissingFileIds() =>
 Future<int> resetStaleFiles() =>
     RustLib.instance.api.crateApiStorageResetStaleFiles();
 
+/// Get the storage usage breakdown for the Storage Manager UI.
+Future<StorageBreakdown> getStorageBreakdown() =>
+    RustLib.instance.api.crateApiStorageGetStorageBreakdown();
+
+/// Delete the file bytes for a single conversation/server (keep the signed
+/// FileHeader rows so messages render as re-downloadable). Returns bytes freed.
+Future<BigInt> clearFileBytesForContext({
+  required String contextType,
+  required String contextId,
+}) => RustLib.instance.api.crateApiStorageClearFileBytesForContext(
+  contextType: contextType,
+  contextId: contextId,
+);
+
+/// Delete ALL downloaded file bytes (keep the signed FileHeader rows). Returns
+/// bytes freed. Removes every file in `files/` then nulls the matching rows.
+Future<BigInt> clearAllFileBytes() =>
+    RustLib.instance.api.crateApiStorageClearAllFileBytes();
+
+/// Enforce the downloaded-files LRU cap (`files/`), evicting oldest bytes until
+/// under `cap_mb`. Keeps signed headers; nulls the rows whose bytes were
+/// evicted (via `reset_stale_file_paths`). Returns bytes freed.
+Future<BigInt> evictFilesCache({
+  required BigInt capMb,
+  required List<String> exemptPaths,
+}) => RustLib.instance.api.crateApiStorageEvictFilesCache(
+  capMb: capMb,
+  exemptPaths: exemptPaths,
+);
+
+/// Clear the entire vault cache (`vault_cache/`) — pure cache, no signed headers
+/// live there. Returns bytes freed.
+Future<BigInt> clearVaultCache() =>
+    RustLib.instance.api.crateApiStorageClearVaultCache();
+
+/// Enforce BOTH cache caps (files/ + vault_cache/). Called after a download
+/// completes so the user-set caps are actually honored (the sliders were no-ops
+/// before this). Returns total bytes freed across both.
+Future<BigInt> enforceStorageCaps({
+  required BigInt filesCapMb,
+  required BigInt vaultCacheCapMb,
+  required List<String> exemptPaths,
+}) => RustLib.instance.api.crateApiStorageEnforceStorageCaps(
+  filesCapMb: filesCapMb,
+  vaultCacheCapMb: vaultCacheCapMb,
+  exemptPaths: exemptPaths,
+);
+
 /// Get file IDs for missing images in a specific server.
 /// Used for late-joiner image sync in 6+ member servers.
 Future<List<String>> getMissingImageFileIdsForServer({
@@ -402,6 +450,86 @@ class FriendFfi {
           direction == other.direction &&
           requestedAt == other.requestedAt &&
           updatedAt == other.updatedAt;
+}
+
+/// Full storage picture for the Storage Manager UI.
+class StorageBreakdown {
+  /// Sum of size_bytes across all completed-on-disk files (from DB).
+  final BigInt totalDbBytes;
+
+  /// Actual `du` of the `files/` directory on disk (catches orphans/partials).
+  final BigInt totalDiskBytes;
+
+  /// Actual `du` of the `vault_cache/` directory.
+  final BigInt vaultCacheBytes;
+
+  /// Actual `du` of the `vault/` (held erasure shards) directory.
+  final BigInt vaultShardBytes;
+  final List<StorageContextUsage> contexts;
+
+  const StorageBreakdown({
+    required this.totalDbBytes,
+    required this.totalDiskBytes,
+    required this.vaultCacheBytes,
+    required this.vaultShardBytes,
+    required this.contexts,
+  });
+
+  @override
+  int get hashCode =>
+      totalDbBytes.hashCode ^
+      totalDiskBytes.hashCode ^
+      vaultCacheBytes.hashCode ^
+      vaultShardBytes.hashCode ^
+      contexts.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is StorageBreakdown &&
+          runtimeType == other.runtimeType &&
+          totalDbBytes == other.totalDbBytes &&
+          totalDiskBytes == other.totalDiskBytes &&
+          vaultCacheBytes == other.vaultCacheBytes &&
+          vaultShardBytes == other.vaultShardBytes &&
+          contexts == other.contexts;
+}
+
+/// Per-conversation/server disk usage of downloaded files.
+class StorageContextUsage {
+  /// "dm" or "channel".
+  final String contextType;
+
+  /// DM = sender MASTER peer id; channel = "server_id:channel_id".
+  final String contextId;
+
+  /// Sum of `size_bytes` for completed-on-disk files in this context (from DB).
+  final BigInt bytesDb;
+  final int fileCount;
+
+  const StorageContextUsage({
+    required this.contextType,
+    required this.contextId,
+    required this.bytesDb,
+    required this.fileCount,
+  });
+
+  @override
+  int get hashCode =>
+      contextType.hashCode ^
+      contextId.hashCode ^
+      bytesDb.hashCode ^
+      fileCount.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is StorageContextUsage &&
+          runtimeType == other.runtimeType &&
+          contextType == other.contextType &&
+          contextId == other.contextId &&
+          bytesDb == other.bytesDb &&
+          fileCount == other.fileCount;
 }
 
 /// A channel message returned to Dart from the local database.
