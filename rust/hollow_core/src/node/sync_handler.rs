@@ -49,7 +49,7 @@ fn broadcast_raw_to_members(
 /// (a) it already applied the change locally and (b) re-feeding a node its OWN
 /// MLS commit fails `process_commit` (epoch already advanced) → self-drops the
 /// group. Returns the number of sibling devices reached (0 for a sole device).
-fn fan_to_own_siblings(
+pub(crate) fn fan_to_own_siblings(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     local_peer_str: &str,
@@ -305,6 +305,16 @@ pub(crate) async fn handle_remove_channel(
             channel_id: channel_id.clone(),
         });
         let _ = state.apply_op(&op);
+
+        // Option B: tear down the channel's MLS subgroup locally if it had one.
+        if let Some(mls_mgr) = mls.as_mut() {
+            let group_key = crate::crypto::subgroup_id(&server_id, &channel_id);
+            if mls_mgr.has_group(&group_key) {
+                hollow_log!("[HOLLOW-MLS] Channel removed — dropping subgroup {group_key}");
+                mls_mgr.remove_group(&group_key);
+                crate::node::crypto_handler::persist_mls_state(mls_mgr, crypto_store);
+            }
+        }
 
         // Persist
         crdt_store.insert_op(op.clone());
@@ -862,6 +872,7 @@ pub(crate) async fn handle_kick_member(
                                 let data = serde_json::to_vec(&HavenMessage::MlsCommit {
                                     server_id: server_id.clone(),
                                     commit: commit_b64.clone(),
+                                    channel_id: None,
                                 }).unwrap_or_default();
                                 for member_peer_str in &broadcast_targets {
                                     if member_peer_str == &peer_id { continue; }
@@ -880,6 +891,14 @@ pub(crate) async fn handle_kick_member(
                     Err(e) => hollow_log!("[HOLLOW-MLS] Failed to remove member from MLS group: {e}"),
                 }
             }
+
+            // Option B: also drop the kicked identity from every restricted-channel
+            // subgroup so it loses access there too (not just the server group).
+            let target_master = super::resolver::resolve(&peer_id);
+            crate::node::crypto_handler::remove_identity_from_subgroups(
+                mls_mgr, event_tx, ws_cmd_tx, ws_room_peers, crypto_store,
+                state, &server_id, local_peer_str, local_device_id, &target_master,
+            ).await;
         }
     }
     false
@@ -1029,6 +1048,7 @@ pub(crate) async fn handle_leave_server(
                                 let data = serde_json::to_vec(&HavenMessage::MlsCommit {
                                     server_id: server_id.clone(),
                                     commit: commit_b64.clone(),
+                                    channel_id: None,
                                 }).unwrap_or_default();
                                 for member_peer_str in &broadcast_targets {
                                     send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
@@ -1044,6 +1064,19 @@ pub(crate) async fn handle_leave_server(
                         persist_mls_state(mls_mgr, crypto_store);
                     }
                 }
+            }
+
+            // Option B: drop every restricted-channel subgroup locally too. We're
+            // leaving the whole server, so we discard the keys; remaining members
+            // sweep our now-stale leaves on their next reconcile/KeyPackage.
+            if let Some(state) = server_states.get(&server_id) {
+                for cid in state.subgroup_channel_ids() {
+                    let gk = crate::crypto::subgroup_id(&server_id, &cid);
+                    if mls_mgr.has_group(&gk) {
+                        mls_mgr.remove_group(&gk);
+                    }
+                }
+                persist_mls_state(mls_mgr, crypto_store);
             }
         }
     }
@@ -1161,6 +1194,7 @@ pub(crate) async fn handle_ban_member(
                                 let data = serde_json::to_vec(&HavenMessage::MlsCommit {
                                     server_id: server_id.clone(),
                                     commit: commit_b64.clone(),
+                                    channel_id: None,
                                 }).unwrap_or_default();
                                 for member_peer_str in &broadcast_targets {
                                     if member_peer_str == &peer_id { continue; }
@@ -1177,6 +1211,13 @@ pub(crate) async fn handle_ban_member(
                     Err(e) => hollow_log!("[HOLLOW-MLS] Failed to remove banned member from MLS group: {e}"),
                 }
             }
+
+            // Option B: also drop the banned identity from every restricted-channel subgroup.
+            let target_master = super::resolver::resolve(&peer_id);
+            crate::node::crypto_handler::remove_identity_from_subgroups(
+                mls_mgr, event_tx, ws_cmd_tx, ws_room_peers, crypto_store,
+                state, &server_id, local_peer_str, local_device_id, &target_master,
+            ).await;
         }
     }
     false
@@ -1347,6 +1388,21 @@ pub(crate) async fn handle_set_channel_visibility(
             visibility: visibility.clone(),
         });
         let _ = state.apply_op(&op);
+
+        // Per-channel MLS subgroup (Option B): if the channel is no longer
+        // restricted (now Everyone/public), tear down its subgroup locally —
+        // messages revert to the server-wide group. (Becoming restricted is
+        // handled by the swarm reconciler, which owns the pending batch queues.)
+        if !state.channel_uses_subgroup(&channel_id) {
+            if let Some(mls_mgr) = mls.as_mut() {
+                let group_key = crate::crypto::subgroup_id(&server_id, &channel_id);
+                if mls_mgr.has_group(&group_key) {
+                    hollow_log!("[HOLLOW-MLS] Channel {channel_id} no longer restricted — removing subgroup {group_key}");
+                    mls_mgr.remove_group(&group_key);
+                    crate::node::crypto_handler::persist_mls_state(mls_mgr, crypto_store);
+                }
+            }
+        }
 
         crdt_store.insert_op(op.clone());
         if let Ok(json) = serialize_state_lean(state) {

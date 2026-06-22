@@ -13,6 +13,29 @@ use crate::hollow_log;
 const CIPHERSUITE: Ciphersuite =
     Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
+/// Group-key for a per-channel MLS subgroup ("Option B"). A restricted channel
+/// (visibility != Everyone, non-public) is encrypted under its own MLS group
+/// keyed by this string instead of the server-wide group keyed by bare
+/// `server_id`. The `#` separator never appears in a `server_id`
+/// (`12D3KooW...` peer id) nor a `channel_id` (`{server_prefix}-{hex4}`), so it
+/// round-trips unambiguously and never collides with a server group key.
+pub(crate) fn subgroup_id(server_id: &str, channel_id: &str) -> String {
+    format!("{server_id}#{channel_id}")
+}
+
+/// Inverse of [`subgroup_id`]. Splits an MLS group key into
+/// `(server_id, Option<channel_id>)`. A bare server group key has no `#` and
+/// yields `(server_id, None)`; a subgroup key `"{server}#{channel}"` yields
+/// `(server, Some(channel))`. Used by the batch timer and bootstrap handlers to
+/// recover the server room / CRDT state and the wire `channel_id` from a group
+/// key uniformly across server groups and channel subgroups.
+pub(crate) fn split_group_key(group_key: &str) -> (String, Option<String>) {
+    match group_key.split_once('#') {
+        Some((server, channel)) => (server.to_string(), Some(channel.to_string())),
+        None => (group_key.to_string(), None),
+    }
+}
+
 /// Wraps OpenMLS for Hollow.s channel group encryption.
 /// One MLS group per server. DMs stay on Olm.
 pub(crate) struct MlsManager {

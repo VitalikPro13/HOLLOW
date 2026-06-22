@@ -1398,6 +1398,29 @@ class _HollowShellState extends ConsumerState<HollowShell>
       if (serverId != null) _subscribeActiveChannel(serverId, next);
     });
 
+    // Channel-visibility eviction: when the channel you're viewing stops being
+    // visible to you in real-time (visibility tier raised, or you were demoted),
+    // the data already propagated via CRDT — this navigates the UI to match.
+    // Land on the next visible text channel, else clear to the server's home.
+    ref.listen<Map<String, ChannelInfo>>(visibleChannelsProvider, (prev, next) {
+      final selectedChannel = ref.read(selectedChannelProvider);
+      final serverId = ref.read(selectedServerProvider);
+      if (selectedChannel == null || serverId == null) return;
+      // Settings panel open → don't yank the user; the panel handles its own state.
+      if (ref.read(serverSettingsOpenProvider)) return;
+      if (next.containsKey(selectedChannel)) return; // still visible — fine
+      // No longer visible: pick the next visible text channel from the layout.
+      final layout = ref.read(channelLayoutProvider);
+      final fallback = firstTextChannelInLayout(next, layout);
+      ref.read(selectedChannelProvider.notifier).state = fallback;
+      if (fallback != null) {
+        final map = Map<String, String>.from(
+            ref.read(lastChannelPerServerProvider));
+        map[serverId] = fallback;
+        ref.read(lastChannelPerServerProvider.notifier).state = map;
+      }
+    });
+
     final hollow = HollowTheme.of(context);
 
     final nodeState = ref.watch(nodeProvider);

@@ -321,7 +321,7 @@ MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
 
 ### 5.2 Group Lifecycle
 
-**One MLS group per server.** All channels within a server share a single MLS group. Channel routing is handled at the application layer.
+**One MLS group per server, plus a subgroup per restricted channel.** By default all channels within a server share a single server-wide MLS group, with channel routing handled at the application layer. A channel with a *restricted* visibility tier (Moderator-and-above or Admin-and-above, and not a public plaintext channel) is instead encrypted under its OWN dedicated MLS subgroup, whose membership is exactly the set of members whose role satisfies the tier. Because a non-qualifying member is never a member of that subgroup, it never holds the decryption key and never receives a decryptable copy of those messages — channel visibility for restricted text channels is therefore a cryptographic boundary, not merely an application-layer filter. Subgroup membership is reconciled automatically on the events that change who qualifies (role change, visibility change, join, kick, ban, leave): a deterministically elected subgroup coordinator (the lowest-id online member who both still qualifies and already holds the subgroup) issues the add/remove commits, advancing the subgroup epoch for forward secrecy. A member removed from a subgroup retains only the messages it already legitimately received.
 
 **Creating a server:**
 1. Creator generates an MLS KeyPackage and creates a new MlsGroup.
@@ -828,16 +828,17 @@ Each channel has two independent access control settings, stored as CRDT values:
 ### 11.5 Enforcement Model
 
 **Cryptographically enforced** (Rust backend):
+- Channel visibility (restricted text channels): a Moderator-and-above or Admin-and-above text channel is encrypted under its own MLS subgroup (see §5.2). Only members whose role satisfies the tier are subgroup members and hold the key; everyone else never receives a decryptable copy. This is a confidentiality boundary, not a UI filter.
 - Message sending: `can_post_in_channel()` checked before broadcast. Unauthorized messages are rejected with an error.
 - Role changes: hierarchy validation prevents privilege escalation.
 - Kick/ban: rank check prevents members from kicking peers of equal or higher rank.
 - CRDT author verification: the `author` field is verified against the actual sender's peer ID.
 
-**UI-filtered only** (not cryptographically enforced):
-- Channel visibility: the sidebar hides restricted channels, but all members still receive all messages via the server-wide MLS group.
-- Channel posting restrictions: the input bar is disabled, but a modified client could bypass this.
+**UI-filtered / authorization-only** (not a confidentiality boundary):
+- Channel posting restrictions: enforced server-side (`can_post_in_channel`) as an authorization gate and reflected by disabling the input bar, but posting is not a confidentiality property — a posting-locked member can still read a channel it can see.
+- Sidebar filtering of `Everyone` channels: cosmetic ordering/grouping only; those channels carry no confidentiality restriction.
 
-**Limitation:** True cryptographic enforcement of channel visibility requires per-channel MLS subgroups, where each channel has its own MLS group and only authorized members hold the decryption keys. This is planned but not yet implemented. Currently, all server members can technically decrypt all channel messages.
+**Scope:** restricted *voice* channels currently still derive their SFrame media key from the server-wide group; deriving it from the channel subgroup (so non-qualifying members cannot decrypt restricted-channel media) is the planned next step.
 
 ### 11.6 Public Channels
 
@@ -1361,7 +1362,7 @@ The relay operator is **not trusted** with: message contents, encryption keys, f
 - **No traffic analysis protection.** The relay uses native TLS via uWebSockets C++ with OpenSSL (direct TLS termination, no reverse proxy), which protects message *content* from network eavesdroppers. However, message *timing and size patterns* remain visible — an observer can infer who is chatting with whom based on when messages are sent, even without reading them. Defeating this would require constant-rate padding (sending dummy traffic to hide real messages), which is impractical for a chat app.
 - **Single relay dependency.** Multi-relay support with cross-relay room gossip is designed but not yet deployed. Horizontal scaling to millions of users via a swarm of relay nodes is the planned architecture.
 - **No social recovery.** Shamir's Secret Sharing for key recovery via trusted contacts is designed but not implemented.
-- **Channel visibility is UI-enforced only.** All server members receive all channel messages via the server-wide MLS group. A modified client could read restricted channels. Per-channel MLS subgroups are planned for cryptographic enforcement.
+- **Channel visibility is cryptographically enforced for text; voice is the remaining gap.** Restricted *text* channels use per-channel MLS subgroups (§5.2), so non-qualifying members cannot decrypt them even with a modified client. Restricted *voice* channels still derive their SFrame media key from the server-wide group; deriving it from the channel subgroup is the planned next step.
 - **Multi-device push previews degrade gracefully.** When a person runs multiple devices, a fully force-killed phone may fall back to a generic "new message" banner if the relay-buffered ciphertext was sealed to a different device's Olm ratchet. The message itself is never lost — it arrives in full via live delivery and sibling backfill when the device next connects (§3.5).
 - **No web client.** Windows, macOS, Linux, Android, and iOS are supported. A Flutter Web build is a future target with no working build today.
 - **Mobile media constraints.** Voice and video calls (with SFrame E2EE), file transfer, DMs, MLS servers, vault, and archive all work on mobile. However, mobile clients cannot *originate* screen sharing or capture system audio (no platform equivalent of WASAPI loopback / Process Tap), and the large-file Share transport (>34 MB, STUN-only) is excluded on mobile because it does not survive carrier-grade NAT. Screen-share audio on desktop still uses different transport paths per platform (out-of-process Opus over a data channel on Windows, a WebRTC audio track on macOS).

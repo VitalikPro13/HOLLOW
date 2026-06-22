@@ -500,15 +500,23 @@ This is the single most dangerous gotcha in the codebase. It has caused data los
 
 ## Cross-Cutting Couplings
 
-### Channel visibility is UI-only, not cryptographically enforced
+### Channel visibility is cryptographically enforced via per-channel MLS subgroups (Option B, text channels)
 
-**Rule:** Channel `visibility` and `posting` modes are UI-filtered only. ALL members still receive ALL messages via the server-wide MLS group.
+**Rule (UPDATED 2026-06-22 — Option B Phase 1 live):** A RESTRICTED text channel (`visibility != Everyone && !is_public`, i.e. `ServerState::channel_uses_subgroup`) is MLS-encrypted under its OWN subgroup keyed `crate::crypto::subgroup_id(server, channel)` = `"{server}#{channel}"`, NOT the server-wide group. Only members whose role satisfies the tier hold the subgroup key, so a non-qualifying member never receives a decryptable copy — visibility is now cryptographically enforced for text. `Everyone` channels stay on the server-wide group; public channels stay plaintext.
 
-**Why:** The current implementation uses a single MLS group per server. Every message encrypted for that group is decryptable by every member, regardless of channel visibility settings. Per-channel MLS subgroups (Option B in the design document) are needed for true cryptographic enforcement but are not yet implemented.
+**Posting** is still NOT cryptographically enforced (a posting-locked member can encrypt to the group, but the Rust `can_post_in_channel` rejects it server-side and the UI locks the input bar) — posting is an authorization gate, not a confidentiality boundary.
 
-**Implication:** Do not rely on channel visibility for security-sensitive features. A malicious client can ignore UI filtering and read all channel messages. This is a known limitation documented for pre-v1.0.
+**Still UI-only:** the `visibility` of `Everyone` channels (no subgroup) and the membership FILTERING in the sidebar are UI conveniences; the cryptographic boundary is the subgroup itself.
 
-**Where:** `lib/src/core/providers/channel_provider.dart:visibleChannelsProvider` -- UI filtering. `lib/src/core/providers/channel_provider.dart:canPostInChannelProvider` -- UI posting guard. The Rust side does NOT enforce channel-level access on message delivery.
+**Where:** `MlsManager` (opaque-string group keys), `crypto_handler::send_mls_broadcast_topic`/`reconcile_subgroups_for_server`, `message_ops.rs` send sites, swarm.rs MLS handlers (KeyPackage/Welcome/Commit decrypt resolve `channel_id`→group_key). Dart `visibleChannelsProvider`/`canPostInChannelProvider` are defense-in-depth + UX. See `project_per_channel_mls_subgroups` memory. KNOWN PARKED: Phase 2 restricted VOICE (SFrame from subgroup).
+
+### Channel visibility/posting UI reactivity must defeat the CrdtStore write race (desktop + mobile)
+
+**Rule:** A LIVE visibility/posting change propagates correctly via CRDT/MLS, but the UI providers must be refreshed reliably on the receiver. `event_provider.dart:_refreshServerState` reloads `channelListProvider` AND invalidates `serverChannelsProvider(id)` on a retry ramp (0/120/400/1000ms) — `get_server_channels` is a DB read that races the fire-and-forget `CrdtStore` write, so a single fixed delay was unreliable.
+
+**Why:** `visibleChannelsProvider` depends only on `channelListProvider`; `canPostInChannelProvider` on `channelListProvider` + `myRole`/`myPermissions`. `channelListProvider` exists ONLY for the selected server — but mobile's Chats tab has NO selected server, so it can't help there. `serverChannelsProvider` (autoDispose family) is the per-server reactive source for mobile and was previously never invalidated on `ServerUpdated`.
+
+**Eviction:** when the open channel leaves `visibleChannelsProvider`, desktop `hollow_shell` selects the next visible text channel (else clears to home); mobile `mobile_chat_route` pops to the Chats tab. Mobile `MobileChatRoute.initState` must `loadForServer` on open (Chats-tab entry leaves the provider stale), and the Chats-tab `_ChannelList` must role-filter like `visibleChannelsProvider` + react to `serverChannelsProvider`/`myRole`/`myPermissions`. NEVER `ref.invalidate` in `initState` (ProviderScope not wired → throws; defer to a post-frame callback). See `feedback_channel_visibility_posting_ui_reactivity` memory.
 
 ### Permission bitmask bit 3 is unused (gap)
 

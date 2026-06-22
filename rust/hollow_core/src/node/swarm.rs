@@ -428,7 +428,17 @@ async fn run_event_loop(
         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
             match store.load_mls_identity() {
                 Ok(Some((signer_data, credential_data, storage_data))) => {
-                    let server_ids: Vec<String> = server_states.keys().cloned().collect();
+                    // Enumerate every MLS group key to reload: each server's bare id
+                    // (server-wide group) PLUS each restricted channel's subgroup id
+                    // (Option B). The storage blob already holds the group data; this
+                    // list is what gets instantiated into the live `groups` map.
+                    let mut server_ids: Vec<String> = Vec::new();
+                    for (sid, state) in server_states.iter() {
+                        server_ids.push(sid.clone());
+                        for cid in state.subgroup_channel_ids() {
+                            server_ids.push(crate::crypto::subgroup_id(sid, &cid));
+                        }
+                    }
                     match MlsManager::from_persisted(
                         &signer_data,
                         &credential_data,
@@ -803,12 +813,24 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::ChangeRole { server_id, peer_id, new_role } => {
-                        if sync_handler::handle_change_role(
+                        let sid = server_id.clone();
+                        let handled = sync_handler::handle_change_role(
                             &mut server_states, &event_tx, &ws_cmd_tx,
                             &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, peer_id, new_role,
                             &crdt_store,
-                        ).await { continue; }
+                        ).await;
+                        // A role change shifts who qualifies for restricted channels —
+                        // reconcile every subgroup in this server (Option B). Idempotent
+                        // + coordinator-gated, so safe even on the permission-denied path.
+                        if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&sid)) {
+                            crate::node::crypto_handler::reconcile_subgroups_for_server(
+                                mls_mgr, &ws_cmd_tx, &ws_room_peers,
+                                &mut pending_mls_key_packages, &mut pending_mls_removals,
+                                state, &sid, &local_peer_str, None,
+                            );
+                        }
+                        if handled { continue; }
                     }
 
                     NodeCommand::KickMember { server_id, peer_id } => {
@@ -960,12 +982,25 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::SetChannelVisibility { server_id, channel_id, visibility } => {
-                        if sync_handler::handle_set_channel_visibility(
+                        let sid = server_id.clone();
+                        let cid = channel_id.clone();
+                        let handled = sync_handler::handle_set_channel_visibility(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
                             &ws_room_peers, &bundle_keypair, &local_peer_str,
                             server_id, channel_id, visibility,
                             &crypto_store, &crdt_store,
-                        ).await { continue; }
+                        ).await;
+                        // If the channel became restricted, populate its subgroup
+                        // (create + pull qualifying members' KeyPackages). Teardown of
+                        // a now-Everyone channel already happened inside the handler.
+                        if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&sid)) {
+                            crate::node::crypto_handler::reconcile_subgroups_for_server(
+                                mls_mgr, &ws_cmd_tx, &ws_room_peers,
+                                &mut pending_mls_key_packages, &mut pending_mls_removals,
+                                state, &sid, &local_peer_str, Some(&cid),
+                            );
+                        }
+                        if handled { continue; }
                     }
 
                     NodeCommand::SetChannelPosting { server_id, channel_id, posting } => {
@@ -2222,6 +2257,7 @@ async fn run_event_loop(
                                                                 &ws_cmd_tx, &ws_room_peers,
                                                                 &peer_id, HavenMessage::MlsKeyPackageRequest {
                                                                     server_id: sid.clone(),
+                                                                    channel_id: None,
                                                                 },
                                                             );
                                                         }
@@ -2237,6 +2273,7 @@ async fn run_event_loop(
                                                             &peer_id, HavenMessage::MlsKeyPackage {
                                                                 server_id: sid.clone(),
                                                                 key_package: kp_b64,
+                                                                channel_id: None,
                                                             },
                                                         );
                                                         mls_bootstrap_requested.insert(sid.clone(), std::time::Instant::now());
@@ -2624,6 +2661,7 @@ async fn run_event_loop(
                                                     pid_str, HavenMessage::MlsKeyPackage {
                                                         server_id: sid.clone(),
                                                         key_package: kp_b64,
+                                                        channel_id: None,
                                                     },
                                                 );
                                                 mls_bootstrap_requested.insert(sid.clone(), std::time::Instant::now());
@@ -3248,33 +3286,45 @@ async fn run_event_loop(
             _ = mls_batch_timer.tick() => {
                 if let Some(ref mut mls_mgr) = mls {
                     // Phase 1: Batch removals (stale members + recovery re-adds) — single commit.
-                    let removal_sids: Vec<String> = pending_mls_removals.keys().cloned().collect();
-                    for server_id in removal_sids {
-                        if let Some(peers_to_remove) = pending_mls_removals.remove(&server_id) {
+                    // Keys are MLS GROUP keys: a bare `server_id` (server-wide group)
+                    // or `subgroup_id(server, channel)` (per-channel subgroup, Option B).
+                    let removal_keys: Vec<String> = pending_mls_removals.keys().cloned().collect();
+                    for group_key in removal_keys {
+                        if let Some(peers_to_remove) = pending_mls_removals.remove(&group_key) {
                             if peers_to_remove.is_empty() { continue; }
+                            let (server_id, channel_id) = crate::crypto::split_group_key(&group_key);
                             let unique: Vec<String> = {
                                 let mut set = std::collections::HashSet::new();
                                 peers_to_remove.into_iter().filter(|p| set.insert(p.clone())).collect()
                             };
                             let refs: Vec<&str> = unique.iter().map(|s| s.as_str()).collect();
-                            hollow_log!("[HOLLOW-MLS] Batch-removing {} members from {server_id}: {:?}", refs.len(), refs);
-                            match mls_mgr.remove_members_batch(&server_id, &refs) {
+                            hollow_log!("[HOLLOW-MLS] Batch-removing {} members from {group_key}: {:?}", refs.len(), refs);
+                            match mls_mgr.remove_members_batch(&group_key, &refs) {
                                 Ok(commit_bytes) => {
-                                    if let Err(e) = mls_mgr.merge_pending_commit(&server_id) {
+                                    if let Err(e) = mls_mgr.merge_pending_commit(&group_key) {
                                         hollow_log!("[HOLLOW-MLS] Failed to merge batch removal commit: {e}");
                                         continue;
                                     }
                                     persist_mls_state(mls_mgr, &crypto_store);
                                     let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
                                     if let Some(state) = server_states.get(&server_id) {
-                                        let commit_msg = HavenMessage::MlsCommit { server_id: server_id.clone(), commit: commit_b64.clone() };
+                                        let commit_msg = HavenMessage::MlsCommit {
+                                            server_id: server_id.clone(),
+                                            commit: commit_b64.clone(),
+                                            channel_id: channel_id.clone(),
+                                        };
                                         let commit_data = serde_json::to_vec(&commit_msg).unwrap_or_default();
                                         // Per-device fan-out; skip self and the exact
                                         // removed device ids (members are master-keyed).
+                                        // For a subgroup, only fan to members who still
+                                        // qualify for the channel (the others aren't leaves).
                                         let removed: std::collections::HashSet<&str> = unique.iter().map(|s| s.as_str()).collect();
                                         let mut sent_devices: std::collections::HashSet<String> = std::collections::HashSet::new();
                                         for member_peer in state.members.keys() {
                                             if super::resolver::same_identity(member_peer, &local_peer_str) { continue; }
+                                            if let Some(ref cid) = channel_id {
+                                                if !state.can_see_channel(member_peer, cid) { continue; }
+                                            }
                                             for dev in crate::node::crypto_handler::online_devices_for(&ws_room_peers, member_peer) {
                                                 if removed.contains(dev.as_str()) { continue; }
                                                 if !sent_devices.insert(dev.clone()) { continue; }
@@ -3283,16 +3333,18 @@ async fn run_event_loop(
                                         }
                                     }
                                 }
-                                Err(e) => hollow_log!("[HOLLOW-MLS] Batch removal failed for {server_id}: {e}"),
+                                Err(e) => hollow_log!("[HOLLOW-MLS] Batch removal failed for {group_key}: {e}"),
                             }
                         }
                     }
 
                     // Phase 2: Batch additions — single commit.
-                    let server_ids: Vec<String> = pending_mls_key_packages.keys().cloned().collect();
-                    for server_id in server_ids {
-                        if let Some(queued) = pending_mls_key_packages.remove(&server_id) {
+                    // Keys are MLS GROUP keys (bare server_id or subgroup_id).
+                    let add_keys: Vec<String> = pending_mls_key_packages.keys().cloned().collect();
+                    for group_key in add_keys {
+                        if let Some(queued) = pending_mls_key_packages.remove(&group_key) {
                             if queued.is_empty() { continue; }
+                            let (server_id, channel_id) = crate::crypto::split_group_key(&group_key);
 
                             // Deduplicate by peer_id — keep only the last KeyPackage per peer.
                             let mut deduped: HashMap<String, Vec<u8>> = HashMap::new();
@@ -3302,18 +3354,20 @@ async fn run_event_loop(
                             let queued: Vec<(String, Vec<u8>)> = deduped.into_iter().collect();
                             if queued.is_empty() { continue; }
 
-                            hollow_log!("[HOLLOW-MLS] Processing batch of {} KeyPackages for {server_id}", queued.len());
+                            hollow_log!("[HOLLOW-MLS] Processing batch of {} KeyPackages for {group_key}", queued.len());
 
-                            match mls_mgr.add_members_batch(&server_id, &queued) {
+                            match mls_mgr.add_members_batch(&group_key, &queued) {
                                 Ok((commit_bytes, welcome_bytes, added_peers)) => {
-                                    if let Err(e) = mls_mgr.merge_pending_commit(&server_id) {
+                                    if let Err(e) = mls_mgr.merge_pending_commit(&group_key) {
                                         hollow_log!("[HOLLOW-MLS] Failed to merge batch commit: {e}");
                                         continue;
                                     }
                                     persist_mls_state(mls_mgr, &crypto_store);
-                                    // Emit epoch change for SFrame key rotation.
-                                    if let Ok(sframe_key) = mls_mgr.export_secret(&server_id, "sframe", b"", 32) {
-                                        let epoch = mls_mgr.epoch(&server_id).unwrap_or(0);
+                                    // Emit epoch change for SFrame key rotation. (Voice
+                                    // SFrame keys are derived per group key — a restricted
+                                    // voice channel will key off its subgroup in Phase 2.)
+                                    if let Ok(sframe_key) = mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
+                                        let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
                                         let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
                                             server_id: server_id.clone(), epoch, sframe_key,
                                         }).await;
@@ -3326,6 +3380,7 @@ async fn run_event_loop(
                                     let welcome_data = serde_json::to_vec(&HavenMessage::MlsWelcome {
                                         server_id: server_id.clone(),
                                         welcome: welcome_b64,
+                                        channel_id: channel_id.clone(),
                                     }).unwrap_or_default();
                                     for peer_id_str in &added_peers {
                                             if peer_is_reachable(&ws_room_peers, peer_id_str) {
@@ -3350,10 +3405,15 @@ async fn run_event_loop(
                                         let commit_data = serde_json::to_vec(&HavenMessage::MlsCommit {
                                             server_id: server_id.clone(),
                                             commit: commit_b64,
+                                            channel_id: channel_id.clone(),
                                         }).unwrap_or_default();
                                         let mut sent_devices: std::collections::HashSet<String> = std::collections::HashSet::new();
                                         for member_peer_str in state.members.keys() {
                                             if super::resolver::same_identity(member_peer_str, &local_peer_str) { continue; }
+                                            // Subgroup: only existing qualifying leaves get the Commit.
+                                            if let Some(ref cid) = channel_id {
+                                                if !state.can_see_channel(member_peer_str, cid) { continue; }
+                                            }
                                             for dev in crate::node::crypto_handler::online_devices_for(&ws_room_peers, member_peer_str) {
                                                 if added_peers.contains(&dev) { continue; }   // gets the Welcome instead
                                                 if !sent_devices.insert(dev.clone()) { continue; } // already sent
@@ -3362,7 +3422,7 @@ async fn run_event_loop(
                                         }
                                     }
 
-                                    hollow_log!("[HOLLOW-MLS] Batch-added {} members to server {server_id}: {:?}", added_peers.len(), added_peers);
+                                    hollow_log!("[HOLLOW-MLS] Batch-added {} members to {group_key}: {:?}", added_peers.len(), added_peers);
 
                                     // Coordinator side: request channel sync FROM each
                                     // recovered peer.  During the stale epoch the
@@ -3371,9 +3431,15 @@ async fn run_event_loop(
                                     // from them fills the gap on this side.
                                     if let Some(state) = server_states.get(&server_id) {
                                         if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                            // Server group: sync all channels. Subgroup:
+                                            // sync only the one restricted channel it serves.
+                                            let sync_cids: Vec<String> = match &channel_id {
+                                                Some(cid) => vec![cid.clone()],
+                                                None => state.channels.keys().cloned().collect(),
+                                            };
                                             for peer_id_str in &added_peers {
                                                 if !peer_is_reachable(&ws_room_peers, peer_id_str) { continue; }
-                                                for cid in state.channels.keys() {
+                                                for cid in &sync_cids {
                                                     let sender_ts = store.get_per_sender_timestamps(&server_id, cid)
                                                         .unwrap_or_default();
                                                     let our_latest = store.get_latest_channel_timestamp(&server_id, cid)
@@ -3392,7 +3458,7 @@ async fn run_event_loop(
                                         }
                                     }
                                 }
-                                Err(e) => hollow_log!("[HOLLOW-MLS] Batch add failed for {server_id}: {e}"),
+                                Err(e) => hollow_log!("[HOLLOW-MLS] Batch add failed for {group_key}: {e}"),
                             }
                         }
                     }
@@ -6654,6 +6720,7 @@ async fn handle_incoming_request(
                                             peer_str, HavenMessage::MlsKeyPackage {
                                                 server_id: server_id.clone(),
                                                 key_package: kp_b64,
+                                                channel_id: None,
                                             },
                                         );
                                         hollow_log!("[HOLLOW-MLS] Sent bootstrap KeyPackage to join responder {peer_str} for {server_id}");
@@ -6966,6 +7033,30 @@ async fn handle_incoming_request(
                             let _ = event_tx.send(NetworkEvent::ServerUpdated {
                                 server_id: server_id.clone(),
                             }).await;
+                        }
+                    }
+
+                    // Option B: a role/visibility op shifts who qualifies for restricted
+                    // channels. Reconcile subgroups here too (coordinator-gated + idempotent)
+                    // so the ACTUAL subgroup coordinator acts even when the op was authored
+                    // by some other member. The `state` mutable borrow above has ended.
+                    let affects_subgroups = matches!(
+                        &op.payload,
+                        CrdtPayload::RoleChanged { .. }
+                            | CrdtPayload::ChannelVisibilityChanged { .. }
+                            | CrdtPayload::MemberRemoved { .. }
+                            | CrdtPayload::MemberBanned { .. }
+                    );
+                    if affects_subgroups {
+                        let only = if let CrdtPayload::ChannelVisibilityChanged { channel_id, .. } = &op.payload {
+                            Some(channel_id.clone())
+                        } else { None };
+                        if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&server_id)) {
+                            crate::node::crypto_handler::reconcile_subgroups_for_server(
+                                mls_mgr, ws_cmd_tx, ws_room_peers,
+                                pending_mls_key_packages, pending_mls_removals,
+                                state, &server_id, local_peer_str, only.as_deref(),
+                            );
                         }
                     }
                 }
@@ -7708,37 +7799,61 @@ async fn handle_incoming_request(
 
         // -- MLS message handlers --
 
-        HavenMessage::MlsChannelMessage { server_id, body } => {
-            hollow_log!("[HOLLOW-TOPIC] RECV MlsChannelMessage from {peer_str} for {server_id} ({} b64 bytes)", body.len());
+        HavenMessage::MlsChannelMessage { server_id, body, channel_id: msg_channel_id } => {
+            // Restricted channels (Option B) are encrypted under a per-channel
+            // subgroup keyed by `subgroup_id(server, channel)`. `group_key` is the
+            // bare server_id for `None` (server-wide group, backward compatible).
+            let group_key = match &msg_channel_id {
+                Some(cid) => crate::crypto::subgroup_id(&server_id, cid),
+                None => server_id.clone(),
+            };
+            hollow_log!("[HOLLOW-TOPIC] RECV MlsChannelMessage from {peer_str} for {group_key} ({} b64 bytes)", body.len());
 
 
             if let Some(mls_mgr) = mls {
-                if !mls_mgr.has_group(&server_id) {
-                    hollow_log!("[HOLLOW-MLS] Received MlsChannelMessage for unknown group {server_id}");
+                if !mls_mgr.has_group(&group_key) {
+                    hollow_log!("[HOLLOW-MLS] Received MlsChannelMessage for unknown group {group_key}");
 
                     // If we're a member of this server but don't have the MLS group,
                     // the Welcome was lost. Send KeyPackage to the coordinator
                     // (lowest online peer) for MLS bootstrap.
-                    // Only do this once per server to avoid spamming (expires after 60s).
-                    if !mls_bootstrap_requested.get(&server_id).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
+                    // Only do this once per group to avoid spamming (expires after 60s).
+                    if !mls_bootstrap_requested.get(&group_key).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
                         if let Some(state) = server_states.get(&server_id) {
-                            // Coordinator = lowest online MASTER (excluding us). Send
-                            // our KeyPackage to one of that master's online DEVICES
-                            // (the master itself has no socket).
-                            let members: Vec<String> = state.members.keys().cloned().collect();
-                            let coordinator = elect_coordinator(&members, &local_peer_str, ws_room_peers)
-                                .filter(|c| c != &local_peer_str);
-                            if let Some(coordinator) = coordinator {
-                                if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
-                                    let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
-                                        server_id: server_id.clone(),
-                                        key_package: kp_b64,
-                                    }).unwrap_or_default();
-                                    let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &coordinator, data);
-                                    if sent > 0 {
-                                        hollow_log!("[HOLLOW-MLS] Sent KeyPackage to coordinator {coordinator} ({sent} device(s)) for MLS bootstrap (triggered by message)");
-                                        mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
+                            // Subgroup: only bootstrap if we actually qualify for the
+                            // channel (a non-qualifying member never holds the key and
+                            // must NOT request it). Server group: any member bootstraps.
+                            let may_bootstrap = match &msg_channel_id {
+                                Some(cid) => state.can_see_channel(&local_peer_str, cid),
+                                None => true,
+                            };
+                            // Coordinator = lowest online MASTER (excluding us). For a
+                            // subgroup the candidate set is the qualifying members; for
+                            // the server group it's all members.
+                            let coordinator = match &msg_channel_id {
+                                Some(cid) => crate::node::crypto_handler::elect_subgroup_coordinator(
+                                    state, cid, &local_peer_str, ws_room_peers,
+                                ).filter(|c| c != &local_peer_str),
+                                None => {
+                                    let members: Vec<String> = state.members.keys().cloned().collect();
+                                    elect_coordinator(&members, &local_peer_str, ws_room_peers)
+                                        .filter(|c| c != &local_peer_str)
+                                }
+                            };
+                            if may_bootstrap {
+                                if let Some(coordinator) = coordinator {
+                                    if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                        let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                        let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+                                            server_id: server_id.clone(),
+                                            key_package: kp_b64,
+                                            channel_id: msg_channel_id.clone(),
+                                        }).unwrap_or_default();
+                                        let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &coordinator, data);
+                                        if sent > 0 {
+                                            hollow_log!("[HOLLOW-MLS] Sent KeyPackage to coordinator {coordinator} ({sent} device(s)) for {group_key} bootstrap (triggered by message)");
+                                            mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
+                                        }
                                     }
                                 }
                             }
@@ -7753,11 +7868,11 @@ async fn handle_incoming_request(
                     Err(e) => { hollow_log!("[HOLLOW-MLS] Base64 decode failed: {e}"); return; }
                 };
 
-                match mls_mgr.decrypt(&server_id, &ciphertext) {
+                match mls_mgr.decrypt(&group_key, &ciphertext) {
                     Ok((plaintext, sender_peer_id)) => {
                         *mls_dirty = true;
-                        mls_decrypt_failures.remove(&server_id); // Reset failure counter on success.
-                        hollow_log!("[HOLLOW-TOPIC] DECRYPT ok for {server_id}, sender(leaf)={sender_peer_id}");
+                        mls_decrypt_failures.remove(&group_key); // Reset failure counter on success.
+                        hollow_log!("[HOLLOW-TOPIC] DECRYPT ok for {group_key}, sender(leaf)={sender_peer_id}");
 
                         // Parse the plaintext as a MessageEnvelope.
                         let envelope_str = String::from_utf8_lossy(&plaintext);
@@ -8163,24 +8278,25 @@ async fn handle_incoming_request(
                         }
                     }
                     Err(e) => {
-                        hollow_log!("[HOLLOW-MLS] Decrypt failed for {server_id}: {e}");
+                        hollow_log!("[HOLLOW-MLS] Decrypt failed for {group_key}: {e}");
 
-                        // Immediately request sync from the sender for
-                        // subscribed channels only.  The dropped message
-                        // came via topic routing so it belongs to one of our
-                        // subscribed channels.  Syncing just those (instead
-                        // of all channels) avoids pulling history the user
-                        // hasn't opened.  5s dedup prevents flood.
+                        // Immediately request sync from the sender. Server group:
+                        // all subscribed channels (the dropped message came via topic
+                        // routing for one of them). Subgroup: just that one channel.
+                        // 5s dedup prevents flood.
                         {
-                            let dedup_key = format!("mls_fail_sync:{server_id}:{peer_str}");
+                            let dedup_key = format!("mls_fail_sync:{group_key}:{peer_str}");
                             if !channel_sync_sent.get(&dedup_key).is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
                                 channel_sync_sent.insert(dedup_key, std::time::Instant::now());
                                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                                    let subscribed: Vec<String> = subscribed_channels
-                                        .get(&server_id)
-                                        .cloned()
-                                        .unwrap_or_default();
-                                    for cid in &subscribed {
+                                    let sync_cids: Vec<String> = match &msg_channel_id {
+                                        Some(cid) => vec![cid.clone()],
+                                        None => subscribed_channels
+                                            .get(&server_id)
+                                            .cloned()
+                                            .unwrap_or_default(),
+                                    };
+                                    for cid in &sync_cids {
                                         let sender_ts = store.get_per_sender_timestamps(&server_id, cid)
                                             .unwrap_or_default();
                                         let our_latest = store.get_latest_channel_timestamp(&server_id, cid)
@@ -8195,45 +8311,60 @@ async fn handle_incoming_request(
                                             },
                                         );
                                     }
-                                    hollow_log!("[HOLLOW-MLS] Requested immediate sync from {peer_str} for {} subscribed channels in {server_id}", subscribed.len());
+                                    hollow_log!("[HOLLOW-MLS] Requested immediate sync from {peer_str} for {} channel(s) in {group_key}", sync_cids.len());
                                 }
                             }
                         }
 
                         // Track consecutive failures — trigger recovery after 3.
-                        let count = mls_decrypt_failures.entry(server_id.clone()).or_insert(0);
+                        let count = mls_decrypt_failures.entry(group_key.clone()).or_insert(0);
                         *count += 1;
 
-                        if *count >= 3 && !mls_bootstrap_requested.get(&server_id).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
-                            hollow_log!("[HOLLOW-MLS] {} consecutive decrypt failures — initiating MLS recovery for {server_id}", count);
+                        if *count >= 3 && !mls_bootstrap_requested.get(&group_key).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
+                            hollow_log!("[HOLLOW-MLS] {} consecutive decrypt failures — initiating MLS recovery for {group_key}", count);
                             *count = 0;
 
                             // Drop broken group and request re-bootstrap from coordinator.
-                            mls_mgr.remove_group(&server_id);
+                            mls_mgr.remove_group(&group_key);
                             persist_mls_state(mls_mgr, crypto_store);
 
                             if let Some(state) = server_states.get(&server_id) {
                                 let local_peer = local_peer_str.to_string();
                                 // Only attempt recovery if we're still a member (skip if banned/removed).
-                                // Members are master-keyed; our master is the key.
-                                if !state.members.contains_key(&local_peer) {
-                                    hollow_log!("[HOLLOW-MLS] Skipping recovery for {server_id} — no longer a member");
+                                // Members are master-keyed; our master is the key. For a
+                                // subgroup we must also still QUALIFY for the channel.
+                                let still_eligible = state.members.contains_key(&local_peer)
+                                    && match &msg_channel_id {
+                                        Some(cid) => state.can_see_channel(&local_peer, cid),
+                                        None => true,
+                                    };
+                                if !still_eligible {
+                                    hollow_log!("[HOLLOW-MLS] Skipping recovery for {group_key} — no longer eligible");
                                 } else {
                                     // Coordinator = lowest online MASTER (excluding us);
-                                    // send to one of its online DEVICES.
-                                    let members: Vec<String> = state.members.keys().cloned().collect();
-                                    let coordinator = elect_coordinator(&members, &local_peer, ws_room_peers)
-                                        .filter(|c| c != &local_peer);
+                                    // send to one of its online DEVICES. Subgroup uses the
+                                    // qualifying-member candidate set.
+                                    let coordinator = match &msg_channel_id {
+                                        Some(cid) => crate::node::crypto_handler::elect_subgroup_coordinator(
+                                            state, cid, &local_peer, ws_room_peers,
+                                        ).filter(|c| c != &local_peer),
+                                        None => {
+                                            let members: Vec<String> = state.members.keys().cloned().collect();
+                                            elect_coordinator(&members, &local_peer, ws_room_peers)
+                                                .filter(|c| c != &local_peer)
+                                        }
+                                    };
                                     if let Some(coordinator) = coordinator {
                                         if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
                                             let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
                                             let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
                                                 server_id: server_id.clone(),
                                                 key_package: kp_b64,
+                                                channel_id: msg_channel_id.clone(),
                                             }).unwrap_or_default();
                                             let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &coordinator, data);
-                                            mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
-                                            hollow_log!("[HOLLOW-MLS] Sent recovery KeyPackage to coordinator {coordinator} ({sent} device(s)) for {server_id}");
+                                            mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
+                                            hollow_log!("[HOLLOW-MLS] Sent recovery KeyPackage to coordinator {coordinator} ({sent} device(s)) for {group_key}");
                                         }
                                     }
                                 }
@@ -8244,8 +8375,14 @@ async fn handle_incoming_request(
             }
         }
 
-        HavenMessage::MlsKeyPackage { server_id, key_package } => {
-            hollow_log!("[HOLLOW-MLS] MlsKeyPackage from {peer_str} for server {server_id}");
+        HavenMessage::MlsKeyPackage { server_id, key_package, channel_id: kp_channel_id } => {
+            // Restricted channel (Option B): the KeyPackage is for the per-channel
+            // subgroup. `group_key` is the bare server_id for the server group.
+            let group_key = match &kp_channel_id {
+                Some(cid) => crate::crypto::subgroup_id(&server_id, cid),
+                None => server_id.clone(),
+            };
+            hollow_log!("[HOLLOW-MLS] MlsKeyPackage from {peer_str} for {group_key}");
 
             // L6: Reject KeyPackage from non-members (prevents unauthorized MLS group joins).
             // Multi-device (Step 6): members are keyed by MASTER; the sender is a
@@ -8253,12 +8390,22 @@ async fn handle_incoming_request(
             // what lets a SIBLING of an existing member get its own leaf added
             // without first being its own CRDT member. Unknown device → resolves to
             // itself → falls back to plain membership (single-device unchanged).
+            // For a subgroup, the sender's identity must additionally QUALIFY for
+            // the channel (role satisfies the visibility tier) — otherwise we'd add
+            // a leaf that cryptographically defeats the channel restriction.
             if let Some(state) = server_states.get(&server_id) {
                 let is_member = state.members.keys()
                     .any(|k| super::resolver::same_identity(peer_str, k));
                 if !is_member {
-                    hollow_log!("[HOLLOW-SECURITY] REJECTED MlsKeyPackage from non-member {peer_str} for {server_id}");
+                    hollow_log!("[HOLLOW-SECURITY] REJECTED MlsKeyPackage from non-member {peer_str} for {group_key}");
                     return;
+                }
+                if let Some(cid) = &kp_channel_id {
+                    let sender_master = super::resolver::resolve(peer_str);
+                    if !state.can_see_channel(&sender_master, cid) {
+                        hollow_log!("[HOLLOW-SECURITY] REJECTED subgroup MlsKeyPackage from {peer_str} — role doesn't satisfy channel {cid} tier");
+                        return;
+                    }
                 }
             } else {
                 hollow_log!("[HOLLOW-MLS] No server state for {server_id}, skipping KeyPackage");
@@ -8276,7 +8423,7 @@ async fn handle_incoming_request(
             // leaf to the SAME group: one epoch advance, no fork. The `!=` guard keeps
             // us from self-processing (we never send our own KP to ourselves).
             let sibling_readd = mls.as_ref().is_some_and(|m| {
-                if !(m.has_group(&server_id)
+                if !(m.has_group(&group_key)
                     && super::resolver::same_identity(peer_str, local_peer_str)
                     && peer_str != local_peer_str)
                 {
@@ -8285,14 +8432,14 @@ async fn handle_incoming_request(
                 // If several of OUR OWN device leaves currently hold the group, only the
                 // lowest-id one re-adds (deterministic single re-adder → no glare). The
                 // sender's (regenerating) leaf is excluded from this tiebreak set.
-                let our_leaves: Vec<String> = m.group_members(&server_id)
+                let our_leaves: Vec<String> = m.group_members(&group_key)
                     .into_iter()
                     .filter(|p| super::resolver::same_identity(p, local_peer_str) && p != peer_str)
                     .collect();
                 our_leaves.iter().map(|s| s.as_str()).min() == Some(&device_peer_id[..])
             });
             if sibling_readd {
-                hollow_log!("[HOLLOW-MLS] Sibling re-add: adding our own sibling {peer_str}'s regenerated leaf to {server_id} (bypassing coordinator election)");
+                hollow_log!("[HOLLOW-MLS] Sibling re-add: adding our own sibling {peer_str}'s regenerated leaf to {group_key} (bypassing coordinator election)");
             }
 
             // Distributed committer: lowest online MLS member (by MASTER identity)
@@ -8301,18 +8448,38 @@ async fn handle_incoming_request(
             // their group, so neither the sending device nor its siblings can be
             // the coordinator that processes it.
             if !sibling_readd { if let Some(mls_mgr) = mls.as_ref() {
-                if mls_mgr.has_group(&server_id) {
-                    let members: Vec<String> = mls_mgr.group_members(&server_id)
+                if mls_mgr.has_group(&group_key) {
+                    let members: Vec<String> = mls_mgr.group_members(&group_key)
                         .into_iter()
                         .filter(|p| !super::resolver::same_identity(p, peer_str))
                         .collect();
                     let coordinator = elect_coordinator(&members, local_peer_str, &ws_room_peers);
                     if coordinator.as_deref() != Some(local_peer_str) {
-                        hollow_log!("[HOLLOW-MLS] Not MLS coordinator for {server_id} (excluding sender identity), skipping KeyPackage");
+                        hollow_log!("[HOLLOW-MLS] Not MLS coordinator for {group_key} (excluding sender identity), skipping KeyPackage");
+                        return;
+                    }
+                } else if kp_channel_id.is_some() {
+                    // Subgroup doesn't exist yet — the elected subgroup coordinator
+                    // (lowest online qualifying member, excluding the sender) creates
+                    // and populates it. Candidate set = members who can see the channel.
+                    let cid = kp_channel_id.as_deref().unwrap();
+                    let coordinator = server_states.get(&server_id).and_then(|s| {
+                        let mut masters: Vec<String> = s.members.keys()
+                            .filter(|m| s.can_see_channel(m, cid))
+                            .filter(|m| !super::resolver::same_identity(peer_str, m))
+                            .filter(|m| m.as_str() == local_peer_str || peer_is_reachable(&ws_room_peers, m))
+                            .cloned()
+                            .collect();
+                        masters.sort();
+                        masters.dedup();
+                        masters.into_iter().next()
+                    });
+                    if coordinator.as_deref() != Some(local_peer_str) {
+                        hollow_log!("[HOLLOW-MLS] Not subgroup coordinator for {group_key}, skipping KeyPackage");
                         return;
                     }
                 } else {
-                    // No MLS group yet — only the owner can create it.
+                    // No server MLS group yet — only the owner can create it.
                     let local_peer = local_peer_str.to_string();
                     let is_owner = server_states.get(&server_id)
                         .map(|s| {
@@ -8329,29 +8496,35 @@ async fn handle_incoming_request(
             } } // close `if let Some(mls_mgr)` + `if !sibling_readd`
 
             if let Some(mls_mgr) = mls {
-                // Create MLS group lazily if it doesn't exist (migration for pre-MLS servers).
-                if !mls_mgr.has_group(&server_id) {
-                    hollow_log!("[HOLLOW-MLS] Lazily creating MLS group for existing server {server_id}");
-                    if let Err(e) = mls_mgr.create_group(&server_id) {
+                // Create MLS group lazily if it doesn't exist (server group: migration
+                // for pre-MLS servers; subgroup: first restricted-channel join).
+                if !mls_mgr.has_group(&group_key) {
+                    hollow_log!("[HOLLOW-MLS] Lazily creating MLS group {group_key}");
+                    if let Err(e) = mls_mgr.create_group(&group_key) {
                         hollow_log!("[HOLLOW-MLS] Failed to create MLS group: {e}");
                         return;
                     }
                 }
 
-                // Step 1: Queue stale MLS members (whose IDENTITY isn't in the CRDT)
-                // for batch removal. Multi-device (Step 6): MLS leaves are device
-                // ids, CRDT members are masters — a leaf is stale iff NO CRDT member
-                // shares its identity. Never sweep our own device's leaf
-                // (same_identity to our master).
+                // Step 1: Queue stale MLS members for batch removal. A leaf is stale
+                // iff NO CRDT member shares its identity (Step 6: leaves are device
+                // ids, members are masters) — and, for a subgroup, additionally if the
+                // member's identity no longer QUALIFIES for the channel (demoted).
+                // Never sweep our own device's leaf.
                 if let Some(state) = server_states.get(&server_id) {
-                    let mls_members = mls_mgr.group_members(&server_id);
+                    let mls_members = mls_mgr.group_members(&group_key);
                     for stale_peer in &mls_members {
                         if super::resolver::same_identity(stale_peer, local_peer_str) { continue; }
+                        let stale_master = super::resolver::resolve(stale_peer);
                         let has_member = state.members.keys()
                             .any(|k| super::resolver::same_identity(stale_peer, k));
-                        if !has_member {
-                            hollow_log!("[HOLLOW-MLS] Queuing stale MLS member {stale_peer} for batch removal from {server_id}");
-                            pending_mls_removals.entry(server_id.clone()).or_default().push(stale_peer.clone());
+                        let qualifies = match &kp_channel_id {
+                            Some(cid) => state.can_see_channel(&stale_master, cid),
+                            None => true,
+                        };
+                        if !has_member || !qualifies {
+                            hollow_log!("[HOLLOW-MLS] Queuing stale/ineligible MLS member {stale_peer} for batch removal from {group_key}");
+                            pending_mls_removals.entry(group_key.clone()).or_default().push(stale_peer.clone());
                         }
                     }
                 }
@@ -8359,9 +8532,9 @@ async fn handle_incoming_request(
                 // Step 2: If the SENDING DEVICE already has a leaf, queue THAT exact
                 // leaf for batch removal + re-add (recovery). Match the exact device
                 // id — never a sibling's live leaf (siblings have distinct ids).
-                if mls_mgr.group_members(&server_id).contains(&peer_str.to_string()) {
-                    hollow_log!("[HOLLOW-MLS] Device {peer_str} already in MLS group for {server_id} — queuing for batch removal + re-add");
-                    pending_mls_removals.entry(server_id.clone()).or_default().push(peer_str.to_string());
+                if mls_mgr.group_members(&group_key).contains(&peer_str.to_string()) {
+                    hollow_log!("[HOLLOW-MLS] Device {peer_str} already in MLS group {group_key} — queuing for batch removal + re-add");
+                    pending_mls_removals.entry(group_key.clone()).or_default().push(peer_str.to_string());
                 }
 
                 let kp_bytes = match base64::engine::general_purpose::STANDARD.decode(&key_package) {
@@ -8371,16 +8544,20 @@ async fn handle_incoming_request(
 
                 // Queue KeyPackage for batch processing (single epoch advance per batch).
                 pending_mls_key_packages
-                    .entry(server_id.clone())
+                    .entry(group_key.clone())
                     .or_default()
                     .push((peer_str.to_string(), kp_bytes));
-                hollow_log!("[HOLLOW-MLS] Queued KeyPackage from {peer_str} for batch add to {server_id}");
+                hollow_log!("[HOLLOW-MLS] Queued KeyPackage from {peer_str} for batch add to {group_key}");
             }
         }
 
-        HavenMessage::MlsWelcome { server_id, welcome } => {
-            hollow_log!("[HOLLOW-MLS] MlsWelcome from {peer_str} for server {server_id}");
-            
+        HavenMessage::MlsWelcome { server_id, welcome, channel_id: wl_channel_id } => {
+            let group_key = match &wl_channel_id {
+                Some(cid) => crate::crypto::subgroup_id(&server_id, cid),
+                None => server_id.clone(),
+            };
+            hollow_log!("[HOLLOW-MLS] MlsWelcome from {peer_str} for {group_key}");
+
 
             if let Some(mls_mgr) = mls {
                 let welcome_bytes = match base64::engine::general_purpose::STANDARD.decode(&welcome) {
@@ -8389,26 +8566,28 @@ async fn handle_incoming_request(
                 };
 
                 // If group already exists locally (stale from failed recovery), remove it first.
-                if mls_mgr.has_group(&server_id) {
-                    hollow_log!("[HOLLOW-MLS] Removing stale local group for {server_id} before Welcome");
-                    mls_mgr.remove_group(&server_id);
+                if mls_mgr.has_group(&group_key) {
+                    hollow_log!("[HOLLOW-MLS] Removing stale local group for {group_key} before Welcome");
+                    mls_mgr.remove_group(&group_key);
                 }
 
-                match mls_mgr.join_from_welcome(&server_id, &welcome_bytes) {
+                match mls_mgr.join_from_welcome(&group_key, &welcome_bytes) {
                     Ok(()) => {
                         persist_mls_state(mls_mgr, crypto_store);
-                        mls_bootstrap_requested.remove(&server_id);
-                        mls_decrypt_failures.remove(&server_id);
-                        hollow_log!("[HOLLOW-MLS] Joined MLS group for server {server_id}");
+                        mls_bootstrap_requested.remove(&group_key);
+                        mls_decrypt_failures.remove(&group_key);
+                        hollow_log!("[HOLLOW-MLS] Joined MLS group {group_key}");
 
-                        // After MLS recovery, sync ALL channels — not just empty ones.
-                        // Messages that arrived during the stale epoch were silently
-                        // dropped (decrypt failed), so the DB has gaps even when
-                        // our_latest != 0.  Use per-sender timestamps so the
-                        // responder only sends what we're actually missing.
+                        // After MLS recovery, sync channels — server group: ALL channels
+                        // (not just empty ones; the DB has gaps from the stale epoch).
+                        // Subgroup: just the one restricted channel it serves.
                         if let Some(state) = server_states.get(&server_id) {
                             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                                for cid in state.channels.keys() {
+                                let sync_cids: Vec<String> = match &wl_channel_id {
+                                    Some(cid) => vec![cid.clone()],
+                                    None => state.channels.keys().cloned().collect(),
+                                };
+                                for cid in &sync_cids {
                                     let sender_ts = store.get_per_sender_timestamps(&server_id, cid)
                                         .unwrap_or_default();
                                     let our_latest = store.get_latest_channel_timestamp(&server_id, cid)
@@ -8427,69 +8606,84 @@ async fn handle_incoming_request(
                         }
                     }
                     Err(e) => {
-                        hollow_log!("[HOLLOW-MLS] Failed to join from Welcome for {server_id}: {e}");
+                        hollow_log!("[HOLLOW-MLS] Failed to join from Welcome for {group_key}: {e}");
                         // Clear bootstrap flag so next MlsChannelMessage can trigger retry.
-                        mls_bootstrap_requested.remove(&server_id);
+                        mls_bootstrap_requested.remove(&group_key);
                     }
                 }
             }
         }
 
-        HavenMessage::MlsCommit { server_id, commit } => {
-            hollow_log!("[HOLLOW-MLS] MlsCommit from {peer_str} for server {server_id}");
-            
+        HavenMessage::MlsCommit { server_id, commit, channel_id: cm_channel_id } => {
+            let group_key = match &cm_channel_id {
+                Some(cid) => crate::crypto::subgroup_id(&server_id, cid),
+                None => server_id.clone(),
+            };
+            hollow_log!("[HOLLOW-MLS] MlsCommit from {peer_str} for {group_key}");
+
 
             if let Some(mls_mgr) = mls {
+                // We may receive a Commit for a subgroup we're not part of (we don't
+                // qualify for the channel) — ignore it rather than self-drop.
+                if !mls_mgr.has_group(&group_key) {
+                    hollow_log!("[HOLLOW-MLS] Ignoring Commit for group we don't hold: {group_key}");
+                    return;
+                }
                 let commit_bytes = match base64::engine::general_purpose::STANDARD.decode(&commit) {
                     Ok(b) => b,
                     Err(e) => { hollow_log!("[HOLLOW-MLS] Base64 decode Commit failed: {e}"); return; }
                 };
 
-                match mls_mgr.process_commit(&server_id, &commit_bytes) {
+                match mls_mgr.process_commit(&group_key, &commit_bytes) {
                     Ok(()) => {
                         persist_mls_state(mls_mgr, crypto_store);
-                        hollow_log!("[HOLLOW-MLS] Processed commit for server {server_id}");
+                        hollow_log!("[HOLLOW-MLS] Processed commit for {group_key}");
                         // Emit epoch change for SFrame key rotation.
-                        if let Ok(sframe_key) = mls_mgr.export_secret(&server_id, "sframe", b"", 32) {
-                            let epoch = mls_mgr.epoch(&server_id).unwrap_or(0);
+                        if let Ok(sframe_key) = mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
+                            let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
                             let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
                                 server_id: server_id.clone(), epoch, sframe_key,
                             }).await;
                         }
                     }
                     Err(e) => {
-                        hollow_log!("[HOLLOW-MLS] Failed to process commit for {server_id}: {e}");
+                        hollow_log!("[HOLLOW-MLS] Failed to process commit for {group_key}: {e}");
 
                         // Commit processing failed — MLS group state is stale.
-                        // Drop group and request re-bootstrap from owner.
-                        if !mls_bootstrap_requested.get(&server_id).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
-                            hollow_log!("[HOLLOW-MLS] Dropping stale MLS group and requesting re-bootstrap for {server_id}");
-                            mls_mgr.remove_group(&server_id);
+                        // Drop group and request re-bootstrap. Server group: from owner.
+                        // Subgroup: from the subgroup coordinator (qualifying members).
+                        if !mls_bootstrap_requested.get(&group_key).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
+                            hollow_log!("[HOLLOW-MLS] Dropping stale MLS group and requesting re-bootstrap for {group_key}");
+                            mls_mgr.remove_group(&group_key);
                             persist_mls_state(mls_mgr, crypto_store);
 
                             if let Some(state) = server_states.get(&server_id) {
                                 let local_peer = local_peer_str.to_string();
-                                for member in state.members_list() {
-                                    if member.peer_id == local_peer { continue; }
-                                    let is_owner = state.roles.get(&member.peer_id)
-                                        .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
-                                        .unwrap_or(false);
-                                    if is_owner {
-                                            // member.peer_id is the owner's MASTER — fan
-                                            // the KeyPackage to its online device(s).
-                                            if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
-                                                let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                                let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
-                                                    server_id: server_id.clone(),
-                                                    key_package: kp_b64,
-                                                }).unwrap_or_default();
-                                                let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &member.peer_id, data);
-                                                if sent > 0 {
-                                                    mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
-                                                    hollow_log!("[HOLLOW-MLS] Sent re-bootstrap KeyPackage to owner {} ({sent} device(s)) for {server_id}", member.peer_id);
-                                                }
-                                            }
-                                        break;
+                                // Pick the re-bootstrap target.
+                                let target: Option<String> = match &cm_channel_id {
+                                    Some(cid) => crate::node::crypto_handler::elect_subgroup_coordinator(
+                                        state, cid, &local_peer, &ws_room_peers,
+                                    ).filter(|c| c != &local_peer),
+                                    None => state.members_list().into_iter()
+                                        .find(|m| m.peer_id != local_peer
+                                            && state.roles.get(&m.peer_id)
+                                                .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+                                                .unwrap_or(false))
+                                        .map(|m| m.peer_id.clone()),
+                                };
+                                if let Some(target) = target {
+                                    if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
+                                        let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                        let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+                                            server_id: server_id.clone(),
+                                            key_package: kp_b64,
+                                            channel_id: cm_channel_id.clone(),
+                                        }).unwrap_or_default();
+                                        let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &target, data);
+                                        if sent > 0 {
+                                            mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
+                                            hollow_log!("[HOLLOW-MLS] Sent re-bootstrap KeyPackage to {target} ({sent} device(s)) for {group_key}");
+                                        }
                                     }
                                 }
                             }
@@ -8499,15 +8693,19 @@ async fn handle_incoming_request(
             }
         }
 
-        HavenMessage::MlsKeyPackageRequest { server_id } => {
-            hollow_log!("[HOLLOW-MLS] MlsKeyPackageRequest from {peer_str} for server {server_id}");
-            
+        HavenMessage::MlsKeyPackageRequest { server_id, channel_id: kpr_channel_id } => {
+            let group_key = match &kpr_channel_id {
+                Some(cid) => crate::crypto::subgroup_id(&server_id, cid),
+                None => server_id.clone(),
+            };
+            hollow_log!("[HOLLOW-MLS] MlsKeyPackageRequest from {peer_str} for {group_key}");
+
 
             // Respond with our KeyPackage if we have an MLS identity.
             // Skip if we already have the MLS group (reconnecting peer, not a new joiner).
             if let Some(mls_mgr) = mls {
-                if mls_mgr.has_group(&server_id) {
-                    hollow_log!("[HOLLOW-MLS] Already in MLS group for {server_id}, ignoring KeyPackageRequest");
+                if mls_mgr.has_group(&group_key) {
+                    hollow_log!("[HOLLOW-MLS] Already in MLS group {group_key}, ignoring KeyPackageRequest");
                     return;
                 }
                 match mls_mgr.generate_key_package() {
@@ -8518,6 +8716,7 @@ async fn handle_incoming_request(
                             peer_str, HavenMessage::MlsKeyPackage {
                                 server_id,
                                 key_package: kp_b64,
+                                channel_id: kpr_channel_id,
                             },
                         );
                     }

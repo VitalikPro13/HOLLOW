@@ -203,13 +203,33 @@ class EventStreamNotifier extends Notifier<bool> {
     ref.invalidate(serverIsNsfwProvider(serverId));
     ref.invalidate(myPermissionsProvider(serverId));
     ref.invalidate(myRoleProvider(serverId));
-    if (ref.read(selectedServerProvider) == serverId) {
-      // CrdtStore persists via fire-and-forget mpsc — the DB write may not
-      // have flushed yet when ServerUpdated fires. A short delay lets the
-      // actor drain before we re-read. Optimistic UI updates cover the gap.
-      Future.delayed(const Duration(milliseconds: 50), () {
-        ref.read(channelListProvider.notifier).loadForServer(serverId);
-        ref.read(channelLayoutProvider.notifier).loadForServer(serverId);
+    // CrdtStore persists via fire-and-forget mpsc, so getServerChannels (a DB
+    // read) races the actor's write — a single fixed delay was unreliable (worked
+    // on join because that path re-reads after the write lands, but flaky for a
+    // LIVE remote ChannelVisibilityChanged/ChannelPostingChanged). Refresh both
+    // the selected-server map AND the per-server snapshot on a ramp:
+    //   - channelListProvider: drives desktop shell + the open mobile chat route.
+    //   - serverChannelsProvider: drives the mobile Chats-tab list, which has NO
+    //     selected server (so channelListProvider can't help it). Both target the
+    //     same DB; the ramp lets the eventually-consistent write land.
+    _reloadChannelsWithRetry(serverId);
+  }
+
+  /// Re-read channels for a server on a short ramp to defeat the CrdtStore
+  /// fire-and-forget write race. Refreshes the per-server snapshot (Chats-tab
+  /// list, any server) every tick; refreshes the selected-server map only while
+  /// that server is still selected. Cheap: each tick is one DB read.
+  void _reloadChannelsWithRetry(String serverId) {
+    const delays = [Duration.zero, Duration(milliseconds: 120),
+        Duration(milliseconds: 400), Duration(milliseconds: 1000)];
+    for (final d in delays) {
+      Future.delayed(d, () {
+        // Per-server snapshot — refresh regardless of selection (Chats tab).
+        ref.invalidate(serverChannelsProvider(serverId));
+        if (ref.read(selectedServerProvider) == serverId) {
+          ref.read(channelListProvider.notifier).loadForServer(serverId);
+          ref.read(channelLayoutProvider.notifier).loadForServer(serverId);
+        }
       });
     }
   }

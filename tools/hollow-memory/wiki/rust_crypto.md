@@ -313,7 +313,7 @@ pub(crate) struct MlsManager {
     provider: OpenMlsRustCrypto,                   // OpenMLS crypto provider
     signer: SignatureKeyPair,                       // Ed25519 signing keypair for MLS
     credential_with_key: CredentialWithKey,         // BasicCredential (peer_id bytes) + signature public key
-    groups: HashMap<String, MlsGroup>,              // server_id -> MLS group
+    groups: HashMap<String, MlsGroup>,              // OPAQUE group key -> MLS group
 }
 ```
 
@@ -323,7 +323,7 @@ pub(crate) struct MlsManager {
 - Hash: SHA-256
 - Signatures: Ed25519
 
-One MLS group per server. DMs use Olm, not MLS. The credential identity is the raw `peer_id` bytes, so `group_members()` can extract peer IDs by reading credential content.
+The `groups` map is keyed by an OPAQUE group-key string, not strictly a server_id. Normally a server's group key IS the bare `server_id`, but per-channel MLS subgroups (Option B, 2026-06-22) add a SECOND kind of key: `crate::crypto::subgroup_id(server, channel)` = `"{server}#{channel}"` for a RESTRICTED text channel (visibility != Everyone, non-public), encrypted under its own group so non-qualifying members can't decrypt. `split_group_key(key) -> (server, Option<channel>)` is the inverse used by the batch timer + bootstrap handlers. All `MlsManager` methods (`create_group`/`add_members_batch`/`encrypt`/`decrypt`/`process_commit`/`export_secret`/`epoch`/`remove_group`/`group_members`) take this opaque key. `from_persisted` must be given EVERY key to restore (server ids + restricted-channel subgroup ids) or the subgroup data in the storage blob isn't instantiated. DMs use Olm, not MLS. The credential identity is the raw device `peer_id` bytes (multi-device: one leaf per device), so `group_members()` returns device ids. See `project_per_channel_mls_subgroups` memory.
 
 ### Lifecycle
 

@@ -415,8 +415,11 @@ For each channel entry:
 
 If `selectedServer` is `null`, returns the unfiltered channel map.
 
-### Important Note
-This is UI-only filtering. All members still receive all messages via the server-wide MLS group. Per-channel MLS subgroups are planned but not yet implemented.
+### Important Note (UPDATED 2026-06-22 — Option B Phase 1 live)
+For RESTRICTED text channels (visibility != everyone, non-public) this UI filter is now backed by a real cryptographic boundary: those channels are MLS-encrypted under a per-channel subgroup (`subgroup_id(server, channel)`), so a non-qualifying member never receives a decryptable copy. This provider is still the UI layer (defense-in-depth + what the sidebar shows); the cryptographic enforcement is the subgroup. `Everyone` channels remain on the server-wide group. See `project_per_channel_mls_subgroups` memory.
+
+### Real-time reactivity
+`channelListProvider` is reloaded reliably on `ServerUpdated` via `event_provider.dart:_refreshServerState` → `_reloadChannelsWithRetry` (ramp 0/120/400/1000ms, defeats the fire-and-forget CrdtStore DB-write race). `hollow_shell` watches this provider and EVICTS the user (selects the next visible text channel, else home) when the open channel leaves the visible map. NOTE: this provider only tracks the SELECTED server — mobile's Chats tab uses `serverChannelsProvider` (per-server, now invalidated on `ServerUpdated`) + its own role filter instead.
 
 ---
 
@@ -736,7 +739,7 @@ The Dart event handler (in `event_provider.dart`) dispatches Rust `NetworkEvent`
 | Network Event | Provider Actions |
 |---|---|
 | `ServerCreated` | `serverListProvider.onServerCreated()`, `serverStripLayoutProvider.onServerCreated()` |
-| `ServerUpdated` | `serverListProvider.onServerUpdated()`, invalidate `serverMembersProvider(id)`, `myRoleProvider(id)`, `myPermissionsProvider(id)`, `serverAvatarProvider.loadAvatar()` |
+| `ServerUpdated` | `serverListProvider.onServerUpdated()`, invalidate `serverMembersProvider(id)`, `myRoleProvider(id)`, `myPermissionsProvider(id)`, `serverIsNsfwProvider(id)`, `serverAvatarProvider.loadAvatar()`; ramp-reload `channelListProvider`/`channelLayoutProvider` (selected server) + ramp-invalidate `serverChannelsProvider(id)` (any server, for mobile Chats-tab list) via `_reloadChannelsWithRetry` |
 | `ServerDeleted` | `serverListProvider.onServerDeleted()`, `serverStripLayoutProvider.onServerDeleted()` |
 | `ChannelAdded` | `channelListProvider.onChannelAdded()` |
 | `ChannelRemoved` | `channelListProvider.onChannelRemoved()` |

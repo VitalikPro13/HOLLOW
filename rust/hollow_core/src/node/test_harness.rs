@@ -532,6 +532,41 @@ impl TestNode {
             .collect()
     }
 
+    /// A channel's visibility tier as the UI reads it via `get_server_channels`
+    /// ("everyone" | "moderator" | "admin"). This is the exact value
+    /// `visibleChannelsProvider` filters on — green here == the UI would hide/show
+    /// correctly. None if the channel/server is unknown.
+    pub(crate) fn channel_visibility(&self, server_id: &str, channel_id: &str) -> Option<String> {
+        let state = self.server_state(server_id)?;
+        let ch = state.channels.get(channel_id)?;
+        Some(match ch.visibility {
+            crate::crdt::server_state::ChannelVisibility::Everyone => "everyone",
+            crate::crdt::server_state::ChannelVisibility::ModeratorPlus => "moderator",
+            crate::crdt::server_state::ChannelVisibility::AdminPlus => "admin",
+        }.to_string())
+    }
+
+    /// A channel's posting tier as the UI reads it ("everyone"|"moderator"|"admin").
+    /// Mirrors `canPostInChannelProvider`'s channel-mode input. None if unknown.
+    pub(crate) fn channel_posting(&self, server_id: &str, channel_id: &str) -> Option<String> {
+        let state = self.server_state(server_id)?;
+        let ch = state.channels.get(channel_id)?;
+        Some(match ch.posting {
+            crate::crdt::server_state::ChannelPosting::Everyone => "everyone",
+            crate::crdt::server_state::ChannelPosting::ModeratorPlus => "moderator",
+            crate::crdt::server_state::ChannelPosting::AdminPlus => "admin",
+        }.to_string())
+    }
+
+    /// Whether this node's local user can SEE a channel — exactly what
+    /// `visibleChannelsProvider` computes (role tier vs channel visibility). The
+    /// UI hides the channel + evicts the user when this flips to false.
+    pub(crate) fn can_see_channel(&self, server_id: &str, channel_id: &str, me: &str) -> bool {
+        self.server_state(server_id)
+            .map(|s| s.can_see_channel(me, channel_id))
+            .unwrap_or(false)
+    }
+
     // --- Raw layer (device-keyed underlying truth) -------------------------
 
     /// The RAW CRDT member keys for a server (as stored). In a correct
@@ -2763,4 +2798,377 @@ async fn manual_state_sync_pulls_servers_from_source_device() {
         "C's server list must include the manually-synced server, got {:?}",
         c.servers()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Per-channel MLS subgroups (Option B): a restricted (Admin+) channel encrypts
+// under its OWN MLS subgroup, so a plain Member is NOT a leaf and cannot decrypt
+// it — channel visibility is cryptographically enforced, not just UI-filtered.
+// Promotion adds the member to the subgroup (decrypts forward); demotion removes
+// it. Driven + inspected end to end via the raw subgroup leaf set + decrypted
+// channel message — no live devices.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn restricted_channel_subgroup_enforces_visibility() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // O = owner, A = will be promoted to Admin, M = stays a plain Member.
+    const O_MASTER: u8 = 60;
+    const A_MASTER: u8 = 61;
+    const M_MASTER: u8 = 62;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+
+    // Mutual friends so the join handshakes' Olm sessions form.
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&a_master, &m_master]).await;
+    sleep_ms(1500).await;
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&o_master, &m_master]).await;
+    sleep_ms(1500).await;
+    let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master, &a_master]).await;
+    sleep_ms(5000).await; // let Olm confirm all around
+    drain_events(&mut o);
+    drain_events(&mut a);
+    drain_events(&mut m);
+
+    // --- Owner creates a server; A and M join. ---
+    let server_id = create_server_and_wait(&mut o, "Subgroup Server").await;
+    sleep_ms(500).await;
+
+    for (node, who) in [(&mut a, "A"), (&mut m, "M")] {
+        node.cmd_tx
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+            .await
+            .unwrap();
+        let joined = wait_event(node, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await;
+        assert!(joined, "{who} should join the server");
+        sleep_ms(2500).await;
+    }
+    sleep_ms(4000).await; // server-wide MLS group forms across all three
+    drain_events(&mut o);
+    drain_events(&mut a);
+    drain_events(&mut m);
+
+    // --- Owner creates a channel and makes it Admin+ restricted. ---
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            name: "secret".to_string(),
+            category: None,
+            channel_type: "text".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut restricted_cid = None;
+    let made = wait_event(&mut o, std::time::Duration::from_secs(5), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, name, .. } = ev {
+            if name == "secret" { restricted_cid = Some(channel_id.clone()); return true; }
+        }
+        false
+    })
+    .await;
+    assert!(made, "owner should create the channel");
+    let restricted_cid = restricted_cid.expect("channel id");
+    sleep_ms(2000).await; // ChannelAdded fans to A + M
+
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibility {
+            server_id: server_id.clone(),
+            channel_id: restricted_cid.clone(),
+            visibility: "admin".to_string(), // ChannelVisibility::AdminPlus
+        })
+        .await
+        .unwrap();
+    // Visibility op fans out; the owner (subgroup coordinator) creates the subgroup
+    // and pulls qualifying members' KeyPackages; the 2s batch timer commits them.
+    sleep_ms(6000).await;
+
+    let subgroup = crate::crypto::subgroup_id(&server_id, &restricted_cid);
+
+    // --- Pre-promotion: only the OWNER qualifies (owner short-circuits can_see).
+    // A and M are plain Members → NOT leaves of the subgroup. ---
+    let owner_sub_leaves = o.mls_members(&subgroup).await;
+    assert!(
+        owner_sub_leaves.contains(&o.device_id),
+        "owner holds the subgroup leaf, got {owner_sub_leaves:?}"
+    );
+    assert!(
+        !owner_sub_leaves.contains(&a.device_id),
+        "plain Member A must NOT be a subgroup leaf pre-promotion, got {owner_sub_leaves:?}"
+    );
+    assert!(
+        !owner_sub_leaves.contains(&m.device_id),
+        "plain Member M must NOT be a subgroup leaf, got {owner_sub_leaves:?}"
+    );
+    // A doesn't hold the subgroup at all (never welcomed).
+    assert!(
+        !a.mls_members(&subgroup).await.contains(&a.device_id),
+        "A must not hold the restricted subgroup before promotion"
+    );
+
+    // --- Owner posts to the restricted channel. A (Member) must NOT decrypt it. ---
+    drain_events(&mut a);
+    drain_events(&mut m);
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: restricted_cid.clone(),
+            text: "admins only #1".to_string(),
+            message_id: "sub-msg-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let a_got_secret = wait_event(&mut a, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "admins only #1")
+    })
+    .await;
+    assert!(!a_got_secret, "plain Member A must NOT receive/decrypt a restricted-channel message");
+    assert!(
+        a.channel_messages(&server_id, &restricted_cid)
+            .iter().all(|r| r.text != "admins only #1"),
+        "A's DB must not contain the restricted message it can't decrypt"
+    );
+
+    // --- Promote A to Admin → reconciler pulls A's KeyPackage → A joins subgroup. ---
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole {
+            server_id: server_id.clone(),
+            peer_id: a_master.clone(),
+            new_role: "admin".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(6000).await; // role fans out; reconcile pulls KP; batch timer commits + welcomes
+
+    let owner_sub_leaves2 = o.mls_members(&subgroup).await;
+    assert!(
+        owner_sub_leaves2.contains(&a.device_id),
+        "after promotion A must be a subgroup leaf on the owner, got {owner_sub_leaves2:?}"
+    );
+    assert!(
+        a.mls_members(&subgroup).await.contains(&a.device_id),
+        "after promotion A must hold the subgroup itself"
+    );
+    // M is still a plain Member → still excluded.
+    assert!(
+        !owner_sub_leaves2.contains(&m.device_id),
+        "M (still Member) must remain excluded from the subgroup, got {owner_sub_leaves2:?}"
+    );
+
+    // --- Owner posts again; now A (Admin) DECRYPTS it; M still cannot. ---
+    drain_events(&mut a);
+    drain_events(&mut m);
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: restricted_cid.clone(),
+            text: "admins only #2".to_string(),
+            message_id: "sub-msg-2".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let a_got2 = wait_event(&mut a, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "admins only #2")
+    })
+    .await;
+    assert!(a_got2, "promoted Admin A must now receive + decrypt the restricted message");
+    let m_got2 = wait_event(&mut m, std::time::Duration::from_secs(2), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "admins only #2")
+    })
+    .await;
+    assert!(!m_got2, "plain Member M must STILL not decrypt the restricted message");
+
+    // --- Demote A back to Member → reconciler removes A's leaf from the subgroup. ---
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole {
+            server_id: server_id.clone(),
+            peer_id: a_master.clone(),
+            new_role: "member".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(6000).await; // role fans out; reconcile queues removal; batch timer commits
+
+    let owner_sub_leaves3 = o.mls_members(&subgroup).await;
+    assert!(
+        !owner_sub_leaves3.contains(&a.device_id),
+        "after demotion A's leaf must be removed from the subgroup, got {owner_sub_leaves3:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Real-time channel visibility/posting propagation to a REMOTE member. The UI
+// reads channel visibility/posting + role from the local DB (get_server_channels
+// / getMyRole) and recomputes visibleChannelsProvider / canPostInChannelProvider.
+// This test proves the DATA LAYER those providers read reflects a LIVE change on
+// the receiving member (the contract the Dart reactivity fix depends on), and
+// that an offline member catches up on reconnect. No live devices / UI.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // O = owner (admin tier), V = a plain Member viewer.
+    const O_MASTER: u8 = 70;
+    const V_MASTER: u8 = 71;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let v_master = NativeKeypair::from_secret_bytes(&seed_bytes(V_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&v_master]).await;
+    sleep_ms(1500).await;
+    let mut v = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await; // Olm confirm
+
+    let server_id = create_server_and_wait(&mut o, "Vis Server").await;
+    sleep_ms(500).await;
+    v.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut v, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "V should join");
+    sleep_ms(3000).await;
+
+    // Owner creates a channel. Both start seeing it as "everyone".
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            name: "topic".to_string(),
+            category: None,
+            channel_type: "text".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut cid = None;
+    wait_event(&mut o, std::time::Duration::from_secs(5), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, name, .. } = ev {
+            if name == "topic" { cid = Some(channel_id.clone()); return true; }
+        }
+        false
+    })
+    .await;
+    let cid = cid.expect("channel id");
+    sleep_ms(2500).await; // ChannelAdded fans to V
+
+    // Baseline: V (plain Member) sees the channel as "everyone" and CAN see it.
+    assert_eq!(v.channel_visibility(&server_id, &cid).as_deref(), Some("everyone"),
+        "V's DB shows the new channel as everyone-visible");
+    assert!(v.can_see_channel(&server_id, &cid, &v_master),
+        "V (Member) can see an everyone channel");
+    assert_eq!(v.channel_posting(&server_id, &cid).as_deref(), Some("everyone"),
+        "V's DB shows everyone-posting baseline");
+
+    // --- LIVE visibility change: owner restricts the channel to Admin+. ---
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibility {
+            server_id: server_id.clone(),
+            channel_id: cid.clone(),
+            visibility: "admin".to_string(),
+        })
+        .await
+        .unwrap();
+    // Poll V's DB-backed view (what the UI reads) until it reflects the change.
+    let mut vis_ok = false;
+    for _ in 0..20 {
+        sleep_ms(300).await;
+        if v.channel_visibility(&server_id, &cid).as_deref() == Some("admin") {
+            vis_ok = true;
+            break;
+        }
+    }
+    assert!(vis_ok, "V's DB must reflect the LIVE visibility change to admin (got {:?})",
+        v.channel_visibility(&server_id, &cid));
+    // The exact predicate visibleChannelsProvider uses now hides it for V.
+    assert!(!v.can_see_channel(&server_id, &cid, &v_master),
+        "V (Member) must NOT be able to see an Admin+ channel after the live change → UI hides + evicts");
+
+    // --- LIVE posting change: set a (now-admin) channel back to everyone-visible
+    // but moderator-only posting, and confirm V's DB reflects posting too. ---
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibility {
+            server_id: server_id.clone(),
+            channel_id: cid.clone(),
+            visibility: "everyone".to_string(),
+        })
+        .await
+        .unwrap();
+    o.cmd_tx
+        .send(NodeCommand::SetChannelPosting {
+            server_id: server_id.clone(),
+            channel_id: cid.clone(),
+            posting: "moderator".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut post_ok = false;
+    for _ in 0..20 {
+        sleep_ms(300).await;
+        let vis = v.channel_visibility(&server_id, &cid);
+        let post = v.channel_posting(&server_id, &cid);
+        if vis.as_deref() == Some("everyone") && post.as_deref() == Some("moderator") {
+            post_ok = true;
+            break;
+        }
+    }
+    assert!(post_ok, "V's DB must reflect the LIVE posting change to moderator + visibility back to everyone (got vis={:?} post={:?})",
+        v.channel_visibility(&server_id, &cid), v.channel_posting(&server_id, &cid));
+    // V can SEE it again (everyone) but the input bar locks (Member can't post in moderator+).
+    assert!(v.can_see_channel(&server_id, &cid, &v_master), "V sees the everyone channel again");
+
+    // --- ABSENT-DURING-CHANGE catch-up: a member that was NOT present when the
+    // visibility was changed must converge to the restricted state when it (re)joins
+    // — the "join pulls the latest CRDT" path the user observed already works, and
+    // this locks it in. (The harness spawns a fresh DB per node, so the rejoiner is
+    // a clean member pulling current state — the same convergence guarantee.) ---
+    drop(v); // V leaves the relay (drops its WS room presence)
+    sleep_ms(1500).await;
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibility {
+            server_id: server_id.clone(),
+            channel_id: cid.clone(),
+            visibility: "admin".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(1500).await;
+
+    let mut v2 = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&o_master]).await;
+    v2.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let mut caught_up = false;
+    for _ in 0..25 {
+        sleep_ms(400).await;
+        if v2.channel_visibility(&server_id, &cid).as_deref() == Some("admin") {
+            caught_up = true;
+            break;
+        }
+    }
+    assert!(caught_up, "a member joining after the change must converge to the restricted visibility (got {:?})",
+        v2.channel_visibility(&server_id, &cid));
+    assert!(!v2.can_see_channel(&server_id, &cid, &v_master),
+        "after catch-up, V can't see the now-Admin+ channel");
 }

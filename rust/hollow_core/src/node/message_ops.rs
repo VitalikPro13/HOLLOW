@@ -557,15 +557,25 @@ pub(crate) async fn handle_send_channel_message(
         }
     } else {
         // MLS path: encrypt once → single WS broadcast to room.
-        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+        // Restricted channels (Option B) encrypt under their per-channel subgroup
+        // instead of the server-wide group.
+        let use_subgroup = server.channel_uses_subgroup(&channel_id);
+        let group_key = if use_subgroup {
+            crate::crypto::subgroup_id(&server_id, &channel_id)
+        } else {
+            server_id.clone()
+        };
+        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
         if use_mls {
-            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, &envelope, crypto_store) {
+            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, use_subgroup, &envelope, crypto_store) {
                 Ok(wire_bytes) => { offline_wire_bytes = Some(wire_bytes); }
                 Err(e) => {
                     hollow_log!("[HOLLOW-MLS] Encrypt failed, falling back to Olm: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                     for member_peer_str in server.members.keys() {
                         if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        // Subgroup: only fan to members who qualify for the channel.
+                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
                         // Olm is per-device: encrypt to EACH online device of the member.
                         for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
                             send_encrypted_message(
@@ -579,10 +589,22 @@ pub(crate) async fn handle_send_channel_message(
                 }
             }
         } else {
-            // Legacy Olm fan-out path.
+            // Subgroup not yet bootstrapped (or legacy server with no MLS group):
+            // Olm fan-out to qualifying members, and (for a restricted channel)
+            // kick off subgroup bootstrap by sending our KeyPackage to the subgroup
+            // coordinator so future messages can use the subgroup.
+            if use_subgroup {
+                if let Some(mls_mgr) = mls.as_mut() {
+                    super::crypto_handler::request_subgroup_bootstrap(
+                        mls_mgr, ws_cmd_tx, ws_room_peers, server,
+                        &server_id, &channel_id, local_peer_str,
+                    );
+                }
+            }
             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
             for member_peer_str in server.members.keys() {
                         if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
                         // Olm is per-device: encrypt to EACH online device of the member.
                         for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
                             send_encrypted_message(
@@ -629,6 +651,9 @@ pub(crate) async fn handle_send_channel_message(
             .filter(|p| {
                 !super::resolver::same_identity(p, local_peer_str)
                     && !peer_is_reachable(ws_room_peers, p)
+                    // Restricted channel (Option B): only members who can see the
+                    // channel get the ciphertext + push (others can't decrypt it).
+                    && server.can_see_channel(p, &channel_id)
             })
             .collect();
         if !offline_members.is_empty() {
@@ -797,15 +822,22 @@ pub(crate) async fn handle_edit_channel_message(
             cid: Some(channel_id.clone()),
         };
 
-        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+        let use_subgroup = server.channel_uses_subgroup(&channel_id);
+        let group_key = if use_subgroup {
+            crate::crypto::subgroup_id(&server_id, &channel_id)
+        } else {
+            server_id.clone()
+        };
+        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
         if use_mls {
-            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, &envelope, crypto_store) {
+            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, use_subgroup, &envelope, crypto_store) {
                 Ok(_) => {}
                 Err(e) => {
                     hollow_log!("[HOLLOW-MLS] Edit encrypt failed, falling back to Olm: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                     for member_peer_str in server.members.keys() {
                         if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
                         // Olm is per-device: encrypt to EACH online device of the member.
                         for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
                             send_encrypted_message(
@@ -822,6 +854,7 @@ pub(crate) async fn handle_edit_channel_message(
             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
             for member_peer_str in server.members.keys() {
                         if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
                         // Olm is per-device: encrypt to EACH online device of the member.
                         for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
                             send_encrypted_message(
@@ -1055,15 +1088,22 @@ pub(crate) async fn handle_delete_channel_message(
             cid: Some(channel_id.clone()),
         };
 
-        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+        let use_subgroup = server.channel_uses_subgroup(&channel_id);
+        let group_key = if use_subgroup {
+            crate::crypto::subgroup_id(&server_id, &channel_id)
+        } else {
+            server_id.clone()
+        };
+        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
         if use_mls {
-            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, &envelope, crypto_store) {
+            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, use_subgroup, &envelope, crypto_store) {
                 Ok(_) => {}
                 Err(e) => {
                     hollow_log!("[HOLLOW-MLS] Delete encrypt failed, falling back to Olm: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                     for member_peer_str in server.members.keys() {
                         if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
                         // Olm is per-device: encrypt to EACH online device of the member.
                         for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
                             send_encrypted_message(
@@ -1080,6 +1120,7 @@ pub(crate) async fn handle_delete_channel_message(
             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
             for member_peer_str in server.members.keys() {
                         if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
                         // Olm is per-device: encrypt to EACH online device of the member.
                         for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
                             send_encrypted_message(
@@ -1260,15 +1301,22 @@ pub(crate) async fn handle_add_channel_reaction(
             cid: Some(channel_id.clone()),
         };
 
-        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+        let use_subgroup = server.channel_uses_subgroup(&channel_id);
+        let group_key = if use_subgroup {
+            crate::crypto::subgroup_id(&server_id, &channel_id)
+        } else {
+            server_id.clone()
+        };
+        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
         if use_mls {
-            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, &envelope, crypto_store) {
+            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, use_subgroup, &envelope, crypto_store) {
                 Ok(_) => {}
                 Err(e) => {
                     hollow_log!("[HOLLOW-MLS] Reaction encrypt failed, falling back to Olm: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                     for member_peer_str in server.members.keys() {
                         if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
                         // Olm is per-device: encrypt to EACH online device of the member.
                         for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
                             send_encrypted_message(
@@ -1285,6 +1333,7 @@ pub(crate) async fn handle_add_channel_reaction(
             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
             for member_peer_str in server.members.keys() {
                         if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
                         // Olm is per-device: encrypt to EACH online device of the member.
                         for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
                             send_encrypted_message(
@@ -1458,15 +1507,22 @@ pub(crate) async fn handle_remove_channel_reaction(
             cid: Some(channel_id.clone()),
         };
 
-        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+        let use_subgroup = server.channel_uses_subgroup(&channel_id);
+        let group_key = if use_subgroup {
+            crate::crypto::subgroup_id(&server_id, &channel_id)
+        } else {
+            server_id.clone()
+        };
+        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
         if use_mls {
-            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, &envelope, crypto_store) {
+            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, use_subgroup, &envelope, crypto_store) {
                 Ok(_) => {}
                 Err(e) => {
                     hollow_log!("[HOLLOW-MLS] Remove reaction encrypt failed, Olm fallback: {e}");
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                     for member_peer_str in server.members.keys() {
                         if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
                         // Olm is per-device: encrypt to EACH online device of the member.
                         for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
                             send_encrypted_message(
@@ -1483,6 +1539,7 @@ pub(crate) async fn handle_remove_channel_reaction(
             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
             for member_peer_str in server.members.keys() {
                         if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
                         // Olm is per-device: encrypt to EACH online device of the member.
                         for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
                             send_encrypted_message(

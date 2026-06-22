@@ -841,37 +841,54 @@ pub(crate) enum HavenMessage {
     // -- MLS group encryption messages --
 
     /// MLS-encrypted channel message (replaces Olm fan-out for channels).
+    /// `channel_id`: `None` = server-wide MLS group (default, backward compatible);
+    /// `Some(cid)` = the restricted channel's per-channel MLS subgroup ("Option B"),
+    /// keyed by `subgroup_id(server_id, cid)`.
     #[serde(rename = "mls_msg")]
     MlsChannelMessage {
         server_id: String,
         body: String, // base64 MLS ciphertext
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel_id: Option<String>,
     },
 
     /// KeyPackage from a peer wanting to join an MLS group.
+    /// `channel_id` selects server group (None) vs a channel subgroup (Some).
     #[serde(rename = "mls_kp")]
     MlsKeyPackage {
         server_id: String,
         key_package: String, // base64 serialized KeyPackage
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel_id: Option<String>,
     },
 
     /// Welcome message sent to a joiner after add_members().
+    /// `channel_id` selects server group (None) vs a channel subgroup (Some).
     #[serde(rename = "mls_welcome")]
     MlsWelcome {
         server_id: String,
         welcome: String, // base64 serialized Welcome
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel_id: Option<String>,
     },
 
     /// Commit message (membership change) from the server owner.
+    /// `channel_id` selects server group (None) vs a channel subgroup (Some).
     #[serde(rename = "mls_commit")]
     MlsCommit {
         server_id: String,
         commit: String, // base64 serialized Commit
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel_id: Option<String>,
     },
 
     /// Request peers to send their KeyPackages for MLS group bootstrap.
+    /// `channel_id` selects server group (None) vs a channel subgroup (Some).
     #[serde(rename = "mls_kp_req")]
     MlsKeyPackageRequest {
         server_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel_id: Option<String>,
     },
 
     // -- Profile sync (Phase 3.5) --

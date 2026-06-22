@@ -142,6 +142,23 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       // Opening the channel: clear its accumulated push lines + dismiss the
       // OS banner (and the channel group summary if it was the last one).
       dismissChannelNotification(widget.serverId!, widget.channelId!);
+      // Load FRESH channel + layout state for this server into the providers the
+      // chat UI reads. On mobile the Chats tab often has NO selected server, so
+      // `channelListProvider` can be empty/stale — without this, a re-opened chat
+      // reads a stale `posting`/visibility value (e.g. shows "locked" after the
+      // owner re-enabled posting while the phone sat on the Chats tab). Also
+      // invalidate role/permissions so `canPostInChannelProvider` recomputes.
+      // Desktop never hits this because its shell keeps these providers live.
+      // `loadForServer` is a notifier-method call (safe in initState); but
+      // `ref.invalidate` of a provider touches the ProviderScope inherited widget,
+      // which isn't available until AFTER initState — defer it one frame.
+      ref.read(channelListProvider.notifier).loadForServer(widget.serverId!);
+      ref.read(channelLayoutProvider.notifier).loadForServer(widget.serverId!);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ref.invalidate(myRoleProvider(widget.serverId!));
+        ref.invalidate(myPermissionsProvider(widget.serverId!));
+      });
       ref.read(channelChatProvider.notifier).loadHistory(
             widget.serverId!,
             widget.channelId!,
@@ -857,6 +874,25 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final bg = ref.watch(backgroundProvider);
+
+    // Channel-visibility eviction (server channels only): if the channel you're
+    // viewing stops being visible to you in real-time (visibility tier raised or
+    // you were demoted), the CRDT state already propagated — pop this route back
+    // to the Chats tab so the now-hidden channel simply disappears.
+    if (!widget.isDm && widget.serverId != null && widget.channelId != null) {
+      ref.listen(visibleChannelsProvider, (prev, next) {
+        if (!mounted) return;
+        // Only act when THIS route's server is the selected one (visibleChannels
+        // tracks the selected server); otherwise the map isn't about us.
+        if (ref.read(selectedServerProvider) != widget.serverId) return;
+        if (next.containsKey(widget.channelId)) return; // still visible — fine
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
+        });
+      });
+    }
 
     Widget scaffold = Scaffold(
           backgroundColor: bg.hasBackground ? Colors.transparent : hollow.background,

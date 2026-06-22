@@ -1045,6 +1045,243 @@ pub(crate) fn is_vault_coordinator(
     elect_vault_coordinator(&members, local_peer, ws_room_peers).as_deref() == Some(local_peer)
 }
 
+/// Elect the coordinator for a per-channel MLS subgroup (Option B). Unlike the
+/// server group — whose membership the elector reads from `mls.group_members` —
+/// a subgroup may not exist yet on any node, so candidates are the CRDT members
+/// who QUALIFY for the channel (`can_see_channel`) and are online. Lowest online
+/// qualifying master wins, mirroring `elect_coordinator`. Returns the elected
+/// master id, or None if nobody (incl. us) qualifies online.
+pub(crate) fn elect_subgroup_coordinator(
+    server: &crate::crdt::server_state::ServerState,
+    channel_id: &str,
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> Option<String> {
+    let mut masters: Vec<String> = server.members.keys()
+        .filter(|m| server.can_see_channel(m, channel_id))
+        .filter(|m| m.as_str() == local_peer || peer_is_reachable(ws_room_peers, m))
+        .cloned()
+        .collect();
+    masters.sort();
+    masters.dedup();
+    masters.into_iter().next()
+}
+
+/// Send our KeyPackage to a restricted channel's subgroup coordinator so we can
+/// be added to (or bootstrap) the subgroup. No-op when WE are the coordinator
+/// (the membership reconciler creates+populates the group on our side) or when
+/// nobody qualifying is online. The KeyPackage is tagged with `channel_id` so
+/// the coordinator adds us to the SUBGROUP, not the server group.
+pub(crate) fn request_subgroup_bootstrap(
+    mls: &mut MlsManager,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server: &crate::crdt::server_state::ServerState,
+    server_id: &str,
+    channel_id: &str,
+    local_peer: &str,
+) {
+    let coordinator = match elect_subgroup_coordinator(server, channel_id, local_peer, ws_room_peers) {
+        Some(c) if c != local_peer => c,
+        _ => return, // we're the coordinator (reconciler handles it) or nobody online
+    };
+    let kp_bytes = match mls.generate_key_package() {
+        Ok(kp) => kp,
+        Err(e) => { hollow_log!("[HOLLOW-MLS] subgroup KP gen failed: {e}"); return; }
+    };
+    let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+        server_id: server_id.to_string(),
+        key_package: kp_b64,
+        channel_id: Some(channel_id.to_string()),
+    }).unwrap_or_default();
+    let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &coordinator, data);
+    if sent > 0 {
+        hollow_log!("[HOLLOW-MLS] Sent subgroup KeyPackage to coordinator {coordinator} for {server_id}#{channel_id} ({sent} device(s))");
+    }
+}
+
+/// Reconcile per-channel MLS subgroup membership against the CRDT after a
+/// lifecycle event (role change, visibility change, channel create/delete,
+/// kick/ban/leave). Runs the desired-vs-actual diff for every restricted channel
+/// (or just `only_channel` when given) and drives the existing batch queues:
+///
+///   * REMOVALS (we do these directly — we already hold the leaf credentials):
+///     any current subgroup leaf whose MASTER is no longer a server member OR no
+///     longer qualifies for the channel is queued into `pending_mls_removals`
+///     (`{master} ∪ devices_for(master)` so all of a human's leaves drop at once).
+///   * ADDITIONS (pull-based — we lack the new member's KeyPackage): any online
+///     qualifying member with no leaf is sent an `MlsKeyPackageRequest{channel_id}`;
+///     it replies with a KeyPackage tagged for the subgroup, which the
+///     MlsKeyPackage handler queues into `pending_mls_key_packages`.
+///
+/// Only the subgroup coordinator acts (idempotent under races — see the
+/// deterministic election). A channel that stops being restricted is torn down
+/// by the visibility handler via `remove_group`, not here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reconcile_subgroups_for_server(
+    mls: &mut MlsManager,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
+    pending_mls_removals: &mut HashMap<String, Vec<String>>,
+    server: &crate::crdt::server_state::ServerState,
+    server_id: &str,
+    local_peer: &str,
+    only_channel: Option<&str>,
+) {
+    let channels: Vec<String> = match only_channel {
+        Some(cid) if server.channel_uses_subgroup(cid) => vec![cid.to_string()],
+        Some(_) => return, // not (or no longer) a restricted channel
+        None => server.subgroup_channel_ids(),
+    };
+
+    for cid in channels {
+        let group_key = crate::crypto::subgroup_id(server_id, &cid);
+        // Elect a STABLE, demotion-safe coordinator: the lowest online master who
+        // (a) still QUALIFIES for the channel AND (b) already holds a subgroup leaf.
+        // This excludes a just-demoted member (no longer qualifies → can't be the
+        // remover, and it never removes its own leaf) AND a just-promoted member
+        // (doesn't hold the group yet → can't add others without their KeyPackage).
+        // If nobody holds the group yet (first restriction), fall back to the lowest
+        // qualifying online master to bootstrap creation.
+        let coord = {
+            let leaf_masters: std::collections::HashSet<String> = mls.group_members(&group_key)
+                .iter().map(|l| super::resolver::resolve(l)).collect();
+            let mut holders: Vec<String> = server.members.keys()
+                .filter(|mm| server.can_see_channel(mm, &cid))
+                .filter(|mm| mm.as_str() == local_peer || peer_is_reachable(ws_room_peers, mm))
+                .filter(|mm| leaf_masters.contains(*mm))
+                .cloned()
+                .collect();
+            holders.sort();
+            holders.into_iter().next()
+                .or_else(|| elect_subgroup_coordinator(server, &cid, local_peer, ws_room_peers))
+        };
+        if coord.as_deref() != Some(local_peer) { continue; }
+
+        // The coordinator must hold the group to commit. Create it lazily (we are
+        // its founding member). If we ourselves don't qualify we can't be coord.
+        if !server.can_see_channel(local_peer, &cid) { continue; }
+        if !mls.has_group(&group_key) {
+            if let Err(e) = mls.create_group(&group_key) {
+                hollow_log!("[HOLLOW-MLS] reconcile: failed to create subgroup {group_key}: {e}");
+                continue;
+            }
+            hollow_log!("[HOLLOW-MLS] reconcile: created subgroup {group_key}");
+        }
+
+        // REMOVALS: existing leaves whose master is gone or no longer qualifies.
+        for leaf in mls.group_members(&group_key) {
+            if super::resolver::same_identity(&leaf, local_peer) { continue; } // never self
+            let leaf_master = super::resolver::resolve(&leaf);
+            let still_ok = server.is_member(&leaf_master) && server.can_see_channel(&leaf_master, &cid);
+            if !still_ok {
+                hollow_log!("[HOLLOW-MLS] reconcile: queue remove {leaf} from {group_key} (master no longer qualifies)");
+                pending_mls_removals.entry(group_key.clone()).or_default().push(leaf);
+            }
+        }
+
+        // ADDITIONS: online qualifying members with no leaf yet → request their KP.
+        // (We can't add without their KeyPackage; pull it.) Dedup against members
+        // we've already queued a KeyPackage for this round.
+        let current_leaf_masters: std::collections::HashSet<String> = mls.group_members(&group_key)
+            .iter().map(|l| super::resolver::resolve(l)).collect();
+        let already_queued: std::collections::HashSet<String> = pending_mls_key_packages
+            .get(&group_key)
+            .map(|v| v.iter().map(|(p, _)| super::resolver::resolve(p)).collect())
+            .unwrap_or_default();
+        for member in server.members.keys() {
+            if super::resolver::same_identity(member, local_peer) { continue; }
+            if !server.can_see_channel(member, &cid) { continue; }
+            if current_leaf_masters.contains(member) { continue; }
+            if already_queued.contains(member) { continue; }
+            if !peer_is_reachable(ws_room_peers, member) { continue; } // offline → pulls itself later
+            let data = serde_json::to_vec(&HavenMessage::MlsKeyPackageRequest {
+                server_id: server_id.to_string(),
+                channel_id: Some(cid.clone()),
+            }).unwrap_or_default();
+            let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data);
+            if sent > 0 {
+                hollow_log!("[HOLLOW-MLS] reconcile: requested KeyPackage from {member} for {group_key} ({sent} device(s))");
+            }
+        }
+    }
+}
+
+/// Remove every leaf of `target_master`'s identity from ALL of a server's
+/// per-channel MLS subgroups (Option B), one commit per subgroup, broadcasting
+/// each commit to the subgroup's remaining qualifying members + our own siblings.
+/// Used by kick/ban/leave so a removed human loses access to restricted channels,
+/// not just the server-wide group. Mirrors the server-group removal in the
+/// kick handler. No-op for subgroups we don't hold or where the target has no leaf.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn remove_identity_from_subgroups(
+    mls: &mut MlsManager,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    crypto_store: &CryptoStore,
+    server: &crate::crdt::server_state::ServerState,
+    server_id: &str,
+    local_peer: &str,
+    local_device_id: &str,
+    target_master: &str,
+) {
+    // credential ids of the removed human = {master} ∪ all known devices.
+    let id_set: Vec<String> = {
+        let mut v = super::resolver::devices_for(target_master);
+        v.push(target_master.to_string());
+        v
+    };
+    for cid in server.subgroup_channel_ids() {
+        let group_key = crate::crypto::subgroup_id(server_id, &cid);
+        if !mls.has_group(&group_key) { continue; }
+        // Only the leaves that actually exist in this subgroup.
+        let present: Vec<&str> = {
+            let leaves = mls.group_members(&group_key);
+            id_set.iter()
+                .filter(|c| leaves.iter().any(|l| l == *c))
+                .map(|s| s.as_str())
+                .collect()
+        };
+        if present.is_empty() { continue; }
+
+        match mls.remove_identity_leaves(&group_key, &present) {
+            Ok(commit_bytes) => {
+                if let Err(e) = mls.merge_pending_commit(&group_key) {
+                    hollow_log!("[HOLLOW-MLS] subgroup remove merge failed for {group_key}: {e}");
+                    continue;
+                }
+                persist_mls_state(mls, crypto_store);
+                if let Ok(sframe_key) = mls.export_secret(&group_key, "sframe", b"", 32) {
+                    let epoch = mls.epoch(&group_key).unwrap_or(0);
+                    let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
+                        server_id: server_id.to_string(), epoch, sframe_key,
+                    }).await;
+                }
+                let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
+                let data = serde_json::to_vec(&HavenMessage::MlsCommit {
+                    server_id: server_id.to_string(),
+                    commit: commit_b64,
+                    channel_id: Some(cid.clone()),
+                }).unwrap_or_default();
+                // Broadcast to remaining qualifying members (skip the removed identity).
+                for member in server.members.keys() {
+                    if super::resolver::same_identity(member, target_master) { continue; }
+                    if super::resolver::same_identity(member, local_peer) { continue; }
+                    if !server.can_see_channel(member, &cid) { continue; }
+                    send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data.clone());
+                }
+                // Our own siblings hold their own leaves — forward the commit (excl. us).
+                super::sync_handler::fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer, local_device_id, data);
+                hollow_log!("[HOLLOW-MLS] Removed {target_master}'s leaves from subgroup {group_key}");
+            }
+            Err(e) => hollow_log!("[HOLLOW-MLS] subgroup remove failed for {group_key}: {e}"),
+        }
+    }
+}
+
 /// Find a WS room containing the given peer.
 pub(crate) fn ws_room_for_peer(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -1075,6 +1312,7 @@ pub(crate) fn send_mls_broadcast(
     let msg = HavenMessage::MlsChannelMessage {
         server_id: server_id.to_string(),
         body: body_b64,
+        channel_id: None,
     };
     let data = serde_json::to_vec(&msg).map_err(|e| format!("serialize msg: {e}"))?;
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
@@ -1092,24 +1330,39 @@ pub(crate) fn send_mls_broadcast(
 /// success so callers can re-deliver the SAME group ciphertext to offline
 /// members (relay offline buffer via 0x09 frames) — MLS application messages
 /// are decryptable by every member, so one encryption serves both paths.
+///
+/// `use_subgroup`: when true, the channel is restricted (Option B) and the
+/// message is encrypted under the per-channel MLS subgroup
+/// (`subgroup_id(server_id, topic)`) and stamped with `channel_id = Some(topic)`
+/// so the receiver decrypts under the same subgroup. When false the message uses
+/// the server-wide group (`channel_id = None`, byte-for-byte legacy behavior).
+/// The relay routing `topic` is always the channel id regardless.
 pub(crate) fn send_mls_broadcast_topic(
     mls: &mut MlsManager,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     server_id: &str,
     topic: &str,
+    use_subgroup: bool,
     envelope: &MessageEnvelope,
     crypto_store: &CryptoStore,
 ) -> Result<Vec<u8>, String> {
+    let group_key = if use_subgroup {
+        crate::crypto::subgroup_id(server_id, topic)
+    } else {
+        server_id.to_string()
+    };
+    let channel_id = if use_subgroup { Some(topic.to_string()) } else { None };
     let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
-    let ciphertext = mls.encrypt(server_id, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
+    let ciphertext = mls.encrypt(&group_key, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
     persist_mls_state(mls, crypto_store);
     let msg = HavenMessage::MlsChannelMessage {
         server_id: server_id.to_string(),
         body: body_b64,
+        channel_id,
     };
     let data = serde_json::to_vec(&msg).map_err(|e| format!("serialize msg: {e}"))?;
-    hollow_log!("[HOLLOW-TOPIC] Broadcast room={server_id} topic={topic} ({} bytes)", data.len());
+    hollow_log!("[HOLLOW-TOPIC] Broadcast room={server_id} topic={topic} group={group_key} ({} bytes)", data.len());
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoomTopic {
         room_code: server_id.to_string(),
         topic: topic.to_string(),
@@ -1141,6 +1394,7 @@ pub(crate) fn send_mls_to_peer(
     let msg = HavenMessage::MlsChannelMessage {
         server_id: server_id.to_string(),
         body: body_b64,
+        channel_id: None,
     };
     let data = serde_json::to_vec(&msg).map_err(|e| format!("serialize msg: {e}"))?;
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {

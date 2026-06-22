@@ -2108,8 +2108,20 @@ pub fn start_fetch_node(
             let store = MessageStore::open(&db_path, &passphrase)?;
             match store.load_mls_identity() {
                 Ok(Some((signer, cred, storage))) => {
+                    // Restore the server-wide group PLUS every restricted-channel
+                    // subgroup (Option B) so a buffered restricted-channel message
+                    // can be decrypted. The fetch node has no live ServerState, so
+                    // read the persisted state JSON to enumerate subgroup channels.
+                    let mut group_keys: Vec<String> = vec![room.clone()];
+                    if let Ok(Some(state_json)) = store.load_server_state(room) {
+                        if let Ok(state) = serde_json::from_str::<crate::crdt::server_state::ServerState>(&state_json) {
+                            for cid in state.subgroup_channel_ids() {
+                                group_keys.push(crate::crypto::subgroup_id(room, &cid));
+                            }
+                        }
+                    }
                     match crate::crypto::MlsManager::from_persisted(
-                        &signer, &cred, storage.as_deref(), &[room.clone()],
+                        &signer, &cred, storage.as_deref(), &group_keys,
                     ) {
                         Ok(m) => Some(m),
                         Err(e) => {

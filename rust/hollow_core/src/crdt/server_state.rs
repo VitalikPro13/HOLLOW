@@ -932,6 +932,29 @@ impl ServerState {
             false
         }
     }
+
+    /// Whether a channel is cryptographically isolated in its own MLS subgroup
+    /// (per-channel MLS subgroups / "Option B"). True iff the channel has a
+    /// restricted visibility tier AND is not a plaintext public channel. Such a
+    /// channel is encrypted under `subgroup_id(server_id, channel_id)` instead of
+    /// the server-wide MLS group, so only members whose role satisfies the tier
+    /// hold the key. `Everyone` channels and public channels do NOT use a subgroup.
+    pub fn channel_uses_subgroup(&self, channel_id: &str) -> bool {
+        self.channels.get(channel_id).is_some_and(|ch| {
+            !ch.is_public && ch.visibility != ChannelVisibility::Everyone
+        })
+    }
+
+    /// All channel ids that currently use a dedicated MLS subgroup (restricted +
+    /// non-public). Used to enumerate subgroup ids for MLS persistence reload and
+    /// to reconcile membership on role/visibility changes.
+    pub fn subgroup_channel_ids(&self) -> Vec<String> {
+        self.channels
+            .values()
+            .filter(|ch| !ch.is_public && ch.visibility != ChannelVisibility::Everyone)
+            .map(|ch| ch.channel_id.clone())
+            .collect()
+    }
 }
 
 /// Truncate a peer ID to a short display name.

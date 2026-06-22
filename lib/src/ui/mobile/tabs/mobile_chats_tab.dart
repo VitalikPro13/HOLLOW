@@ -911,6 +911,12 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
   }
 
   Future<void> _loadChannels() async {
+    // Read the local user's role FIRST so we can hide channels their tier can't
+    // see — same cryptographic+UI rule desktop's visibleChannelsProvider applies.
+    // Without this, the Chats-tab list showed ALL channels regardless of
+    // visibility (and never refreshed on a live visibility/role change).
+    final roleStr = await crdt_api.getMyRole(serverId: widget.serverId)
+        .catchError((_) => 'member');
     final results = await Future.wait([
       ChannelListNotifier.fetchChannels(widget.serverId),
       ChannelLayoutNotifier.fetchLayout(widget.serverId),
@@ -919,15 +925,31 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
     final channelMap = results[0] as Map<String, ChannelInfo>;
     final layoutJson = results[1] as String;
     setState(() {
-      _displayItems = _buildDisplayItems(channelMap, layoutJson);
+      _displayItems = _buildDisplayItems(channelMap, layoutJson, roleStr);
       _loading = false;
     });
   }
 
+  /// Visibility filter mirroring desktop `visibleChannelsProvider`.
+  static bool _roleCanSee(String visibility, int priority) {
+    if (visibility == 'moderator') return priority >= 1;
+    if (visibility == 'admin') return priority >= 2;
+    return true; // 'everyone' / unknown → visible
+  }
+
   List<_DisplayItem> _buildDisplayItems(
-    Map<String, ChannelInfo> channels,
+    Map<String, ChannelInfo> allChannels,
     String layoutJson,
+    String roleStr,
   ) {
+    const rolePriority = {'owner': 3, 'admin': 2, 'moderator': 1, 'member': 0};
+    final priority = rolePriority[roleStr] ?? 0;
+    // Hide channels this user's role can't see (matches desktop).
+    final channels = <String, ChannelInfo>{
+      for (final e in allChannels.entries)
+        if (_roleCanSee(e.value.visibility, priority)) e.key: e.value,
+    };
+
     final items = <_DisplayItem>[];
     final placedIds = <String>{};
     String? currentCategory;
@@ -998,6 +1020,20 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
     });
     ref.listen(channelListProvider, (prev, next) {
       if (prev != next) _loadChannels();
+    });
+    // Live visibility/posting OR role changes must refresh THIS list even when no
+    // server is "selected" (the common Chats-tab case where channelListProvider is
+    // stale). `serverChannelsProvider` is a per-server FutureProvider invalidated
+    // by the ServerUpdated handler, so it fires for any server; role/permission
+    // changes re-run the visibility filter. Matches desktop's always-live shell.
+    ref.listen(serverChannelsProvider(widget.serverId), (prev, next) {
+      _loadChannels();
+    });
+    ref.listen(myRoleProvider(widget.serverId), (prev, next) {
+      if (prev?.valueOrNull != next.valueOrNull) _loadChannels();
+    });
+    ref.listen(myPermissionsProvider(widget.serverId), (prev, next) {
+      if (prev?.valueOrNull != next.valueOrNull) _loadChannels();
     });
 
     if (_loading) {

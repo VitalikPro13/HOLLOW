@@ -353,14 +353,19 @@ fn try_process_channel_msg(
     let haven: HavenMessage = serde_json::from_str(data).ok()?;
 
     match haven {
-        HavenMessage::MlsChannelMessage { server_id, body } => {
+        HavenMessage::MlsChannelMessage { server_id, body, channel_id } => {
             let mls_mgr = mls.as_mut()?;
-            if !mls_mgr.has_group(&server_id) {
-                hollow_log!("[HOLLOW-FETCH] No MLS group for {server_id} — skip (app syncs later)");
+            // Restricted channel (Option B): decrypt under the per-channel subgroup.
+            let group_key = match &channel_id {
+                Some(cid) => crate::crypto::subgroup_id(&server_id, cid),
+                None => server_id.clone(),
+            };
+            if !mls_mgr.has_group(&group_key) {
+                hollow_log!("[HOLLOW-FETCH] No MLS group for {group_key} — skip (app syncs later)");
                 return None;
             }
             let ciphertext = OlmManager::decode_base64(&body).ok()?;
-            let (plaintext, sender) = match mls_mgr.decrypt(&server_id, &ciphertext) {
+            let (plaintext, sender) = match mls_mgr.decrypt(&group_key, &ciphertext) {
                 Ok(r) => r,
                 Err(e) => {
                     hollow_log!("[HOLLOW-FETCH] MLS decrypt failed (stale epoch?): {e} — app self-heals via sync");

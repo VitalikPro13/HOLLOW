@@ -304,11 +304,11 @@ Standard broadcast pattern (MLS with plaintext fallback). When `is_public` is tr
 
 Permission: `Permission::MANAGE_CHANNELS`
 
-CrdtPayload: `ChannelVisibilityChanged { channel_id, visibility }` — `visibility` is a String (e.g., "public", "moderator_only", "admin_only").
+CrdtPayload: `ChannelVisibilityChanged { channel_id, visibility }` — `visibility` is a String ("everyone" | "moderator" | "admin").
 
 Emits: `NetworkEvent::ServerUpdated { server_id }`
 
-Note: Channel visibility is UI-filtered only. All members still receive all messages via the server-wide MLS group. Per-channel MLS subgroups needed before v1.0 for true enforcement.
+**Per-channel MLS subgroups (Option B, 2026-06-22):** channel visibility is now CRYPTOGRAPHICALLY enforced for restricted text channels. When a channel becomes restricted (`channel_uses_subgroup` true) the handler does NOT itself build the subgroup — it applies the CRDT op + emits ServerUpdated, and the swarm.rs `SetChannelVisibility` arm calls `crypto_handler::reconcile_subgroups_for_server(... Some(channel_id))` (coordinator-gated) to create + populate the subgroup (pulling qualifying members' KeyPackages). When a channel becomes `Everyone` again, this handler tears the subgroup down locally (`mls.remove_group(subgroup_id)`). The reconciler also runs on `handle_change_role` (role shifts who qualifies) and on received CRDT ops in `handle_envelope_crdt_op` / `handle_incoming_request` (RoleChanged/ChannelVisibilityChanged/MemberRemoved/MemberBanned) so the ACTUAL subgroup coordinator acts even when another member authored the op. Kick/ban/leave drop the identity from all subgroups (`remove_identity_from_subgroups`). See `project_per_channel_mls_subgroups` memory.
 
 ## handle_set_channel_posting()
 

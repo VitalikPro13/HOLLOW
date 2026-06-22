@@ -585,17 +585,28 @@ pub(crate) async fn handle_send_file(
         }
 
         // Send the TEXT MESSAGE via MLS (for proper sync/queue to offline peers).
+        // Restricted channels (Option B) use the per-channel subgroup so only
+        // qualifying members can decrypt the companion text.
         if let Some(mls_mgr) = mls {
-            if let Ok(ct) = mls_mgr.encrypt(&sid, envelope_json.as_bytes()) {
+            let use_subgroup = server_states.get(&sid)
+                .is_some_and(|s| s.channel_uses_subgroup(&cid));
+            let group_key = if use_subgroup {
+                crate::crypto::subgroup_id(&sid, &cid)
+            } else {
+                sid.clone()
+            };
+            if let Ok(ct) = mls_mgr.encrypt(&group_key, envelope_json.as_bytes()) {
                 crate::node::crypto_handler::persist_mls_state(mls_mgr, crypto_store);
                 let mls_msg = HavenMessage::MlsChannelMessage {
                     server_id: sid.clone(),
                     body: base64::engine::general_purpose::STANDARD.encode(&ct),
+                    channel_id: if use_subgroup { Some(cid.clone()) } else { None },
                 };
                 if let Some(state) = server_states.get(&sid) {
                     let mls_data = serde_json::to_vec(&mls_msg).unwrap_or_default();
                     for member_peer_str in state.members.keys() {
                         if super::resolver::same_identity(member_peer_str, &local_peer) { continue; }
+                        if use_subgroup && !state.can_see_channel(member_peer_str, &cid) { continue; }
                         super::crypto_handler::send_raw_to_identity(&ws_cmd_tx, &ws_room_peers, member_peer_str, mls_data.clone());
                     }
                 }
