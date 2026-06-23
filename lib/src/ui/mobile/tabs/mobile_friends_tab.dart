@@ -54,21 +54,33 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
     final online = ref.watch(onlineIdentitiesProvider);
     ref.watch(profileProvider);
     final favourites = ref.watch(favouriteFriendsProvider);
+    final links = ref.watch(deviceLinkProvider);
     ref.watch(localNicknameProvider);
 
-    final accepted = <FriendInfo>[];
+    // Accepted friends come master-collapsed + deduped from the shared provider
+    // (parity with desktop) so a friend stranded under a DEVICE id doesn't appear
+    // twice or under a raw id. Pending requests stay raw (their device→master
+    // mapping usually isn't known until after acceptance).
+    final accepted = ref.watch(sortedFriendsProvider);
     final incoming = <FriendInfo>[];
     final outgoing = <FriendInfo>[];
 
     for (final f in friends.values) {
-      if (f.status == 'accepted') {
-        accepted.add(f);
-      } else if (f.status == 'pending' && f.direction == 'incoming') {
+      if (f.status == 'pending' && f.direction == 'incoming') {
         incoming.add(f);
       } else if (f.status == 'pending' && f.direction == 'outgoing') {
         outgoing.add(f);
       }
     }
+
+    // Favourite ids are resolved device→master before matching, so a favourite
+    // saved under a device id still matches its (collapsed) friend row.
+    final favMasters = favourites.map(links.identityOf).toList();
+    int favRank(String peerId) {
+      final i = favMasters.indexOf(peerId);
+      return i < 0 ? favMasters.length : i;
+    }
+    bool isFav(String peerId) => favMasters.contains(peerId);
 
     // Separate favourites from non-favourites
     final favFriends = <FriendInfo>[];
@@ -79,7 +91,7 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
       final name = _resolvedName(f.peerId);
       if (_searchQuery.isNotEmpty && !name.toLowerCase().contains(_searchQuery)) continue;
 
-      if (favourites.contains(f.peerId)) {
+      if (isFav(f.peerId)) {
         favFriends.add(f);
       } else if (online.contains(f.peerId)) {
         onlineFriends.add(f);
@@ -89,8 +101,7 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
     }
 
     // Sort favourites by fav order, others alphabetically
-    favFriends.sort((a, b) =>
-        favourites.indexOf(a.peerId).compareTo(favourites.indexOf(b.peerId)));
+    favFriends.sort((a, b) => favRank(a.peerId).compareTo(favRank(b.peerId)));
 
     int sortByName(FriendInfo a, FriendInfo b) =>
         _resolvedName(a.peerId)
@@ -509,6 +520,9 @@ class _FriendRow extends ConsumerWidget {
             onPressed: () {
               Navigator.pop(context);
               ref.read(friendsProvider.notifier).removeFriend(peerId);
+              // Also drop them from favourites so no stale entry lingers (parity
+              // with desktop). peerId is the master from the collapsed list.
+              ref.read(favouriteFriendsProvider.notifier).remove(peerId);
               HollowToast.show(context, 'Friend removed', type: HollowToastType.success);
             },
             child: const Text('Remove'),

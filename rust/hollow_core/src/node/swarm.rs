@@ -26,6 +26,220 @@ fn key_request_is_fresh(
         .is_some_and(|t| t.elapsed() < OLM_KEY_REQUEST_TIMEOUT)
 }
 
+/// Run the full sibling-convergence machinery for a peer we have CRYPTOGRAPHICALLY
+/// PROVEN is our own other device (it appeared in `inbox:{our_master}` AND either
+/// already resolves to us OR answered a [`HavenMessage::SiblingProveRequest`] with a
+/// valid master-signed proof). This was previously inline in the `PeerJoined` handler,
+/// gated only on bare inbox-room membership — which a friend-request sender (a
+/// stranger) satisfies, causing a mis-merge. It is now called ONLY behind a
+/// same-identity / verified-proof gate, from both the `PeerJoined` and `RoomMembers`
+/// inbox paths and the `SiblingProveResponse` dispatch arm.
+///
+/// Seeds the resolver, unions the sibling into our master-signed device list, pushes
+/// our profile/friends to it and pulls theirs, requests a DM backfill, re-announces
+/// our servers, and (if WE are an empty device) auto-requests a full snapshot. Sync —
+/// none of these calls await.
+#[allow(clippy::too_many_arguments)]
+fn on_verified_sibling(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    local_peer_str: &str,
+    server_states: &HashMap<String, ServerState>,
+    link_snapshot_requested: &mut std::collections::HashSet<String>,
+    is_invisible: bool,
+    db_path: &str,
+    db_passphrase: &str,
+    peer_id: &str,
+) {
+    let own_inbox = format!("inbox:{}", local_peer_str);
+    // The joining device belongs to our master identity.
+    super::resolver::update(peer_id, local_peer_str);
+
+    // CRITICAL (presence collapse): the verified proof tells us `peer_id` is OUR
+    // sibling device. Merge it into our own master-signed device list RIGHT HERE — do
+    // not wait for a ProfileUpdate carrying a device_list (a freshly-imported sibling
+    // has no profile, so it never sends one, and our list would stay 1 device forever
+    // → a friend like AL only ever learns ONE of our devices and shows us offline when
+    // that one quits). Union + re-sign + persist, then re-announce our profile (now
+    // carrying BOTH devices) to every friend we share a room with so they converge
+    // immediately.
+    let our_set_grew = super::crypto_handler::merge_sibling_device_id(
+        master_keypair, device_peer_id, peer_id,
+        db_path, db_passphrase,
+    );
+    if our_set_grew {
+        let peers: Vec<String> = ws_room_peers.values()
+            .flat_map(|p| p.iter().cloned())
+            .collect();
+        hollow_log!(
+            "[HOLLOW-DEVICES] Inbox sibling {peer_id} merged — re-announcing to {} room peer(s)",
+            peers.len()
+        );
+        for pid in peers {
+            if pid == local_peer_str || pid == device_peer_id { continue; }
+            if super::resolver::same_identity(&pid, local_peer_str) { continue; }
+            social::send_own_profile_to_peer(
+                ws_cmd_tx, ws_room_peers,
+                local_peer_str, master_keypair, device_peer_id, &pid,
+                is_invisible,
+                db_path, db_passphrase,
+            );
+        }
+    }
+    // Also hand the sibling our device list directly (via a ProfileUpdate) so IT
+    // converges on the union too — covers the case where the sibling is the one with a
+    // profile and we are the fresh device.
+    social::send_own_profile_to_peer(
+        ws_cmd_tx, ws_room_peers,
+        local_peer_str, master_keypair, device_peer_id, peer_id,
+        is_invisible,
+        db_path, db_passphrase,
+    );
+
+    // SIBLING PROFILE SYNC: a freshly-imported device holds the master KEY but none of
+    // the master's profile CONTENT (name/avatar). If our OWN identity profile is
+    // empty/absent, pull it from the sibling — the incoming ProfileUpdate resolves to
+    // our master (== local_peer_str), so save_incoming_profile adopts it as our own.
+    // Without this the substitute device shows the identity online but nameless.
+    let need_profile = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .ok()
+        .and_then(|s| s.load_profile(local_peer_str).ok().flatten())
+        .map(|p| p.display_name.trim().is_empty())
+        .unwrap_or(true);
+    if need_profile {
+        hollow_log!(
+            "[HOLLOW-MULTIDEV] Own profile empty — requesting it from sibling {peer_id}"
+        );
+        send_message_to_peer(
+            ws_cmd_tx, ws_room_peers,
+            peer_id, HavenMessage::ProfileRequest,
+        );
+    }
+
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(friends) = store.load_friends(Some("accepted")) {
+            if !friends.is_empty() {
+                let entries: Vec<FriendListEntry> = friends
+                    .into_iter()
+                    .map(|(pid, status, direction, requested_at, _updated)| FriendListEntry {
+                        peer_id: pid,
+                        status,
+                        direction,
+                        requested_at,
+                    })
+                    .collect();
+                hollow_log!(
+                    "[HOLLOW-MULTIDEV] Sibling device {peer_id} verified — sharing {} friends",
+                    entries.len()
+                );
+                send_message_to_peer(
+                    ws_cmd_tx, ws_room_peers,
+                    peer_id, HavenMessage::FriendListSync { friends: entries },
+                );
+            }
+        }
+    }
+    // Pull theirs too (in case WE are the empty device).
+    hollow_log!(
+        "[HOLLOW-MULTIDEV] Sibling {peer_id} verified — requesting their friend list"
+    );
+    send_message_to_peer(
+        ws_cmd_tx, ws_room_peers,
+        peer_id, HavenMessage::FriendListRequest,
+    );
+
+    // Multi-device backfill (Step 5): ask the sibling for the FULL DM history across
+    // all conversations, both directions, since our per-conversation high-water mark.
+    super::crypto_handler::request_sibling_dm_backfill(
+        ws_cmd_tx, ws_room_peers, peer_id,
+        db_path, db_passphrase,
+    );
+
+    // Multi-device (Step 9D follow-up): RE-ANNOUNCE every non-deleted server we belong
+    // to, to this freshly-verified sibling (idempotent on the receiver).
+    for (sid, st) in server_states.iter() {
+        if st.is_deleted() { continue; }
+        let announce = serde_json::to_vec(
+            &HavenMessage::SiblingServerAnnounce { server_id: sid.clone() },
+        ).unwrap_or_default();
+        if !announce.is_empty() {
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                room_code: own_inbox.clone(),
+                target_peer: peer_id.to_string(),
+                data: announce,
+            });
+        }
+    }
+    hollow_log!(
+        "[HOLLOW-CRDT] Re-announced {} server(s) to verified sibling {peer_id}",
+        server_states.values().filter(|s| !s.is_deleted()).count()
+    );
+
+    // Multi-device link (Step 4): if WE are essentially empty (a fresh mnemonic
+    // import) and a populated sibling is now online, AUTO-REQUEST a full snapshot from
+    // it. The sibling shows a Confirm before sending. Gate on a near-empty DB so a
+    // populated device never re-pulls, and only fire once per sibling per session.
+    let (my_msgs, my_friends, _my_servers, _hp) =
+        crate::api::storage::snapshot_state_summary();
+    if my_msgs == 0 && my_friends == 0
+        && link_snapshot_requested.insert(peer_id.to_string())
+    {
+        hollow_log!(
+            "[HOLLOW-LINK] Empty device — auto-requesting snapshot from sibling {peer_id}"
+        );
+        // Mnemonic path has no typed code; both siblings share the master id, so use it
+        // as the .hollow passphrase.
+        link_handler::set_my_link_code(local_peer_str);
+        link_handler::handle_request_link_snapshot(
+            ws_cmd_tx, ws_room_peers, peer_id, false, false,
+        );
+    }
+}
+
+/// Issue a sibling-proof challenge to an UNPROVEN peer that appeared in our own
+/// `inbox:{master}` room. Dedupes against a live unexpired challenge for the same
+/// peer, bounds the map, and sends a fresh-nonce [`HavenMessage::SiblingProveRequest`].
+/// Only a peer holding our SHARED MASTER key can answer it (see `on_verified_sibling`);
+/// a friend-request sender (a stranger) cannot, so it is never mis-merged as our device.
+fn issue_sibling_challenge(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    pending_sibling_challenges: &mut HashMap<String, (String, std::time::Instant)>,
+    peer_id: &str,
+) {
+    const CHALLENGE_TTL: Duration = Duration::from_secs(60);
+    const MAX_PENDING: usize = 64;
+    // Live unexpired challenge already out for this peer → don't spam.
+    if pending_sibling_challenges
+        .get(peer_id)
+        .is_some_and(|(_, t)| t.elapsed() < CHALLENGE_TTL)
+    {
+        return;
+    }
+    // Bound the map: drop expired entries, and if still full, refuse a new challenge.
+    if pending_sibling_challenges.len() >= MAX_PENDING {
+        pending_sibling_challenges.retain(|_, (_, t)| t.elapsed() < CHALLENGE_TTL);
+        if pending_sibling_challenges.len() >= MAX_PENDING {
+            hollow_log!("[HOLLOW-SIBLING] Challenge map full — dropping new challenge to {peer_id}");
+            return;
+        }
+    }
+    let nonce = hex::encode({
+        let mut b = [0u8; 16];
+        getrandom::fill(&mut b)
+            .expect("system RNG unavailable — cannot generate secure random bytes");
+        b
+    });
+    pending_sibling_challenges.insert(peer_id.to_string(), (nonce.clone(), std::time::Instant::now()));
+    hollow_log!("[HOLLOW-SIBLING] Challenging unproven inbox peer {peer_id} for sibling proof");
+    send_message_to_peer(
+        ws_cmd_tx, ws_room_peers,
+        peer_id, HavenMessage::SiblingProveRequest { nonce },
+    );
+}
+
 use crate::crdt::hlc::Hlc;
 use crate::crdt::operations::{CrdtPayload, Permission};
 use crate::crdt::server_state::ServerState;
@@ -375,6 +589,36 @@ async fn run_event_loop(
     // device id to its master internally (one chokepoint for dozens of call sites).
     crate::crdt::set_identity_resolver(super::resolver::resolve);
 
+    // -- Friend-table canonicalization sweep (multi-device heal) --
+    // INVARIANT: every friend row is keyed by the friend's MASTER identity. Older
+    // builds (and the temp-nickname add path) could strand a row under a friend's
+    // DEVICE id, which then diverged from presence/DM/profile (all master-keyed) —
+    // the friend showed offline, removal missed, favourites went stale, etc. The
+    // resolver is now warm (persisted device links loaded above), so fold any
+    // device-keyed row into its master in one pass. Idempotent: a row already
+    // under its master resolves to itself and is skipped. This heals an existing
+    // broken DB on the very next launch — no re-add required.
+    {
+        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+            if let Ok(rows) = store.load_friends(None) {
+                let mut folded = 0u32;
+                for (peer_id, _status, _dir, _req, _upd) in rows {
+                    let master = super::resolver::resolve(&peer_id);
+                    if master != peer_id {
+                        if let Ok(true) = store.migrate_friend_to_master(&peer_id, &master) {
+                            folded += 1;
+                        }
+                    }
+                }
+                if folded > 0 {
+                    hollow_log!(
+                        "[HOLLOW-FRIENDS] Canonicalized {folded} device-keyed friend row(s) → master at startup"
+                    );
+                }
+            }
+        }
+    }
+
     // -- CRDT state (Phase 3) --
     // Server states keyed by server_id. Reload from DB so servers survive restarts.
     let mut server_states: HashMap<String, ServerState> = HashMap::new();
@@ -557,6 +801,11 @@ async fn run_event_loop(
     let mut pending_link_code: Option<String> = None;
     // Siblings we've already auto-requested a snapshot from this session (fire-once).
     let mut link_snapshot_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Sibling-proof challenges in flight: unknown inbox peer_id -> (nonce, issued_at).
+    // An unproven peer joining `inbox:{our_master}` is challenged to sign the nonce with
+    // our shared master key; only a genuine sibling can, gating the merge/snapshot.
+    // 60s TTL, bounded, one live challenge per peer (see issue_sibling_challenge).
+    let mut pending_sibling_challenges: HashMap<String, (String, std::time::Instant)> = HashMap::new();
     // Pending friend removals: peer_ids whose FriendRemove wasn't delivered (peer offline).
     let mut pending_friend_removals: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
@@ -585,6 +834,25 @@ async fn run_event_loop(
                         "[HOLLOW-FRIENDS] Restored {} pending friend removals from DB",
                         pending_friend_removals.len()
                     );
+                }
+            }
+        }
+    }
+
+    // Pending friend ACCEPTS: master → timestamp. A FriendAccept we sent may not have
+    // reached the requester (its device raced our accept and wasn't in our room yet, or
+    // it was offline) — without redelivery the requester stays stuck "pending outgoing"
+    // forever (it accepted on our side but never on theirs). Seed with EVERY accepted
+    // friend so that on this session's first contact with each, we (re)send an
+    // idempotent FriendAccept — guaranteeing the requester converges even across a
+    // restart. Drained on the peer's appearance (PeerJoined/RoomMembers); the entry is
+    // removed on first delivery so it's at most one extra message per friend per session.
+    let mut pending_friend_accepts: HashMap<String, i64> = HashMap::new();
+    {
+        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+            if let Ok(friends) = store.load_friends(Some("accepted")) {
+                for (peer_id, _status, _direction, requested_at, _updated_at) in friends {
+                    pending_friend_accepts.insert(peer_id, requested_at);
                 }
             }
         }
@@ -1273,6 +1541,7 @@ async fn run_event_loop(
                         social::handle_send_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers, &sig_cmd_tx,
                             &mut pending_friend_requests,
+                            &mut pending_friend_removals,
                             &local_peer_str, peer_id_str,
                             &db_path, &db_passphrase,
                         ).await;
@@ -1343,7 +1612,10 @@ async fn run_event_loop(
                     NodeCommand::AcceptFriendRequest { peer_id: peer_id_str } => {
                         social::handle_accept_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers, &sig_cmd_tx,
-                            &local_peer_str, peer_id_str,
+                            &local_peer_str, &master_keypair, &device_peer_id, is_invisible,
+                            peer_id_str,
+                            &mut pending_friend_accepts,
+                            &mut pending_friend_removals,
                             &db_path, &db_passphrase,
                         ).await;
                     }
@@ -1361,6 +1633,8 @@ async fn run_event_loop(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             peer_id_str,
                             &mut pending_friend_removals,
+                            &mut pending_friend_requests,
+                            &mut pending_friend_accepts,
                             &db_path, &db_passphrase,
                         ).await;
                     }
@@ -1979,24 +2253,83 @@ async fn run_event_loop(
                                     },
                                 }).await;
 
-                                // Drain pending friend requests for this peer.
-                                if let Some(requested_at) = pending_friend_requests.remove(&peer_id) {
-                                    hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared, sending queued friend request");
-                                    send_message_to_peer(
-                                        &ws_cmd_tx, &ws_room_peers,
-                                        &peer_id, HavenMessage::FriendRequest { requested_at },
-                                    );
+                                // Drain pending friend requests for this peer. The request is
+                                // keyed by the TARGET'S MASTER id (the friend-list/UI key), but
+                                // the relay reports DEVICE ids in rooms — so match the joining
+                                // device to a queued request by resolving device→master (a fresh
+                                // target we've never linked resolves to itself, so a single-device
+                                // peer still matches its own id). Deliver to the concrete device.
+                                let pending_target = {
+                                    let joined_master = super::resolver::resolve(&peer_id);
+                                    if pending_friend_requests.contains_key(&peer_id) {
+                                        Some(peer_id.clone())
+                                    } else if pending_friend_requests.contains_key(&joined_master) {
+                                        Some(joined_master)
+                                    } else {
+                                        None
+                                    }
+                                };
+                                if let Some(target_key) = pending_target {
+                                    if let Some(requested_at) = pending_friend_requests.remove(&target_key) {
+                                        hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared (target {target_key}), sending queued friend request");
+                                        send_message_to_peer(
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            &peer_id, HavenMessage::FriendRequest { requested_at },
+                                        );
+                                        // Defense in depth: leave the target's inbox now that the
+                                        // request is delivered (ordered after the send). Accept comes
+                                        // back via the DM room, not the inbox.
+                                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+                                            room_code: format!("inbox:{}", target_key),
+                                        });
+                                    }
                                 }
 
-                                // Drain pending friend removals for this peer.
-                                if pending_friend_removals.remove(&peer_id) {
-                                    hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared, sending queued friend removal");
-                                    send_message_to_peer(
-                                        &ws_cmd_tx, &ws_room_peers,
-                                        &peer_id, HavenMessage::FriendRemove,
-                                    );
-                                    if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
-                                        let _ = store.remove_friend(&peer_id);
+                                // Drain pending friend removals for this peer. The
+                                // tombstone is keyed by the friend's MASTER (the
+                                // friend-list key), but the relay reports DEVICE ids
+                                // — resolve the joining device→master to match (a
+                                // single-device peer resolves to itself). Deliver the
+                                // FriendRemove to the concrete device that appeared.
+                                {
+                                    let joined_master = super::resolver::resolve(&peer_id);
+                                    let removal_key = if pending_friend_removals.contains(&peer_id) {
+                                        Some(peer_id.clone())
+                                    } else if pending_friend_removals.contains(&joined_master) {
+                                        Some(joined_master)
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(key) = removal_key {
+                                        pending_friend_removals.remove(&key);
+                                        hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared (master {key}), sending queued friend removal");
+                                        send_message_to_peer(
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            &peer_id, HavenMessage::FriendRemove,
+                                        );
+                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                            let _ = store.remove_friend(&key);
+                                        }
+                                    }
+                                }
+
+                                // (Re)deliver a queued FriendAccept to the requester. The
+                                // accept can race the requester's DM-room join (it isn't in
+                                // our room yet when we click Accept) or the requester may
+                                // have been offline — so we send the FriendAccept to its
+                                // device now that it has appeared. Idempotent (receiver
+                                // re-saves "accepted"); the entry is removed on delivery so
+                                // it fires at most once per friend per session.
+                                {
+                                    let joined_master = super::resolver::resolve(&peer_id);
+                                    if pending_friend_accepts.remove(&joined_master).is_some()
+                                        || pending_friend_accepts.remove(&peer_id).is_some()
+                                    {
+                                        hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared (master {joined_master}), (re)sending FriendAccept");
+                                        send_message_to_peer(
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            &peer_id, HavenMessage::FriendAccept,
+                                        );
                                     }
                                 }
 
@@ -2009,180 +2342,28 @@ async fn run_event_loop(
                                         &db_path, &db_passphrase,
                                     );
 
-                                    // Multi-device (Phase 6): a peer joining OUR OWN inbox room
-                                    // (`inbox:{master}`) is BY DEFINITION our own other device —
-                                    // only our devices ever join our master inbox. Use that as the
-                                    // sibling proof DIRECTLY, instead of `same_identity` (which
-                                    // depends on the device-list having already been exchanged — a
-                                    // chicken-and-egg that lost the friend-share to join-timing
-                                    // races). Seed the resolver from this fact, then push our friend
-                                    // list AND pull theirs (covers either side being the empty one).
+                                    // Multi-device (Phase 6): a peer in OUR OWN inbox room
+                                    // (`inbox:{master}`) MIGHT be our own other device — but the
+                                    // friend-request protocol makes a STRANGER (the requester) join
+                                    // our inbox to deliver, so bare room membership is NOT proof
+                                    // (that mis-merged strangers as siblings). Require a cryptographic
+                                    // same-identity proof: a sibling we already resolve to ourselves
+                                    // runs the convergence machinery directly; an UNPROVEN inbox peer
+                                    // is challenged to sign a nonce with our SHARED MASTER key (only
+                                    // a real sibling can) before any merge/resolver/snapshot.
                                     let own_inbox = format!("inbox:{}", local_peer_str);
                                     if room == own_inbox && peer_id != device_peer_id {
-                                        // The joining device belongs to our master identity.
-                                        super::resolver::update(&peer_id, &local_peer_str);
-
-                                        // CRITICAL (presence collapse): the inbox-proof tells us
-                                        // `peer_id` is OUR sibling device. Merge it into our own
-                                        // master-signed device list RIGHT HERE — do not wait for a
-                                        // ProfileUpdate carrying a device_list (a freshly-imported
-                                        // sibling has no profile, so it never sends one, and our list
-                                        // would stay 1 device forever → a friend like AL only ever
-                                        // learns ONE of our devices and shows us offline when that one
-                                        // quits). Union + re-sign + persist, then re-announce our
-                                        // profile (now carrying BOTH devices) to every friend we share
-                                        // a room with so they converge immediately.
-                                        let our_set_grew = super::crypto_handler::merge_sibling_device_id(
-                                            &master_keypair, &device_peer_id, &peer_id,
-                                            &db_path, &db_passphrase,
-                                        );
-                                        if our_set_grew {
-                                            let peers: Vec<String> = ws_room_peers.values()
-                                                .flat_map(|p| p.iter().cloned())
-                                                .collect();
-                                            hollow_log!(
-                                                "[HOLLOW-DEVICES] Inbox sibling {peer_id} merged — re-announcing to {} room peer(s)",
-                                                peers.len()
+                                        if super::resolver::same_identity(&peer_id, &local_peer_str) {
+                                            on_verified_sibling(
+                                                &ws_cmd_tx, &ws_room_peers, &master_keypair,
+                                                &device_peer_id, &local_peer_str, &server_states,
+                                                &mut link_snapshot_requested, is_invisible,
+                                                &db_path, &db_passphrase, &peer_id,
                                             );
-                                            for pid in peers {
-                                                if pid == local_peer_str || pid == device_peer_id { continue; }
-                                                if super::resolver::same_identity(&pid, &local_peer_str) { continue; }
-                                                social::send_own_profile_to_peer(
-                                                    &ws_cmd_tx, &ws_room_peers,
-                                                    &local_peer_str, &master_keypair, &device_peer_id, &pid,
-                                                    is_invisible,
-                                                    &db_path, &db_passphrase,
-                                                );
-                                            }
-                                        }
-                                        // Also hand the sibling our device list directly (via a
-                                        // ProfileUpdate) so IT converges on the union too — covers the
-                                        // case where the sibling is the one with a profile and we are
-                                        // the fresh device.
-                                        social::send_own_profile_to_peer(
-                                            &ws_cmd_tx, &ws_room_peers,
-                                            &local_peer_str, &master_keypair, &device_peer_id, &peer_id,
-                                            is_invisible,
-                                            &db_path, &db_passphrase,
-                                        );
-
-                                        // SIBLING PROFILE SYNC: a freshly-imported device holds the
-                                        // master KEY but none of the master's profile CONTENT (name/
-                                        // avatar). If our OWN identity profile is empty/absent, pull it
-                                        // from the sibling — the incoming ProfileUpdate resolves to our
-                                        // master (== local_peer_str), so save_incoming_profile adopts it
-                                        // as our own. Without this the substitute device shows the
-                                        // identity online but nameless.
-                                        let need_profile = crate::storage::MessageStore::open(&db_path, &db_passphrase)
-                                            .ok()
-                                            .and_then(|s| s.load_profile(&local_peer_str).ok().flatten())
-                                            .map(|p| p.display_name.trim().is_empty())
-                                            .unwrap_or(true);
-                                        if need_profile {
-                                            hollow_log!(
-                                                "[HOLLOW-MULTIDEV] Own profile empty — requesting it from sibling {peer_id}"
-                                            );
-                                            send_message_to_peer(
+                                        } else {
+                                            issue_sibling_challenge(
                                                 &ws_cmd_tx, &ws_room_peers,
-                                                &peer_id, HavenMessage::ProfileRequest,
-                                            );
-                                        }
-
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
-                                            if let Ok(friends) = store.load_friends(Some("accepted")) {
-                                                if !friends.is_empty() {
-                                                    let entries: Vec<FriendListEntry> = friends
-                                                        .into_iter()
-                                                        .map(|(pid, status, direction, requested_at, _updated)| FriendListEntry {
-                                                            peer_id: pid,
-                                                            status,
-                                                            direction,
-                                                            requested_at,
-                                                        })
-                                                        .collect();
-                                                    hollow_log!(
-                                                        "[HOLLOW-MULTIDEV] Sibling device {peer_id} joined our inbox — sharing {} friends",
-                                                        entries.len()
-                                                    );
-                                                    send_message_to_peer(
-                                                        &ws_cmd_tx, &ws_room_peers,
-                                                        &peer_id, HavenMessage::FriendListSync { friends: entries },
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        // Pull theirs too (in case WE are the empty device).
-                                        hollow_log!(
-                                            "[HOLLOW-MULTIDEV] Sibling {peer_id} joined our inbox — requesting their friend list"
-                                        );
-                                        send_message_to_peer(
-                                            &ws_cmd_tx, &ws_room_peers,
-                                            &peer_id, HavenMessage::FriendListRequest,
-                                        );
-
-                                        // Multi-device backfill (Step 5): ask the sibling for the
-                                        // FULL DM history across all conversations, both directions,
-                                        // since our per-conversation high-water mark. Closes the
-                                        // offline gap that live fan-out (Step 3) and the one-time
-                                        // link snapshot (Step 4) can't. Throttled per-sibling
-                                        // (Step 5.1) so this path + the device-list-ingest path +
-                                        // reconnect re-fires collapse into one request; incremental
-                                        // + idempotent (message_id dedup) so a skipped redundant
-                                        // request loses nothing.
-                                        super::crypto_handler::request_sibling_dm_backfill(
-                                            &ws_cmd_tx, &ws_room_peers, &peer_id,
-                                            &db_path, &db_passphrase,
-                                        );
-
-                                        // Multi-device (Step 9D follow-up): RE-ANNOUNCE every server
-                                        // we belong to, to this freshly-online sibling. A server
-                                        // CREATE/JOIN only announces to siblings that are ONLINE at
-                                        // the time (SiblingServerAnnounce is a one-shot live message,
-                                        // not a CRDT op served on reconnect like ServerDeleted) — so a
-                                        // sibling that was OFFLINE when we created or joined a server
-                                        // never learned it exists. This reconnect re-announce closes
-                                        // that gap: the sibling's handler is idempotent (already a
-                                        // member / already joining → no-op), so re-announcing owned
-                                        // AND joined servers every time a sibling appears is safe and
-                                        // self-healing. Skip tombstoned servers (the sibling reconciles
-                                        // deletion via the grow-only CRDT path).
-                                        for (sid, st) in server_states.iter() {
-                                            if st.is_deleted() { continue; }
-                                            let announce = serde_json::to_vec(
-                                                &HavenMessage::SiblingServerAnnounce { server_id: sid.clone() },
-                                            ).unwrap_or_default();
-                                            if !announce.is_empty() {
-                                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                                                    room_code: own_inbox.clone(),
-                                                    target_peer: peer_id.clone(),
-                                                    data: announce,
-                                                });
-                                            }
-                                        }
-                                        hollow_log!(
-                                            "[HOLLOW-CRDT] Re-announced {} server(s) to reconnected sibling {peer_id}",
-                                            server_states.values().filter(|s| !s.is_deleted()).count()
-                                        );
-
-                                        // Multi-device link (Step 4): if WE are essentially empty
-                                        // (a fresh mnemonic import) and a populated sibling is now
-                                        // online, AUTO-REQUEST a full snapshot from it. The sibling
-                                        // shows a Confirm before sending. We gate on a near-empty DB
-                                        // so a populated device never re-pulls, and we only fire once
-                                        // per sibling per session (link_snapshot_requested).
-                                        let (my_msgs, my_friends, _my_servers, _hp) =
-                                            crate::api::storage::snapshot_state_summary();
-                                        if my_msgs == 0 && my_friends == 0
-                                            && link_snapshot_requested.insert(peer_id.clone())
-                                        {
-                                            hollow_log!(
-                                                "[HOLLOW-LINK] Empty device — auto-requesting snapshot from sibling {peer_id}"
-                                            );
-                                            // Mnemonic path has no typed code; both siblings share the
-                                            // master id, so use it as the .hollow passphrase.
-                                            link_handler::set_my_link_code(&local_peer_str);
-                                            link_handler::handle_request_link_snapshot(
-                                                &ws_cmd_tx, &ws_room_peers, &peer_id, false, false,
+                                                &mut pending_sibling_challenges, &peer_id,
                                             );
                                         }
                                     }
@@ -2368,6 +2549,46 @@ async fn run_event_loop(
                                     );
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {peer_id} for {room}");
                                 }
+
+                                // DM-room co-presence re-key (outside is_new — the peer was
+                                // already met in the inbox so is_new is false here). FIX for the
+                                // friend-handshake Olm wedge: a friend-request requester joins
+                                // the DM room, joins the target inbox to deliver, then LEAVES the
+                                // inbox — and its DM-room join may not have reached the accepter's
+                                // ws_room_peers yet when the accepter sends its KeyBundle reply.
+                                // That bundle then targets a peer in NO shared room and is
+                                // SILENTLY DROPPED (send_message_to_peer → ws_room_for_peer = None),
+                                // so the lower-id side never builds an outbound session and the
+                                // higher-id side defers forever (only the 30s sweep healed it).
+                                // When the DURABLE DM room becomes mutually populated, re-issue a
+                                // KeyRequest — bypassing the in-flight freshness gate, because a
+                                // room transition is exactly the dropped-frame event the sweep was
+                                // meant to catch, but at sub-second latency. KeyRequest is
+                                // idempotent (the receiver rebuilds only a stale/unconfirmed half;
+                                // a confirmed session under cooldown is preserved) and the
+                                // device-vs-device glare tiebreaker still arbitrates who creates
+                                // the outbound session. `local_peer_str` is the master, so this is
+                                // the pure f(masters) DM room (resolver stays OUTSIDE dm_room_code).
+                                // Siblings meet in inbox:{master}, never in dm_room_code(m,m), so
+                                // this never fires for them; server members meet in the server
+                                // room, not here; strangers/guests share neither → no key spam.
+                                // Gate on `!has_session` (NO session object), not
+                                // `!has_confirmed_session`: the wedged/deferred side holds no
+                                // session at all, so this targets exactly it. A side that already
+                                // built an unconfirmed OUTBOUND session has a handshake in flight —
+                                // re-keying it would tear that down (the KeyRequest handler removes
+                                // a held session) and cause needless glare churn. Skipping it lets
+                                // the in-progress handshake finish; only the truly-stuck side kicks.
+                                if !olm.has_session(&peer_id)
+                                    && room == dm_room_code(&local_peer_str, &super::resolver::resolve(&peer_id))
+                                {
+                                    hollow_log!("[HOLLOW-CRYPTO] DM-room co-presence with {peer_id} and no session — re-keying (handshake-race heal)");
+                                    send_message_to_peer(
+                                        &ws_cmd_tx, &ws_room_peers,
+                                        &peer_id, HavenMessage::KeyRequest,
+                                    );
+                                    key_request_in_flight.insert(peer_id.clone(), std::time::Instant::now());
+                                }
                             }
                     }
                     WsEvent::PeerLeft { room, peer_id } => {
@@ -2378,6 +2599,10 @@ async fn run_event_loop(
                                 ws_room_peers.remove(&room);
                             }
                         }
+
+                        // Drop any in-flight sibling-proof challenge for a peer that left
+                        // our inbox (it'll be re-challenged on its next appearance).
+                        pending_sibling_challenges.remove(&peer_id);
 
                         // Hollow Share: drop the peer from peer_have + free
                         // any in-flight chunk requests so the scheduler retries.
@@ -2685,56 +2910,40 @@ async fn run_event_loop(
                                         }
                                     }
 
-                                    // Drain pending friend requests for this peer.
-                                    if let Some(requested_at) = pending_friend_requests.remove(pid_str) {
-                                        hollow_log!("[HOLLOW-FRIENDS] Peer {pid_str} appeared in RoomMembers, sending queued friend request");
-                                        send_message_to_peer(
-                                            &ws_cmd_tx, &ws_room_peers,
-                                            pid_str, HavenMessage::FriendRequest { requested_at },
-                                        );
-                                    }
+                                    // (Friend request / removal / accept drains MOVED out of the
+                                    // is_new guard — see below, after the block closes. A re-add to
+                                    // an ALREADY-SYNCED peer (device already in synced_peers from a
+                                    // prior friendship) produced is_new=false here, so the queued
+                                    // re-add FriendRequest never drained and the peer never saw it.)
 
-                                    // Drain pending friend removals for this peer.
-                                    if pending_friend_removals.remove(pid_str) {
-                                        hollow_log!("[HOLLOW-FRIENDS] Peer {pid_str} appeared in RoomMembers, sending queued friend removal");
-                                        send_message_to_peer(
-                                            &ws_cmd_tx, &ws_room_peers,
-                                            pid_str, HavenMessage::FriendRemove,
-                                        );
-                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
-                                            let _ = store.remove_friend(pid_str);
-                                        }
-                                    }
-
-                                    // Multi-device (Step 9D follow-up): RE-ANNOUNCE our servers to a
-                                    // sibling already present in OUR inbox. This is the RECONNECTING
-                                    // side of the gap — the symmetric twin of the PeerJoined re-announce.
+                                    // Multi-device sibling convergence on the RECONNECTING side.
                                     // RoomMembers fires on US (the device that just came back online)
                                     // and lists peers already there, so PeerJoined never fires for that
-                                    // sibling on our side; without this, a sibling we created/joined a
-                                    // server on while WE were offline would never be told once we return.
-                                    // `inbox:{master}` is only ever joined by our own devices → the
-                                    // room match alone proves siblinghood. Receiver is idempotent.
+                                    // sibling on our side. THIS IS THE DIRECTIONAL HALF that matters for
+                                    // a fresh mnemonic link: the new EMPTY device joins last → it learns
+                                    // of the populated sibling via RoomMembers (not PeerJoined), and it
+                                    // is the side that must PULL the snapshot. As with PeerJoined,
+                                    // membership in `inbox:{master}` is NOT proof on its own (a stranger
+                                    // delivering a friend request lands there too) — gate on a verified
+                                    // same-identity proof. A proven sibling runs full convergence
+                                    // (which re-announces our servers, idempotent); an unproven peer is
+                                    // challenged to prove it holds our shared master key.
                                     {
                                         let own_inbox = format!("inbox:{}", local_peer_str);
                                         if room == own_inbox && pid_str.as_str() != device_peer_id {
-                                            for (sid, st) in server_states.iter() {
-                                                if st.is_deleted() { continue; }
-                                                let announce = serde_json::to_vec(
-                                                    &HavenMessage::SiblingServerAnnounce { server_id: sid.clone() },
-                                                ).unwrap_or_default();
-                                                if !announce.is_empty() {
-                                                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                                                        room_code: own_inbox.clone(),
-                                                        target_peer: pid_str.clone(),
-                                                        data: announce,
-                                                    });
-                                                }
+                                            if super::resolver::same_identity(pid_str, &local_peer_str) {
+                                                on_verified_sibling(
+                                                    &ws_cmd_tx, &ws_room_peers, &master_keypair,
+                                                    &device_peer_id, &local_peer_str, &server_states,
+                                                    &mut link_snapshot_requested, is_invisible,
+                                                    &db_path, &db_passphrase, pid_str,
+                                                );
+                                            } else {
+                                                issue_sibling_challenge(
+                                                    &ws_cmd_tx, &ws_room_peers,
+                                                    &mut pending_sibling_challenges, pid_str,
+                                                );
                                             }
-                                            hollow_log!(
-                                                "[HOLLOW-CRDT] Re-announced {} server(s) to sibling {pid_str} on reconnect (RoomMembers)",
-                                                server_states.values().filter(|s| !s.is_deleted()).count()
-                                            );
                                         }
                                     }
 
@@ -2803,6 +3012,70 @@ async fn run_event_loop(
 
                                 }
 
+                                // Friend request / removal / accept drains — OUTSIDE the is_new
+                                // guard. CRITICAL for RE-ADD while the peer stays ONLINE: the
+                                // peer's device is already in `synced_peers` from the prior
+                                // friendship, so the RoomMembers `is_new` was false and the queued
+                                // re-add FriendRequest never drained — the peer never saw the new
+                                // request (and, with the stale pending_friend_accepts now cleared on
+                                // FriendRemove, it also no longer auto-accepts → it would see
+                                // NOTHING). These drains are one-shot (`.remove()`), so running them
+                                // on every RoomMembers for an already-synced peer is idempotent
+                                // (no pending entry → no-op). Mirrors the PeerJoined drains, which
+                                // already run unconditionally.
+                                {
+                                    let joined_master = super::resolver::resolve(pid_str);
+                                    // Queued friend REQUEST (the re-add path).
+                                    let req_key = if pending_friend_requests.contains_key(pid_str) {
+                                        Some(pid_str.to_string())
+                                    } else if pending_friend_requests.contains_key(&joined_master) {
+                                        Some(joined_master.clone())
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(target_key) = req_key {
+                                        if let Some(requested_at) = pending_friend_requests.remove(&target_key) {
+                                            hollow_log!("[HOLLOW-FRIENDS] Peer {pid_str} appeared in RoomMembers (target {target_key}), sending queued friend request");
+                                            send_message_to_peer(
+                                                &ws_cmd_tx, &ws_room_peers,
+                                                pid_str, HavenMessage::FriendRequest { requested_at },
+                                            );
+                                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+                                                room_code: format!("inbox:{}", target_key),
+                                            });
+                                        }
+                                    }
+                                    // Queued friend REMOVAL tombstone.
+                                    let removal_key = if pending_friend_removals.contains(pid_str) {
+                                        Some(pid_str.to_string())
+                                    } else if pending_friend_removals.contains(&joined_master) {
+                                        Some(joined_master.clone())
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(key) = removal_key {
+                                        pending_friend_removals.remove(&key);
+                                        hollow_log!("[HOLLOW-FRIENDS] Peer {pid_str} appeared in RoomMembers (master {key}), sending queued friend removal");
+                                        send_message_to_peer(
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            pid_str, HavenMessage::FriendRemove,
+                                        );
+                                        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+                                            let _ = store.remove_friend(&key);
+                                        }
+                                    }
+                                    // (Re)deliver a queued FriendAccept to the requester.
+                                    if pending_friend_accepts.remove(&joined_master).is_some()
+                                        || pending_friend_accepts.remove(&pid_str.to_string()).is_some()
+                                    {
+                                        hollow_log!("[HOLLOW-FRIENDS] Peer {pid_str} appeared in RoomMembers (master {joined_master}), (re)sending FriendAccept");
+                                        send_message_to_peer(
+                                            &ws_cmd_tx, &ws_room_peers,
+                                            pid_str, HavenMessage::FriendAccept,
+                                        );
+                                    }
+                                }
+
                                 // Send join request if this room matches a pending server join.
                                 // Outside is_new guard — peer may already be in synced_peers
                                 // from a DM room but we still need to send the join request.
@@ -2816,6 +3089,30 @@ async fn run_event_loop(
                                         },
                                     );
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {pid_str} for {room}");
+                                }
+
+                                // DM-room co-presence re-key (RoomMembers twin of the PeerJoined
+                                // heal above — REQUIRED because, depending on join order, the
+                                // wedged side may learn of the peer's DM-room entry via RoomMembers
+                                // (it's the joiner) rather than PeerJoined (the incumbent). Same
+                                // fix: when the durable DM room is mutually populated and we lack a
+                                // confirmed session, re-issue a KeyRequest bypassing the freshness
+                                // gate so a KeyBundle dropped during the inbox-leave race is retried
+                                // promptly instead of waiting for the 30s sweep. See the PeerJoined
+                                // arm for the full rationale (idempotent, antisymmetric, no sibling/
+                                // server/guest regression; pure f(masters) DM room).
+                                // See the PeerJoined arm: gate on `!has_session` so only the
+                                // wedged/deferred side (which holds no session) kicks, not a side
+                                // with an unconfirmed handshake already in flight.
+                                if !olm.has_session(pid_str)
+                                    && room == dm_room_code(&local_peer_str, &super::resolver::resolve(pid_str))
+                                {
+                                    hollow_log!("[HOLLOW-CRYPTO] DM-room co-presence (RoomMembers) with {pid_str} and no session — re-keying (handshake-race heal)");
+                                    send_message_to_peer(
+                                        &ws_cmd_tx, &ws_room_peers,
+                                        pid_str, HavenMessage::KeyRequest,
+                                    );
+                                    key_request_in_flight.insert(pid_str.clone(), std::time::Instant::now());
                                 }
                             }
                         }
@@ -2855,7 +3152,10 @@ async fn run_event_loop(
                         // DM + inbox rooms so we get RoomMembers → full state healing.
                         let local_peer = local_peer_str.to_string();
                         for peer_id in &online {
-                            let dm_room = dm_room_code(&local_peer, peer_id);
+                            // `online` reports DEVICE ids; the DM room is master-paired
+                            // (f(masters)) — resolve so we re-join the SAME room the
+                            // friend is in (a device-keyed room would never match).
+                            let dm_room = dm_room_code(&local_peer, &super::resolver::resolve(peer_id));
                             hollow_log!("[HOLLOW-WS] Liveness heal: {peer_id} is online, re-joining DM + inbox rooms");
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                                 room_code: dm_room,
@@ -2908,10 +3208,20 @@ async fn run_event_loop(
                     WsEvent::NicknameResolved { nickname, peer_id } => {
                         if pending_nickname_resolve.as_deref() == Some(&nickname) {
                             pending_nickname_resolve = None;
+                            // A temporary nickname is claimed at the relay under the
+                            // claimer's WS-auth DEVICE id, so `peer_id` is a DEVICE id —
+                            // but friendships key on the MASTER (presence/DM/profile all
+                            // do). Collapse device→master so the friend row isn't stranded
+                            // under a device id. Harmless when the resolver is cold (an
+                            // unknown id resolves to itself); the device-list ingest's
+                            // re-key (crypto_handler::ingest_device_list) repairs the row
+                            // once the mapping is learned, for the cold case.
+                            let target = super::resolver::resolve(&peer_id);
                             social::handle_send_friend_request(
                                 &event_tx, &ws_cmd_tx, &ws_room_peers, &sig_cmd_tx,
                                 &mut pending_friend_requests,
-                                &local_peer_str, peer_id,
+                                &mut pending_friend_removals,
+                                &local_peer_str, target,
                                 &db_path, &db_passphrase,
                             ).await;
                         }
@@ -3288,7 +3598,10 @@ async fn run_event_loop(
                                         &guest_rooms,
                                         &subscribed_channels,
                                         &db_path, &db_passphrase,
-                                        &local_peer_str, &from, is_invisible, msg,
+                                        &local_peer_str, &from, is_invisible,
+                                        &mut link_snapshot_requested, &mut pending_sibling_challenges,
+                                        &mut pending_friend_accepts, &mut pending_friend_requests,
+                                        msg,
                                     ).await;
                             } else {
                                 hollow_log!("[HOLLOW-WS] Failed to parse HavenMessage from {from} in {room}");
@@ -3557,16 +3870,32 @@ async fn run_event_loop(
                             }
                         }
                     }
+                    // Accepted-friend masters (built once per sweep). BACKSTOP for the
+                    // friend-handshake Olm wedge: the side that DEFERRED on glare holds NO
+                    // session object at all (absent, not unconfirmed → `half_session` is
+                    // false) and a freshly-friended peer is not a server member, so without
+                    // this a wedged friend with no queued DM would never be swept. The
+                    // prompt heal is the DM-room co-presence re-key (PeerJoined/RoomMembers);
+                    // this guarantees EVENTUAL convergence if any co-presence signal is
+                    // missed. One DB read per 30s tick — negligible. Master-keyed; a sibling
+                    // resolves to our own master (not in our friends) so it's excluded.
+                    let accepted_friends: std::collections::HashSet<String> =
+                        crate::storage::MessageStore::open(&db_path, &db_passphrase)
+                            .ok()
+                            .and_then(|s| s.load_friends(Some("accepted")).ok())
+                            .map(|v| v.into_iter().map(|(pid, ..)| pid).collect())
+                            .unwrap_or_default();
                     for peer in &online {
                         // Only reconcile peers we actually have a relationship with —
-                        // a shared-server member, a peer with queued DMs, or one with a
-                        // half-built (unconfirmed) session. Avoids spamming co-room
-                        // strangers (e.g. public-channel guests we never DM).
+                        // a shared-server member, an accepted friend, a peer with queued
+                        // DMs, or one with a half-built (unconfirmed) session. Avoids
+                        // spamming co-room strangers (e.g. public-channel guests we never DM).
                         let is_member = server_states.values()
                             .any(|s| s.is_member(peer));
+                        let is_friend = accepted_friends.contains(&super::resolver::resolve(peer));
                         let has_pending = pending_messages.contains_key(peer);
                         let half_session = olm.has_unconfirmed_session(peer);
-                        if !(is_member || has_pending || half_session) {
+                        if !(is_member || is_friend || has_pending || half_session) {
                             continue;
                         }
                         // Confirmed session → nothing to do.
@@ -4122,6 +4451,47 @@ fn dm_event_convo(
     super::resolver::resolve(sender_peer)
 }
 
+/// After a session is (re)established with `peer_str`, ask that peer to re-serve
+/// our DM history from our high-water mark. This is the LIVE equivalent of the
+/// restart-time DM re-sync: during an Olm session desync (glare) the peer kept
+/// encrypting on a ratchet we couldn't decrypt, so its messages never rendered —
+/// a restart recovered them only because it re-synced over a fresh session. Now
+/// that we hold a fresh session, do the same without a restart. The DmSyncBatch
+/// response rides the new (good) session; the receiver dedups by message_id, so a
+/// redundant re-serve on an already-healthy session is harmless. Targets the
+/// concrete device `peer_str` (the live socket); the convo key resolves to master.
+fn request_dm_resync_after_rekey(
+    peer_str: &str,
+    master_peer_str: &str,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        let convo = super::resolver::resolve(peer_str);
+        // Multi-device: if WE have a sibling, request both directions from our
+        // cross-direction high-water mark (mirrors the PeerJoined DM-sync) so a
+        // friend also re-serves messages we sent from another device.
+        let multi_device = !super::resolver::devices_for(master_peer_str).is_empty();
+        let since = if multi_device {
+            store.get_latest_dm_timestamp_any(&convo)
+        } else {
+            store.get_latest_dm_timestamp(&convo)
+        }
+        .unwrap_or(None)
+        .unwrap_or(0);
+        hollow_log!("[HOLLOW-SYNC] Post-rekey DM resync from {peer_str} since {since} (both={multi_device})");
+        send_message_to_peer(
+            ws_cmd_tx, ws_room_peers,
+            peer_str, HavenMessage::DmSyncRequest {
+                since_timestamp: since,
+                both_directions: multi_device,
+            },
+        );
+    }
+}
+
 /// Pack a slice of stored DM messages into wire `DmSyncItem`s, joining in each
 /// message's reactions and file metadata in two batch queries. Shared by the
 /// friend `DmSyncRequest` responder and the multi-device sibling backfill
@@ -4278,6 +4648,10 @@ async fn handle_incoming_request(
     local_peer_str: &str,
     peer_str: &str,
     is_invisible: bool,
+    link_snapshot_requested: &mut std::collections::HashSet<String>,
+    pending_sibling_challenges: &mut HashMap<String, (String, std::time::Instant)>,
+    pending_friend_accepts: &mut HashMap<String, i64>,
+    pending_friend_requests: &mut HashMap<String, i64>,
     request: HavenMessage,
 ) {
 
@@ -4524,6 +4898,18 @@ async fn handle_incoming_request(
                                     ).await;
                                 }
                             }
+                            // Re-pull any DMs the peer sent on the now-dead ratchet
+                            // (the glare-desync case: the peer kept encrypting on a
+                            // session we couldn't decrypt, so those messages never
+                            // rendered live — exactly what a RESTART recovers via DM
+                            // sync). Now that we hold a FRESH session, ask the peer to
+                            // re-serve from our high-water mark; the response rides this
+                            // good session and the receiver dedups by message_id. This is
+                            // the live equivalent of the restart-time re-sync.
+                            request_dm_resync_after_rekey(
+                                &peer_str, &master_peer_str,
+                                &ws_cmd_tx, &ws_room_peers, db_path, db_passphrase,
+                            );
                             sync_handler::flush_pending_sync_requests(
                                 pending_sync_requests, peer_str,
                                 olm, crypto_store,
@@ -4535,25 +4921,29 @@ async fn handle_incoming_request(
                             pt
                         }
                         Err(e) => {
-                            // Apply cooldown to prevent flood from stale PreKey messages.
                             let now = std::time::Instant::now();
-                            let should_rekey = match decrypt_fail_cooldown.get(peer_str) {
-                                Some(last) => now.duration_since(*last) >= Duration::from_secs(5),
-                                None => true,
-                            };
-                            if should_rekey {
-                                hollow_log!("[HOLLOW-CRYPTO] PreKey session creation failed for {peer_str}: {e} — initiating re-key");
+                            // ALWAYS log (was cooldown-gated → silent under a burst).
+                            hollow_log!("[HOLLOW-CRYPTO] PreKey session creation FAILED for {peer_str}: {e}");
+                            // Throttle the teardown bookkeeping to 5s (anti-flood) but
+                            // keep nudging the peer to re-key on a shorter 2s throttle so
+                            // a glare resolves live instead of stalling until restart.
+                            if matches!(decrypt_fail_cooldown.get(peer_str),
+                                        None) || decrypt_fail_cooldown.get(peer_str)
+                                .is_some_and(|last| now.duration_since(*last) >= Duration::from_secs(5))
+                            {
                                 decrypt_fail_cooldown.insert(peer_str.to_string(), now);
-                                if !key_request_is_fresh(key_request_in_flight, peer_str) {
-                                    key_request_in_flight.insert(peer_str.to_string(), now);
-                                    send_message_to_peer(
-                                        ws_cmd_tx, ws_room_peers,
-                                        peer_str, HavenMessage::KeyRequest,
-                                    );
-                                }
+                            }
+                            let req_throttled = key_request_in_flight
+                                .get(peer_str)
+                                .is_some_and(|t| now.duration_since(*t) < Duration::from_secs(2));
+                            if !req_throttled {
+                                key_request_in_flight.insert(peer_str.to_string(), now);
+                                send_message_to_peer(
+                                    ws_cmd_tx, ws_room_peers,
+                                    peer_str, HavenMessage::KeyRequest,
+                                );
                             }
                             persist_crypto_state(olm, crypto_store, &peer_str);
-                            
                             return;
                         }
                     }
@@ -4572,21 +4962,31 @@ async fn handle_incoming_request(
                             let _ = event_tx.send(NetworkEvent::SessionEstablished {
                                 peer_id: peer_str.to_string(),
                             }).await;
+                            // Re-pull anything missed while this session was unconfirmed
+                            // / desynced (live equivalent of the restart re-sync).
+                            request_dm_resync_after_rekey(
+                                peer_str, &master_peer_str,
+                                ws_cmd_tx, ws_room_peers, db_path, db_passphrase,
+                            );
                         }
                         pt
                     }
                     Err(e) => {
-                        // Decrypt failure — check cooldown before killing session.
-                        // This prevents rapid session thrashing when many in-flight
-                        // chunks fail (e.g., large file transfer with 1000+ chunks).
                         let now = std::time::Instant::now();
-                        let should_rekey = match decrypt_fail_cooldown.get(peer_str) {
-                            Some(last_kill) => now.duration_since(*last_kill) >= Duration::from_secs(5),
-                            None => true, // First failure — allow rekey
-                        };
+                        // ALWAYS log every decrypt failure (was gated behind the 5s
+                        // teardown cooldown, so a burst of undecryptable frames after a
+                        // glare-desynced session went completely UNLOGGED — the bug was
+                        // invisible: 40+ frames delivered by the relay, zero trace here).
+                        hollow_log!("[HOLLOW-SWARM] Decrypt FAILED for {peer_str}: {e}");
 
-                        if should_rekey {
-                            hollow_log!("[HOLLOW-SWARM] Decrypt failed for {peer_str}: {e} — removing stale session");
+                        // Tear down the (known-dead) session at most once per 5s — this
+                        // throttle prevents session thrashing under a 1000-chunk file
+                        // transfer where many in-flight chunks fail at once.
+                        let teardown_ok = match decrypt_fail_cooldown.get(peer_str) {
+                            Some(last_kill) => now.duration_since(*last_kill) >= Duration::from_secs(5),
+                            None => true,
+                        };
+                        if teardown_ok {
                             olm.remove_session(&peer_str);
                             persist_crypto_state(olm, crypto_store, &peer_str);
                             decrypt_fail_cooldown.insert(peer_str.to_string(), now);
@@ -4607,15 +5007,27 @@ async fn handle_incoming_request(
                                     }).await;
                                 }
                             }
+                        }
 
-                            // Send a KeyRequest to re-establish the session.
-                            if !key_request_is_fresh(key_request_in_flight, peer_str) {
-                                key_request_in_flight.insert(peer_str.to_string(), now);
-                                send_message_to_peer(
-                                    ws_cmd_tx, ws_room_peers,
-                                    peer_str, HavenMessage::KeyRequest,
-                                );
-                            }
+                        // Send a KeyRequest to re-establish the session — independent of
+                        // the teardown throttle, lightly throttled on its own (2s). The
+                        // sender keeps blasting messages on its live-but-dead ratchet and
+                        // the relay never ACKs, so OUR repeated KeyRequest is the only
+                        // signal that drives the peer to drop its half and re-handshake.
+                        // Gating this behind the 5s teardown cooldown (the old bug) made
+                        // us go silent for 5s after the first failure → the glare never
+                        // resolved live and only a RESTART fixed it. Once the session is
+                        // rebuilt, our pending_messages queue + the peer's re-send recover
+                        // the missed messages (the receiver dedups by message_id).
+                        let req_throttled = key_request_in_flight
+                            .get(peer_str)
+                            .is_some_and(|t| now.duration_since(*t) < Duration::from_secs(2));
+                        if !req_throttled {
+                            key_request_in_flight.insert(peer_str.to_string(), now);
+                            send_message_to_peer(
+                                ws_cmd_tx, ws_room_peers,
+                                peer_str, HavenMessage::KeyRequest,
+                            );
                         }
 
                         return;
@@ -7784,6 +8196,58 @@ async fn handle_incoming_request(
             }).await;
         }
 
+        HavenMessage::SiblingProveRequest { nonce } => {
+            // A peer in OUR inbox is challenging us to prove we are its sibling (we
+            // share the master key). We sign `hollow-sibling:{our_master}:{our_device}:
+            // {nonce}` with the MASTER key. A genuine challenger shares our master, so
+            // it can reconstruct + verify this; a stranger that somehow received this
+            // (it never should — strangers don't sit in our inbox to challenge) gains
+            // nothing because the proof binds to OUR master, which only real siblings
+            // hold. `master_peer_str` is our master peer_id; `device_peer_id` is ours.
+            let (sig_b64, master_pubkey_b64) =
+                super::crypto_handler::build_sibling_proof(master_keypair, device_peer_id, &nonce);
+            hollow_log!("[HOLLOW-SIBLING] Answering sibling-proof challenge from {peer_str}");
+            send_message_to_peer(
+                ws_cmd_tx, ws_room_peers,
+                peer_str, HavenMessage::SiblingProveResponse { nonce, sig_b64, master_pubkey_b64 },
+            );
+        }
+
+        HavenMessage::SiblingProveResponse { nonce, sig_b64, master_pubkey_b64 } => {
+            // The peer we challenged answered. Verify the proof binds to OUR master AND
+            // to the device id WE challenged (peer_str — taken from the routing layer,
+            // never self-reported) AND to the nonce we issued. Only on a valid proof do
+            // we treat it as our sibling and run the convergence machinery.
+            let Some((expected_nonce, issued_at)) = pending_sibling_challenges.get(peer_str) else {
+                hollow_log!("[HOLLOW-SIBLING] Unsolicited/expired SiblingProveResponse from {peer_str} — ignored");
+                return;
+            };
+            if *expected_nonce != nonce {
+                hollow_log!("[HOLLOW-SIBLING] Nonce mismatch in SiblingProveResponse from {peer_str} — ignored");
+                return;
+            }
+            if issued_at.elapsed() >= Duration::from_secs(60) {
+                hollow_log!("[HOLLOW-SIBLING] Stale SiblingProveResponse from {peer_str} — ignored");
+                pending_sibling_challenges.remove(peer_str);
+                return;
+            }
+            if !super::crypto_handler::verify_sibling_proof(
+                local_peer_str, peer_str, &nonce, &sig_b64, &master_pubkey_b64,
+            ) {
+                hollow_log!("[HOLLOW-SIBLING] INVALID sibling proof from {peer_str} — NOT a sibling, no merge");
+                pending_sibling_challenges.remove(peer_str);
+                return;
+            }
+            pending_sibling_challenges.remove(peer_str);
+            hollow_log!("[HOLLOW-SIBLING] Verified sibling {peer_str} via master-signed proof — converging");
+            on_verified_sibling(
+                ws_cmd_tx, ws_room_peers, master_keypair,
+                device_peer_id, local_peer_str, server_states,
+                link_snapshot_requested, is_invisible,
+                db_path, db_passphrase, peer_str,
+            );
+        }
+
         HavenMessage::SiblingServerAnnounce { server_id } => {
             // Multi-device: one of OUR OWN devices created a server and is telling us
             // (its sibling) to onboard. SECURITY: only act on a SAME-IDENTITY sender —
@@ -8909,22 +9373,61 @@ async fn handle_incoming_request(
 
             hollow_log!("[HOLLOW-FRIENDS] Friend request from {peer_str}");
 
-            // Save as pending incoming.
+            // Save as pending incoming, keyed by the sender's MASTER (friendships key
+            // on the master). Cold resolver → resolves to the device id itself, which
+            // the device-list ingest re-key later migrates to the master. Also migrate
+            // any row already stranded under the device id.
             {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                    let _ = store.save_friend(&peer_str, "pending", "incoming", requested_at);
+                    let master = super::resolver::resolve(&peer_str);
+                    if master != peer_str {
+                        let _ = store.migrate_friend_to_master(&peer_str, &master);
+                    }
+                    let _ = store.save_friend(&master, "pending", "incoming", requested_at);
                 }
             }
 
-            // Register DM room code so we can rediscover this peer.
+            // Register DM room code so we can rediscover this peer, AND JOIN the DM
+            // relay room now. The requester is already in this DM room (it joined at
+            // send time) and — post anti-mis-link fix — LEAVES our inbox after
+            // delivery, so the DM room is the shared rendezvous over which our eventual
+            // FriendAccept routes back. Without joining here, the accept could find no
+            // shared room (we used to rely on the requester lingering in our inbox).
+            // `dm_room_code` is pure (f(masters)) — pass the requester's MASTER (not the
+            // raw sender device) so we land in the SAME room the requester joined
+            // (`dm_room_code(my_master, their_master)`). Using the device id put us in a
+            // DIFFERENT room (`dm_room_code(my_master, their_device)`) where the requester
+            // never was → our FriendAccept had no shared room and was lost (the exact bug
+            // where the requester never learned we accepted).
             let local_peer = local_peer_str.to_string();
-            let room = dm_room_code(&local_peer, &peer_str);
+            let req_master = super::resolver::resolve(&peer_str);
+            let room = dm_room_code(&local_peer, &req_master);
             let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
                 room_code: room.clone(),
             }).await;
             let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
-                room_code: room,
+                room_code: room.clone(),
             }).await;
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                room_code: room,
+            });
+
+            // CRITICAL: push OUR profile + DEVICE LIST to the requester NOW, while it is
+            // still reachable (it just sent us this request, so it shares a room with
+            // us — the inbox and/or the DM room). This is the ONLY reliable moment to
+            // teach the requester `our-device → our-master`: our normal device-list send
+            // is gated behind the `is_new` PeerJoined path, which the requester defeats
+            // by leaving our inbox right after delivery and then being pinned in
+            // `synced_peers` via the shared DM room — so it never fires again. Without
+            // this, the requester never ingests our device list, never collapses our
+            // device→master, and our friendship stays split (their incoming row keyed by
+            // our device id, never re-keyed). Send to the SENDER device directly.
+            social::send_own_profile_to_peer(
+                ws_cmd_tx, ws_room_peers,
+                local_peer_str, master_keypair, device_peer_id, &peer_str,
+                is_invisible,
+                db_path, db_passphrase,
+            );
 
             let _ = event_tx.send(NetworkEvent::FriendRequestReceived {
                 peer_id: peer_str.to_string(),
@@ -8935,20 +9438,29 @@ async fn handle_incoming_request(
             
             hollow_log!("[HOLLOW-FRIENDS] Friend accepted by {peer_str}");
 
-            // Update our outgoing request to accepted.
+            // Update our outgoing request to accepted, keyed by the friend's MASTER.
+            // The accepter's `peer_str` may be a device id (multi-device / nickname);
+            // resolve so the accepted row matches presence/DM/profile, and migrate any
+            // pending row stranded under the device id.
             {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as i64;
-                    let _ = store.save_friend(&peer_str, "accepted", "", now);
+                    let master = super::resolver::resolve(&peer_str);
+                    if master != peer_str {
+                        let _ = store.migrate_friend_to_master(&peer_str, &master);
+                    }
+                    let _ = store.save_friend(&master, "accepted", "", now);
                 }
             }
 
-            // Register DM room code with signaling for internet discovery.
+            // Register DM room code with signaling. Use the MASTER so both sides compute
+            // the SAME pure dm_room_code.
             let local_peer = local_peer_str.to_string();
-            let room = dm_room_code(&local_peer, &peer_str);
+            let friend_master = super::resolver::resolve(&peer_str);
+            let room = dm_room_code(&local_peer, &friend_master);
             let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
                 room_code: room.clone(),
             }).await;
@@ -8956,39 +9468,84 @@ async fn handle_incoming_request(
                 room_code: room,
             }).await;
 
+            // Push our profile + device list to the accepter while it's reachable, so it
+            // learns our device→master mapping over the durable DM room (same reason as
+            // the FriendRequest handler — the is_new gate otherwise suppresses it).
+            social::send_own_profile_to_peer(
+                ws_cmd_tx, ws_room_peers,
+                local_peer_str, master_keypair, device_peer_id, &peer_str,
+                is_invisible,
+                db_path, db_passphrase,
+            );
+
             let _ = event_tx.send(NetworkEvent::FriendRequestAccepted {
                 peer_id: peer_str.to_string(),
             }).await;
         }
 
         HavenMessage::FriendReject => {
-            
-            hollow_log!("[HOLLOW-FRIENDS] Friend rejected by {peer_str}");
+            // The sender is a DEVICE id but our outgoing request row is keyed by
+            // their MASTER — delete the master row (a raw device-id delete would
+            // silently no-op, leaving a ghost outgoing request). Delete both keys
+            // to also clean any legacy device-stranded row.
+            let master = super::resolver::resolve(&peer_str);
+            hollow_log!("[HOLLOW-FRIENDS] Friend rejected by {peer_str} (master {master})");
 
-            // Remove our outgoing request.
             {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                    let _ = store.remove_friend(&peer_str);
+                    let _ = store.remove_friend(&master);
+                    if master != peer_str {
+                        let _ = store.remove_friend(&peer_str);
+                    }
                 }
             }
 
             let _ = event_tx.send(NetworkEvent::FriendRequestRejected {
-                peer_id: peer_str.to_string(),
+                peer_id: master,
             }).await;
         }
 
         HavenMessage::FriendRemove => {
-            
-            hollow_log!("[HOLLOW-FRIENDS] Friend removed by {peer_str}");
+            // The remover sends from a DEVICE id, but the friendship is keyed by
+            // their MASTER on our side — resolve so the DELETE hits the right row
+            // (a raw device-id delete misses a master-keyed friend → asymmetric
+            // removal where they removed us but we still list them). Delete both
+            // keys for any legacy device-stranded row.
+            let master = super::resolver::resolve(&peer_str);
+            hollow_log!("[HOLLOW-FRIENDS] Friend removed by {peer_str} (master {master})");
 
             {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                    let _ = store.remove_friend(&peer_str);
+                    let _ = store.remove_friend(&master);
+                    if master != peer_str {
+                        let _ = store.remove_friend(&peer_str);
+                    }
                 }
             }
 
+            // CRITICAL — clear our OWN queued accept/request for this person. We may
+            // hold a `pending_friend_accepts[master]` entry (we accepted them earlier,
+            // AND it is re-seeded from accepted-friends at every startup). If it
+            // survives this removal, then when they RE-ADD us and their device
+            // reappears, the pending-accepts drain AUTO-SENDS a FriendAccept WITHOUT
+            // ever surfacing their new request — they re-friend us off that stale
+            // accept while WE show nothing and never consented (the asymmetric
+            // re-add-auto-accept bug). The send-side `handle_remove_friend` already
+            // does this; the RECEIVE side must too. Clear both master and device keys.
+            pending_friend_accepts.remove(&master);
+            pending_friend_requests.remove(&master);
+            if master != peer_str {
+                pending_friend_accepts.remove(peer_str);
+                pending_friend_requests.remove(peer_str);
+            }
+
+            // NOTE: do NOT LeaveRoom here either — symmetric with the send side. The
+            // lingering ex-friend presence is handled as a UI-count concern (the Network
+            // column counts only peers resolving to an accepted friend), not by leaving
+            // rooms (which raced removal delivery and dropped the message).
+
             let _ = event_tx.send(NetworkEvent::FriendRemoved {
-                peer_id: peer_str.to_string(),
+                peer_id: master,
             }).await;
         }
 
@@ -9021,19 +9578,26 @@ async fn handle_incoming_request(
                     if super::resolver::same_identity(&entry.peer_id, local_peer_str) {
                         continue;
                     }
-                    if existing.contains(&entry.peer_id) {
+                    // Key the friend by their MASTER (the invariant). A sibling on a
+                    // current build already sends masters, but resolve defensively so
+                    // a device-keyed entry from an older sibling still lands canonical
+                    // and dedups against our existing master row.
+                    let fmaster = super::resolver::resolve(&entry.peer_id);
+                    if existing.contains(&fmaster) || existing.contains(&entry.peer_id) {
                         continue;
                     }
                     // v1 shares only accepted friends; persist as accepted.
                     if store
-                        .save_friend(&entry.peer_id, "accepted", "", entry.requested_at)
+                        .save_friend(&fmaster, "accepted", "", entry.requested_at)
                         .is_ok()
                     {
                         inserted += 1;
                     }
                     // Join the friend's DM room so presence flows both ways and
                     // future live messages arrive (history backfill is Step 4/5).
-                    let room = dm_room_code(local_peer_str, &entry.peer_id);
+                    // Use the friend's MASTER so both sides compute the same pure
+                    // dm_room_code (a device-keyed room would diverge per-side).
+                    let room = dm_room_code(local_peer_str, &fmaster);
                     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                         room_code: room.clone(),
                     });

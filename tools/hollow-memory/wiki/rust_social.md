@@ -96,12 +96,13 @@ All incoming friend messages are processed directly in `swarm.rs:handle_incoming
 2. Emits `NetworkEvent::FriendRequestRejected { peer_id }`
 
 ### HavenMessage::FriendRemove
-1. Calls `remove_friend(peer_str)` in MessageStore
-2. Emits `NetworkEvent::FriendRemoved { peer_id }`
+1. Resolves `master = resolve(peer_str)` (the remover sends from a DEVICE id; friendships key on MASTER) and `remove_friend(master)` (+ `remove_friend(peer_str)` for any legacy device-stranded row).
+2. **CLEARS `pending_friend_accepts` + `pending_friend_requests` for both `master` and `peer_str` (2026-06-23).** Without this, a stale `pending_friend_accepts[master]` (we accepted them earlier; also re-seeded from accepted-friends at every startup) survives the removal → on a later RE-ADD the pending-accepts drain AUTO-SENDS a FriendAccept with NO consent and no Incoming-tab entry (asymmetric: they re-friend us, we show nothing). The two maps are threaded into `handle_incoming_request` specifically for this. (The send-side `handle_remove_friend` already cleared them.)
+3. Emits `NetworkEvent::FriendRemoved { peer_id: master }`.
 
-### Pending Friend Request Drain
+### Pending Friend Request / Removal / Accept Drains
 
-When a peer becomes reachable (`PeerJoined` or `RoomMembers` events in swarm.rs), the node checks `pending_friend_requests` for any queued requests to that peer. If found, sends `HavenMessage::FriendRequest { requested_at }` and removes from the pending map. This handles the case where the friend request was initiated before the peer was online.
+When a peer becomes reachable (`PeerJoined` or `RoomMembers` events in swarm.rs), the node drains `pending_friend_requests` (sends the queued `FriendRequest`), `pending_friend_removals` (sends the queued `FriendRemove`), and `pending_friend_accepts` (re-sends `FriendAccept`). Each matches by resolving the joining DEVICE → MASTER. All are one-shot (`.remove()`). **These drains run OUTSIDE the `is_new` guard (2026-06-23) in BOTH PeerJoined and RoomMembers** — RoomMembers fires for a peer ALREADY present when WE join/reconnect, so for an already-synced peer `is_new=false` and the drain was being SKIPPED. That stranded the queued FriendRequest of a RE-ADD to an online ex-friend (the peer never saw the new request). The fix made the friendship require fresh consent again; see `feedback_friend_readd_online_auto_accept.md`.
 
 ---
 

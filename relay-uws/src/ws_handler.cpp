@@ -479,9 +479,8 @@ static void buffer_offline_msg(const std::string& target_peer_id,
     while (count_kind(false, false) > MAX_BUFFERED_MSGS_PER_PEER)          drop_oldest_kind(false, false);
     while (count_kind(true, false)  > MAX_BUFFERED_IMAGES_PER_PEER)        drop_oldest_kind(true, false);
     while (count_kind(false, true)  > MAX_BUFFERED_CHANNEL_MSGS_PER_PEER)  drop_oldest_kind(false, true);
-    fprintf(stderr, "[push] Buffered offline %s for %.12s... (room=%.8s..., queued=%zu)\n",
-            is_image ? "image" : (is_channel ? "channel msg" : "msg"),
-            target_peer_id.c_str(), room.c_str(), q.size());
+    // No per-message logging — the relay must not record who buffers what for whom
+    // (peer_id + room = social-graph metadata). Privacy-preserving by design.
 }
 
 // Replay any buffered messages for `peer_id` that belong to `room`, sending
@@ -509,10 +508,7 @@ static void replay_buffered_msgs(SSLWebSocket* ws, const std::string& peer_id,
     if (q.empty()) {
         state.offline_buffer.erase(it);
     }
-    if (delivered > 0) {
-        fprintf(stderr, "[push] Replayed %zu buffered msg(s) to %.12s... (room=%.8s..., full_node=%d)\n",
-                delivered, peer_id.c_str(), room.c_str(), full_node);
-    }
+    (void)delivered;
     (void)full_node;
 }
 
@@ -547,21 +543,17 @@ static void try_push_notify(const std::string& target_peer_id,
                             const std::string& sender_peer_id, RelayState& state) {
     auto tok_it = state.push_tokens.find(target_peer_id);
     if (tok_it == state.push_tokens.end()) {
-        fprintf(stderr, "[push] No token for %.12s... (tokens=%zu)\n",
-                target_peer_id.c_str(), state.push_tokens.size());
         return;
     }
 
     auto now = std::chrono::steady_clock::now();
     auto& last = state.last_push_sent[target_peer_id];
     if ((now - last) < std::chrono::seconds(PUSH_DEBOUNCE_SECS)) {
-        fprintf(stderr, "[push] Debounced for %.12s...\n", target_peer_id.c_str());
         return;
     }
     last = now;
 
-    fprintf(stderr, "[push] Sending push for %.12s... from %.12s...\n",
-            target_peer_id.c_str(), sender_peer_id.c_str());
+    // No logging of push routing — target/sender peer_ids are social-graph metadata.
     notify_push_sidecar(tok_it->second.token, tok_it->second.platform, sender_peer_id);
 }
 
@@ -571,8 +563,7 @@ static void handle_register_push_token(SSLWebSocket* ws, PerSocketData* data,
     if (data->is_guest || token.empty()) return;
     state.push_tokens[data->peer_id] = { token, platform };
     send_json(ws, {{"type", "push_token_registered"}});
-    fprintf(stderr, "[push] Token registered for %.12s... (platform=%s, total=%zu)\n",
-            data->peer_id.c_str(), platform.c_str(), state.push_tokens.size());
+    // No logging — associating a peer_id with a push token is sensitive.
 }
 
 // Store a peer's channel push prefs (RAM only, replaced wholesale). The app
@@ -602,8 +593,7 @@ static void handle_set_push_prefs(PerSocketData* data, const json& j, RelayState
         prefs[server] = std::move(p);
     }
     state.push_prefs[data->peer_id] = std::move(prefs);
-    fprintf(stderr, "[push] Channel push prefs set for %.12s... (%zu server(s))\n",
-            data->peer_id.c_str(), state.push_prefs[data->peer_id].size());
+    // No logging — peer_id + server set is membership metadata.
 }
 
 // Fire a channel push for an offline server member, filtered by their
@@ -648,8 +638,7 @@ static void try_channel_push_notify(const std::string& target, const std::string
     if (!mention) cps.count_since_offline++;
     any_last = now;
 
-    fprintf(stderr, "[push] Channel push for %.12s... (server=%.8s..., mention=%d)\n",
-            target.c_str(), server.c_str(), (int)mention);
+    // No logging — target peer + server + mention flag is membership/social metadata.
     notify_push_sidecar(PushJob{tok_it->second.token, tok_it->second.platform,
                                 sender, server, channel, mention});
 }
@@ -752,8 +741,6 @@ static void handle_direct(PerSocketData* data, const std::string& room,
         // dropping is what lets a fresh device's Olm session actually establish
         // (the "session can't be established with the other device" symptom).
         bool in_sockets = state.peer_sockets.find(target) != state.peer_sockets.end();
-        fprintf(stderr, "[push] direct: target %.12s... not in room, in_sockets=%d\n",
-                target.c_str(), in_sockets);
         // Buffer as a 0x06 frame so the fetch node's binary parser handles it
         // uniformly with binary DMs.
         buffer_offline_msg(target, room,
@@ -1010,6 +997,37 @@ static void handle_binary_topic_msg(PerSocketData* data,
     }
 }
 
+// NICKNAME_TTL_SECS: a claimed nickname lives 10 minutes, then is reclaimable.
+// (It's a transient friend-request rendezvous, not a persistent identity.)
+static constexpr uint64_t NICKNAME_TTL_SECS = 600;
+
+// Erase a nickname binding (both directions + expiry).
+static void erase_nickname_binding(RelayState& state, const std::string& nickname,
+                                   const std::string& peer_id) {
+    state.nickname_to_peer.erase(nickname);
+    state.peer_to_nickname.erase(peer_id);
+    state.nickname_expiry.erase(nickname);
+}
+
+// True iff a nickname's current binding is STALE: expired by TTL, or its holder's
+// socket is no longer connected. Such a binding must not block a fresh claim, and
+// resolve must treat it as not-found. Erases it as a side effect when stale.
+static bool nickname_binding_is_stale(RelayState& state, const std::string& nickname) {
+    auto it = state.nickname_to_peer.find(nickname);
+    if (it == state.nickname_to_peer.end()) return true; // no binding == free
+    const std::string& holder = it->second;
+    bool expired = false;
+    auto exp = state.nickname_expiry.find(nickname);
+    if (exp != state.nickname_expiry.end() && now_unix_secs() > exp->second) expired = true;
+    // Dead holder: no live socket authenticated as this peer_id.
+    bool dead_holder = state.peer_sockets.find(holder) == state.peer_sockets.end();
+    if (expired || dead_holder) {
+        erase_nickname_binding(state, nickname, holder);
+        return true;
+    }
+    return false;
+}
+
 static void handle_claim_nickname(SSLWebSocket* ws, PerSocketData* data,
                                    const std::string& raw_nick, RelayState& state) {
     if (data->is_guest) return;
@@ -1023,18 +1041,20 @@ static void handle_claim_nickname(SSLWebSocket* ws, PerSocketData* data,
     // Auto-release old nickname if peer already has one
     auto old = state.peer_to_nickname.find(data->peer_id);
     if (old != state.peer_to_nickname.end()) {
-        state.nickname_to_peer.erase(old->second);
-        state.peer_to_nickname.erase(old);
+        erase_nickname_binding(state, old->second, data->peer_id);
     }
 
-    // Check availability
-    if (state.nickname_to_peer.count(nickname)) {
+    // Check availability — but a STALE binding (expired TTL, or held by a peer whose
+    // socket is gone) is evicted here so it can't permanently block a fresh claim.
+    // This is the fix for "nickname stayed bound to a dead old identity".
+    if (state.nickname_to_peer.count(nickname) && !nickname_binding_is_stale(state, nickname)) {
         send_json(ws, {{"type", "nickname_error"}, {"error", "taken"}});
         return;
     }
 
     state.nickname_to_peer[nickname] = data->peer_id;
     state.peer_to_nickname[data->peer_id] = nickname;
+    state.nickname_expiry[nickname] = now_unix_secs() + NICKNAME_TTL_SECS;
     send_json(ws, {{"type", "nickname_claimed"}, {"nickname", nickname}});
 }
 
@@ -1042,8 +1062,7 @@ static void handle_release_nickname(SSLWebSocket* ws, PerSocketData* data,
                                      RelayState& state) {
     auto it = state.peer_to_nickname.find(data->peer_id);
     if (it != state.peer_to_nickname.end()) {
-        state.nickname_to_peer.erase(it->second);
-        state.peer_to_nickname.erase(it);
+        erase_nickname_binding(state, it->second, data->peer_id);
     }
     send_json(ws, {{"type", "nickname_released"}});
 }
@@ -1051,12 +1070,14 @@ static void handle_release_nickname(SSLWebSocket* ws, PerSocketData* data,
 static void handle_resolve_nickname(SSLWebSocket* ws, PerSocketData* /*data*/,
                                      const std::string& raw_nick, RelayState& state) {
     std::string nickname = to_lowercase(raw_nick);
-    auto it = state.nickname_to_peer.find(nickname);
-    if (it != state.nickname_to_peer.end()) {
-        send_json(ws, {{"type", "nickname_resolved"}, {"nickname", nickname}, {"peer_id", it->second}});
-    } else {
+    // A stale binding (expired / dead holder) must resolve as not_found, not return a
+    // dead peer_id the requester would then friend-request into the void.
+    if (nickname_binding_is_stale(state, nickname)) {
         send_json(ws, {{"type", "nickname_error"}, {"error", "not_found"}, {"nickname", nickname}});
+        return;
     }
+    auto it = state.nickname_to_peer.find(nickname);
+    send_json(ws, {{"type", "nickname_resolved"}, {"nickname", nickname}, {"peer_id", it->second}});
 }
 
 // ── Multi-device link codes (Step 4) — mirrors the nickname registry ──────────
@@ -1275,9 +1296,10 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
     bool owns_peer = (sock_it == state.peer_sockets.end() || sock_it->second == expected_ws);
 
     if (owns_peer) {
-        // Release temporary nickname
+        // Release temporary nickname (+ its expiry entry)
         auto nit = state.peer_to_nickname.find(peer_id);
         if (nit != state.peer_to_nickname.end()) {
+            state.nickname_expiry.erase(nit->second);
             state.nickname_to_peer.erase(nit->second);
             state.peer_to_nickname.erase(nit);
         }

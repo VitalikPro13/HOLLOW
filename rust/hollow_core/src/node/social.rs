@@ -11,13 +11,48 @@ use super::crypto_handler::{
 use super::signaling::SignalingCmd;
 use super::types::*;
 
+/// The concrete, ONLINE device peer_ids to target when we want to reach a friend
+/// identity. A bare master id authenticates as no socket, so a send addressed to it
+/// is dropped — we must resolve to real devices. Sources, deduped: the literal
+/// `original` id (the device that contacted us, if any), every resolver-known device
+/// of `master`, AND every peer currently in a SHARED ROOM that resolves to `master`
+/// (the load-bearing source when we don't yet hold the friend's device list). Only
+/// ids that are actually reachable (in some room we know) are returned.
+pub(crate) fn friend_device_targets(
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    original: &str,
+    master: &str,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |id: String, out: &mut Vec<String>| {
+        if !out.contains(&id) && peer_is_reachable(ws_room_peers, &id) {
+            out.push(id);
+        }
+    };
+    push(original.to_string(), &mut out);
+    for d in super::resolver::devices_for(master) {
+        push(d, &mut out);
+    }
+    // Any room peer that resolves to the friend's master is a live device of theirs.
+    for peers in ws_room_peers.values() {
+        for p in peers {
+            if super::resolver::resolve(p) == master {
+                push(p.clone(), &mut out);
+            }
+        }
+    }
+    out
+}
+
 /// Handle `NodeCommand::SendFriendRequest`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_send_friend_request(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     pending_friend_requests: &mut HashMap<String, i64>,
+    pending_friend_removals: &mut std::collections::HashSet<String>,
     local_peer_str: &str,
     peer_id_str: String,
     db_path: &str,
@@ -38,17 +73,36 @@ pub(crate) async fn handle_send_friend_request(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    // Save as pending outgoing.
+    // CANCEL any pending REMOVAL for this person — re-adding a friend you just
+    // removed (before the removal was delivered) must NOT also fire the queued
+    // FriendRemove. Without this, the request drain and the removal drain BOTH
+    // fired on the target's reconnect, sending a contradictory FriendRequest +
+    // FriendRemove → the peer removed us back and the friendship ping-ponged.
+    let cancel_master = super::resolver::resolve(&peer_id_str);
+    pending_friend_removals.remove(&cancel_master);
+    pending_friend_removals.remove(&peer_id_str);
+
+    // Save as pending outgoing, keyed by the target's MASTER (the swarm already
+    // resolved a nickname-result device→master before calling us; a pasted peer-ID is
+    // the master; resolving here is idempotent and covers any remaining device id).
+    let master = super::resolver::resolve(&peer_id_str);
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-            let _ = store.save_friend(&peer_id_str, "pending", "outgoing", now);
+            // Fold any pre-existing row stranded under the device id (parity with
+            // the accept path) so re-adding never leaves a stale device-keyed dup.
+            if master != peer_id_str {
+                let _ = store.migrate_friend_to_master(&peer_id_str, &master);
+            }
+            let _ = store.save_friend(&master, "pending", "outgoing", now);
         }
     }
 
     // Register DM room code immediately so signaling can help
-    // discover the peer even before they accept.
+    // discover the peer even before they accept. Use the target's MASTER (resolved
+    // above) so we join the SAME pure room the target will (`dm_room_code` is
+    // f(masters)); a nickname-resolved device id would otherwise diverge the room.
     let local_peer = local_peer_str.to_string();
-    let room = dm_room_code(&local_peer, &peer_id_str);
+    let room = dm_room_code(&local_peer, &master);
     let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
         room_code: room.clone(),
     }).await;
@@ -73,6 +127,15 @@ pub(crate) async fn handle_send_friend_request(
             &ws_cmd_tx, &ws_room_peers,
             &peer_id_str, HavenMessage::FriendRequest { requested_at: now },
         );
+        // Defense in depth: we only joined the TARGET's inbox to DELIVER the request.
+        // Leaving it now stops us lingering in the target's inbox set, where their
+        // sibling-proof challenge would (correctly) reject us but we needn't be at all.
+        // WS commands are ordered on one channel, so this leave is processed AFTER the
+        // SendDirect above. The friend ACCEPT comes back via the shared DM room (joined
+        // above), not the inbox, so leaving here does not break acceptance.
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+            room_code: inbox_room.clone(),
+        });
     } else {
         // Peer not in any WS room yet — queue the request.
         // It will be sent when the peer appears via PeerJoined/RoomMembers
@@ -87,40 +150,86 @@ pub(crate) async fn handle_send_friend_request(
 }
 
 /// Handle `NodeCommand::AcceptFriendRequest`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_accept_friend_request(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     local_peer_str: &str,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    is_invisible: bool,
     peer_id_str: String,
+    pending_friend_accepts: &mut HashMap<String, i64>,
+    pending_friend_removals: &mut std::collections::HashSet<String>,
     db_path: &str,
     db_passphrase: &str,
 ) {
     hollow_log!("[HOLLOW-FRIENDS] Accepting friend request from {peer_id_str}");
 
-    // Update to accepted.
+    // Update to accepted, keyed by the friend's MASTER. The incoming peer_id may be a
+    // DEVICE id (e.g. a nickname-resolved request, or a multi-device sender), but
+    // friendships key on the master (presence/DM/profile all do). Resolve here so the
+    // row is correct from the moment of acceptance — otherwise it stays stranded under
+    // the device id until the next device-list ingest re-keys it (which never happens
+    // if the device list was already ingested BEFORE the accept). Also migrate any
+    // pre-existing pending row that was saved under the device id.
+    let master = super::resolver::resolve(&peer_id_str);
+
+    // CANCEL any pending REMOVAL for this person — accepting a (re)friend supersedes a
+    // not-yet-delivered removal. Otherwise the removal drain would fire alongside the
+    // accept and the peer would remove us back.
+    pending_friend_removals.remove(&master);
+    pending_friend_removals.remove(&peer_id_str);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64;
-            let _ = store.save_friend(&peer_id_str, "accepted", "", now);
+            if master != peer_id_str {
+                let _ = store.migrate_friend_to_master(&peer_id_str, &master);
+            }
+            let _ = store.save_friend(&master, "accepted", "", now);
         }
     }
 
-    // Send acceptance to peer.
-    if peer_is_reachable(&ws_room_peers, &peer_id_str) {
+    // Send acceptance. The send must target a DEVICE (the bare master authenticates as
+    // no socket → dropped). Build the target set from: the original id (may be the
+    // device that sent the request), every resolver-known device of the master, AND —
+    // crucially — every peer CURRENTLY IN A SHARED ROOM that resolves to the master.
+    // That last source is what makes this work when we DON'T yet hold the friend's
+    // device list (so `devices_for` is empty) but their device is right there in our
+    // DM/inbox room: the master id alone is unreachable.
+    let targets = friend_device_targets(&ws_room_peers, &peer_id_str, &master);
+    for t in &targets {
         send_message_to_peer(
             &ws_cmd_tx, &ws_room_peers,
-            &peer_id_str, HavenMessage::FriendAccept,
+            t, HavenMessage::FriendAccept,
         );
     }
+    // ALWAYS queue the acceptance for redelivery, keyed by the requester's MASTER.
+    // The requester's device can race the accept: it delivers the request, then
+    // leaves our inbox, and its DM-room join may not have populated our
+    // `ws_room_peers` yet at the instant we accept — so `friend_device_targets`
+    // can be EMPTY here even though the device shows up a beat later. It can also
+    // simply be offline by the time the human clicks Accept. Without a queue, the
+    // FriendAccept is lost and the requester never learns we accepted (their row
+    // stays "pending outgoing" forever — the exact bug). The pending-accepts drain
+    // on PeerJoined/RoomMembers re-sends it the moment the requester's device
+    // appears; FriendAccept is idempotent (the receiver just re-saves "accepted").
+    pending_friend_accepts.insert(master.clone(), now);
+    hollow_log!(
+        "[HOLLOW-FRIENDS] Accepted {master}: sent FriendAccept to {} device(s) now, queued for redelivery",
+        targets.len()
+    );
 
-    // Register DM room code with signaling for internet discovery.
+    // Register DM room code with signaling for internet discovery. Use the MASTER so
+    // both sides compute the SAME pure `dm_room_code` (resolving inside it would
+    // diverge the room per-side).
     let local_peer = local_peer_str.to_string();
-    let room = dm_room_code(&local_peer, &peer_id_str);
+    let room = dm_room_code(&local_peer, &master);
     let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
         room_code: room.clone(),
     }).await;
@@ -131,6 +240,20 @@ pub(crate) async fn handle_accept_friend_request(
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
         room_code: room,
     });
+
+    // Push OUR profile + device list to the friend now (over the inbox/DM room where
+    // they're reachable), so they learn our device→master mapping. We are the ACCEPTER:
+    // if we never sent our own request (we only clicked Accept), no FriendRequest
+    // handler on the friend pushed our list to them — this is the path that delivers
+    // it. Fan to the friend's online devices.
+    for t in &friend_device_targets(&ws_room_peers, &peer_id_str, &master) {
+        send_own_profile_to_peer(
+            &ws_cmd_tx, &ws_room_peers,
+            local_peer_str, master_keypair, device_peer_id, t,
+            is_invisible,
+            db_path, db_passphrase,
+        );
+    }
 
     let _ = event_tx.send(NetworkEvent::FriendRequestAccepted {
         peer_id: peer_id_str,
@@ -146,12 +269,20 @@ pub(crate) async fn handle_reject_friend_request(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    hollow_log!("[HOLLOW-FRIENDS] Rejecting friend request from {peer_id_str}");
+    // The UI may pass a DEVICE id (a pending incoming request is keyed under the
+    // sender's device id until the device-list ingest re-keys it) OR a master.
+    // Delete BOTH the resolved-master row and the original-id row so the pending
+    // request is cleared regardless of which key it currently lives under.
+    let master = super::resolver::resolve(&peer_id_str);
+    hollow_log!("[HOLLOW-FRIENDS] Rejecting friend request from {peer_id_str} (master {master})");
 
-    // Remove from friends table.
+    // Remove from friends table (both possible keys).
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-            let _ = store.remove_friend(&peer_id_str);
+            let _ = store.remove_friend(&master);
+            if master != peer_id_str {
+                let _ = store.remove_friend(&peer_id_str);
+            }
         }
     }
 
@@ -168,35 +299,77 @@ pub(crate) async fn handle_reject_friend_request(
 }
 
 /// Handle `NodeCommand::RemoveFriend`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_remove_friend(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     peer_id_str: String,
     pending_friend_removals: &mut std::collections::HashSet<String>,
+    pending_friend_requests: &mut HashMap<String, i64>,
+    pending_friend_accepts: &mut HashMap<String, i64>,
     db_path: &str,
     db_passphrase: &str,
 ) {
-    hollow_log!("[HOLLOW-FRIENDS] Removing friend {peer_id_str}");
+    // The UI passes the friend's MASTER id (the friends list collapses
+    // device→master). The friend row is master-keyed, so resolve here too and
+    // always delete the MASTER row — a raw device-id delete silently no-ops
+    // against a master-keyed row (the bug where "Remove friend" did nothing /
+    // left a ghost). `resolve` is idempotent for a single-device friend.
+    let master = super::resolver::resolve(&peer_id_str);
+    hollow_log!("[HOLLOW-FRIENDS] Removing friend {peer_id_str} (master {master})");
 
-    if peer_is_reachable(&ws_room_peers, &peer_id_str) {
-        send_message_to_peer(
-            &ws_cmd_tx, &ws_room_peers,
-            &peer_id_str, HavenMessage::FriendRemove,
-        );
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+    // CANCEL any pending outgoing REQUEST and queued ACCEPT for this person —
+    // removing supersedes them. Otherwise a queued request/accept would re-fire on
+    // the peer's next appearance and contradict the removal (the ping-pong where
+    // request + remove went out together and the friendship flapped).
+    pending_friend_requests.remove(&master);
+    pending_friend_requests.remove(&peer_id_str);
+    pending_friend_accepts.remove(&master);
+    pending_friend_accepts.remove(&peer_id_str);
+
+    // Delete the local row up-front, unconditionally. Removal is a local-first
+    // action — it must take effect immediately whether or not the peer is online
+    // to receive the notification. Also clean up any legacy row still keyed under
+    // the original id (device-stranded) so no duplicate survives.
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        let _ = store.remove_friend(&master);
+        if master != peer_id_str {
             let _ = store.remove_friend(&peer_id_str);
         }
-    } else {
-        pending_friend_removals.insert(peer_id_str.clone());
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-            let _ = store.save_friend(&peer_id_str, "removed", "outgoing", 0);
-        }
-        hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id_str} not reachable, queued friend removal for delivery");
     }
 
+    // Notify the friend. The bare master authenticates as NO socket, so fan the
+    // FriendRemove out to every online device of theirs (devices_for(master) ∪
+    // live room peers resolving to master). If none are reachable, queue a
+    // tombstone keyed by the MASTER and a pending entry (the drain resolves a
+    // reconnecting device→master to match it).
+    let targets = friend_device_targets(&ws_room_peers, &peer_id_str, &master);
+    if targets.is_empty() {
+        pending_friend_removals.insert(master.clone());
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            let _ = store.save_friend(&master, "removed", "outgoing", 0);
+        }
+        hollow_log!("[HOLLOW-FRIENDS] Friend {master} not reachable, queued removal for delivery");
+    } else {
+        for t in &targets {
+            send_message_to_peer(
+                &ws_cmd_tx, &ws_room_peers,
+                t, HavenMessage::FriendRemove,
+            );
+        }
+        hollow_log!("[HOLLOW-FRIENDS] Sent FriendRemove for {master} to {} device(s)", targets.len());
+    }
+
+    // NOTE: we deliberately do NOT LeaveRoom the DM room here. Leaving right after the
+    // send raced our own FriendRemove — the relay processed our room-leave and dropped
+    // us from the room's routing set BEFORE it fanned out the message, so the peer never
+    // received the removal (one-sided removal). The ex-friend's lingering presence is a
+    // pure UI-count concern, handled in the Network column (it counts only peers that
+    // resolve to an accepted friend), not by tearing down the room mid-send.
+
     let _ = event_tx.send(NetworkEvent::FriendRemoved {
-        peer_id: peer_id_str,
+        peer_id: master,
     }).await;
 }
 

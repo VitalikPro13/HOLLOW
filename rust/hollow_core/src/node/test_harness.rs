@@ -798,6 +798,73 @@ async fn spawn_node_full(
     }
 }
 
+/// Spawn a node on a db_path the CALLER already created and pre-seeded (and owns
+/// the backing `tmp`). Unlike `spawn_node_full`, this does NOT create or seed the
+/// DB — it boots `spawn_node_mock` directly on the given path, so the test can
+/// stage arbitrary on-disk state (e.g. a device-keyed friend row + a friend's
+/// device list) and exercise the real startup code against it. The caller must
+/// have already run `migrate_auto_vacuum_once` and saved an Olm account.
+async fn spawn_node_on_db(
+    relay: &MockRelay,
+    master_tag: u8,
+    device_tag: u8,
+    db_path: &str,
+    tmp: tempfile::TempDir,
+) -> TestNode {
+    let master = NativeKeypair::from_secret_bytes(&seed_bytes(master_tag));
+    let device = NativeKeypair::from_secret_bytes(&seed_bytes(device_tag));
+    let passphrase = passphrase_for(&master);
+    let db_path = db_path.to_string();
+
+    // Ensure an Olm account exists (spawn_node_mock expects one), without touching
+    // any friend/device-list rows the caller staged.
+    let olm = {
+        let store = crate::storage::MessageStore::open(&db_path, &passphrase).expect("open store");
+        let mgr = OlmManager::new();
+        if store.load_olm_account().ok().flatten().is_none() {
+            let pickle = mgr.account_pickle_json().expect("pickle");
+            store.save_olm_account(&pickle).expect("save olm");
+        }
+        mgr
+    };
+    let crypto_store = CryptoStore::open(db_path.clone(), passphrase.clone()).expect("crypto store");
+    let crdt_store = CrdtStore::open(db_path.clone(), passphrase.clone()).expect("crdt store");
+
+    let (event_tx, event_rx) = mpsc::channel::<NetworkEvent>(256);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<NodeCommand>(256);
+    let cmd_tx_clone = cmd_tx.clone();
+
+    let (master_id, join, ws_cmd_rx, ws_event_tx) = super::swarm::spawn_node_mock(
+        master.clone(),
+        device.clone(),
+        event_tx,
+        cmd_rx,
+        cmd_tx_clone,
+        olm,
+        crypto_store,
+        crdt_store,
+        false,
+        db_path.clone(),
+        passphrase.clone(),
+    )
+    .await
+    .expect("spawn_node_mock");
+
+    let device_id = device.peer_id();
+    relay.register(device_id.clone(), ws_cmd_rx, ws_event_tx);
+
+    TestNode {
+        master_id,
+        device_id,
+        cmd_tx,
+        event_rx,
+        db_path,
+        passphrase,
+        _join: join,
+        _tmp: tmp,
+    }
+}
+
 /// Drain a node's events until `pred` returns true or the timeout elapses.
 /// Returns true if matched.
 async fn wait_event(
@@ -3409,4 +3476,970 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
         v2.channel_visibility(&server_id, &cid));
     assert!(!v2.can_see_channel(&server_id, &cid, &v_master),
         "after catch-up, V can't see the now-Admin+ channel");
+}
+
+// ---------------------------------------------------------------------------
+// ANTI-MIS-LINK (the security fix): a friend request between two DISTINCT
+// identities must NEVER fuse them. Sending a friend request makes the requester
+// join the TARGET's `inbox:{target}` room to deliver — which used to trip the
+// inbox-proof, mis-merging the stranger as the target's own sibling device
+// (resolver poison + device-list merge + friend-list leak + auto snapshot/link),
+// and swallowing the real request as a "self friend request". With the
+// cryptographic sibling-proof handshake, the stranger (holding only ITS OWN
+// master key) cannot answer the target's nonce challenge, so NO merge happens and
+// the request flows normally.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn friend_request_between_strangers_does_not_merge() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // A and B are TWO DISTINCT identities (different master tags → different master
+    // keys), each a single device. They are NOT siblings and NOT yet friends. The
+    // resolver is NOT pre-seeded for either (test_guard cleared it) — so a buggy
+    // inbox-proof would be the ONLY thing that could link them.
+    const A_MASTER: u8 = 1;
+    const A_DEV: u8 = 2;
+    const B_MASTER: u8 = 3;
+    const B_DEV: u8 = 4;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let a_dev = NativeKeypair::from_secret_bytes(&seed_bytes(A_DEV)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    sleep_ms(1500).await; // let both join their own inbox rooms + settle
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // A sends B a friend request → A joins inbox:{b_master} to deliver. B's inbox
+    // handler sees A's device and (post-fix) challenges it; A can't answer.
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+
+    // B must receive a NORMAL pending INCOMING friend request — NOT have it swallowed
+    // as a "self friend request (own device)". A is single-device and hasn't shared a
+    // device list, so from B's side A's identity IS A's sending DEVICE id (B has no
+    // device→master link for A — and crucially must NOT fabricate one).
+    let b_got_request = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { peer_id } if *peer_id == a_dev)
+    })
+    .await;
+    assert!(
+        b_got_request,
+        "B must receive a normal incoming friend request from A (not swallowed as self)"
+    );
+    sleep_ms(2000).await; // give any (buggy) merge / handshake the time to (not) happen
+
+    // --- THE SECURITY ASSERTIONS: A and B remain DISTINCT identities ---
+    assert!(
+        !super::resolver::same_identity(&a_master, &b_master),
+        "A and B must remain distinct identities after a friend request"
+    );
+    assert!(
+        !super::resolver::same_identity(&a_dev, &b_master),
+        "A's device must NOT resolve to B's master (no resolver poisoning)"
+    );
+    assert!(
+        !super::resolver::same_identity(&b_dev, &a_master),
+        "B's device must NOT resolve to A's master (symmetric — no poisoning either way)"
+    );
+
+    // B must NOT have merged A's device into B's own master-signed device list.
+    let b_devices = super::resolver::devices_for(&b_master);
+    assert!(
+        !b_devices.contains(&a_dev),
+        "B's device set must NOT contain A's device (no inbox-proof mis-merge), got {b_devices:?}"
+    );
+    if let Ok(Some(list)) = b.store().load_device_list(&b_master) {
+        assert!(
+            !list.devices.contains(&a_dev),
+            "B's PERSISTED device list must not contain A's device, got {:?}",
+            list.devices
+        );
+    }
+    // Symmetric: A must not have merged B's device.
+    let a_devices = super::resolver::devices_for(&a_master);
+    assert!(
+        !a_devices.contains(&b_dev),
+        "A's device set must NOT contain B's device, got {a_devices:?}"
+    );
+
+    // B's incoming-friend row is genuinely pending/incoming (the normal flow ran).
+    // It is keyed by A's MASTER (friend save sites resolve device→master; B learned
+    // A's device→master from A's published device list). If B hadn't learned the
+    // mapping yet it would key under the device id — accept either, but it must be
+    // one of A's ids and NOT collapsed into B's own identity.
+    let b_friends = b.store().load_friends(None).unwrap_or_default();
+    assert!(
+        b_friends.iter().any(|(pid, status, dir, _, _)| {
+            (*pid == a_master || *pid == a_dev) && status == "pending" && dir == "incoming"
+        }),
+        "B must hold a pending INCOMING friend row for A (master or device), got {b_friends:?}"
+    );
+    // And that row must key on A, never on B's own identity.
+    assert!(
+        b_friends.iter().all(|(pid, _, _, _, _)| !super::resolver::same_identity(pid, &b_master)),
+        "no friend row may be keyed under B's own identity, got {b_friends:?}"
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// Friend convergence across DEVICE≠MASTER (the VM/AL bug): when A friend-requests
+// B (whose device id ≠ master id) and B accepts, A must LEARN B's device→master
+// mapping and end with a SINGLE accepted friend keyed by B's MASTER — not a split
+// (incoming under B's device id + outgoing under B's master). The fix: the friend
+// handlers push our profile+device-list to the peer over the durable room (the
+// `is_new` gate otherwise suppressed it after the transient inbox window).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn friend_converges_to_master_across_distinct_device() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // A and B are distinct identities, EACH with device != master (the VM/AL shape).
+    const A_MASTER: u8 = 8;
+    const A_DEV: u8 = 9;
+    const B_MASTER: u8 = 11;
+    const B_DEV: u8 = 12;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    sleep_ms(1500).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // A requests B (by master). B accepts.
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    let b_got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { .. })
+    })
+    .await;
+    assert!(b_got, "B must receive A's friend request");
+    sleep_ms(2000).await; // let the profile/device-list pushes propagate both ways
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // --- THE CORE FIX: A learned B's device→master mapping (the pushed device list).
+    // This is what was BROKEN: A's only chance to ingest B's device list was the
+    // transient inbox window, then the is_new gate suppressed it forever, so A never
+    // collapsed B's device→master. The friend handlers now push the device list over
+    // the durable room. ---
+    assert_eq!(
+        super::resolver::resolve(&b_dev), b_master,
+        "A must resolve B's device → B's master after the device-list push (the fix)"
+    );
+
+    // --- A's friend row for B is keyed by B's MASTER and is SINGULAR (no split into a
+    // device-keyed + a master-keyed row). Status may be pending or accepted depending
+    // on accept-delivery timing — the keying is what this test pins. ---
+    let a_friends = a.store().load_friends(None).unwrap_or_default();
+    let b_rows: Vec<_> = a_friends.iter()
+        .filter(|(pid, _, _, _, _)| super::resolver::same_identity(pid, &b_master))
+        .collect();
+    assert_eq!(
+        b_rows.len(), 1,
+        "A must have exactly ONE friend row for B (no device/master split), got {a_friends:?}"
+    );
+    assert_eq!(b_rows[0].0, b_master, "A's friend row for B must be keyed by B's MASTER");
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// POSITIVE (no regression): the sibling-proof handshake itself links two genuine
+// siblings that meet LIVE in the inbox with NO pre-seeded resolver. Unlike
+// `linked_sibling_resolves_both_devices_at_startup` (which pre-seeds the resolver
+// from an imported device list), here neither device knows the other at boot —
+// the ONLY way they converge is the challenge→master-signed-response→merge path.
+// Proves the handshake replaces the old bare-inbox shortcut without breaking
+// genuine multi-device convergence.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn genuine_siblings_converge_via_proof_handshake() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // ONE identity M, two devices B and C (same master tag → SHARED master key).
+    // CRUCIAL: do NOT seed_self — the resolver starts empty for both, so each
+    // device's startup seeds only ITSELF. They can only learn of each other by
+    // answering each other's inbox sibling-proof challenge.
+    const M_MASTER: u8 = 5;
+    const B_DEV: u8 = 6;
+    const C_DEV: u8 = 7;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[]).await;
+    sleep_ms(1000).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
+    // Allow the handshake round-trip (challenge → response → verify → merge) and the
+    // device-list re-sign that follows.
+    sleep_ms(3000).await;
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    // After the handshake, BOTH devices resolve to the shared master, and the
+    // resolver lists both — i.e. the merge ran via the verified-proof path.
+    assert!(
+        super::resolver::same_identity(&b_dev, &c_dev),
+        "the two genuine sibling devices must resolve to the same identity after the handshake"
+    );
+    assert_eq!(
+        super::resolver::resolve(&c_dev), m_master,
+        "sibling C's device must resolve to the shared master after a verified proof"
+    );
+    assert_eq!(
+        super::resolver::resolve(&b_dev), m_master,
+        "sibling B's device must resolve to the shared master after a verified proof"
+    );
+    let mut devs = super::resolver::devices_for(&m_master);
+    devs.sort();
+    let mut expected = vec![b_dev.clone(), c_dev.clone()];
+    expected.sort();
+    assert_eq!(
+        devs, expected,
+        "the resolver must list BOTH sibling devices for the master after the proof handshake"
+    );
+
+    drop(b);
+    drop(c);
+}
+
+// ---------------------------------------------------------------------------
+// Friend REMOVAL must be symmetric across a device != master shape. The bug:
+// every remove_friend call (send side + the FriendRemove receive arm) passed a
+// RAW id with no device→master resolution. Once the UI collapses to master, A
+// removing B addressed the bare master (no socket → the online branch was
+// skipped → a stuck offline tombstone) while B, receiving FriendRemove from A's
+// DEVICE id, DELETEd `WHERE peer_id = <A device>` and MISSED its master-keyed
+// row — so B still listed A. This test drives the real request/accept/remove
+// flow and asserts BOTH sides end with NO row for the other.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn friend_removal_is_symmetric_across_distinct_device() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // A and B distinct identities, EACH device != master (the VM/AL shape).
+    const A_MASTER: u8 = 8;
+    const A_DEV: u8 = 9;
+    const B_MASTER: u8 = 11;
+    const B_DEV: u8 = 12;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    sleep_ms(1500).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // A requests B (by master). B accepts using the id B actually RECEIVED the
+    // request under — exactly as the UI does (`acceptRequest(req.peerId)`), which
+    // is A's DEVICE id while B's resolver is still cold for A. This is the real
+    // path; accepting `a_master` directly would skip the device→master plumbing.
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    let mut a_id_as_b_saw = None;
+    let b_got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+            a_id_as_b_saw = Some(peer_id.clone());
+            true
+        } else {
+            false
+        }
+    })
+    .await;
+    assert!(b_got, "B must receive A's friend request");
+    let a_id_for_accept = a_id_as_b_saw.expect("captured the requester id");
+    sleep_ms(1500).await; // let A's device list propagate so B can resolve A→master
+
+    // Accept and wait for BOTH sides to record the accepted friendship. Acceptance
+    // delivery depends on the device lists having propagated so both sides agree on
+    // the DM room — in the harness that can take a couple of round-trips, so re-send
+    // the (idempotent) accept and re-check up to a few times rather than racing a
+    // single fixed sleep. This mirrors real use, where convergence is within
+    // seconds and the human clicks Accept well after the request lands.
+    let mut converged = false;
+    for _ in 0..6 {
+        b.cmd_tx
+            .send(NodeCommand::AcceptFriendRequest { peer_id: a_id_for_accept.clone() })
+            .await
+            .unwrap();
+        sleep_ms(1500).await;
+        drain_events(&mut a);
+        drain_events(&mut b);
+        let a_has_b = a.store().load_friends(None).unwrap_or_default()
+            .iter().any(|(pid, st, _, _, _)| pid == &b_master && st == "accepted");
+        let b_has_a = b.store().load_friends(None).unwrap_or_default()
+            .iter().any(|(pid, st, _, _, _)| pid == &a_master && st == "accepted");
+        if a_has_b && b_has_a {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "precondition: both A and B must list each other as accepted (master-keyed) before removal"
+    );
+
+    // --- THE ACT: A removes B (by MASTER, exactly as the collapsed UI does). ---
+    a.cmd_tx
+        .send(NodeCommand::RemoveFriend { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    // B should receive the FriendRemove (fanned to B's online device, not the
+    // bare master) and DELETE its master-keyed row for A.
+    let b_removed = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::FriendRemoved { .. })
+    })
+    .await;
+    assert!(b_removed, "B must receive the FriendRemove and emit FriendRemoved");
+    sleep_ms(500).await;
+
+    // --- ASSERT: NEITHER side has ANY row for the other (no ghost, no asymmetry). ---
+    let a_rows_for_b: Vec<_> = a.store().load_friends(None).unwrap_or_default()
+        .into_iter()
+        .filter(|(pid, _, _, _, _)| super::resolver::same_identity(pid, &b_master))
+        .collect();
+    assert!(
+        a_rows_for_b.is_empty(),
+        "A must have NO friend row for B after removal, got {a_rows_for_b:?}"
+    );
+    let b_rows_for_a: Vec<_> = b.store().load_friends(None).unwrap_or_default()
+        .into_iter()
+        .filter(|(pid, _, _, _, _)| super::resolver::same_identity(pid, &a_master))
+        .collect();
+    assert!(
+        b_rows_for_a.is_empty(),
+        "B must have NO friend row for A after removal (symmetric remove), got {b_rows_for_a:?}"
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// The REQUESTER must end up with an ACCEPTED friend row after the other side
+// accepts — even though it was the requester (it never clicked Accept). The bug:
+// the accepter's FriendAccept could be lost (the requester's device raced the
+// accept and wasn't yet in the accepter's DM room, OR the FriendRequest-receive
+// handler joined a DEVICE-keyed DM room that the requester never shared), so the
+// requester stayed stuck "pending outgoing" forever. The pending-accepts queue +
+// master-keyed DM-room join fix this: the accept is (re)delivered when the
+// requester's device appears. This test pins the REQUESTER's side specifically.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn requester_gets_accepted_row_after_acceptance() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // REQUESTER R and ACCEPTER C, each device != master.
+    const R_MASTER: u8 = 30;
+    const R_DEV: u8 = 31;
+    const C_MASTER: u8 = 32;
+    const C_DEV: u8 = 33;
+    let r_master = NativeKeypair::from_secret_bytes(&seed_bytes(R_MASTER)).peer_id();
+    let c_master = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER)).peer_id();
+
+    let mut r = spawn_node_with_friends(&relay, R_MASTER, R_DEV, &[]).await;
+    let mut c = spawn_node_with_friends(&relay, C_MASTER, C_DEV, &[]).await;
+    sleep_ms(1500).await;
+    drain_events(&mut r);
+    drain_events(&mut c);
+
+    // R requests C (by master).
+    r.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: c_master.clone() })
+        .await
+        .unwrap();
+    let mut r_id_as_c_saw = None;
+    let c_got = wait_event(&mut c, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+            r_id_as_c_saw = Some(peer_id.clone());
+            true
+        } else {
+            false
+        }
+    })
+    .await;
+    assert!(c_got, "C must receive R's friend request");
+    let r_id_for_accept = r_id_as_c_saw.expect("captured requester id");
+    sleep_ms(1000).await;
+
+    // C accepts. THE FOCUS: R (the requester) must converge to an accepted row even
+    // though it never accepted — i.e. C's FriendAccept reaches R. Poll R's own DB,
+    // re-issuing the (idempotent) accept a few times to absorb harness delivery jitter.
+    let mut r_has_c_accepted = false;
+    for _ in 0..6 {
+        c.cmd_tx
+            .send(NodeCommand::AcceptFriendRequest { peer_id: r_id_for_accept.clone() })
+            .await
+            .unwrap();
+        sleep_ms(1500).await;
+        drain_events(&mut r);
+        drain_events(&mut c);
+        r_has_c_accepted = r.store().load_friends(None).unwrap_or_default()
+            .iter()
+            .any(|(pid, st, _, _, _)| pid == &c_master && st == "accepted");
+        if r_has_c_accepted {
+            break;
+        }
+    }
+    assert!(
+        r_has_c_accepted,
+        "REQUESTER R must hold an accepted row keyed by C's master after C accepts \
+         (the FriendAccept must reach the requester), rows={:?}",
+        r.store().load_friends(None).unwrap_or_default()
+    );
+
+    drop(r);
+    drop(c);
+}
+
+// ---------------------------------------------------------------------------
+// REMOVE → RE-ADD must NOT ping-pong. The bug: removing a friend while they were
+// offline queued a FriendRemove; re-adding then queued a FriendRequest — and on
+// the peer's reconnect BOTH drained, sending a contradictory FriendRequest +
+// FriendRemove. The peer removed us back and the friendship flapped. The fix:
+// sending a request (or accepting) CANCELS any pending removal for that person,
+// and removing CANCELS any pending request/accept. This test removes B while B is
+// offline, re-adds, then brings B's contact back and asserts the friendship forms
+// cleanly (no stray removal tears it down).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn remove_then_readd_does_not_pingpong() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 40;
+    const A_DEV: u8 = 41;
+    const B_MASTER: u8 = 42;
+    const B_DEV: u8 = 43;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    // A starts with B already an accepted friend (seeded). B is OFFLINE.
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
+    sleep_ms(1000).await;
+    drain_events(&mut a);
+
+    // A removes B (B offline → removal is QUEUED, not delivered).
+    a.cmd_tx
+        .send(NodeCommand::RemoveFriend { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    sleep_ms(500).await;
+    // A re-adds B (sends a fresh request). This MUST cancel the queued removal.
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    sleep_ms(500).await;
+    drain_events(&mut a);
+
+    // NOW B comes online. B accepts A's request. The drain on B's appearance must
+    // send ONLY the friend request (the removal was cancelled) — so the friendship
+    // forms and STAYS.
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    // B should receive A's request; accept it using the id B saw.
+    let mut a_id_as_b_saw = None;
+    let b_got = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+            a_id_as_b_saw = Some(peer_id.clone());
+            true
+        } else {
+            false
+        }
+    })
+    .await;
+    assert!(b_got, "B must receive A's re-add friend request");
+    let a_id_for_accept = a_id_as_b_saw.expect("captured A's id");
+
+    let mut converged = false;
+    for _ in 0..6 {
+        b.cmd_tx
+            .send(NodeCommand::AcceptFriendRequest { peer_id: a_id_for_accept.clone() })
+            .await
+            .unwrap();
+        sleep_ms(1500).await;
+        drain_events(&mut a);
+        drain_events(&mut b);
+        let a_has_b = a.store().load_friends(None).unwrap_or_default()
+            .iter().any(|(pid, st, _, _, _)| pid == &b_master && st == "accepted");
+        let b_has_a = b.store().load_friends(None).unwrap_or_default()
+            .iter().any(|(pid, st, _, _, _)| pid == &a_master && st == "accepted");
+        if a_has_b && b_has_a {
+            converged = true;
+            break;
+        }
+    }
+    assert!(converged, "re-added friendship must form on both sides");
+
+    // Settle, then assert it STAYS accepted (a stray FriendRemove would have torn it
+    // down — the ping-pong symptom).
+    sleep_ms(2000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+    let a_has_b = a.store().load_friends(None).unwrap_or_default()
+        .iter().any(|(pid, st, _, _, _)| pid == &b_master && st == "accepted");
+    let b_has_a = b.store().load_friends(None).unwrap_or_default()
+        .iter().any(|(pid, st, _, _, _)| pid == &a_master && st == "accepted");
+    assert!(a_has_b, "A must STILL list B as accepted (no stray removal ping-pong)");
+    assert!(b_has_a, "B must STILL list A as accepted (no stray removal ping-pong)");
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// REMOVE → RE-ADD while BOTH stay ONLINE must require fresh CONSENT (2026-06-23).
+// THE LIVE BUG (Vitalik): A and B become friends (B clicked Accept, so B holds a
+// `pending_friend_accepts[A]` entry, ALSO re-seeded from accepted-friends at every
+// startup). A removes B; B receives the FriendRemove and DELETES its row — but the
+// stale `pending_friend_accepts[A]` SURVIVES (the FriendRemove receive handler
+// never cleared it). When A re-adds (fresh FriendRequest) and A's device reappears
+// in B's rooms, B's pending-accepts drain AUTO-SENDS a FriendAccept — WITHOUT ever
+// showing A's request in B's Incoming tab. A re-adds B as a friend off that stale
+// accept; B has NO row and never consented. Result: asymmetric (A has B, B has
+// nothing). This test drives the exact flow (both online throughout) and asserts B
+// gets a genuine INCOMING pending request on re-add and does NOT silently re-friend.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn readd_while_online_requires_fresh_consent() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // A (requester) and B (accepter), each device != master (the real shape).
+    const A_MASTER: u8 = 51;
+    const A_DEV: u8 = 52;
+    const B_MASTER: u8 = 53;
+    const B_DEV: u8 = 54;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    sleep_ms(1500).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // --- Phase 1: become friends ORGANICALLY (B must click Accept so B holds a
+    // pending_friend_accepts[A] — the stale entry that later mis-fires). ---
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    let mut a_id_as_b_saw = None;
+    let b_got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+            a_id_as_b_saw = Some(peer_id.clone());
+            true
+        } else {
+            false
+        }
+    })
+    .await;
+    assert!(b_got, "B must receive A's initial friend request");
+    let a_id_for_accept = a_id_as_b_saw.expect("captured A's id");
+    let mut converged = false;
+    for _ in 0..6 {
+        b.cmd_tx
+            .send(NodeCommand::AcceptFriendRequest { peer_id: a_id_for_accept.clone() })
+            .await
+            .unwrap();
+        sleep_ms(1200).await;
+        drain_events(&mut a);
+        drain_events(&mut b);
+        let a_has_b = a.store().load_friends(None).unwrap_or_default()
+            .iter().any(|(pid, st, _, _, _)| pid == &b_master && st == "accepted");
+        let b_has_a = b.store().load_friends(None).unwrap_or_default()
+            .iter().any(|(pid, st, _, _, _)| pid == &a_master && st == "accepted");
+        if a_has_b && b_has_a { converged = true; break; }
+    }
+    assert!(converged, "precondition: both must be accepted friends before removal");
+
+    // --- Phase 2: A removes B (both still ONLINE). B deletes its row. ---
+    a.cmd_tx
+        .send(NodeCommand::RemoveFriend { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    let b_removed = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::FriendRemoved { .. })
+    })
+    .await;
+    assert!(b_removed, "B must receive the FriendRemove");
+    sleep_ms(1000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+    // Sanity: B has no row for A right now.
+    assert!(
+        !b.store().load_friends(None).unwrap_or_default()
+            .iter().any(|(pid, _, _, _, _)| super::resolver::same_identity(pid, &a_master)),
+        "B must have no friend row for A after the removal"
+    );
+
+    // --- Phase 3: A RE-ADDS B (fresh FriendRequest). B must see a genuine INCOMING
+    // pending request — NOT silently auto-accept off the stale pending_friend_accepts. ---
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    let b_got_readd = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { .. })
+    })
+    .await;
+    assert!(
+        b_got_readd,
+        "B must receive a NEW incoming friend request on re-add (the bug: B auto-accepted \
+         off a stale pending_friend_accepts and never surfaced the request)"
+    );
+
+    // Give any (buggy) auto-accept time to propagate, then assert the friendship did
+    // NOT silently re-form: B's row for A must be PENDING/INCOMING (awaiting consent),
+    // and A must NOT yet list B as accepted (no stale-accept round-trip).
+    sleep_ms(1500).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+    let b_rows_for_a: Vec<_> = b.store().load_friends(None).unwrap_or_default()
+        .into_iter()
+        .filter(|(pid, _, _, _, _)| super::resolver::same_identity(pid, &a_master))
+        .collect();
+    assert!(
+        b_rows_for_a.iter().all(|(_, st, _, _, _)| st != "accepted"),
+        "B must NOT have auto-accepted A on re-add (must await consent), got {b_rows_for_a:?}"
+    );
+    assert!(
+        b_rows_for_a.iter().any(|(_, st, dir, _, _)| st == "pending" && dir == "incoming"),
+        "B must hold a PENDING INCOMING request for A on re-add, got {b_rows_for_a:?}"
+    );
+    let a_has_b_accepted = a.store().load_friends(None).unwrap_or_default()
+        .iter().any(|(pid, st, _, _, _)| super::resolver::same_identity(pid, &b_master) && st == "accepted");
+    assert!(
+        !a_has_b_accepted,
+        "A must NOT list B as accepted off a stale auto-accept (B never consented)"
+    );
+
+    // --- Phase 4: B genuinely accepts → NOW it converges cleanly both ways. ---
+    let mut reconverged = false;
+    for _ in 0..6 {
+        b.cmd_tx
+            .send(NodeCommand::AcceptFriendRequest { peer_id: a_master.clone() })
+            .await
+            .unwrap();
+        sleep_ms(1200).await;
+        drain_events(&mut a);
+        drain_events(&mut b);
+        let a_has_b = a.store().load_friends(None).unwrap_or_default()
+            .iter().any(|(pid, st, _, _, _)| pid == &b_master && st == "accepted");
+        let b_has_a = b.store().load_friends(None).unwrap_or_default()
+            .iter().any(|(pid, st, _, _, _)| pid == &a_master && st == "accepted");
+        if a_has_b && b_has_a { reconverged = true; break; }
+    }
+    assert!(reconverged, "after B's genuine re-accept, both must list each other accepted");
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// The startup CANONICALIZATION sweep heals a friend row stranded under a DEVICE
+// id (the legacy temp-nickname-add shape). We pre-seed: (1) a friend row keyed
+// by the friend's DEVICE id, and (2) a persisted device list mapping that device
+// → its master. On start, the resolver warms from the device list and the sweep
+// folds the row to the master — no re-add, no network. This is what repairs an
+// existing broken DB on the next launch.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn startup_canonicalizes_device_keyed_friend_row() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // The local node.
+    const LOCAL_MASTER: u8 = 20;
+    const LOCAL_DEV: u8 = 21;
+    // The FRIEND: distinct identity with device != master.
+    const FRIEND_MASTER: u8 = 22;
+    const FRIEND_DEV: u8 = 23;
+    let friend_master = NativeKeypair::from_secret_bytes(&seed_bytes(FRIEND_MASTER)).peer_id();
+    let friend_dev = NativeKeypair::from_secret_bytes(&seed_bytes(FRIEND_DEV)).peer_id();
+
+    // Build the local node's DB path the same way spawn_node does, so we can
+    // pre-seed it before start. (spawn_node uses its own tempdir, so instead we
+    // pre-seed via a throwaway dir and point the node at it.)
+    let tmp = tempfile::tempdir().expect("tmp");
+    let db_path = tmp.path().join("messages.db").to_str().unwrap().to_string();
+    let local_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(LOCAL_MASTER));
+    let passphrase = passphrase_for(&local_master_kp);
+    crate::storage::MessageStore::migrate_auto_vacuum_once(&db_path, &passphrase)
+        .expect("auto_vacuum migration");
+    {
+        let store = crate::storage::MessageStore::open(&db_path, &passphrase).expect("open store");
+        // (1) Friend row stranded under the friend's DEVICE id.
+        store.save_friend(&friend_dev, "accepted", "", 100).expect("seed device-keyed friend");
+        // (2) Persisted device list: friend_dev → friend_master (so the resolver
+        //     can collapse it at startup).
+        let friend_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(FRIEND_MASTER));
+        let signed = super::crypto_handler::build_signed_device_list(
+            &friend_master_kp, 1, vec![friend_dev.clone()], Vec::new(),
+        );
+        let json = serde_json::to_string(&signed).expect("serialize");
+        store
+            .save_device_list(&signed.master_peer_id, &json, signed.version, &signed.devices, 0)
+            .expect("persist friend device list");
+    }
+
+    // Boot the node ON THAT pre-seeded DB. The startup sweep should fold the row.
+    let mut local = spawn_node_on_db(&relay, LOCAL_MASTER, LOCAL_DEV, &db_path, tmp).await;
+    sleep_ms(1500).await;
+    drain_events(&mut local);
+
+    // The device-keyed row is GONE; a single row keyed by the friend's MASTER
+    // remains, status preserved (accepted).
+    let rows = local.store().load_friends(None).unwrap_or_default();
+    let for_friend: Vec<_> = rows
+        .iter()
+        .filter(|(pid, _, _, _, _)| super::resolver::same_identity(pid, &friend_master))
+        .collect();
+    assert_eq!(
+        for_friend.len(), 1,
+        "exactly one friend row for the friend after canonicalization, got {rows:?}"
+    );
+    assert_eq!(
+        for_friend[0].0, friend_master,
+        "the surviving row must be keyed by the friend's MASTER"
+    );
+    assert_eq!(for_friend[0].1, "accepted", "status must be preserved by the fold");
+    assert!(
+        !rows.iter().any(|(pid, _, _, _, _)| pid == &friend_dev),
+        "the device-keyed row must be deleted"
+    );
+
+    drop(local);
+}
+
+// ---------------------------------------------------------------------------
+// THE LIVE BUG REPRODUCTION (2026-06-23): two FRESH single-device people (AL/VM),
+// each device != master, become friends ORGANICALLY (no pre-seeded resolver, real
+// FriendRequest→Accept handshake), then DM each other BOTH ways. Every fresh
+// install since ad7b49e mints a random device key, so device != master even with
+// NO sibling — the "byte-for-byte pre-multi-device" claim only ever held on
+// MIGRATED keystone installs. This is the exact shape Vitalik reports: AL→VM DMs
+// never render on VM while VM→AL works.
+//
+// What this pins (the WHOLE chain, end to end, on REAL state):
+//   1. After the handshake, EACH side's resolver maps the OTHER's device→master
+//      (the device-list push over the durable room must land BOTH directions).
+//   2. Olm sessions confirm BOTH ways (no glare deadlock / incompatible halves).
+//   3. A DM sent each way RENDERS in the receiver's master-keyed UI thread
+//      (`dm_thread(sender_master)`) — this is the assertion the convergence test
+//      was MISSING. If the receiver filed the DM under the sender's DEVICE id
+//      (cold resolver), `dm_thread` (which keys on master) is EMPTY → caught here.
+//   4. The rendered bubble is INCOMING (is_mine == false) and SIGNED.
+// This is the headless equivalent of the live two-laptop test.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn fresh_single_device_friends_dm_both_ways() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // AL and VM: distinct identities, EACH device != master (the real fresh-install
+    // shape). Resolver NOT pre-seeded (test_guard cleared it) — they must learn each
+    // other's device→master purely from the organic handshake's device-list push.
+    const AL_MASTER: u8 = 41;
+    const AL_DEV: u8 = 42;
+    const VM_MASTER: u8 = 43;
+    const VM_DEV: u8 = 44;
+    let al_master = NativeKeypair::from_secret_bytes(&seed_bytes(AL_MASTER)).peer_id();
+    let al_dev = NativeKeypair::from_secret_bytes(&seed_bytes(AL_DEV)).peer_id();
+    let vm_master = NativeKeypair::from_secret_bytes(&seed_bytes(VM_MASTER)).peer_id();
+    let vm_dev = NativeKeypair::from_secret_bytes(&seed_bytes(VM_DEV)).peer_id();
+    // Precondition: this scenario is meaningless unless device != master.
+    assert_ne!(al_dev, al_master, "AL must be a real fresh install (device != master)");
+    assert_ne!(vm_dev, vm_master, "VM must be a real fresh install (device != master)");
+
+    let mut al = spawn_node_with_friends(&relay, AL_MASTER, AL_DEV, &[]).await;
+    let mut vm = spawn_node_with_friends(&relay, VM_MASTER, VM_DEV, &[]).await;
+    sleep_ms(1500).await;
+    drain_events(&mut al);
+    drain_events(&mut vm);
+
+    // AL friend-requests VM (by master). VM accepts. This drives the REAL handshake
+    // incl. the device-list/profile pushes both directions.
+    al.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: vm_master.clone() })
+        .await
+        .unwrap();
+    let vm_got = wait_event(&mut vm, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { .. })
+    })
+    .await;
+    assert!(vm_got, "VM must receive AL's friend request");
+    vm.cmd_tx
+        .send(NodeCommand::AcceptFriendRequest { peer_id: al_master.clone() })
+        .await
+        .unwrap();
+    // Let accept + the profile/device-list pushes + Olm key exchange settle.
+    // PROMPTNESS GUARD: a SHORT settle. Before the fix, the inbox-leave race dropped
+    // one side's KeyBundle and the handshake only healed via the 30s reconciliation
+    // sweep — so this 2s window left BOTH sides session-less and the DM assertions
+    // failed. The co-presence re-key (PeerJoined/RoomMembers on the durable DM room)
+    // must establish the session within a couple of seconds, not 30.
+    sleep_ms(2000).await;
+    drain_events(&mut al);
+    drain_events(&mut vm);
+
+    // (1) Resolver converged BOTH ways — the load-bearing precondition for DM
+    // attribution. If EITHER side is cold, that side files the friend's DMs under a
+    // device id its master-keyed UI never reads.
+    assert_eq!(
+        super::resolver::resolve(&vm_dev), vm_master,
+        "AL→VM direction: AL's resolver must map VM's device → VM's master"
+    );
+    assert_eq!(
+        super::resolver::resolve(&al_dev), al_master,
+        "VM→AL direction: VM's resolver must map AL's device → AL's master"
+    );
+
+    // (2) Olm sessions confirmed BOTH ways (no glare deadlock / incompatible halves).
+    // The session lives keyed by the peer's DEVICE id on each side.
+    let al_sees_vm = al.olm_status(&vm_dev).await;
+    let vm_sees_al = vm.olm_status(&al_dev).await;
+    assert!(
+        al_sees_vm == "confirmed" || al_sees_vm == "unconfirmed",
+        "AL must hold an Olm session with VM's device (got {al_sees_vm})"
+    );
+    assert!(
+        vm_sees_al == "confirmed" || vm_sees_al == "unconfirmed",
+        "VM must hold an Olm session with AL's device (got {vm_sees_al})"
+    );
+
+    // (3) THE ACTUAL BUG: AL → VM. AL sends; VM must RENDER it in the master-keyed
+    // thread (not strand it under al_dev).
+    al.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: vm_master.clone(),
+            text: "AL-to-VM-hello".to_string(),
+            message_id: "al-vm-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let vm_rx = wait_event(&mut vm, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { text, from_peer, is_own, .. }
+            if text == "AL-to-VM-hello" && *from_peer == al_master && !*is_own)
+    })
+    .await;
+    assert!(
+        vm_rx,
+        "VM must emit MessageReceived for AL's DM attributed to AL's MASTER (the live bug: \
+         it never rendered / was attributed to AL's device)"
+    );
+
+    // VM → AL (the working direction — guards against a fix that breaks it).
+    vm.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: al_master.clone(),
+            text: "VM-to-AL-hello".to_string(),
+            message_id: "vm-al-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let al_rx = wait_event(&mut al, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { text, from_peer, is_own, .. }
+            if text == "VM-to-AL-hello" && *from_peer == vm_master && !*is_own)
+    })
+    .await;
+    assert!(al_rx, "AL must receive VM's DM attributed to VM's MASTER");
+
+    // (4) The UI-layer thread (master-keyed, read exactly as the chat pane does)
+    // shows BOTH sides' messages on BOTH nodes. This is the green-inspector ==
+    // green-UI guarantee: if VM stranded AL's DM under al_dev, this is EMPTY.
+    sleep_ms(500).await;
+    let vm_thread = vm.dm_thread(&al_master);
+    assert!(
+        vm_thread.iter().any(|b| b.text == "AL-to-VM-hello" && !b.is_mine && b.has_sig),
+        "VM's DM thread with AL must show AL's incoming signed message, got {vm_thread:?}"
+    );
+    assert!(
+        vm_thread.iter().any(|b| b.text == "VM-to-AL-hello" && b.is_mine),
+        "VM's DM thread must also show VM's own outgoing message, got {vm_thread:?}"
+    );
+    let al_thread = al.dm_thread(&vm_master);
+    assert!(
+        al_thread.iter().any(|b| b.text == "VM-to-AL-hello" && !b.is_mine && b.has_sig),
+        "AL's DM thread with VM must show VM's incoming signed message, got {al_thread:?}"
+    );
+    assert!(
+        al_thread.iter().any(|b| b.text == "AL-to-VM-hello" && b.is_mine),
+        "AL's DM thread must also show AL's own outgoing message, got {al_thread:?}"
+    );
+
+    drop(al);
+    drop(vm);
 }

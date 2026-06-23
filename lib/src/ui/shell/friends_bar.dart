@@ -38,7 +38,10 @@ class FriendsBar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final displayList = ref.watch(sortedFriendsProvider);
+    // The DOCK shows favourites-only when favourites are set (its purpose), via
+    // the dedicated display provider. The Friends dialog/home/chats use the
+    // unfiltered sortedFriendsProvider so favouriting never hides a friend there.
+    final displayList = ref.watch(friendsBarDisplayProvider);
     final pendingCount = ref.watch(pendingFriendCountProvider);
     final online = ref.watch(onlineIdentitiesProvider);
     final profiles = ref.watch(profileProvider);
@@ -259,17 +262,13 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final friends = ref.watch(friendsProvider);
-    final online = ref.watch(onlineIdentitiesProvider);
 
-    final accepted = friends.values
-        .where((f) => f.status == 'accepted')
-        .toList()
-      ..sort((a, b) {
-        final aOn = online.contains(a.peerId) ? 0 : 1;
-        final bOn = online.contains(b.peerId) ? 0 : 1;
-        if (aOn != bOn) return aOn.compareTo(bOn);
-        return a.peerId.compareTo(b.peerId);
-      });
+    // Accepted list is master-collapsed + deduped + sorted by the shared provider
+    // (so a friend stranded under a device id by a nickname-add resolves to the
+    // right person here too). Pending requests stay raw — the device→master
+    // mapping usually isn't known until after acceptance (the re-key then moves
+    // the row to the master).
+    final accepted = ref.watch(sortedFriendsProvider);
     final incoming = friends.values
         .where((f) => f.status == 'pending' && f.direction == 'incoming')
         .toList();
@@ -863,7 +862,8 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
     final filtered = q.isEmpty
         ? widget.requests
         : widget.requests.where((r) {
-            final name = displayNameFor(profiles, r.peerId).toLowerCase();
+            final id = ref.read(deviceLinkProvider).identityOf(r.peerId);
+            final name = displayNameFor(profiles, id).toLowerCase();
             return name.contains(q) || r.peerId.toLowerCase().contains(q);
           }).toList();
 
@@ -920,7 +920,13 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
       ),
       itemBuilder: (context, index) {
         final req = requests[index];
-        final name = displayNameFor(profiles, req.peerId);
+        // Resolve the stored id → master for DISPLAY (name + avatar key on the
+        // master). A pending request added by nickname can be keyed under a device
+        // id until the backend re-key lands; resolving here heals the name/avatar
+        // immediately. Accept/reject still target `req.peerId` (the device that sent
+        // it / a reachable id), so only the display is resolved.
+        final displayId = ref.watch(deviceLinkProvider).identityOf(req.peerId);
+        final name = displayNameFor(profiles, displayId);
         final direction = widget.direction;
 
         return Padding(
@@ -936,7 +942,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
             ),
             child: Row(
               children: [
-                HollowAvatar(peerId: req.peerId, size: 32),
+                HollowAvatar(peerId: displayId, size: 32),
                 const SizedBox(width: HollowSpacing.sm),
                 Expanded(
                   child: Column(

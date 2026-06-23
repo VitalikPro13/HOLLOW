@@ -250,7 +250,10 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final friends = ref.watch(friendsProvider);
+    // Master-collapsed + deduped accepted friends — so a friend stranded under a
+    // DEVICE id (nickname-added, pre-re-key) doesn't appear as a phantom duplicate
+    // chat. Messages/unreads/profiles all key on the master.
+    final friends = ref.watch(sortedFriendsProvider);
     final online = ref.watch(onlineIdentitiesProvider);
     final lastMessages = ref.watch(lastDmMessageProvider);
     final servers = ref.watch(serverListProvider);
@@ -261,9 +264,9 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     // Build unified list items
     final items = <_ConversationItem>[];
 
-    // DM conversations (accepted friends, not hidden)
-    for (final friend in friends.values) {
-      if (friend.status != 'accepted') continue;
+    // DM conversations (accepted friends, not hidden). `friends` is already the
+    // accepted, master-collapsed list from sortedFriendsProvider.
+    for (final friend in friends) {
       if (hiddenDms.contains(friend.peerId)) continue;
       final last = lastMessages[friend.peerId];
       items.add(_ConversationItem(

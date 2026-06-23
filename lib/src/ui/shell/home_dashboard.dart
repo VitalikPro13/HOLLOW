@@ -494,13 +494,13 @@ class _SyncStatsCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final friends = ref.watch(friendsProvider);
     final servers = ref.watch(serverListProvider);
     final devices = ref.watch(myDevicesProvider);
     final dmCount = ref.watch(_dmMessageCountProvider);
 
-    final friendCount =
-        friends.values.where((f) => f.status == 'accepted').length;
+    // Count via the master-collapsed+deduped list so a friend stranded under a
+    // device id isn't double-counted (nor counted separately from its master).
+    final friendCount = ref.watch(sortedFriendsProvider).length;
     final serverCount = servers.length;
     final devicesOnline = devices.where((d) => d.online).length;
     final deviceCount = devices.length;
@@ -634,15 +634,16 @@ class _RecentConversationsColumn extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final friends = ref.watch(friendsProvider);
     final lastMessages = ref.watch(lastDmMessageProvider);
     final online = ref.watch(onlineIdentitiesProvider);
     final dmUnreads = ref.watch(unreadProvider.select((s) => s.dmUnreadCounts));
 
-    // Build list of friends with their last message, sorted by recency.
-    final accepted = friends.values
-        .where((f) => f.status == 'accepted')
-        .toList();
+    // Build list of friends with their last message, sorted by recency. Use the
+    // shared sorted provider, which collapses a friend's stored id → master and
+    // dedupes — so a friend stranded under a DEVICE id (nickname-added, pre-re-key)
+    // does NOT show as a phantom duplicate conversation here. Messages/unreads key
+    // on the master, so all lookups below resolve correctly.
+    final accepted = ref.watch(sortedFriendsProvider);
 
     final conversations = <_ConversationInfo>[];
     for (final friend in accepted) {
@@ -919,7 +920,6 @@ class _NetworkColumn extends ConsumerWidget {
     // Multi-device: a friend can be online via a device whose peer_id differs
     // from their master friend.peerId, so the master key won't be in `peers`.
     final online = ref.watch(onlineIdentitiesProvider);
-    final friends = ref.watch(friendsProvider);
     final relayStats = ref.watch(relayStatsProvider);
 
     // Real connection state (local node + relay WS), not just "node started".
@@ -927,9 +927,11 @@ class _NetworkColumn extends ConsumerWidget {
 
     // Friends connection status (granular via connectionStatusProvider).
     final connStatus = ref.watch(connectionStatusProvider);
-    final accepted = friends.values
-        .where((f) => f.status == 'accepted')
-        .toList();
+    // Master-collapsed list: each friend's `peerId` is their MASTER, so the
+    // `links.identityOf(device) == f.peerId` device scans below match. A friend
+    // stranded under a device id would otherwise never match its own devices and
+    // stick in a fake "connecting"/offline state.
+    final accepted = ref.watch(sortedFriendsProvider);
     // Multi-device (Phase 6): `peers` / `connStatus` are keyed by the DEVICE
     // peer_id the relay reports, but a friend is `f.peerId` = their MASTER id.
     // So resolve per friend by scanning for ANY of their devices: a friend is
@@ -1033,13 +1035,23 @@ class _NetworkColumn extends ConsumerWidget {
                         fontSize: 12,
                       ),
                     ),
-                    Text(
-                      '${peers.length} peer${peers.length == 1 ? '' : 's'} reachable',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 10,
-                      ),
-                    ),
+                    Builder(builder: (context) {
+                      // Count reachable FRIENDS (master identities), not raw relay
+                      // device peers. A just-removed friend can linger in `peers`
+                      // (still in a shared room) — counting raw peers showed a
+                      // phantom "1 peer reachable" after removal. Counting accepted
+                      // friends who are online keys on the relationship, not the
+                      // socket, so it drops to 0 the moment they're no longer a friend.
+                      final reachable =
+                          accepted.where((f) => online.contains(f.peerId)).length;
+                      return Text(
+                        '$reachable friend${reachable == 1 ? '' : 's'} reachable',
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.textSecondary,
+                          fontSize: 10,
+                        ),
+                      );
+                    }),
                   ],
                 ),
               ),

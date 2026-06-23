@@ -3308,6 +3308,77 @@ impl MessageStore {
         Ok(())
     }
 
+    /// Re-key a friend row from a DEVICE id to its MASTER id once the device→master
+    /// mapping is learned (device-list ingest). Friendships must key on the master
+    /// (presence/DM/profile all do), but a friend added by TEMPORARY NICKNAME lands
+    /// under the friend's DEVICE id (the relay claims nicknames under the WS-auth
+    /// device socket), stranding the row. Returns true if a row was migrated.
+    ///
+    /// Merge rule when a master row already exists: keep `accepted` over `pending`,
+    /// keep the earliest non-zero `requested_at`, then delete the device row. No-op
+    /// when `device == master` or no device row exists.
+    pub fn migrate_friend_to_master(&self, device: &str, master: &str) -> Result<bool, String> {
+        if device == master {
+            return Ok(false);
+        }
+        // Load the device row (if any).
+        let dev_row: Option<(String, String, i64)> = self
+            .conn
+            .query_row(
+                "SELECT status, direction, requested_at FROM friends WHERE peer_id = ?1",
+                params![device],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+            )
+            .ok();
+        let Some((dev_status, dev_dir, dev_req)) = dev_row else {
+            return Ok(false);
+        };
+        // Load the existing master row (if any) to merge.
+        let mas_row: Option<(String, String, i64)> = self
+            .conn
+            .query_row(
+                "SELECT status, direction, requested_at FROM friends WHERE peer_id = ?1",
+                params![master],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+            )
+            .ok();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let (status, direction, requested_at) = match mas_row {
+            Some((m_status, m_dir, m_req)) => {
+                // Prefer accepted; otherwise keep the master row's status.
+                let status = if m_status == "accepted" || dev_status == "accepted" {
+                    "accepted".to_string()
+                } else {
+                    m_status
+                };
+                let direction = if !m_dir.is_empty() { m_dir } else { dev_dir };
+                let requested_at = match (m_req, dev_req) {
+                    (0, d) => d,
+                    (m, 0) => m,
+                    (m, d) => m.min(d),
+                };
+                (status, direction, requested_at)
+            }
+            None => (dev_status, dev_dir, dev_req),
+        };
+        self.conn
+            .execute(
+                "INSERT INTO friends (peer_id, status, direction, requested_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(peer_id) DO UPDATE SET status = ?2, direction = ?3,
+                     requested_at = ?4, updated_at = ?5",
+                params![master, status, direction, requested_at, now],
+            )
+            .map_err(|e| format!("Failed to upsert master friend row: {e}"))?;
+        self.conn
+            .execute("DELETE FROM friends WHERE peer_id = ?1", params![device])
+            .map_err(|e| format!("Failed to delete device friend row: {e}"))?;
+        Ok(true)
+    }
+
     /// Load all friends, optionally filtered by status.
     /// Returns Vec<(peer_id, status, direction, requested_at, updated_at)>.
     pub fn load_friends(
@@ -4371,6 +4442,59 @@ mod tests {
         assert_eq!(both.len(), 6, "peer-fallback serve must return both directions");
         assert_eq!(both.iter().filter(|m| m.is_mine).count(), 3);
         assert_eq!(both.iter().filter(|m| !m.is_mine).count(), 3);
+    }
+
+    /// A friend added by temporary nickname is stored under the friend's DEVICE
+    /// id; once the device→master mapping is learned, `migrate_friend_to_master`
+    /// must move the row to the master so presence/DM/profile (all master-keyed)
+    /// line up. Covers the plain move, the merge-with-existing-master case
+    /// (prefer accepted), and the device==master no-op.
+    #[test]
+    fn migrate_friend_device_to_master() {
+        let device = "12D3KooWdeviceXYZ";
+        let master = "12D3KooWmasterABC";
+
+        // (1) Plain move: only a device row exists → it becomes the master row.
+        {
+            let store = mem_store();
+            store.save_friend(device, "accepted", "", 100).unwrap();
+            let moved = store.migrate_friend_to_master(device, master).unwrap();
+            assert!(moved, "a stranded device row must migrate");
+            let friends = store.load_friends(None).unwrap();
+            assert_eq!(friends.len(), 1, "device row removed, master row added");
+            assert_eq!(friends[0].0, master, "row is now keyed by master");
+            assert_eq!(friends[0].1, "accepted");
+        }
+
+        // (2) Merge: a pending master row + an accepted device row → accepted wins.
+        {
+            let store = mem_store();
+            store.save_friend(master, "pending", "outgoing", 50).unwrap();
+            store.save_friend(device, "accepted", "", 100).unwrap();
+            let moved = store.migrate_friend_to_master(device, master).unwrap();
+            assert!(moved);
+            let friends = store.load_friends(None).unwrap();
+            assert_eq!(friends.len(), 1, "the two rows collapse into one master row");
+            assert_eq!(friends[0].0, master);
+            assert_eq!(friends[0].1, "accepted", "accepted must win over pending");
+        }
+
+        // (3) No-op when device == master (a single-device peer).
+        {
+            let store = mem_store();
+            store.save_friend(master, "accepted", "", 100).unwrap();
+            let moved = store.migrate_friend_to_master(master, master).unwrap();
+            assert!(!moved, "device==master is a no-op");
+            assert_eq!(store.load_friends(None).unwrap().len(), 1);
+        }
+
+        // (4) No-op when there is no device row to migrate.
+        {
+            let store = mem_store();
+            store.save_friend(master, "accepted", "", 100).unwrap();
+            let moved = store.migrate_friend_to_master(device, master).unwrap();
+            assert!(!moved, "no device row → nothing to migrate");
+        }
     }
 
     /// `get_latest_dm_timestamp` (friend high-water) ignores our own sends, so a

@@ -71,8 +71,21 @@ pub(crate) fn generate_new_identity() -> Result<IdentityData, String> {
     // Save the keypair to disk.
     save_keypair(&keypair)?;
 
-    // Brand-new identity → fresh random device key (distinct from the master).
-    let device_keypair = super::device_key::load_or_create_device_keypair(None)?;
+    // Brand-new identity → fresh random device key, ALWAYS distinct from the master
+    // AND overwriting any stale `identity.device` left from a PREVIOUS identity on
+    // this install. (The old `load_or_create_device_keypair(None)` REUSED a leftover
+    // device file without rotation — if that file was a legacy keystone where
+    // device == old master, the new identity inherited a device id equal to some
+    // unrelated master, which then got published as a master-as-device entry in the
+    // device list and broke friend/DM keying for peers. Mirror
+    // `restore_identity_from_mnemonic`, which already mints fresh + overwrites.)
+    let device_secret = {
+        let mut s = [0u8; 32];
+        getrandom::fill(&mut s).map_err(|e| format!("RNG failed: {e}"))?;
+        s
+    };
+    let device_keypair = NativeKeypair::from_secret_bytes(&device_secret);
+    save_keypair_to(&device_keypair_path()?, &device_keypair)?;
     let device_peer_id = device_keypair.peer_id();
 
     Ok(IdentityData {

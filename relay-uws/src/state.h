@@ -119,9 +119,13 @@ struct RelayState {
     LicenseState license;
     ServerStatsCache stats_cache;
 
-    // Temporary nickname registry (RAM only, released on disconnect)
+    // Temporary nickname registry (RAM only, released on disconnect, 10-min TTL).
+    // The TTL + a dead-holder live-check on claim/resolve prevent a stale binding
+    // (an old identity that never cleanly released) from permanently blocking the
+    // nickname for a new claimer — the bug where "123" stayed bound to a dead peer.
     std::unordered_map<std::string, std::string> nickname_to_peer;  // nickname -> peer_id
     std::unordered_map<std::string, std::string> peer_to_nickname;  // peer_id -> nickname
+    std::unordered_map<std::string, uint64_t>    nickname_expiry;   // nickname -> expiry unix secs
 
     // Multi-device link-code registry (RAM only, released on disconnect, 5-min TTL,
     // consumed on resolve). Mirrors the nickname registry. Used by Step 4 device

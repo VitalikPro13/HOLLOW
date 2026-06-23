@@ -106,7 +106,7 @@ void LicenseState::try_reload(RelayState& state) {
     for (auto& [lic_key, pid] : active_keys) {
         if (new_keys.find(lic_key) == new_keys.end()) {
             peers_to_kick.push_back(pid);
-            fprintf(stderr, "[license] Key revoked for peer %s\n", pid.c_str());
+            // No logging of the revoked peer_id (user-identifying).
         }
     }
 

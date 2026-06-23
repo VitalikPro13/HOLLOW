@@ -959,7 +959,7 @@ iOS build/config: classic non-UIScene AppDelegate + firebase pinned below the iO
 
 - **Zero-knowledge routing:** The relay never decrypts message content. All payloads are opaque bytes.
 - **Authenticated connections:** Every WebSocket connection requires a valid Ed25519 signature over a timestamped challenge. No anonymous connections.
-- **No connection logging:** Comments throughout the code (`// privacy: no connection logging`) indicate deliberate suppression of peer connect/disconnect logs.
+- **No metadata logging (source-enforced, 2026-06-23):** NO log statement in the relay prints a peer_id, room, push target/sender, channel, server, or push token. The entire `[push]` family (buffer/replay/send-push/token-register/prefs/channel-push/direct-not-in-room) and `[license] Key revoked for peer <id>` were stripped — the relay must not record who-talks-to-whom (a truncated `12D3KooW…` prefix still fingerprints). Only aggregate counts (`Swept N`, `Loaded N key(s)`), config-file paths in parse errors, and `[main]` startup/shutdown banners remain. peer_ids in `state.*` maps / protocol `send_json` responses / signature strings are routing logic, NOT logging. See `feedback_relay_no_metadata_logging.md`.
 - **Sender identity injection:** For binary types 0x02/0x03/0x04, the relay replaces/injects the sender's peer_id — peers cannot spoof their identity to the relay.
 - **Timestamp anti-replay:** 60-second skew window limits replay attacks on auth and signaling requests.
 - **No rate limiting:** Removed — Ed25519 auth + license keys are the DoS protection layer.

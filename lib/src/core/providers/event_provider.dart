@@ -54,7 +54,6 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
-import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/ui/dialogs/twitch_join_dialog.dart' show showTwitchJoinDialog, handleTwitchJoinResult, showJoinRejectedDialog, showNsfwConfirmDialog;
 
 /// Listens to the Rust event stream and dispatches events
@@ -737,6 +736,11 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Device list updated: $masterPeerId');
         ref.read(deviceLinkProvider.notifier).refresh();
         ref.read(deviceLabelProvider.notifier).refresh();
+        // The ingest may have RE-KEYED a friend row from a device id to this
+        // master (a friend added by temporary nickname was stranded under the
+        // device id). Reload so the now-master-keyed friend surfaces with the
+        // correct name/presence instead of a raw device id.
+        ref.read(friendsProvider.notifier).loadAll();
 
       case NetworkEvent_SelfRevoked():
         // Step 7: THIS device was revoked by the identity. Self-nuke — wipe the

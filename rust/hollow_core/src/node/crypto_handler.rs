@@ -172,6 +172,75 @@ pub(crate) fn verify_device_list(list: &SignedDeviceList) -> bool {
         .unwrap_or(false)
 }
 
+// --- Sibling proof handshake (anti-mis-link) -------------------------------------
+//
+// A peer joining our own `inbox:{master}` room used to be trusted DIRECTLY as our
+// sibling device. But the friend-request protocol makes the REQUESTER join the
+// TARGET's inbox to deliver the request (social.rs), so a STRANGER lands in our
+// inbox and was mis-merged as our device (resolver poisoning + device-list merge +
+// friend-list leak + auto snapshot/link). The fix: before any merge we challenge an
+// unproven inbox peer to sign a fresh nonce with the SHARED MASTER key. Only a
+// genuine sibling holds it; a stranger holds only its own master key and fails the
+// pubkey→our-master binding. Mirrors the device-list sign/verify template above.
+
+/// Canonical signing payload for the sibling proof. Binds the proof to OUR master
+/// peer_id, the CHALLENGED device id, and a fresh nonce so a captured response can't
+/// be replayed against a different master/device/nonce.
+pub(crate) fn sibling_proof_payload(
+    master_peer_id: &str,
+    device_peer_id: &str,
+    nonce: &str,
+) -> String {
+    format!("hollow-sibling:{master_peer_id}:{device_peer_id}:{nonce}")
+}
+
+/// Sign a sibling proof with the (shared) master key. `device_peer_id` is OUR OWN
+/// device id (the responder's). Returns `(sig_b64, master_pubkey_b64)` to put in a
+/// [`HavenMessage::SiblingProveResponse`].
+pub(crate) fn build_sibling_proof(
+    master: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    nonce: &str,
+) -> (String, String) {
+    use base64::engine::general_purpose::STANDARD as B64;
+    let payload = sibling_proof_payload(&master.peer_id(), device_peer_id, nonce);
+    let sig = master.sign(payload.as_bytes());
+    (B64.encode(sig), B64.encode(master.public_key_protobuf()))
+}
+
+/// Verify a sibling proof. `claimed_master_peer_id` is OUR OWN master peer_id (the
+/// challenger): the response's pubkey must derive to it (proving the responder holds
+/// OUR master key), and the signature must validate over the canonical payload built
+/// from our master + the device id WE challenged (`challenged_device_peer_id`, taken
+/// from the routing layer — never a value the responder self-reports) + the nonce.
+pub(crate) fn verify_sibling_proof(
+    claimed_master_peer_id: &str,
+    challenged_device_peer_id: &str,
+    nonce: &str,
+    sig_b64: &str,
+    master_pubkey_b64: &str,
+) -> bool {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use crate::identity::native_identity::NativeKeypair;
+
+    let Ok(pk_bytes) = B64.decode(master_pubkey_b64) else {
+        return false;
+    };
+    // Bind pubkey → OUR claimed master peer_id (a stranger's own-key pubkey derives
+    // to a different peer_id and is rejected here).
+    match NativeKeypair::peer_id_from_pubkey_protobuf(&pk_bytes) {
+        Some(derived) if derived == claimed_master_peer_id => {}
+        _ => return false,
+    }
+    let Ok(sig_bytes) = B64.decode(sig_b64) else {
+        return false;
+    };
+    let payload =
+        sibling_proof_payload(claimed_master_peer_id, challenged_device_peer_id, nonce);
+    NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, payload.as_bytes())
+        .unwrap_or(false)
+}
+
 /// Build OUR OWN master-signed device list to attach to outbound profile syncs.
 ///
 /// Reads the current device set + version persisted under our master peer_id and
@@ -204,8 +273,21 @@ pub(crate) fn build_local_device_list(
             if self_added {
                 devs.push(device_peer_id.to_string());
             }
+            // Strip a stale MASTER-as-device entry. A legacy keystone install (where
+            // `device_peer_id == master`) wrote `devices = [master]`; once a DISTINCT
+            // device key exists (a re-import / rotation, so `device != master`), the
+            // bare master is NOT a transport device — no socket ever authenticates as
+            // it, so a friend who only learns `[master]` can never map our real device
+            // → master and our DMs/presence/friend-row key wrong. Drop it so we publish
+            // only real device ids. NEVER strip when device == master (a genuine sole
+            // keystone that legitimately is its own device + owns its MLS leaf).
+            let master_stripped = device_peer_id != master_peer_id
+                && devs.iter().any(|d| d == &master_peer_id);
+            if master_stripped {
+                devs.retain(|d| d != &master_peer_id);
+            }
             // Membership changed → bump version so peers accept the update.
-            if self_added || revoked.len() != list.revoked.len() {
+            if self_added || master_stripped || revoked.len() != list.revoked.len() {
                 (devs, revoked, list.version.saturating_add(1))
             } else {
                 (devs, revoked, list.version.max(1))
@@ -606,6 +688,21 @@ pub(crate) async fn ingest_device_list(
             &list.master_peer_id,
             merged.iter().map(|s| s.as_str()),
         );
+        // Re-key any friend row stranded under one of this master's DEVICE ids (a
+        // friend added by temporary nickname lands under the device id). Even on the
+        // redundant-ingest path, do this — the friend row may have been created AFTER
+        // a prior ingest warmed the resolver but BEFORE this re-key existed. Include
+        // the SENDER device explicitly: a stale legacy device list can advertise only
+        // the master-as-device while the friend actually transmits from a distinct
+        // device id (the nickname/WS-auth id), so the sender is the id the friend row
+        // is keyed under — and it may NOT appear in `merged`.
+        for dev in merged.iter().map(|s| s.as_str()).chain(std::iter::once(sender_peer_id)) {
+            if let Ok(true) = store.migrate_friend_to_master(dev, &list.master_peer_id) {
+                hollow_log!(
+                    "[HOLLOW-FRIENDS] Re-keyed friend {dev} → master {}", list.master_peer_id
+                );
+            }
+        }
         let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
             master_peer_id: list.master_peer_id.clone(),
         }).await;
@@ -652,6 +749,20 @@ pub(crate) async fn ingest_device_list(
         &stored.master_peer_id,
         stored.devices.iter().map(|s| s.as_str()),
     );
+    // Re-key any friend row stranded under one of this master's DEVICE ids → the
+    // master (a friend added by temporary nickname keys under the device id; the
+    // friend system is the one place that stores the raw id). Include the SENDER
+    // device explicitly — a stale legacy device list may advertise only the
+    // master-as-device while the friend transmits from a distinct device id, so the
+    // sender (the id the friend row is keyed under) may NOT be in `stored.devices`.
+    // Idempotent.
+    for dev in stored.devices.iter().map(|s| s.as_str()).chain(std::iter::once(sender_peer_id)) {
+        if let Ok(true) = store.migrate_friend_to_master(dev, &stored.master_peer_id) {
+            hollow_log!(
+                "[HOLLOW-FRIENDS] Re-keyed friend {dev} → master {}", stored.master_peer_id
+            );
+        }
+    }
     hollow_log!(
         "[HOLLOW-DEVICES] Ingested device list for {} (v{}, {} devices, {} revoked, +{} new)",
         stored.master_peer_id, stored.version, stored.devices.len(),
@@ -1901,6 +2012,48 @@ mod tests {
         crate::identity::native_identity::NativeKeypair::from_mnemonic(&m).unwrap()
     }
 
+    /// A legacy keystone wrote `devices = [master]`. Once a DISTINCT device key
+    /// exists (device != master), `build_local_device_list` must STRIP the
+    /// master-as-device entry and publish only the real device id — otherwise a
+    /// friend who only learns `[master]` can never map our real device → master
+    /// (broke nickname-added friend keying). A genuine sole keystone (device ==
+    /// master) keeps its single entry untouched (it owns its MLS leaf).
+    #[test]
+    fn local_device_list_strips_master_as_device() {
+        super::super::resolver::clear_all();
+        let master = test_master();
+        let master_id = master.peer_id();
+        let device_id = "12D3KooWrealDeviceXYZ".to_string();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("m.db").to_str().unwrap().to_string();
+        let pass = "ab".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+
+        // Seed a STALE legacy keystone list: devices = [master], v1.
+        {
+            let store = crate::storage::MessageStore::open(&db, &pass).unwrap();
+            let stale = build_signed_device_list(&master, 1, vec![master_id.clone()], vec![]);
+            let json = serde_json::to_string(&stale).unwrap();
+            store.save_device_list(&master_id, &json, 1, &stale.devices, 0).unwrap();
+        }
+
+        // Publish from the REAL distinct device → master must be stripped, device added.
+        let signed = build_local_device_list(&master, &device_id, &db, &pass).unwrap();
+        assert!(
+            !signed.devices.contains(&master_id),
+            "master-as-device must be stripped, got {:?}", signed.devices
+        );
+        assert!(
+            signed.devices.contains(&device_id),
+            "the real device id must be published, got {:?}", signed.devices
+        );
+        assert!(signed.version >= 2, "membership changed → version bumped");
+        assert!(verify_device_list(&signed), "re-signed list must verify");
+
+        super::super::resolver::clear_all();
+    }
+
     #[test]
     fn device_list_sign_verify_roundtrip() {
         let master = test_master();
@@ -1912,6 +2065,44 @@ mod tests {
         );
         assert_eq!(list.master_peer_id, master.peer_id());
         assert!(verify_device_list(&list));
+    }
+
+    #[test]
+    fn sibling_proof_sign_verify_roundtrip() {
+        let master = test_master();
+        let our_master = master.peer_id();
+        let challenged_device = "12D3KooWsiblingDevice";
+        let nonce = "deadbeefcafef00d";
+
+        // The genuine sibling holds the SAME master key, signs with its own device id.
+        let (sig, pk) = build_sibling_proof(&master, challenged_device, nonce);
+        assert!(
+            verify_sibling_proof(&our_master, challenged_device, nonce, &sig, &pk),
+            "a valid master-signed proof must verify"
+        );
+
+        // A stranger signs with a DIFFERENT master key → pubkey binds to the wrong
+        // master peer_id → rejected.
+        let stranger = {
+            let phrase = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong";
+            let m: bip39::Mnemonic = phrase.parse().unwrap();
+            crate::identity::native_identity::NativeKeypair::from_mnemonic(&m).unwrap()
+        };
+        let (bad_sig, bad_pk) = build_sibling_proof(&stranger, challenged_device, nonce);
+        assert!(
+            !verify_sibling_proof(&our_master, challenged_device, nonce, &bad_sig, &bad_pk),
+            "a stranger's signature must NOT verify against our master"
+        );
+
+        // A tampered nonce / device id breaks the signature.
+        assert!(
+            !verify_sibling_proof(&our_master, challenged_device, "wrongnonce", &sig, &pk),
+            "wrong nonce must not verify"
+        );
+        assert!(
+            !verify_sibling_proof(&our_master, "12D3KooWotherDevice", nonce, &sig, &pk),
+            "wrong challenged device must not verify"
+        );
     }
 
     #[test]

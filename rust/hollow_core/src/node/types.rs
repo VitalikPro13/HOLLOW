@@ -988,6 +988,35 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "sibling_state_sync_request")]
     SiblingStateSyncRequest,
 
+    // -- Multi-device sibling proof handshake (anti-mis-link) --
+
+    /// Sent to an UNPROVEN peer that appeared in our own `inbox:{master}` room,
+    /// challenging it to prove it holds our master private key (i.e. is genuinely
+    /// our own sibling device). A friend-request sender lands in our inbox too but
+    /// does NOT hold our master key, so it can never produce a valid response — this
+    /// is what stops a stranger being mis-merged as our device. `nonce` is a fresh
+    /// per-attempt random value the challenger remembers in `pending_sibling_challenges`.
+    #[serde(rename = "sib_prove_req")]
+    SiblingProveRequest {
+        #[serde(default)]
+        nonce: String,
+    },
+
+    /// Response to a [`HavenMessage::SiblingProveRequest`]: the responder signs
+    /// `hollow-sibling:{challenger_master}:{responder_device}:{nonce}` with the SHARED
+    /// master key. The challenger verifies the signature binds to ITS OWN master and to
+    /// the device id it challenged; only then does it run the sibling merge/snapshot
+    /// machinery. `master_pubkey_b64` is the protobuf-encoded master pubkey (base64).
+    #[serde(rename = "sib_prove_resp")]
+    SiblingProveResponse {
+        #[serde(default)]
+        nonce: String,
+        #[serde(default)]
+        sig_b64: String,
+        #[serde(default)]
+        master_pubkey_b64: String,
+    },
+
     // -- Multi-device link snapshot (Step 4) --
 
     /// (Empty → populated sibling) "Send me your full DB snapshot." Carries the
