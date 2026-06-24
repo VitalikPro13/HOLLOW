@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -53,13 +54,21 @@ class ChannelMessageBubble extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
+    // Multi-device: a message's senderId may be a per-DEVICE peer id (public
+    // channels store the raw frame author; older rows predate the Rust resolve).
+    // Collapse device→master so the profile, nickname, name, avatar and colour all
+    // key on the person — exactly like the member panel and DM path. Single-device
+    // senders resolve to themselves (no-op); watching keeps the row reactive if the
+    // device→master link arrives after first paint.
+    final senderMaster =
+        ref.watch(deviceLinkProvider).identityOf(message.senderId);
     final senderProfile = ref.watch(
-        profileProvider.select((p) => p[message.senderId]));
+        profileProvider.select((p) => p[senderMaster]));
     final senderNickname = ref.watch(
-        serverNicknamesProvider(serverId).select((n) => n[message.senderId]));
+        serverNicknamesProvider(serverId).select((n) => n[senderMaster]));
     final senderName = serverDisplayNameForPeer(
       senderProfile,
-      message.senderId,
+      senderMaster,
       nickname: senderNickname ?? '',
     );
     final isMe = message.isMe;
@@ -243,10 +252,10 @@ class ChannelMessageBubble extends ConsumerWidget {
             Padding(
               padding: const EdgeInsets.only(top: 5),
               child: ProfileTapTarget(
-                peerId: message.senderId,
+                peerId: senderMaster,
                 nickname:
                     (senderNickname?.isNotEmpty ?? false) ? senderNickname : null,
-                child: HollowAvatar(peerId: message.senderId, size: avatarSize),
+                child: HollowAvatar(peerId: senderMaster, size: avatarSize),
               ),
             ),
             const SizedBox(width: avatarGap),
@@ -257,7 +266,7 @@ class ChannelMessageBubble extends ConsumerWidget {
                   Row(
                     children: [
                       ProfileTapTarget(
-                        peerId: message.senderId,
+                        peerId: senderMaster,
                         nickname: (senderNickname?.isNotEmpty ?? false)
                             ? senderNickname
                             : null,
@@ -266,7 +275,7 @@ class ChannelMessageBubble extends ConsumerWidget {
                           style: HollowTypography.body.copyWith(
                             color: isMe
                                 ? hollow.accent
-                                : nameColorFromId(message.senderId),
+                                : nameColorFromId(senderMaster),
                             fontWeight: FontWeight.w600,
                             fontSize: 13,
                           ),

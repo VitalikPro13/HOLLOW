@@ -379,14 +379,19 @@ fn try_process_channel_msg(
                     let ChannelMessagePayload {
                         sid, cid, text, ts, sig, pk, mid, reply_to, file_id, ..
                     } = *inner;
+                    // The MLS leaf credential is the sender's DEVICE id, but the
+                    // message is signed by — and attributed to — the MASTER. Resolve
+                    // so the fetched row is master-keyed, mirroring the live MLS
+                    // handler (swarm.rs sender_master). Single-device → no-op.
+                    let sender_master = crate::node::resolver::resolve(&sender);
                     let text = clip_text(text);
                     insert_channel_row(
-                        db_path, db_passphrase, &sid, &cid, &sender, &text, ts,
+                        db_path, db_passphrase, &sid, &cid, &sender_master, &text, ts,
                         sig.as_deref(), pk.as_deref(), mid.as_deref(), reply_to.as_deref(),
                         file_id.as_deref(),
                     );
                     Some(FetchedDm {
-                        from_peer: sender,
+                        from_peer: sender_master,
                         text,
                         timestamp: ts,
                         message_id: mid.unwrap_or_default(),
@@ -403,16 +408,21 @@ fn try_process_channel_msg(
         HavenMessage::PublicChannelMessage {
             server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, ..
         } => {
-            // Public channels: signed plaintext. The sender is the relay-attested
-            // frame author (`from`) — same source the live handler uses.
+            // Public channels: signed plaintext. The relay-attested frame author
+            // (`from`) is the sender's DEVICE id, but the message is signed by — and
+            // attributed to — the sender's MASTER. Resolve so the fetched row lands
+            // master-keyed (matching the live handler) and renders the sender's name
+            // instead of a raw device id. The resolver is warmed from DB links before
+            // run_fetch; a single-device sender resolves to itself (no-op).
+            let sender_master = crate::node::resolver::resolve(from);
             let text = clip_text(text);
             insert_channel_row(
-                db_path, db_passphrase, &server_id, &channel_id, from, &text, ts,
+                db_path, db_passphrase, &server_id, &channel_id, &sender_master, &text, ts,
                 sig.as_deref(), pk.as_deref(), Some(&mid), reply_to.as_deref(),
                 file_id.as_deref(),
             );
             Some(FetchedDm {
-                from_peer: from.to_string(),
+                from_peer: sender_master,
                 text,
                 timestamp: ts,
                 message_id: mid,

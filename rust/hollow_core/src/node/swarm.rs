@@ -5122,11 +5122,13 @@ async fn handle_incoming_request(
                             // Verify signature on each synced message.
                             // Skip edited messages — the stored signature was created
                             // against the original text, not the edited text.
+                            let mut sig_verified = false;
                             if msg.sig.is_some() && msg.edited_at.is_none() {
                                 let payload = message_signing_payload(
                                     "ch", &format!("{sid}:{cid}"), &msg.s, msg.ts, &msg.t,
                                 );
-                                if !verify_message_signature_cached(&msg.s, msg.sig.as_deref(), msg.pk.as_deref(), &payload, &mut pk_cache) {
+                                sig_verified = verify_message_signature_cached(&msg.s, msg.sig.as_deref(), msg.pk.as_deref(), &payload, &mut pk_cache);
+                                if !sig_verified {
                                     hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for synced msg from {} ts={} text_len={} has_pk={}", msg.s, msg.ts, msg.t.len(), msg.pk.is_some());
                                 }
                             }
@@ -5155,6 +5157,32 @@ async fn handle_incoming_request(
                                     mid, &msg.t, edit_ts,
                                     msg.sig.as_deref(), msg.pk.as_deref(),
                                 );
+                            } else if sig_verified {
+                                // Multi-device self-heal: the row already exists but may
+                                // have been stored under a sender DEVICE id (pre device→
+                                // master resolve fix) with signature material that no
+                                // longer verifies on this device — the "12D3KooW… +
+                                // unverified signature" bubble. This synced copy's sig
+                                // VERIFIED (authentic sender + text), so if our stored row
+                                // is attributed to a different sender, repair it to the
+                                // verified one. INSERT OR IGNORE blocked re-inserting the
+                                // good copy, so this UPDATE is the only path to converge.
+                                // Safe: we only ever replace with a cryptographically
+                                // verified attribution (can't be used to forge).
+                                if let Some(mid) = &msg.mid {
+                                    let stored_sender = store.get_channel_message_sender(mid);
+                                    if stored_sender.as_deref() != Some(msg.s.as_str()) {
+                                        match store.repair_channel_message_sender(
+                                            mid, &msg.s, is_mine,
+                                            msg.sig.as_deref(), msg.pk.as_deref(),
+                                        ) {
+                                            Ok(true) => hollow_log!(
+                                                "[HOLLOW-SYNC] Repaired channel msg {mid} sender {stored_sender:?} → {} (verified)", msg.s
+                                            ),
+                                            _ => {}
+                                        }
+                                    }
+                                }
                             }
 
                             // Apply deletion if the message was hidden on the syncing peer.
@@ -9786,9 +9814,16 @@ async fn handle_incoming_request(
 
         HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview } => {
             if peer_str == local_peer_str { return; }
+            // Multi-device: the relay frame author (`peer_str`) is the sender's
+            // DEVICE id, but a public channel message is SIGNED by — and must be
+            // attributed to — the sender's MASTER (the send side signs with the
+            // master id; see message_ops public-channel send). Resolve first so the
+            // signature verifies and the row is master-keyed, exactly like the MLS
+            // path. Single-device senders resolve to themselves (no-op).
+            let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_channel_message(
                 &event_tx, &bundle_keypair, &local_peer_str,
-                peer_str.to_string(),
+                sender_master,
                 server_id, channel_id, text, ts, sig, pk,
                 Some(mid), reply_to, file_id, link_preview, None,
                 &db_path, &db_passphrase,
@@ -9797,8 +9832,9 @@ async fn handle_incoming_request(
 
         HavenMessage::PublicChannelEdit { server_id, channel_id, mid, text, ts, sig, pk } => {
             if peer_str == local_peer_str { return; }
+            let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_edit_message(
-                &event_tx, &bundle_keypair, peer_str,
+                &event_tx, &bundle_keypair, &sender_master,
                 mid, text, ts, sig, pk,
                 Some(server_id), Some(channel_id),
                 &db_path, &db_passphrase,
@@ -9807,8 +9843,9 @@ async fn handle_incoming_request(
 
         HavenMessage::PublicChannelDelete { server_id, channel_id, mid, ts, sig, pk } => {
             if peer_str == local_peer_str { return; }
+            let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_delete_message(
-                &event_tx, &bundle_keypair, peer_str,
+                &event_tx, &bundle_keypair, &sender_master,
                 mid, ts, sig, pk,
                 Some(server_id), Some(channel_id),
                 &db_path, &db_passphrase,
@@ -9817,8 +9854,9 @@ async fn handle_incoming_request(
 
         HavenMessage::PublicChannelAddReaction { server_id, channel_id, mid, emoji, ts, sig, pk } => {
             if peer_str == local_peer_str { return; }
+            let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_add_reaction(
-                &event_tx, &bundle_keypair, peer_str,
+                &event_tx, &bundle_keypair, &sender_master,
                 mid, emoji, ts, sig, pk,
                 Some(server_id), Some(channel_id),
                 &db_path, &db_passphrase,
@@ -9827,8 +9865,9 @@ async fn handle_incoming_request(
 
         HavenMessage::PublicChannelRemoveReaction { server_id, channel_id, mid, emoji, ts, sig, pk } => {
             if peer_str == local_peer_str { return; }
+            let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_remove_reaction(
-                &event_tx, &bundle_keypair, peer_str,
+                &event_tx, &bundle_keypair, &sender_master,
                 mid, emoji, ts, sig, pk,
                 Some(server_id), Some(channel_id),
                 &db_path, &db_passphrase,

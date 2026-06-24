@@ -274,6 +274,8 @@ These handle envelopes received via MLS group decryption in `swarm.rs`. They are
 
 **Public channel reuse:** The 5 `HavenMessage::PublicChannel*` variants received in `swarm.rs` are unpacked and delegated to the SAME `handle_envelope_*` functions below. No separate receive handlers exist for public channels — the existing handlers are transport-agnostic.
 
+**Multi-device sender resolution (caller's responsibility):** A channel message is SIGNED by, and must be attributed to, the sender's MASTER (the send path signs `message_signing_payload(..., &local_peer, ...)` where `local_peer` is the master). But the transport author differs by path: the MLS leaf credential is the sender's DEVICE id, and the public-channel relay frame's `from` is also the DEVICE id. So BOTH callers in `swarm.rs` resolve `sender_master = resolver::resolve(<device>)` and pass the MASTER as `sender_peer_id`/`peer_str` to the handlers below (the MLS decrypt arm and each `HavenMessage::PublicChannel*` arm). The push-fetch node does the same in `fetch.rs::try_process_channel_msg` (both the public branch and the MLS-leaf `sender` branch). Without this, the row is stored + the event emitted under the DEVICE id (raw `12D3KooW…` in the bubble) AND the signature fails verification (signed against master, verified against device). Single-device senders resolve to themselves (no-op).
+
 ### handle_envelope_channel_message()
 
 `message_ops.rs:handle_envelope_channel_message()`
@@ -284,7 +286,7 @@ Parameters: `event_tx`, `bundle_keypair`, `local_peer`, `sender_peer_id`, `sid`,
 
 Flow:
 1. **Verify signature** — Reconstructs `message_signing_payload("ch", "sid:cid", &sender_peer_id, ts, &text)` and calls `verify_message_signature()`. Logs failure but does NOT reject the message (verification is informational, not gating).
-2. **Determine authorship** — `is_mine = sender_peer_id == local_peer`. True when MLS broadcast loops back to self (sender receives their own message).
+2. **Determine authorship** — `is_mine = resolver::same_identity(&sender_peer_id, local_peer)` (multi-device: a message from ANY of our own devices is ours). `sender_peer_id` here is the already-resolved MASTER (see "Multi-device sender resolution" above).
 3. **Persist** — `store.insert_channel_message()`. Returns row count; `is_new = rows > 0` for deduplication. Link preview stored only for new messages.
 4. **Emit event** (only if new) — `NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key }`.
 

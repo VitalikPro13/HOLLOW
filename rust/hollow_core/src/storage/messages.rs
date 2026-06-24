@@ -2621,6 +2621,32 @@ impl MessageStore {
         }
     }
 
+    /// Repair a channel message's attributed sender + signature material (multi-device
+    /// self-heal). A row that was stored before the device→master resolve fix can be
+    /// keyed under a sender DEVICE id with signature material that no longer verifies
+    /// against the master-id payload. When channel sync later delivers the SAME message
+    /// id with a signature that DOES verify (proving authentic sender + text), the
+    /// caller overwrites the local row's `sender_id`/`signature`/`public_key`/`is_mine`
+    /// with the verified values so the bubble renders the person and the proof verifies.
+    /// `INSERT OR IGNORE` blocks re-inserting the corrupt row, so this UPDATE is the only
+    /// way to converge it. Returns true if a row was changed.
+    pub fn repair_channel_message_sender(
+        &self,
+        message_id: &str,
+        sender_id: &str,
+        is_mine: bool,
+        signature: Option<&str>,
+        public_key: Option<&str>,
+    ) -> Result<bool, String> {
+        self.conn
+            .execute(
+                "UPDATE channel_messages SET sender_id = ?1, is_mine = ?2, signature = ?3, public_key = ?4 WHERE message_id = ?5",
+                params![sender_id, is_mine as i32, signature, public_key, message_id],
+            )
+            .map(|rows| rows > 0)
+            .map_err(|e| format!("repair_channel_message_sender: {e}"))
+    }
+
     /// Edit a DM message by message_id. Preserves old text in message_edits table.
     /// Returns true if the message was found and updated.
     pub fn set_dm_message_edited_at(&self, message_id: &str, edited_at: i64) -> Result<(), String> {

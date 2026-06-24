@@ -356,10 +356,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                         final profiles = ref.read(profileProvider);
                         final nicknames =
                             ref.read(serverNicknamesProvider(widget.serverId));
+                        // Collapse device→master so pinned rows show the person's
+                        // name (not a raw device id). Single-device → no-op.
+                        final pinnedMaster = ref
+                            .read(deviceLinkProvider)
+                            .identityOf(msg.senderId);
                         final name = serverDisplayNameFor(
                           profiles,
-                          msg.senderId,
-                          nickname: nicknames[msg.senderId] ?? '',
+                          pinnedMaster,
+                          nickname: nicknames[pinnedMaster] ?? '',
                         );
                         final time =
                             '${msg.timestamp.hour.toString().padLeft(2, '0')}:${msg.timestamp.minute.toString().padLeft(2, '0')}';
@@ -1454,14 +1459,19 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                       itemCount: _searchResults.length,
                       itemBuilder: (_, index) {
                         final msg = _searchResults[index];
+                        // Collapse device→master so search results show the person's
+                        // name (not a raw device id). Single-device → no-op.
+                        final searchMaster = ref
+                            .watch(deviceLinkProvider)
+                            .identityOf(msg.senderId);
                         final senderProfile = ref.watch(
-                            profileProvider.select((p) => p[msg.senderId]));
+                            profileProvider.select((p) => p[searchMaster]));
                         final senderNickname = ref.watch(
                             serverNicknamesProvider(widget.serverId)
-                                .select((n) => n[msg.senderId]));
+                                .select((n) => n[searchMaster]));
                         final name = serverDisplayNameForPeer(
                           senderProfile,
-                          msg.senderId,
+                          searchMaster,
                           nickname: senderNickname ?? '',
                         );
                         final time = DateTime.fromMillisecondsSinceEpoch(
@@ -1686,10 +1696,13 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                             : null,
                         onReply: msg.messageId != null
                             ? () {
+                                // Collapse device→master so the reply banner shows
+                                // the person's name, not a raw device id.
+                                final replyMaster = links.identityOf(msg.senderId);
                                 final senderName = serverDisplayNameFor(
                                   profiles,
-                                  msg.senderId,
-                                  nickname: nicknames[msg.senderId] ?? '',
+                                  replyMaster,
+                                  nickname: nicknames[replyMaster] ?? '',
                                 );
                                 setState(() {
                                   _replyToMessageId = msg.messageId;
@@ -1793,8 +1806,13 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                         onInfo: () {
                           final localPeerId =
                               ref.read(identityProvider).peerId ?? '';
-                          final senderPeerId =
-                              msg.isMe ? localPeerId : msg.senderId;
+                          // The signature is computed over the sender's MASTER id
+                          // (the send side signs with the master), so the proof must
+                          // verify against the master — resolve device→master here or
+                          // a multi-device sender's signature reads as invalid.
+                          final senderPeerId = msg.isMe
+                              ? localPeerId
+                              : links.identityOf(msg.senderId);
                           showMessageProofDialog(
                             context,
                             MessageProofData(
@@ -1837,10 +1855,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                               replyText = original.fileAttachment != null
                                   ? (original.fileAttachment!.isImage ? '📷 Image' : '📎 ${original.fileAttachment!.fileName}')
                                   : original.text;
+                              // Collapse device→master so the reply-preview header
+                              // shows the original sender's name, not a device id.
+                              final origMaster =
+                                  links.identityOf(original.senderId);
                               replySender = serverDisplayNameFor(
                                 profiles,
-                                original.senderId,
-                                nickname: nicknames[original.senderId] ?? '',
+                                origMaster,
+                                nickname: nicknames[origMaster] ?? '',
                               );
                               if (original.fileAttachment?.isImage == true) {
                                 replyImagePath = original.fileAttachment?.diskPath;

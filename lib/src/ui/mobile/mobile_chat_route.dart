@@ -1384,13 +1384,19 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         final msg = messages[index];
         final prev = index > 0 ? messages[index - 1] : null;
 
+        // Multi-device: collapse each sender device→master so a person's messages
+        // group as ONE sender and the header shows their name (not a raw device id).
+        // Single-device → identityOf is a no-op.
+        final links = ref.watch(deviceLinkProvider);
+        final curSender = links.identityOf(msg.senderId);
+
         final showDate = prev == null || !_sameDay(prev.timestamp, msg.timestamp);
         final showHeader = prev == null ||
-            prev.senderId != msg.senderId ||
+            links.identityOf(prev.senderId) != curSender ||
             msg.timestamp.difference(prev.timestamp).inMinutes > 5;
 
         final localPeerId = ref.read(identityProvider).peerId ?? '';
-        final senderName = displayNameFor(profiles, msg.senderId);
+        final senderName = displayNameFor(profiles, curSender);
 
         // Edit mode: show inline editor instead of bubble.
         if (_editingMessageId != null && _editingMessageId == msg.messageId) {
@@ -1421,7 +1427,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                     ? '📷 Image'
                     : '📎 ${original.fileAttachment!.fileName}')
                 : original.text;
-            replySender = displayNameFor(profiles, original.senderId);
+            replySender =
+                displayNameFor(profiles, links.identityOf(original.senderId));
           }
         }
 
@@ -1610,7 +1617,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               showMessageProofDialog(
                 context,
                 MessageProofData(
-                  senderPeerId: msg.senderId,
+                  // The channel signature is computed over the sender's MASTER id,
+                  // so the proof must verify against the master — resolve device→
+                  // master or a multi-device sender's signature reads as invalid.
+                  senderPeerId:
+                      ref.read(deviceLinkProvider).identityOf(msg.senderId),
                   senderDisplayName: senderName,
                   text: msg.text,
                   timestampMs: (msg.editedAt ?? msg.timestamp)
@@ -1720,7 +1731,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                 itemBuilder: (_, index) {
                   final msg = _searchResults[index];
                   final profiles = ref.watch(profileProvider);
-                  final name = displayNameFor(profiles, msg.senderId);
+                  // Collapse device→master so search results show the person's name.
+                  final name = displayNameFor(profiles,
+                      ref.watch(deviceLinkProvider).identityOf(msg.senderId));
                   final time = DateTime.fromMillisecondsSinceEpoch(
                       msg.timestamp.toInt());
                   final timeStr =
@@ -2172,10 +2185,14 @@ class _MobileChatHeader extends ConsumerWidget {
                       Divider(color: hollow.border, height: 1),
                   itemBuilder: (_, index) {
                     final msg = pinnedMessages[index]!;
+                    // Collapse device→master so pinned rows show the person's name.
+                    final pinnedMaster = ref
+                        .read(deviceLinkProvider)
+                        .identityOf(msg.senderId);
                     final name = serverDisplayNameFor(
                       profiles,
-                      msg.senderId,
-                      nickname: nicknames[msg.senderId] ?? '',
+                      pinnedMaster,
+                      nickname: nicknames[pinnedMaster] ?? '',
                     );
                     final time =
                         '${msg.timestamp.hour.toString().padLeft(2, '0')}:${msg.timestamp.minute.toString().padLeft(2, '0')}';

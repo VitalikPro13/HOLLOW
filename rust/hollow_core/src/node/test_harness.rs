@@ -580,6 +580,16 @@ impl TestNode {
         keys
     }
 
+    /// The RAW `sender_id` a channel message row is stored under (NOT collapsed
+    /// device→master like `channel_messages`). In a correct multi-device world a
+    /// channel message's stored sender is the sender's MASTER (the bubble keys on
+    /// it); if a sender DEVICE id leaks in here, the receive path stored it
+    /// unresolved — a bug the master-collapsed `channel_messages` inspector hides
+    /// (it resolves on read). None if no such message id is stored.
+    pub(crate) fn raw_channel_message_sender(&self, message_id: &str) -> Option<String> {
+        self.store().get_channel_message_sender(message_id)
+    }
+
     // --- Live crypto state (queries the running event loop) ----------------
 
     /// Snapshot the node's LIVE in-memory MLS/Olm state (owned by the running
@@ -1248,6 +1258,152 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
     let row = msgs.iter().find(|m| m.text == "hello channel").expect("message stored");
     assert_eq!(row.sender_master, o_master, "channel message attributed to owner master");
     assert!(!row.is_mine, "received message is not is_mine on the joiner");
+}
+
+// ---------------------------------------------------------------------------
+// PUBLIC-channel multi-device attribution (UI device→master collapse, 2026-06-24).
+// A PUBLIC channel broadcasts signed PLAINTEXT (no MLS), and the relay frame's
+// `from` is the sender's DEVICE id. Before the fix, the PublicChannelMessage
+// handler passed that raw device id straight to handle_envelope_channel_message,
+// so the message was attributed to + stored under the DEVICE — the bubble showed
+// "12D3KooW…" instead of the sender's name (while the MLS path already resolved
+// to master). It also broke signature verification (the sender SIGNS with its
+// master id). This asserts the fix: the receiver attributes a public-channel
+// message from a device!=master sender to that sender's MASTER, in BOTH the live
+// event (`from_peer`) AND the raw stored row (NOT just the master-collapsed
+// inspector, which would hide a device-keyed row by resolving on read).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn public_channel_message_from_multidevice_sender_attributes_to_master() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // O = owner/sender, J = joiner. BOTH are real fresh installs (device != master,
+    // the shape every fresh friend has since ad7b49e). Resolver NOT pre-seeded —
+    // J must learn O's device→master purely from the organic friend handshake, so
+    // resolving the relay frame's device `from` to O's master is a real lookup.
+    const O_MASTER: u8 = 50;
+    const O_DEV: u8 = 51;
+    const J_MASTER: u8 = 52;
+    const J_DEV: u8 = 53;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let o_dev = NativeKeypair::from_secret_bytes(&seed_bytes(O_DEV)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+    let j_dev = NativeKeypair::from_secret_bytes(&seed_bytes(J_DEV)).peer_id();
+    // Precondition: meaningless unless the sender's device != master.
+    assert_ne!(o_dev, o_master, "O must be a real fresh install (device != master)");
+    assert_ne!(j_dev, j_master, "J must be a real fresh install (device != master)");
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_DEV, &[]).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_DEV, &[]).await;
+    sleep_ms(1500).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // Organic friend handshake O <-> J (drives the device-list/profile pushes both
+    // directions, warming J's resolver with O_DEV → O_MASTER and vice versa).
+    o.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: j_master.clone() })
+        .await
+        .unwrap();
+    let j_got_req = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { .. })
+    })
+    .await;
+    assert!(j_got_req, "J must receive O's friend request");
+    j.cmd_tx
+        .send(NodeCommand::AcceptFriendRequest { peer_id: o_master.clone() })
+        .await
+        .unwrap();
+    // Let accept + device-list/profile pushes + Olm key exchange settle.
+    sleep_ms(4000).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // Precondition: J's resolver maps O's device → O's master. Without this, the
+    // resolve in the PublicChannelMessage handler is a no-op and the test can't
+    // distinguish the fix.
+    assert_eq!(
+        super::resolver::resolve(&o_dev), o_master,
+        "J's resolver must map O's device → O's master after the friend handshake"
+    );
+
+    // O creates a server (+ implicit #general); J joins (forms the shared room so a
+    // SendToRoom public broadcast reaches J).
+    let server_id = create_server_and_wait(&mut o, "Public Test Server").await;
+    let general = general_channel_of(&server_id);
+    sleep_ms(300).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "J must join the server");
+    sleep_ms(3000).await; // let membership + the shared server room settle
+
+    // O makes #general PUBLIC (plaintext broadcast path, no MLS).
+    o.cmd_tx
+        .send(NodeCommand::SetChannelPublic {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            is_public: true,
+        })
+        .await
+        .unwrap();
+    sleep_ms(2000).await; // let the ChannelPublicChanged CRDT op converge to J
+    drain_events(&mut j);
+
+    // --- THE PAYOFF: O sends a PUBLIC channel message from its DEVICE; J must
+    // attribute it to O's MASTER (not O_DEV) ---
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "public from a device".to_string(),
+            message_id: "pub-md-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+
+    // Live event: from_peer is the raw value handle_envelope_channel_message was
+    // called with — O's MASTER with the fix, O_DEV without it.
+    let attributed_to_master = wait_event(&mut j, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, from_peer, .. }
+            if text == "public from a device" && *from_peer == o_master)
+    })
+    .await;
+    assert!(
+        attributed_to_master,
+        "J must receive the public channel message attributed to O's MASTER ({o_master}), not O's device ({o_dev})"
+    );
+    sleep_ms(200).await;
+
+    // Raw layer (device-keyed truth): the stored row's sender is O's MASTER. This
+    // is the assertion the master-collapsed `channel_messages` inspector can't make
+    // — it resolves device→master on read and would pass even on a device-keyed row.
+    assert_eq!(
+        j.raw_channel_message_sender("pub-md-1").as_deref(),
+        Some(o_master.as_str()),
+        "the stored public-channel row must be MASTER-keyed (raw), not device-keyed"
+    );
+    // And the channel-pane inspector agrees (is_mine=false on the receiver).
+    let msgs = j.channel_messages(&server_id, &general);
+    let row = msgs.iter().find(|m| m.text == "public from a device").expect("public message stored");
+    assert_eq!(row.sender_master, o_master, "public channel message attributed to O's master");
+    assert!(!row.is_mine, "received public message is not is_mine on J");
 }
 
 // ---------------------------------------------------------------------------
@@ -2211,6 +2367,126 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
         recovered_seq[0].1 < recovered_seq[1].1 && recovered_seq[1].1 < recovered_seq[2].1,
         "backfilled sends must keep strictly increasing order_us (true send order): {recovered_seq:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-device self-heal of a PRE-FIX channel row (2026-06-24). A row stored
+// before the device→master resolve fix can be keyed under a sender DEVICE id with
+// signature material that no longer verifies against the master-id payload — the
+// "12D3KooW… + unverified signature" bubble Vitalik hit on VM. INSERT OR IGNORE +
+// the already-exists skip means a later channel sync that carries the CORRECT
+// (verified, master-keyed) copy can't overwrite it. The self-heal: when a synced
+// item's signature VERIFIES and our stored row is attributed to a different
+// sender, repair the row to the verified one. Here we simulate the corruption
+// directly (poison the stored sender to a bogus device id), then re-sync from the
+// member that holds the good copy and assert the row converges back to the master.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn corrupt_device_keyed_channel_row_self_heals_from_verified_sync() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // A = owner/sender (single keystone device), J = member. Both befriended so the
+    // server-join Olm handshake works, exactly like the recovery test above.
+    const A_MASTER: u8 = 170;
+    const J_MASTER: u8 = 180;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+    // A bogus DEVICE id to poison J's stored row with (stands in for the pre-fix
+    // sibling-device id that AnonListen saw). It is NOT A's master and NOT in the
+    // resolver, so it can never verify — mirroring the wedged VM row.
+    let ghost_dev = NativeKeypair::from_secret_bytes(&seed_bytes(199)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&j_master]).await;
+    sleep_ms(1500).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&a_master]).await;
+    sleep_ms(4000).await; // Olm confirm A↔J
+    drain_events(&mut a);
+    drain_events(&mut j);
+
+    // A creates a server; J joins and forms its MLS leaf.
+    let server_id = create_server_and_wait(&mut a, "Heal Server").await;
+    let general = general_channel_of(&server_id);
+    sleep_ms(300).await;
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "J must join the server");
+    sleep_ms(4000).await; // MLS leaf forms
+
+    // A sends a channel message; J receives + stores it CORRECTLY (verified, keyed to
+    // A's master). This is the "good" copy A will later re-serve.
+    drain_events(&mut j);
+    const MID: &str = "heal-1";
+    a.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "heal me".to_string(),
+            message_id: MID.to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let j_got = wait_event(&mut j, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "heal me")
+    })
+    .await;
+    assert!(j_got, "J must receive A's channel message");
+    sleep_ms(300).await;
+    assert_eq!(
+        j.raw_channel_message_sender(MID).as_deref(), Some(a_master.as_str()),
+        "precondition: J first stores the message correctly under A's master"
+    );
+
+    // --- Simulate the PRE-FIX corruption: poison J's stored row to the ghost device
+    // id (sender no longer matches the signature → 'unverified' bubble). This is the
+    // exact wedged state VM was in (stored under a sibling device, sig won't verify).
+    let changed = j.store().repair_channel_message_sender(
+        MID, &ghost_dev, false, None, None,
+    ).expect("poison row");
+    assert!(changed, "the poison write must mutate the row");
+    assert_eq!(
+        j.raw_channel_message_sender(MID).as_deref(), Some(ghost_dev.as_str()),
+        "row is now corrupt (device-keyed) on J, mirroring the pre-fix VM state"
+    );
+
+    // --- Re-trigger channel sync: J reconnects, fires a ChannelSyncRequest per
+    // channel; A serves the message (sender = A's master, valid signature). Because
+    // J's stored sender is now the ghost device, J's per-sender cursor for A's master
+    // is 0 → A re-serves it, and the self-heal fires (verified sig + sender mismatch
+    // → repair). ---
+    relay.set_online(&j.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut j);
+    relay.set_online(&j.device_id, true);
+    sleep_ms(700).await; // let J re-run connect + re-register the sync coordinator
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    sleep_ms(4000).await; // let the ChannelSyncRequest round-trip + heal commit
+
+    // --- THE ASSERTION: J's row is repaired back to A's master (raw, device-keyed
+    // truth), and its signature verifies again via the channel-pane inspector. ---
+    assert_eq!(
+        j.raw_channel_message_sender(MID).as_deref(), Some(a_master.as_str()),
+        "the corrupt device-keyed row must self-heal back to A's master after a verified sync"
+    );
+    let msgs = j.channel_messages(&server_id, &general);
+    let row = msgs.iter().find(|m| m.text == "heal me").expect("healed message present");
+    assert_eq!(row.sender_master, a_master, "healed message attributed to A's master");
 }
 
 // ---------------------------------------------------------------------------

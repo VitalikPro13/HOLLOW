@@ -114,11 +114,12 @@ When `message.reactions` is non-empty: renders `ReactionBar` passing `localPeerI
 ### Differences from MessageBubble
 
 1. **Model type:** Uses `ChannelChatMessage` instead of `ChatMessage`.
-2. **Server nickname resolution:** Reads `serverNicknamesProvider(serverId)` and uses `serverDisplayNameFor(profiles, message.senderId, nickname:)` which prefers server nicknames over profile display names.
-3. **`isMentioned` flag:** Extra boolean parameter. When true, the message gets the same accent-tinted background as `isHighlighted`. The highlight decoration condition is `isHighlighted || isMentioned`.
-4. **@mention name resolution:** Watches `serverMembersProvider(serverId)` to build a `Set<String>` of all member names (display names, nicknames, profile names). Passes this as `memberNames:` to `buildMessageText()` so @mentions are rendered as highlighted pills.
-5. **Avatar uses `message.senderId`** directly (not a `peerId` parameter) since channel messages carry their sender ID.
-6. **`serverId` parameter:** Required, used for nickname and member lookups.
+2. **Multi-device sender collapse (device→master):** `build()` first resolves `senderMaster = ref.watch(deviceLinkProvider).identityOf(message.senderId)` and keys EVERYTHING on `senderMaster` — profile, server nickname, display name, `HollowAvatar`, `nameColorFromId`, and both `ProfileTapTarget`s. A channel message's `senderId` may be a per-DEVICE peer id (a public-channel row, or any row stored before the Rust device→master resolve fix); collapsing it makes the bubble show the person's name + avatar instead of a raw `12D3KooW…` + generic colored square — matching the member panel. Single-device senders resolve to themselves (no-op); `watch` keeps the row reactive if the link arrives after first paint. The collapse only re-renders — it does not rewrite the DB (a device-keyed row on disk heals via channel-sync `repair_channel_message_sender`).
+3. **Server nickname resolution:** Reads `serverNicknamesProvider(serverId)` and uses `serverDisplayNameFor(profiles, senderMaster, nickname:)` (the resolved master) which prefers server nicknames over profile display names.
+4. **`isMentioned` flag:** Extra boolean parameter. When true, the message gets the same accent-tinted background as `isHighlighted`. The highlight decoration condition is `isHighlighted || isMentioned`.
+5. **@mention name resolution:** Watches `serverMembersProvider(serverId)` to build a `Set<String>` of all member names (display names, nicknames, profile names). Passes this as `memberNames:` to `buildMessageText()` so @mentions are rendered as highlighted pills.
+6. **Avatar uses `senderMaster`** (the resolved master, not `message.senderId` raw, and not a `peerId` parameter).
+7. **`serverId` parameter:** Required, used for nickname and member lookups.
 
 ### Layout
 

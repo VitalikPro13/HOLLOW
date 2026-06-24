@@ -2880,6 +2880,42 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
                         public_key: msg.pk.clone(),
                     }).await;
                 }
+            } else if msg.sig.is_some() && msg.edited_at.is_none() {
+                // Multi-device self-heal: the row already exists but may have been
+                // stored under a sender DEVICE id (pre device→master resolve fix)
+                // with signature material that no longer verifies on this device —
+                // the "12D3KooW… + unverified signature" bubble. If THIS synced copy's
+                // signature verifies (proving authentic sender + text) and our stored
+                // row is attributed to a different sender, repair it to the verified
+                // one. INSERT OR IGNORE blocked re-inserting the good copy, so this
+                // UPDATE is the only path to converge. Safe: verify_message_signature
+                // also binds the PeerId to the pubkey, so this can only ever replace an
+                // attribution with a cryptographically authentic one (no forgery).
+                if let Some(mid) = &msg.mid {
+                    let stored_sender = store.get_channel_message_sender(mid);
+                    if stored_sender.as_deref() != Some(msg.s.as_str()) {
+                        let payload = super::crypto_handler::message_signing_payload(
+                            "ch", &format!("{sid}:{cid}"), &msg.s, msg.ts, &msg.t,
+                        );
+                        if super::crypto_handler::verify_message_signature(
+                            &msg.s, msg.sig.as_deref(), msg.pk.as_deref(), &payload,
+                        ) {
+                            if let Ok(true) = store.repair_channel_message_sender(
+                                mid, &msg.s, is_mine,
+                                msg.sig.as_deref(), msg.pk.as_deref(),
+                            ) {
+                                // The DB row is now master-keyed + verifiable. We don't
+                                // fake an edit event (that would mark it "(edited)" and
+                                // wouldn't move the in-memory senderId anyway); the
+                                // corrected sender renders on the next channel open /
+                                // loadHistory, which is when this sync runs.
+                                hollow_log!(
+                                    "[HOLLOW-SYNC] Repaired channel msg {mid} sender {stored_sender:?} → {} (verified)", msg.s
+                                );
+                            }
+                        }
+                    }
+                }
             }
             if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
                 if store.set_channel_message_hidden(mid, hidden_ts).is_ok() {

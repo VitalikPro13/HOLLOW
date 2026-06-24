@@ -228,7 +228,7 @@ The signed list propagates as an attachment on profile sync, so friends converge
 
 ### 3.3 Device-to-Master Resolver
 
-Clients maintain a resolver mapping each known device peer ID to its master. Its core invariant is that an **unknown peer ID resolves to itself** — a stranger, a single-device user, or a friend whose device list has not yet arrived is treated as their own identity. This makes a fresh single-device install **byte-for-byte identical to pre-multi-device Hollow**; multi-device behavior activates only once a signed device list is ingested.
+Clients maintain a resolver mapping each known device peer ID to its master. Its core invariant is that an **unknown peer ID resolves to itself** — a stranger, a single-device user, or a friend whose device list has not yet arrived is treated as their own identity. Note that this invariant, not an absence of indirection, is what makes single-device use safe: every install mints a distinct device key, so a device peer ID never equals its master even for a sole device, and the device→master path is therefore *always* exercised. Correctness rests entirely on the resolver's self-mapping fallback (and on per-person attribution collapsing to the master), not on any device==master special case. Multi-device behavior beyond that fallback activates only once a signed device list is ingested.
 
 Two rules govern every cross-device interaction:
 
@@ -1126,6 +1126,8 @@ hollow-msg:{type}:{context}:{sender}:{timestamp_ms}:{text}
 4. Verify the Ed25519 signature over the canonical payload using strict verification (`verify_strict`), which rejects non-canonical signatures (small-order group elements, malleable S values).
 
 If any step fails, the message is rejected. This prevents impersonation: even if an attacker can inject messages into the encrypted channel, they cannot forge a valid signature without the sender's private key.
+
+Because the signed sender is the author's *master* identity (§3.3), verification doubles as an **attribution-convergence** mechanism. When a node holds a stored message whose locally-recorded sender disagrees with an incoming, signature-verified copy of the same message (delivered via channel synchronization from any member that holds the authentic copy), the node repairs the stored attribution to the verified sender. This is unforgeable by construction — the repair is gated on the same full verification above, so it can only ever replace an attribution with one that the master's key has signed, never introduce a forged one. The mechanism exists so that a record stored before per-person attribution was applied (for example, one keyed under a specific device rather than its master) self-corrects on the next sync rather than remaining permanently misattributed.
 
 ### 15.3 Timestamp Integrity
 
