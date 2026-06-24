@@ -15,6 +15,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_avatars.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 
 
 /// Full-screen call overlay that slides up from the bottom inside a DM chat.
@@ -479,22 +480,10 @@ class MobileCallStatusStrip extends ConsumerWidget {
     return GestureDetector(
       onTap: () {
         Navigator.of(context).push(
-          PageRouteBuilder(
+          hollowMobileRoute(
             settings: const RouteSettings(name: 'call-screen'),
-            pageBuilder: (_, __, ___) =>
-                MobileCallScreen(peerId: peerId),
-            transitionsBuilder: (_, anim, __, child) {
-              return SlideTransition(
-                position: Tween<Offset>(
-                  begin: const Offset(0, 1),
-                  end: Offset.zero,
-                ).animate(CurvedAnimation(
-                  parent: anim,
-                  curve: Curves.easeOut,
-                )),
-                child: child,
-              );
-            },
+            transition: HollowRouteTransition.slideUp,
+            builder: (_) => MobileCallScreen(peerId: peerId),
           ),
         );
       },

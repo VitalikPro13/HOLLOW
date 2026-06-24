@@ -271,9 +271,9 @@ List<InlineSpan> _tokensToSpans(
               child: Text(
                 tok.text,
                 style: style.copyWith(
-                  color: hollow.accent,
+                  color: hollow.accentText,
                   decoration: TextDecoration.underline,
-                  decorationColor: hollow.accent,
+                  decorationColor: hollow.accentText,
                 ),
               ),
             ),
@@ -292,7 +292,7 @@ List<InlineSpan> _tokensToSpans(
             child: Text(
               '@${tok.text}',
               style: style.copyWith(
-                color: hollow.accent,
+                color: hollow.accentText,
                 fontWeight: FontWeight.w600,
               ),
             ),

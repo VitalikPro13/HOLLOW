@@ -40,6 +40,7 @@ import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_active_call_pill.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_video_view.dart';
 import 'package:hollow/src/ui/mobile/mobile_member_panel.dart';
 import 'package:hollow/src/ui/mobile/mobile_notification_banner.dart';
@@ -1987,6 +1988,8 @@ class _MobileChatHeader extends ConsumerWidget {
                       child: StatusDot(
                         color: isOnline ? hollow.success : hollow.textSecondary,
                         size: 8, pulse: isOnline,
+                        filled: isOnline,
+                        semanticLabel: isOnline ? 'Online' : 'Offline',
                       ),
                     ),
                   ),
@@ -2552,21 +2555,10 @@ class _DmCallButtons extends ConsumerWidget {
     void startAndOpen({bool withVideo = false}) {
       ref.read(callProvider.notifier).startCall(peerId, withVideo: withVideo);
       Navigator.of(context).push(
-        PageRouteBuilder(
+        hollowMobileRoute(
           settings: const RouteSettings(name: 'call-screen'),
-          pageBuilder: (_, __, ___) => MobileCallScreen(peerId: peerId),
-          transitionsBuilder: (_, anim, __, child) {
-            return SlideTransition(
-              position: Tween<Offset>(
-                begin: const Offset(0, 1),
-                end: Offset.zero,
-              ).animate(CurvedAnimation(
-                parent: anim,
-                curve: Curves.easeOut,
-              )),
-              child: child,
-            );
-          },
+          transition: HollowRouteTransition.slideUp,
+          builder: (_) => MobileCallScreen(peerId: peerId),
         ),
       );
     }
@@ -2579,22 +2571,11 @@ class _DmCallButtons extends ConsumerWidget {
               ? () => startAndOpen()
               : isCallWithThisPeer
                   ? () => Navigator.of(context).push(
-                        PageRouteBuilder(
-                          settings: const RouteSettings(name: 'call-screen'),
-                          pageBuilder: (_, __, ___) =>
-                              MobileCallScreen(peerId: peerId),
-                          transitionsBuilder: (_, anim, __, child) {
-                            return SlideTransition(
-                              position: Tween<Offset>(
-                                begin: const Offset(0, 1),
-                                end: Offset.zero,
-                              ).animate(CurvedAnimation(
-                                parent: anim,
-                                curve: Curves.easeOut,
-                              )),
-                              child: child,
-                            );
-                          },
+                        hollowMobileRoute(
+                          settings:
+                              const RouteSettings(name: 'call-screen'),
+                          transition: HollowRouteTransition.slideUp,
+                          builder: (_) => MobileCallScreen(peerId: peerId),
                         ),
                       )
                   : null,
@@ -2878,18 +2859,12 @@ class _VoiceChannelStatusStrip extends ConsumerWidget {
     return GestureDetector(
       onTap: () {
         Navigator.of(context).push(
-          PageRouteBuilder(
-            pageBuilder: (_, __, ___) => MobileVoiceChannelRoute(
+          hollowMobileRoute(
+            transition: HollowRouteTransition.slideUp,
+            builder: (_) => MobileVoiceChannelRoute(
               serverId: vcState.currentServerId!,
               channelId: vcState.currentChannelId!,
               channelName: channelName,
-            ),
-            transitionsBuilder: (_, anim, __, child) => SlideTransition(
-              position: Tween<Offset>(
-                begin: const Offset(0, 1),
-                end: Offset.zero,
-              ).animate(CurvedAnimation(parent: anim, curve: Curves.easeOut)),
-              child: child,
             ),
           ),
         );

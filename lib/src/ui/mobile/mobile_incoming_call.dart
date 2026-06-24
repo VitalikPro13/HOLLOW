@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_video_view.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Full-screen incoming call overlay for mobile.
@@ -232,22 +233,12 @@ class _MobileIncomingCallOverlayState
                           final peerId = _cachedPeerId;
                           if (peerId.isNotEmpty) {
                             Navigator.of(context, rootNavigator: true).push(
-                              PageRouteBuilder(
-                                settings: const RouteSettings(name: 'call-screen'),
-                                pageBuilder: (_, __, ___) =>
+                              hollowMobileRoute(
+                                settings:
+                                    const RouteSettings(name: 'call-screen'),
+                                transition: HollowRouteTransition.slideUp,
+                                builder: (_) =>
                                     MobileCallScreen(peerId: peerId),
-                                transitionsBuilder: (_, anim, __, child) {
-                                  return SlideTransition(
-                                    position: Tween<Offset>(
-                                      begin: const Offset(0, 1),
-                                      end: Offset.zero,
-                                    ).animate(CurvedAnimation(
-                                      parent: anim,
-                                      curve: Curves.easeOut,
-                                    )),
-                                    child: child,
-                                  );
-                                },
                               ),
                             );
                           }

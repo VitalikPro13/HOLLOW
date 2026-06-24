@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -2547,10 +2548,13 @@ class _SpinningRefreshIconState extends State<_SpinningRefreshIcon>
   @override
   void initState() {
     super.initState();
+    final reduce = ReduceMotionController.instance.isReduced;
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1500),
-    )..repeat();
+      duration:
+          reduce ? Duration.zero : const Duration(milliseconds: 1500),
+    );
+    if (!reduce) _controller.repeat();
   }
 
   @override

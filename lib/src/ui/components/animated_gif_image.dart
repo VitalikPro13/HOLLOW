@@ -5,6 +5,8 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
+import 'package:hollow/src/core/reduce_motion.dart';
+
 /// Renders an animated GIF from raw bytes with proper frame delay handling.
 ///
 /// Unlike Flutter's built-in Image.memory which can play GIFs too fast
@@ -47,6 +49,21 @@ class _AnimatedGifImageState extends State<AnimatedGifImage>
   void initState() {
     super.initState();
     _decode();
+    // Reduce-motion treats GIF playback as motion: show the static first
+    // frame. React live when the OS / in-app flag flips.
+    ReduceMotionController.instance.effective.addListener(_onReduceMotion);
+  }
+
+  void _onReduceMotion() {
+    if (!mounted || _frames == null || _frames!.length <= 1) return;
+    if (ReduceMotionController.instance.isReduced) {
+      _ticker?.stop();
+      if (_currentFrame != 0) setState(() => _currentFrame = 0);
+    } else if (_ticker != null && !_ticker!.isActive) {
+      _elapsed = Duration.zero;
+      _nextFrameAt = _frames![0].duration;
+      _ticker!.start();
+    }
   }
 
   @override
@@ -89,11 +106,13 @@ class _AnimatedGifImageState extends State<AnimatedGifImage>
 
       setState(() => _frames = frames);
 
-      // Start animation if multi-frame
+      // Start animation if multi-frame (unless reduce-motion: hold frame 0).
       if (frames.length > 1) {
         _nextFrameAt = frames[0].duration;
         _ticker = createTicker(_onTick);
-        _ticker!.start();
+        if (!ReduceMotionController.instance.isReduced) {
+          _ticker!.start();
+        }
       }
     } catch (_) {
       if (mounted) setState(() => _failed = true);
@@ -125,6 +144,7 @@ class _AnimatedGifImageState extends State<AnimatedGifImage>
 
   @override
   void dispose() {
+    ReduceMotionController.instance.effective.removeListener(_onReduceMotion);
     _disposeFrames();
     super.dispose();
   }

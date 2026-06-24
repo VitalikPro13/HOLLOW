@@ -90,7 +90,7 @@ class ChannelMessageBubble extends ConsumerWidget {
             width: 2,
             height: 28,
             decoration: BoxDecoration(
-              color: hollow.textSecondary.withValues(alpha: 0.3),
+              color: hollow.textSecondary.withValues(alpha: 0.5),
               borderRadius: BorderRadius.circular(1),
             ),
           ),
@@ -174,7 +174,7 @@ class ChannelMessageBubble extends ConsumerWidget {
                     TextSpan(
                       text: ' (edited)',
                       style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary.withValues(alpha: 0.5),
+                        color: hollow.textTertiary,
                         fontSize: 10,
                       ),
                     ),
@@ -285,8 +285,7 @@ class ChannelMessageBubble extends ConsumerWidget {
                       Text(
                         time,
                         style: HollowTypography.caption.copyWith(
-                          color:
-                              hollow.textSecondary.withValues(alpha: 0.5),
+                          color: hollow.textTertiary,
                           fontSize: 10,
                         ),
                       ),

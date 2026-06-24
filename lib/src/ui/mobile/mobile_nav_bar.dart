@@ -174,7 +174,7 @@ class _NavTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final color = isActive ? hollow.accent : hollow.textSecondary;
+    final color = isActive ? hollow.accentText : hollow.textSecondary;
 
     return Expanded(
       child: GestureDetector(

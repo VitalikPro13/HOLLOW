@@ -331,6 +331,10 @@ class _MemberTile extends ConsumerWidget {
                                 : hollow.textSecondary,
                         size: 8,
                         pulse: isSyncing || isOnline,
+                        filled: isSyncing || isOnline,
+                        semanticLabel: isSyncing
+                            ? 'Syncing'
+                            : isOnline ? 'Online' : 'Offline',
                       ),
                     ),
                   ),

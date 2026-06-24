@@ -253,9 +253,7 @@ class _HollowTextFieldState extends State<HollowTextField>
                   Text(
                     '$_charCount/${widget.maxLength}',
                     style: HollowTypography.caption.copyWith(
-                      color: nearLimit
-                          ? hollow.warning
-                          : hollow.textSecondary.withValues(alpha: 0.4),
+                      color: nearLimit ? hollow.warning : hollow.textTertiary,
                       fontSize: 10,
                     ),
                   ),

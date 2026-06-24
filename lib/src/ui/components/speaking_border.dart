@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 
 class SpeakingBorder extends StatefulWidget {
@@ -35,15 +36,19 @@ class _SpeakingBorderState extends State<SpeakingBorder>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 300),
+      duration: ReduceMotionController.instance.isReduced
+          ? Duration.zero
+          : const Duration(milliseconds: 300),
     );
     _anim = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
-    if (widget.isSpeaking) _controller.forward();
+    if (widget.isSpeaking) _controller.value = 1.0;
   }
 
   @override
   void didUpdateWidget(SpeakingBorder old) {
     super.didUpdateWidget(old);
+    // With reduce-motion the duration is zero, so forward/reverse snap
+    // instantly — the border still appears as an info cue, just without fade.
     if (widget.isSpeaking && !old.isSpeaking) {
       _controller.forward();
     } else if (!widget.isSpeaking && old.isSpeaking) {

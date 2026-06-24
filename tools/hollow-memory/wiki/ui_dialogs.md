@@ -840,7 +840,8 @@ Values: `profile`, `system`, `security`, `updates`, `about`
 
 **Sections:**
 - APPEARANCE: Dark Mode toggle, `_AccentColorPicker` (rainbow hue slider + preset swatches), `_BackgroundPicker` (image selection with 16:9 crop + darken opacity slider)
-- LAYOUT: Dock Mode toggle (with subtitle), Disable Animations toggle
+- LAYOUT: Dock Mode toggle (with subtitle) — Reduce Motion moved to the Accessibility category
+- ACCESSIBILITY (2026-06-24): Reduce Motion tri-state Auto/On/Off (`reduceMotionProvider`/`ReduceMotionController`), Reduce Transparency toggle (`reduceTransparencyProvider`)
 - SYSTEM: Appear Invisible toggle, Minimize to Tray toggle (desktop only)
 - FILES: Auto-Download Threshold slider (34 MB - 2 GB, 50 divisions), Cache Size Limit slider (256 MB - 10 GB, 40 divisions)
 - MEDIA: `_ImageQualitySelector` -- three pill chips for image quality tiers
@@ -893,7 +894,7 @@ Values: `profile`, `system`, `security`, `updates`, `about`
 
 ### Providers read/written
 - `identityProvider`, `profileProvider`, `themeModeProvider`, `minimizeToTrayProvider`
-- `proxyEnabledProvider`, `layoutModeProvider`, `disableAnimationsProvider`
+- `proxyEnabledProvider`, `layoutModeProvider`, `reduceMotionProvider`, `reduceTransparencyProvider`
 - `invisibleModeProvider`, `autoDownloadThresholdProvider`, `vaultCacheCapProvider`
 - `accentHueProvider`, `accentPresetsProvider`, `backgroundProvider`
 - `audioInputDeviceProvider`, `audioOutputDeviceProvider`, `cameraDeviceProvider`

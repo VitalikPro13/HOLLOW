@@ -261,6 +261,8 @@ Same file. Abstract final class with static duration getters that return `Durati
 
 All duration getters check `_disabled` flag and return `Duration.zero` when true. Components also check `HollowDurations.animationsDisabled` directly for `AnimationController` durations.
 
+**Reduce Motion ownership (2026-06-24):** `HollowDurations.animationsDisabled` and `SharedTickers.instance.disabled` are no longer written directly by settings UI. The single source of truth is `ReduceMotionController` (`lib/src/core/reduce_motion.dart`): a singleton that combines the OS accessibility flag (`PlatformDispatcher.accessibilityFeatures.disableAnimations`) with the tri-state in-app override (`ReduceMotionMode` Auto/On/Off, persisted via `reduceMotionProvider`, key `reduce_motion_mode`; migrates the legacy `disable_animations` bool). Effective = `mode==on || (mode==auto && OS flag)`. It seeds from the OS flag in `main()` BEFORE `SharedTickers.start()`, listens to `onAccessibilityFeaturesChanged` for live OS changes, and writes both statics + pauses/resumes the ticker. Exposes `effective` (a `ValueListenable<bool>`) and `isReduced`. Continuous animations that hardcode their own `AnimationController`/`..repeat()` (channel spinner, voice/recording pulse, speaking border, home poll bar, GIF ticker → static first frame) consult `ReduceMotionController.instance.isReduced` directly. Mobile route transitions go through `hollowMobileRoute()` (`lib/src/ui/mobile/mobile_page_route.dart`), which uses zero duration + no transition when reduced.
+
 
 ## FadeSlideTransition
 
@@ -432,7 +434,7 @@ Singleton (`SharedTickers.instance`) that centralizes all repeating animation ti
 - `pause()` — stops ticker, cancels ambient timer, stops ambient stopwatch.
 - `resume()` — disposes old ticker, creates new one (Ticker cannot restart once stopped), restarts ambient timer.
 - `didChangeAppLifecycleState` — pauses on `paused`/`hidden`/`detached`, resumes on `resumed`, keeps running on `inactive`.
-- `disabled` flag — when true, `start()` and `resume()` are no-ops. All animation widgets stay frozen.
+- `disabled` flag — when true, `start()` and `resume()` are no-ops. All animation widgets stay frozen. **Set by `ReduceMotionController`, not the settings UI directly** (see Reduce Motion ownership under HollowDurations above).
 
 
 ## HollowShaderWarmUp
@@ -736,18 +738,19 @@ File: `lib/src/ui/components/hollow_card.dart`
 
 File: `lib/src/ui/components/status_dot.dart`
 
-`StatelessWidget`. Small colored circle for connection/encryption status.
+`StatelessWidget`. Small status indicator for connection / presence / encryption.
 
-**Parameters:** `color` (default `hollow.success`), `size` (default 8), `pulse` (default false).
+**Parameters:** `color` (default `hollow.success`), `size` (default 8), `pulse` (default false), `filled` (default true), `semanticLabel` (nullable).
 
-**Named constructor:** `StatusDot.online({size, pulse})` — uses success color from theme.
+**Differentiate-Without-Color (a11y Phase 1.3, 2026-06-24):** presence is conveyed by SHAPE as well as color — `filled: true` = solid disc (online/syncing), `filled: false` = **hollow ring** (transparent center + colored border, stroke 1.5px ≤size 8 else 2px). `semanticLabel` wraps the dot in `Semantics` for screen readers ("Online"/"Offline"/"Syncing"). **Convention:** pass `filled: isOnline` (or `isSyncing || isOnline`); add `semanticLabel` only when there's NO adjacent status word (avatar overlays), else skip it to avoid double-announce.
 
-**Non-pulse:** Simple `Container` with circle shape.
+**Named constructors:** `StatusDot.online({size, pulse})` (success, filled, label "Online"); `StatusDot.offline({size, color})` (hollow ring, no pulse, label "Offline").
 
-**Pulse mode:** Uses `SharedTickers.instance.pulse` (3s breathing, ping-pong 0 to 1 to 0 with easeInOut). `ValueListenableBuilder` wrapping Container with `BoxShadow`:
-- Color: dot color at `0.4 * value` alpha.
-- Blur: `3 * value`.
-- Spread: `1.5 * value`.
+**Non-pulse:** `Container` with circle shape; transparent fill + `Border.all` when `!filled`.
+
+**Pulse mode:** Uses `SharedTickers.instance.pulse` (3s breathing, ping-pong 0 to 1 to 0 with easeInOut). `ValueListenableBuilder` → `_PulseDotPainter` (now takes `filled`: fill vs stroke). `BoxShadow`/glow: dot color at `0.4 * value` alpha, blur `3 * value`, spread `1.5 * value`.
+
+**Presence call-site inventory:** ~30 StatusDot sites exist; the genuine person-presence ones all carry the shape cue (peer_card, member_panel, friends_bar, user_bar, mobile members/member-panel/friends/chat-header/profile-sheet/chats-tab, home dashboard self+recent-conversations, DM left profile panel `chat_pane.dart:3798`, bottom_bar dock status). Non-presence dots (active-call always-green, error markers, storage/recovery health) are left filled. Full list in memory `project_accessibility_status_dot_inventory`.
 
 
 ## ConnectionProgress

@@ -142,6 +142,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                           color: statusColor,
                           size: 7,
                           pulse: statusPulse,
+                          filled: statusPulse,
                         ),
                         const SizedBox(width: 4),
                         Expanded(

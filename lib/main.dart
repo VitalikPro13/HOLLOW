@@ -14,6 +14,7 @@ import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/ui/app.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
@@ -240,9 +241,15 @@ Future<void> main() async {
   // Set up crash dump logging to hollow_crash.log.
   await _initCrashLogging();
 
+  // Seed reduce-motion from the OS accessibility flag BEFORE tickers start, so
+  // decorative animations never spin on the login screen when the OS has
+  // Reduce Motion on. The persisted in-app override (Auto/On/Off) is applied
+  // in _bootstrap() after the DB opens. This also wires the runtime listener
+  // so flipping the OS setting takes effect live.
+  ReduceMotionController.instance.initFromOs();
+
   // Start shared animation tickers (one ticker drives all decorative anims).
-  // The disable-animations setting is restored in _bootstrap() after the DB
-  // opens — loadSetting requires SQLCipher which isn't available until login.
+  // No-op if reduce-motion was already effective (controller set disabled).
   SharedTickers.instance.start();
 
   runApp(UncontrolledProviderScope(

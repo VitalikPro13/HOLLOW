@@ -26,6 +26,7 @@ import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
@@ -85,8 +86,8 @@ List<Override> hollowTestOverrides({
       accentHueProvider.overrideWith(() => _MockAccentHueNotifier()),
       backgroundProvider.overrideWith(() => _MockBackgroundNotifier()),
       layoutModeProvider.overrideWith(() => _MockLayoutModeNotifier()),
-      disableAnimationsProvider
-          .overrideWith(() => _MockDisableAnimationsNotifier()),
+      reduceMotionProvider
+          .overrideWith(() => _MockReduceMotionNotifier()),
       invisibleModeProvider
           .overrideWith(() => _MockInvisibleModeNotifier()),
       serverStripLayoutProvider
@@ -255,9 +256,10 @@ class _MockLayoutModeNotifier extends LayoutModeNotifier {
   Future<LayoutMode> build() async => LayoutMode.dock;
 }
 
-class _MockDisableAnimationsNotifier extends DisableAnimationsNotifier {
+class _MockReduceMotionNotifier extends ReduceMotionNotifier {
   @override
-  Future<bool> build() async => true; // disable animations in tests
+  Future<ReduceMotionMode> build() async =>
+      ReduceMotionMode.on; // reduce motion in tests
 }
 
 class _MockInvisibleModeNotifier extends InvisibleModeNotifier {

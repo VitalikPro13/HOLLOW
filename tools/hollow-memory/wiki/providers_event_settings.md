@@ -525,11 +525,15 @@ Provider: `minimizeToTrayProvider` -- `AsyncNotifierProvider<MinimizeToTrayNotif
 - Default: `true` (minimize to tray on close).
 - `setEnabled(bool value)` -- Persists and updates state.
 
-### Disable Animations
-Provider: `disableAnimationsProvider` -- `AsyncNotifierProvider<DisableAnimationsNotifier, bool>`
-- Key: `'disable_animations'`
-- Default: `false` (animations enabled).
-- `setEnabled(bool value)` -- Persists and updates state. When true, all UI transitions become instant.
+### Reduce Motion (replaced Disable Animations, 2026-06-24)
+Provider: `reduceMotionProvider` -- `AsyncNotifierProvider<ReduceMotionNotifier, ReduceMotionMode>`
+- Key: `'reduce_motion_mode'` (values `auto`/`on`/`off`). Migrates the legacy `'disable_animations'` bool on first read (true→`on`, else→`auto`).
+- Default: `ReduceMotionMode.auto` (follow OS Reduce-Motion flag).
+- `setMode(ReduceMotionMode)` -- Persists, then calls `ReduceMotionController.instance.setMode()` which recomputes effective reduce-motion and writes both motion statics + pauses/resumes the ticker. See `lib/src/core/reduce_motion.dart`.
+
+### Reduce Transparency
+Provider: `reduceTransparencyProvider` -- `AsyncNotifierProvider<ReduceTransparencyNotifier, bool>`
+- Key: `'reduce_transparency'`. Default `false`. Also mirrors into a process-wide `reduceTransparencyFlag` ValueNotifier so the ref-less `showHollowDialog` can drop glass blur to 0.
 
 ### Audio Input Device
 Provider: `audioInputDeviceProvider` -- `AsyncNotifierProvider<AudioInputDeviceNotifier, String?>`

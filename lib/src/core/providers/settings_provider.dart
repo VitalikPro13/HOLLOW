@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
@@ -25,24 +26,80 @@ class MinimizeToTrayNotifier extends AsyncNotifier<bool> {
   }
 }
 
-/// Whether all UI animations are disabled (instant transitions, no effects).
-/// Default: false (animations enabled).
-final disableAnimationsProvider =
-    AsyncNotifierProvider<DisableAnimationsNotifier, bool>(
-        DisableAnimationsNotifier.new);
+/// Reduce-motion preference (tri-state Auto/On/Off).
+///
+/// - Auto (default): follow the OS "Reduce Motion" accessibility flag.
+/// - On: always reduce motion.
+/// - Off: never reduce motion.
+///
+/// Effective reduce-motion (OS flag OR override) is owned by
+/// [ReduceMotionController]; this provider just persists the user's choice and
+/// pushes it into the controller. The legacy `disable_animations` bool is
+/// migrated on first read: true → On, otherwise → Auto.
+final reduceMotionProvider =
+    AsyncNotifierProvider<ReduceMotionNotifier, ReduceMotionMode>(
+        ReduceMotionNotifier.new);
 
-class DisableAnimationsNotifier extends AsyncNotifier<bool> {
+class ReduceMotionNotifier extends AsyncNotifier<ReduceMotionMode> {
+  @override
+  Future<ReduceMotionMode> build() async {
+    final raw = await storage_api.loadSetting(key: 'reduce_motion_mode');
+    if (raw != null && raw.isNotEmpty) {
+      final mode = ReduceMotionMode.fromKey(raw);
+      ReduceMotionController.instance.setMode(mode);
+      return mode;
+    }
+    // Migrate the legacy disable_animations bool.
+    final legacy = await storage_api.loadSetting(key: 'disable_animations');
+    final migrated =
+        legacy == 'true' ? ReduceMotionMode.on : ReduceMotionMode.auto;
+    await storage_api.saveSetting(
+      key: 'reduce_motion_mode',
+      value: migrated.key,
+    );
+    ReduceMotionController.instance.setMode(migrated);
+    return migrated;
+  }
+
+  Future<void> setMode(ReduceMotionMode mode) async {
+    await storage_api.saveSetting(
+      key: 'reduce_motion_mode',
+      value: mode.key,
+    );
+    ReduceMotionController.instance.setMode(mode);
+    state = AsyncData(mode);
+  }
+}
+
+/// Whether to reduce transparency / blur effects (accessibility).
+///
+/// When on, glassmorphism dialog blur drops to sigma 0 and the opt-in
+/// background-image panel renders fully opaque. Persisted under
+/// `reduce_transparency`. Default: false.
+final reduceTransparencyProvider =
+    AsyncNotifierProvider<ReduceTransparencyNotifier, bool>(
+        ReduceTransparencyNotifier.new);
+
+/// Process-wide mirror of [reduceTransparencyProvider], so top-level helpers
+/// without a `ref` (e.g. `showHollowDialog`) can consult it synchronously.
+/// Kept in sync by [ReduceTransparencyNotifier].
+final ValueNotifier<bool> reduceTransparencyFlag = ValueNotifier<bool>(false);
+
+class ReduceTransparencyNotifier extends AsyncNotifier<bool> {
   @override
   Future<bool> build() async {
-    final val = await storage_api.loadSetting(key: 'disable_animations');
-    return val == 'true';
+    final val = await storage_api.loadSetting(key: 'reduce_transparency');
+    final on = val == 'true';
+    reduceTransparencyFlag.value = on;
+    return on;
   }
 
   Future<void> setEnabled(bool value) async {
     await storage_api.saveSetting(
-      key: 'disable_animations',
+      key: 'reduce_transparency',
       value: value.toString(),
     );
+    reduceTransparencyFlag.value = value;
     state = AsyncData(value);
   }
 }

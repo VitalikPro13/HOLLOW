@@ -1,6 +1,7 @@
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -34,15 +35,22 @@ Future<T?> showHollowDialog<T>({
         builder: (context, dialogChild) {
           return Stack(
             children: [
-              // Blur layer — fades with dialog.
-              RepaintBoundary(
-                child: FadeTransition(
-                  opacity: animation,
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-                    child: const SizedBox.expand(),
-                  ),
-                ),
+              // Blur layer — fades with dialog. Reduce Transparency drops the
+              // sigma to 0 (no glassmorphism) and reacts live.
+              ValueListenableBuilder<bool>(
+                valueListenable: reduceTransparencyFlag,
+                builder: (context, reduce, _) {
+                  if (reduce) return const SizedBox.shrink();
+                  return RepaintBoundary(
+                    child: FadeTransition(
+                      opacity: animation,
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+                        child: const SizedBox.expand(),
+                      ),
+                    ),
+                  );
+                },
               ),
               // Dialog content — scale + fade.
               FadeTransition(

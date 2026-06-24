@@ -2,6 +2,7 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
@@ -242,6 +243,7 @@ class _ProfileColumn extends ConsumerWidget {
                   : (isOnline ? hollow.success : hollow.textSecondary),
               size: 8,
               pulse: amInvisible ? false : isOnline,
+              filled: !amInvisible && isOnline,
             ),
             const SizedBox(width: HollowSpacing.xs),
             Text(
@@ -769,6 +771,9 @@ class _RecentConversationsColumn extends ConsumerWidget {
                                       : hollow.textSecondary,
                                   size: 8,
                                   pulse: conv.isOnline,
+                                  filled: conv.isOnline,
+                                  semanticLabel:
+                                      conv.isOnline ? 'Online' : 'Offline',
                                 ),
                               ),
                             ),
@@ -1021,6 +1026,8 @@ class _NetworkColumn extends ConsumerWidget {
                         : hollow.textSecondary),
                 size: 8,
                 pulse: overall.isOnline,
+                // Adjacent overall.label text names the state; ring = not online.
+                filled: overall.isOnline,
               ),
               const SizedBox(width: HollowSpacing.sm),
               Expanded(
@@ -1482,7 +1489,13 @@ class _RelayStatsCardState extends State<_RelayStatsCard>
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 7),
-    )..forward();
+    );
+    // Decorative poll-cycle sweep — hold it static under reduce-motion.
+    if (ReduceMotionController.instance.isReduced) {
+      _controller.value = 1.0;
+    } else {
+      _controller.forward();
+    }
   }
 
   @override
@@ -1491,7 +1504,11 @@ class _RelayStatsCardState extends State<_RelayStatsCard>
     // Reset animation when a new fetch completes.
     if (widget.stats.fetchCount != _lastFetchCount) {
       _lastFetchCount = widget.stats.fetchCount;
-      _controller.forward(from: 0.0);
+      if (ReduceMotionController.instance.isReduced) {
+        _controller.value = 1.0;
+      } else {
+        _controller.forward(from: 0.0);
+      }
     }
   }
 

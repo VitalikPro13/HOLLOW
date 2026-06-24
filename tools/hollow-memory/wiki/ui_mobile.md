@@ -375,7 +375,7 @@ Sections in order:
    - Add relay: inline TextField + Add/Cancel
    - Remove relay: X button on non-default relays
    - "Apply & Close App" (conditional) → `relayDomainProvider.setDomain()` → `notifyShutdown()` → `SystemNavigator.pop()`
-3. **Appearance** — `_ThemeToggleRow` (dark/light switch, immediate apply via `themeModeProvider`), `_AccentHueSection` (rainbow slider 0-359° via `RainbowSliderTrackShape`, preset swatches 28x28 in Wrap, long-press to remove, + to save), `_BackgroundSection` (file picker → mobile crop 9:16 → `backgroundProvider.setImage()`, opacity slider 0.0–0.92), `_AnimationsToggleRow` (`disableAnimationsProvider` + `HollowDurations` + `SharedTickers`), `_InvisibleToggleRow` (`invisibleModeProvider`)
+3. **Appearance** — `_ThemeToggleRow` (dark/light switch, immediate apply via `themeModeProvider`), `_AccentHueSection` (rainbow slider 0-359° via `RainbowSliderTrackShape`, preset swatches 28x28 in Wrap, long-press to remove, + to save), `_BackgroundSection` (file picker → mobile crop 9:16 → `backgroundProvider.setImage()`, opacity slider 0.0–0.92), `_InvisibleToggleRow` (`invisibleModeProvider`). **Reduce Motion moved out of Appearance** (2026-06-24) into a new **Accessibility** nav tile → `_AccessibilityTab`: `_ReduceMotionRow` (tri-state Auto/On/Off `_MobileSegment` → `reduceMotionProvider`/`ReduceMotionController`) + `_ReduceTransparencyRow` (`reduceTransparencyProvider`)
 4. **Voice & Audio** — audio quality pills, mic gain slider, audio processing info
 5. **Files** — `_ImageQualityPicker` (Lossless/Balanced/Small pills via `imageQualityProvider`), `_AutoDownloadSlider` (34-2048 MB), `_CacheCapSlider` (256-10240 MB, formatted as GB when ≥1024)
 6. **Ringtone** — ringtone picker + volume slider

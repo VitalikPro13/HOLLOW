@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
+import 'contrast.dart';
 import 'hollow_colors.dart';
 import 'hollow_spacing.dart';
 
@@ -14,8 +15,15 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
   final Color accent;
   final Color accentHover;
   final Color accentMuted;
+  /// Accent guaranteed legible as FOREGROUND (text/icons/links) on
+  /// [background] — clears ~4.5:1. Use this anywhere accent is text/icon;
+  /// keep raw [accent] for fills (which pair with dark [textOnAccent]).
+  final Color accentText;
   final Color textPrimary;
   final Color textSecondary;
+  /// Faded-metadata token (timestamps, "(edited)", counters) that still
+  /// clears 4.5:1 — replaces ad-hoc alpha-faded textSecondary.
+  final Color textTertiary;
   final Color textOnAccent;
   final Color border;
   final Color error;
@@ -33,8 +41,10 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     required this.accent,
     required this.accentHover,
     required this.accentMuted,
+    required this.accentText,
     required this.textPrimary,
     required this.textSecondary,
+    required this.textTertiary,
     required this.textOnAccent,
     required this.border,
     required this.error,
@@ -47,15 +57,19 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
   });
 
   /// Default dark theme.
-  factory HollowTheme.dark() => const HollowTheme(
+  factory HollowTheme.dark() => HollowTheme(
         background: HollowColors.background,
         surface: HollowColors.surface,
         elevated: HollowColors.elevated,
         accent: HollowColors.accent,
         accentHover: HollowColors.accentHover,
         accentMuted: HollowColors.accentMuted,
+        accentText: Contrast.ensureContrast(
+            HollowColors.accent, HollowColors.background,
+            targetRatio: 4.5),
         textPrimary: HollowColors.textPrimary,
         textSecondary: HollowColors.textSecondary,
+        textTertiary: HollowColors.textTertiary,
         textOnAccent: HollowColors.textOnAccent,
         border: HollowColors.border,
         error: HollowColors.error,
@@ -75,13 +89,15 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         accent: HollowColors.accent,
         accentHover: HollowColors.accentHover,
         accentMuted: HollowColors.accentMutedLight,
+        accentText: HollowColors.accentTextLight,
         textPrimary: HollowColors.textPrimaryLight,
         textSecondary: HollowColors.textSecondaryLight,
+        textTertiary: HollowColors.textTertiaryLight,
         textOnAccent: HollowColors.textOnAccentLight,
         border: HollowColors.borderLight,
-        error: HollowColors.error,
-        success: HollowColors.success,
-        warning: HollowColors.warning,
+        error: HollowColors.errorLight,
+        success: HollowColors.successLight,
+        warning: HollowColors.warningLight,
         radiusSm: HollowRadius.sm,
         radiusMd: HollowRadius.md,
         radiusLg: HollowRadius.lg,
@@ -96,8 +112,12 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         accent: accentFromHue(hue),
         accentHover: accentHoverFromHue(hue),
         accentMuted: accentMutedFromHue(hue),
+        accentText: Contrast.ensureContrast(
+            accentFromHue(hue), HollowColors.background,
+            targetRatio: 4.5),
         textPrimary: HollowColors.textPrimary,
         textSecondary: HollowColors.textSecondary,
+        textTertiary: HollowColors.textTertiary,
         textOnAccent: HollowColors.textOnAccent,
         border: HollowColors.border,
         error: HollowColors.error,
@@ -117,13 +137,17 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         accent: accentFromHue(hue),
         accentHover: accentHoverFromHue(hue),
         accentMuted: accentMutedLightFromHue(hue),
+        accentText: Contrast.ensureContrast(
+            accentFromHue(hue), HollowColors.backgroundLight,
+            targetRatio: 4.5),
         textPrimary: HollowColors.textPrimaryLight,
         textSecondary: HollowColors.textSecondaryLight,
+        textTertiary: HollowColors.textTertiaryLight,
         textOnAccent: HollowColors.textOnAccentLight,
         border: HollowColors.borderLight,
-        error: HollowColors.error,
-        success: HollowColors.success,
-        warning: HollowColors.warning,
+        error: HollowColors.errorLight,
+        success: HollowColors.successLight,
+        warning: HollowColors.warningLight,
         radiusSm: HollowRadius.sm,
         radiusMd: HollowRadius.md,
         radiusLg: HollowRadius.lg,
@@ -155,8 +179,10 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     Color? accent,
     Color? accentHover,
     Color? accentMuted,
+    Color? accentText,
     Color? textPrimary,
     Color? textSecondary,
+    Color? textTertiary,
     Color? textOnAccent,
     Color? border,
     Color? error,
@@ -174,8 +200,10 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       accent: accent ?? this.accent,
       accentHover: accentHover ?? this.accentHover,
       accentMuted: accentMuted ?? this.accentMuted,
+      accentText: accentText ?? this.accentText,
       textPrimary: textPrimary ?? this.textPrimary,
       textSecondary: textSecondary ?? this.textSecondary,
+      textTertiary: textTertiary ?? this.textTertiary,
       textOnAccent: textOnAccent ?? this.textOnAccent,
       border: border ?? this.border,
       error: error ?? this.error,
@@ -198,8 +226,10 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       accent: Color.lerp(accent, other.accent, t)!,
       accentHover: Color.lerp(accentHover, other.accentHover, t)!,
       accentMuted: Color.lerp(accentMuted, other.accentMuted, t)!,
+      accentText: Color.lerp(accentText, other.accentText, t)!,
       textPrimary: Color.lerp(textPrimary, other.textPrimary, t)!,
       textSecondary: Color.lerp(textSecondary, other.textSecondary, t)!,
+      textTertiary: Color.lerp(textTertiary, other.textTertiary, t)!,
       textOnAccent: Color.lerp(textOnAccent, other.textOnAccent, t)!,
       border: Color.lerp(border, other.border, t)!,
       error: Color.lerp(error, other.error, t)!,

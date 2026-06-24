@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'package:hollow/src/core/reduce_motion.dart';
+
 /// Pulsing red dot + "REC" text. Used to mark anyone (self or remote peer)
 /// who is currently recording the call. Self version can also show the
 /// elapsed recording time next to the label.
@@ -51,7 +53,10 @@ class _RecordingIndicatorState extends State<RecordingIndicator>
     _pulse = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 900),
-    )..repeat(reverse: true);
+    );
+    if (!ReduceMotionController.instance.isReduced) {
+      _pulse.repeat(reverse: true);
+    }
 
     if (widget.startedAt != null) {
       _elapsed = DateTime.now().difference(widget.startedAt!);

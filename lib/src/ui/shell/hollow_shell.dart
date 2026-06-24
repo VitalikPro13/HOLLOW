@@ -31,7 +31,7 @@ import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
-import 'package:hollow/src/core/shared_tickers.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -763,14 +763,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
       return;
     }
 
-    // Restore animation toggle from DB (must be after identity load opens DB).
+    // Restore the reduce-motion override from DB (must be after identity load
+    // opens DB). Building the provider self-applies the persisted Auto/On/Off
+    // mode to ReduceMotionController, which owns both motion statics + tickers.
+    // We seeded from the OS flag in main() already; this refines with the
+    // user's override.
     try {
-      final disableAnim =
-          await storage_api.loadSetting(key: 'disable_animations');
-      if (disableAnim == 'true') {
-        HollowDurations.animationsDisabled = true;
-        SharedTickers.instance.disabled = true;
-        SharedTickers.instance.pause();
+      await ref.read(reduceMotionProvider.future);
+      if (ReduceMotionController.instance.isReduced) {
         // Skip the startup reveal animation instantly.
         if (!_revealController.isCompleted) {
           _revealController.value = 1.0;

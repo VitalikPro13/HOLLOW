@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -58,18 +59,12 @@ class _MobileVoiceChannelPillState
 
   void _openVoiceRoute(VoiceChannelState vcState, String channelName) {
     Navigator.of(context, rootNavigator: true).push(
-      PageRouteBuilder(
-        pageBuilder: (_, __, ___) => MobileVoiceChannelRoute(
+      hollowMobileRoute(
+        transition: HollowRouteTransition.slideUp,
+        builder: (_) => MobileVoiceChannelRoute(
           serverId: vcState.currentServerId!,
           channelId: vcState.currentChannelId!,
           channelName: channelName,
-        ),
-        transitionsBuilder: (_, anim, __, child) => SlideTransition(
-          position: Tween<Offset>(
-            begin: const Offset(0, 1),
-            end: Offset.zero,
-          ).animate(CurvedAnimation(parent: anim, curve: Curves.easeOut)),
-          child: child,
         ),
       ),
     );

@@ -639,6 +639,8 @@ class _ServerMemberTile extends ConsumerWidget {
                                 : hollow.textSecondary,
                             size: 7,
                             pulse: isOnline,
+                            filled: isOnline,
+                            semanticLabel: isOnline ? 'Online' : 'Offline',
                           ),
                   ),
                 ),

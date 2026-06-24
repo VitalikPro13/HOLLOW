@@ -3799,6 +3799,8 @@ class _DmProfilePanel extends ConsumerWidget {
                             color: isOnline ? hollow.success : hollow.textSecondary,
                             size: 10,
                             pulse: isOnline,
+                            filled: isOnline,
+                            semanticLabel: isOnline ? 'Online' : 'Offline',
                           ),
                         ),
                       ),

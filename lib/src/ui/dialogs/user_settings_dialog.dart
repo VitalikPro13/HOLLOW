@@ -25,6 +25,7 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/ui/settings/storage_section.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
@@ -119,6 +120,7 @@ Color _bannerColorFromId(String id) {
 enum _SettingsCategory {
   profile,
   appearance,
+  accessibility,
   network,
   storage,
   audio,
@@ -134,6 +136,7 @@ extension _SettingsCategoryMeta on _SettingsCategory {
   IconData get icon => switch (this) {
         _SettingsCategory.profile => LucideIcons.user,
         _SettingsCategory.appearance => LucideIcons.palette,
+        _SettingsCategory.accessibility => LucideIcons.accessibility,
         _SettingsCategory.network => LucideIcons.globe,
         _SettingsCategory.storage => LucideIcons.hardDrive,
         _SettingsCategory.audio => LucideIcons.mic,
@@ -148,6 +151,7 @@ extension _SettingsCategoryMeta on _SettingsCategory {
   String get label => switch (this) {
         _SettingsCategory.profile => 'Profile',
         _SettingsCategory.appearance => 'Appearance',
+        _SettingsCategory.accessibility => 'Accessibility',
         _SettingsCategory.network => 'Network',
         _SettingsCategory.storage => 'Files & Storage',
         _SettingsCategory.audio => 'Audio & Video',
@@ -167,7 +171,10 @@ extension _SettingsCategoryMeta on _SettingsCategory {
           'profile display name status about me avatar banner twitch connection',
         _SettingsCategory.appearance =>
           'appearance theme dark light mode accent color background image layout '
-              'dock classic animations transitions invisible',
+              'dock classic invisible',
+        _SettingsCategory.accessibility =>
+          'accessibility contrast motion reduce animations transitions '
+              'transparency blur text size voice screen reader voiceover',
         _SettingsCategory.network => 'network relay server domain connection',
         _SettingsCategory.storage =>
           'files storage disk space cache clear reclaim downloads breakdown '
@@ -577,6 +584,8 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     final Widget body = switch (cat) {
       _SettingsCategory.profile => _buildProfileTab(hollow),
       _SettingsCategory.appearance => _cardList(hollow, _appearanceCards(hollow)),
+      _SettingsCategory.accessibility =>
+        _cardList(hollow, _accessibilityCards(hollow)),
       _SettingsCategory.network => _cardList(hollow, _networkCards(hollow)),
       _SettingsCategory.storage => _cardList(hollow, _storageCards(hollow)),
       _SettingsCategory.audio => _cardList(hollow, _audioCards(hollow)),
@@ -621,7 +630,6 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     final dockMode =
         (ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock) ==
             LayoutMode.dock;
-    final disableAnims = ref.watch(disableAnimationsProvider).valueOrNull ?? false;
     final invisible = ref.watch(invisibleModeProvider);
     final isDesktop = Platform.isWindows || Platform.isLinux || Platform.isMacOS;
     final tray = ref.watch(minimizeToTrayProvider).valueOrNull ?? true;
@@ -659,14 +667,6 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
           ),
           const SizedBox(height: HollowSpacing.md),
           _ToggleRow(
-            icon: LucideIcons.zap,
-            label: 'Disable Animations',
-            subtitle: 'Turn off UI transitions and effects',
-            value: disableAnims,
-            onChanged: (v) => _setDisableAnimations(v),
-          ),
-          const SizedBox(height: HollowSpacing.md),
-          _ToggleRow(
             icon: LucideIcons.eyeOff,
             label: 'Appear Invisible',
             subtitle: 'Show as offline to other users',
@@ -690,16 +690,68 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     ];
   }
 
-  Future<void> _setDisableAnimations(bool value) async {
-    await ref.read(disableAnimationsProvider.notifier).setEnabled(value);
-    HollowDurations.animationsDisabled = value;
-    SharedTickers.instance.disabled = value;
-    if (value) {
-      SharedTickers.instance.pause();
-    } else {
-      SharedTickers.instance.start();
-      SharedTickers.instance.resume();
-    }
+  // ── Accessibility category ───────────────────────────────────────
+  List<Widget> _accessibilityCards(HollowTheme hollow) {
+    final motion =
+        ref.watch(reduceMotionProvider).valueOrNull ?? ReduceMotionMode.auto;
+    final reduceTransparency =
+        ref.watch(reduceTransparencyProvider).valueOrNull ?? false;
+    return [
+      _SettingsCard(
+        title: 'Motion',
+        children: [
+          Row(
+            children: [
+              Icon(LucideIcons.zap, size: 16, color: hollow.textSecondary),
+              const SizedBox(width: HollowSpacing.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Reduce Motion',
+                      style: HollowTypography.body
+                          .copyWith(color: hollow.textPrimary),
+                    ),
+                    Text(
+                      'Auto follows your system setting',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          _TriStateSegment<ReduceMotionMode>(
+            value: motion,
+            options: const [
+              (ReduceMotionMode.auto, 'Auto'),
+              (ReduceMotionMode.on, 'On'),
+              (ReduceMotionMode.off, 'Off'),
+            ],
+            onChanged: (m) =>
+                ref.read(reduceMotionProvider.notifier).setMode(m),
+          ),
+        ],
+      ),
+      _SettingsCard(
+        title: 'Transparency',
+        children: [
+          _ToggleRow(
+            icon: LucideIcons.square,
+            label: 'Reduce Transparency',
+            subtitle: 'Turn off background blur and glass effects',
+            value: reduceTransparency,
+            onChanged: (v) =>
+                ref.read(reduceTransparencyProvider.notifier).setEnabled(v),
+          ),
+        ],
+      ),
+    ];
   }
 
   // ── Network category ─────────────────────────────────────────────
@@ -2532,6 +2584,65 @@ class _ToggleRow extends StatelessWidget {
         ),
         HollowToggle(value: value, onChanged: onChanged),
       ],
+    );
+  }
+}
+
+/// Horizontal segmented control for a small set of mutually-exclusive
+/// options (e.g. Reduce Motion's Auto/On/Off). Each segment is a
+/// [HollowPressable] so it is keyboard- and screen-reader-actionable.
+class _TriStateSegment<T> extends StatelessWidget {
+  final T value;
+  final List<(T, String)> options;
+  final ValueChanged<T> onChanged;
+
+  const _TriStateSegment({
+    required this.value,
+    required this.options,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: hollow.border),
+      ),
+      padding: const EdgeInsets.all(2),
+      child: Row(
+        children: [
+          for (final (opt, label) in options)
+            Expanded(
+              child: HollowPressable(
+                onTap: () => onChanged(opt),
+                borderRadius: BorderRadius.circular(6),
+                child: AnimatedContainer(
+                  duration: HollowDurations.fast,
+                  alignment: Alignment.center,
+                  padding:
+                      const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
+                  decoration: BoxDecoration(
+                    color: opt == value ? hollow.accent : Colors.transparent,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    label,
+                    style: HollowTypography.body.copyWith(
+                      color: opt == value
+                          ? hollow.textOnAccent
+                          : hollow.textSecondary,
+                      fontWeight:
+                          opt == value ? FontWeight.w600 : FontWeight.w400,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

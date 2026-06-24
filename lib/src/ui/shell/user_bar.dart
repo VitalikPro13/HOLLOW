@@ -80,7 +80,7 @@ class UserBar extends ConsumerWidget {
           statusPulse = true;
         case ServerSyncStatus.syncing:
           statusText = 'Syncing...';
-          statusColor = hollow.accent;
+          statusColor = hollow.accentText;
           statusPulse = true;
         case ServerSyncStatus.synced:
         case ServerSyncStatus.idle:
@@ -189,6 +189,9 @@ class UserBar extends ConsumerWidget {
                           color: statusColor,
                           size: 7,
                           pulse: statusPulse,
+                          // Non-pulsing states (sync failed/offline) read as a
+                          // hollow ring — the adjacent status word labels it.
+                          filled: statusPulse,
                         ),
                         const SizedBox(width: HollowSpacing.xs),
                         Text(

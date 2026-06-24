@@ -26,6 +26,7 @@ import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -151,6 +152,14 @@ class MobileSettingsTab extends ConsumerWidget {
           subtitle: 'Theme, accent, background & layout',
           onTap: () => _push(context, 'Appearance',
               const _AppearanceTab(key: ValueKey('appearance'))),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        _SettingsNavTile(
+          icon: LucideIcons.accessibility,
+          title: 'Accessibility',
+          subtitle: 'Motion, transparency & contrast',
+          onTap: () => _push(context, 'Accessibility',
+              const _AccessibilityTab(key: ValueKey('accessibility'))),
         ),
         const SizedBox(height: HollowSpacing.sm),
         _SettingsNavTile(
@@ -1295,9 +1304,28 @@ class _AppearanceTab extends StatelessWidget {
         SizedBox(height: HollowSpacing.xl),
         _SectionLabel(label: 'Layout'),
         SizedBox(height: HollowSpacing.sm),
-        _AnimationsToggleRow(),
-        SizedBox(height: HollowSpacing.md),
         _InvisibleToggleRow(),
+        SizedBox(height: HollowSpacing.xl),
+      ],
+    );
+  }
+}
+
+class _AccessibilityTab extends StatelessWidget {
+  const _AccessibilityTab({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.all(HollowSpacing.lg),
+      children: const [
+        _SectionLabel(label: 'Motion'),
+        SizedBox(height: HollowSpacing.sm),
+        _ReduceMotionRow(),
+        SizedBox(height: HollowSpacing.xl),
+        _SectionLabel(label: 'Transparency'),
+        SizedBox(height: HollowSpacing.sm),
+        _ReduceTransparencyRow(),
         SizedBox(height: HollowSpacing.xl),
       ],
     );
@@ -1708,27 +1736,74 @@ class _BackgroundSection extends ConsumerWidget {
   }
 }
 
-class _AnimationsToggleRow extends ConsumerWidget {
-  const _AnimationsToggleRow();
+class _ReduceMotionRow extends ConsumerWidget {
+  const _ReduceMotionRow();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final asyncVal = ref.watch(disableAnimationsProvider);
-    final disabled = asyncVal.valueOrNull ?? false;
+    final mode =
+        ref.watch(reduceMotionProvider).valueOrNull ?? ReduceMotionMode.auto;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(LucideIcons.zap, size: 18, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Reduce Motion',
+                      style: HollowTypography.body.copyWith(
+                        color: hollow.textPrimary,
+                      )),
+                  Text('Auto follows your system setting',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary, fontSize: 11,
+                      )),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.md),
+        _MobileSegment<ReduceMotionMode>(
+          value: mode,
+          options: const [
+            (ReduceMotionMode.auto, 'Auto'),
+            (ReduceMotionMode.on, 'On'),
+            (ReduceMotionMode.off, 'Off'),
+          ],
+          onChanged: (m) => ref.read(reduceMotionProvider.notifier).setMode(m),
+        ),
+      ],
+    );
+  }
+}
+
+class _ReduceTransparencyRow extends ConsumerWidget {
+  const _ReduceTransparencyRow();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final on = ref.watch(reduceTransparencyProvider).valueOrNull ?? false;
 
     return Row(
       children: [
-        Icon(LucideIcons.zap, size: 18, color: hollow.textSecondary),
+        Icon(LucideIcons.square, size: 18, color: hollow.textSecondary),
         const SizedBox(width: HollowSpacing.md),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Disable Animations', style: HollowTypography.body.copyWith(
+              Text('Reduce Transparency', style: HollowTypography.body.copyWith(
                 color: hollow.textPrimary,
               )),
-              Text('Turn off UI transitions and effects',
+              Text('Turn off background blur and glass effects',
                   style: HollowTypography.caption.copyWith(
                     color: hollow.textSecondary, fontSize: 11,
                   )),
@@ -1736,23 +1811,71 @@ class _AnimationsToggleRow extends ConsumerWidget {
           ),
         ),
         Switch(
-          value: disabled,
-          onChanged: (v) {
-            ref.read(disableAnimationsProvider.notifier).setEnabled(v);
-            HollowDurations.animationsDisabled = v;
-            SharedTickers.instance.disabled = v;
-            if (v) {
-              SharedTickers.instance.pause();
-            } else {
-              SharedTickers.instance.start();
-              SharedTickers.instance.resume();
-            }
-          },
+          value: on,
+          onChanged: (v) =>
+              ref.read(reduceTransparencyProvider.notifier).setEnabled(v),
           activeTrackColor: hollow.accent,
           activeColor: Colors.white,
           inactiveTrackColor: hollow.border,
         ),
       ],
+    );
+  }
+}
+
+/// Horizontal segmented control for a small set of mutually-exclusive options.
+class _MobileSegment<T> extends StatelessWidget {
+  final T value;
+  final List<(T, String)> options;
+  final ValueChanged<T> onChanged;
+
+  const _MobileSegment({
+    required this.value,
+    required this.options,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: hollow.border),
+      ),
+      padding: const EdgeInsets.all(2),
+      child: Row(
+        children: [
+          for (final (opt, label) in options)
+            Expanded(
+              child: HollowPressable(
+                onTap: () => onChanged(opt),
+                borderRadius: BorderRadius.circular(6),
+                child: AnimatedContainer(
+                  duration: HollowDurations.fast,
+                  alignment: Alignment.center,
+                  padding:
+                      const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
+                  decoration: BoxDecoration(
+                    color: opt == value ? hollow.accent : Colors.transparent,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    label,
+                    style: HollowTypography.body.copyWith(
+                      color: opt == value
+                          ? hollow.textOnAccent
+                          : hollow.textSecondary,
+                      fontWeight:
+                          opt == value ? FontWeight.w600 : FontWeight.w400,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

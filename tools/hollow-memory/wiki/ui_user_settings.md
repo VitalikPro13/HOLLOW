@@ -50,7 +50,9 @@ Stateless widget. Props: `icon` (IconData), `label` (String), `isActive` (bool),
 
 `_UserSettingsContentState` no longer holds `_pending*`/`_initial*`/`_*Initialized` fields for the toggles — those were removed when the deferred-save model was dropped. Toggle/slider cards read provider values directly (`ref.watch(...).valueOrNull`) and write via the notifier in `onChanged` (e.g. dark mode, dock mode, animations, invisible, minimize-to-tray, auto-download threshold, cache cap). The state class now only tracks: `_activeTab` (`_SettingsCategory`), `_searchController`/`_searchQuery`, relay selection (`_initialRelayDomain`/`_selectedRelay`/`_showAddRelay`/`_newRelayController`), `_profileDirty` (+ the avatar/banner/live-name fields for the Profile preview). `_saveProfile()` commits the profile and clears `_profileDirty`; it does NOT close the dialog.
 
-Disable-animations applies immediately via `_setDisableAnimations()` (sets `HollowDurations.animationsDisabled` + `SharedTickers.instance` pause/resume). Relay change uses an explicit "Apply & Restart" button (`_applyRelayAndRestart()`) since it requires a process restart.
+Reduce Motion (formerly "Disable Animations") moved out of Appearance into the new **Accessibility** category (2026-06-24) as a tri-state Auto/On/Off segmented control (`_TriStateSegment`), writing `reduceMotionProvider.notifier.setMode()` → `ReduceMotionController` (which owns both motion statics + ticker; see `services_media_storage.md`). Relay change uses an explicit "Apply & Restart" button (`_applyRelayAndRestart()`) since it requires a process restart.
+
+**Accessibility category** (`_SettingsCategory.accessibility`, between Appearance and Network; icon `LucideIcons.accessibility`): two cards — **Motion** (Reduce Motion tri-state, "Auto follows your system setting") and **Transparency** (Reduce Transparency toggle → `reduceTransparencyProvider`, which drops dialog glass blur to sigma 0 via a `reduceTransparencyFlag` ValueNotifier mirror read in `hollow_dialog.dart`, and skips the background-image panel-opacity override in `app.dart`). Built incrementally — High Contrast / Text Size land in later phases.
 
 ### Legacy (pre-2026-06-21) deferred-save fields — REMOVED:
 
@@ -164,7 +166,7 @@ Built by `_buildSystemTab(HollowTheme hollow)`. A `SingleChildScrollView` with s
 
 **Dock Mode toggle** — `_ToggleRow` with `LucideIcons.layoutDashboard`. Subtitle: "Bottom bar with friends strip". Toggles `_pendingDockMode`.
 
-**Disable Animations toggle** — `_ToggleRow` with `LucideIcons.zap`. Subtitle: "Turn off UI transitions and effects". Toggles `_pendingDisableAnimations`.
+(Reduce Motion moved to the Accessibility category — see "State Management" above. No longer in the Appearance Layout section.)
 
 ### SYSTEM Section
 
@@ -639,7 +641,8 @@ Providers read/watched by this dialog:
 - `minimizeToTrayProvider` — async, tray minimize toggle
 - `proxyEnabledProvider` — async, proxy toggle
 - `layoutModeProvider` — async, dock/classic layout
-- `disableAnimationsProvider` — async, animation toggle
+- `reduceMotionProvider` — async, tri-state Auto/On/Off reduce-motion (replaced `disableAnimationsProvider`)
+- `reduceTransparencyProvider` — async, reduce-transparency toggle
 - `invisibleModeProvider` — sync, invisible status
 - `autoDownloadThresholdProvider` — async, file auto-download MB threshold
 - `vaultCacheCapProvider` — async, vault cache MB cap

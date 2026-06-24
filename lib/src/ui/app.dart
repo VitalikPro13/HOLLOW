@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/annotation_mode_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
@@ -31,7 +32,10 @@ class HollowApp extends ConsumerWidget {
         ? HollowThemeData.dark(accentHue: isCustomHue ? hue : null)
         : HollowThemeData.light(accentHue: isCustomHue ? hue : null);
 
-    if (bg.hasBackground) {
+    final reduceTransparency =
+        ref.watch(reduceTransparencyProvider).valueOrNull ?? false;
+
+    if (bg.hasBackground && !reduceTransparency) {
       final hollow = themeData.extension<HollowTheme>()!;
       final base = bg.panelOpacity.clamp(0.3, 0.95);
       // background = chat area, home dashboard → more transparent (see image through)

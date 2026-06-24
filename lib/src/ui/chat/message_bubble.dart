@@ -154,7 +154,7 @@ class MessageBubble extends ConsumerWidget {
                     TextSpan(
                       text: ' (edited)',
                       style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary.withValues(alpha: 0.5),
+                        color: hollow.textTertiary,
                         fontSize: 10,
                       ),
                     ),
@@ -260,8 +260,7 @@ class MessageBubble extends ConsumerWidget {
                         Text(
                           time,
                           style: HollowTypography.caption.copyWith(
-                            color:
-                                hollow.textSecondary.withValues(alpha: 0.5),
+                            color: hollow.textTertiary,
                             fontSize: 10,
                           ),
                         ),

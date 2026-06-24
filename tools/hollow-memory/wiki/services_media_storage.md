@@ -418,7 +418,7 @@ Called once in `main()`: `SharedTickers.instance.start()`. Registers as a `Widge
 
 ### Disable flag
 
-`disabled` (bool): When true, `start()` and `resume()` are no-ops. All decorative animations stay frozen. Set before `start()` on app launch or toggled at runtime from the "Disable Animations" user setting.
+`disabled` (bool): When true, `start()` and `resume()` are no-ops. All decorative animations stay frozen. **No longer set directly by the settings UI** — owned by `ReduceMotionController` (`lib/src/core/reduce_motion.dart`), which combines the OS Reduce-Motion flag with the tri-state in-app override (`reduceMotionProvider` Auto/On/Off, key `reduce_motion_mode`, migrates legacy `disable_animations`) and writes both `disabled` and `HollowDurations.animationsDisabled`. Seeded from the OS flag in `main()` before `start()`; listens to `onAccessibilityFeaturesChanged` for live OS changes.
 
 ### App lifecycle integration
 

@@ -31,6 +31,7 @@ import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_channel_actions.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_server_settings_route.dart';
@@ -165,18 +166,12 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
           ref.read(selectedChannelProvider.notifier).state = null;
         }
       });
-      nav.push(PageRouteBuilder(
-        pageBuilder: (_, __, ___) => MobileVoiceChannelRoute(
+      nav.push(hollowMobileRoute(
+        transition: HollowRouteTransition.slideUp,
+        builder: (_) => MobileVoiceChannelRoute(
           serverId: serverId,
           channelId: channel.channelId,
           channelName: channel.name,
-        ),
-        transitionsBuilder: (_, anim, __, child) => SlideTransition(
-          position: Tween<Offset>(
-            begin: const Offset(0, 1),
-            end: Offset.zero,
-          ).animate(CurvedAnimation(parent: anim, curve: Curves.easeOut)),
-          child: child,
         ),
       ));
       return;
@@ -554,6 +549,8 @@ class _DmRow extends ConsumerWidget {
                       color: isOnline ? hollow.success : hollow.textSecondary,
                       size: 10,
                       pulse: isOnline,
+                      filled: isOnline,
+                      semanticLabel: isOnline ? 'Online' : 'Offline',
                     ),
                   ),
                 ),

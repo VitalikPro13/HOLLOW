@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -57,7 +58,10 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
     _pulse = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 900),
-    )..repeat(reverse: true);
+    );
+    if (!ReduceMotionController.instance.isReduced) {
+      _pulse.repeat(reverse: true);
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => _start());
   }
 
