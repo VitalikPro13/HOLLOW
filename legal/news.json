@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-06-24-v070",
+    "date": "Jun 24, 2026",
+    "title": "v0.7 - Multi-Device Fixes, Channel Encryption Hardening & Storage Manager",
+    "body": "Hey! Well, I guess that every single time a big feature is implemented, there will always be a bug that would just make you crash out. But it's fixed, multi-device support is now more stable and doesn't break your Friends or member rendering inside server chat.\n\nWhat I need is definitely implement the proper inside-app changelog instead of listing features here... oh well, then I'll use all the full power of markdown, so just [press me here](https://github.com/VitalikPro13/HOLLOW/releases/tag/v0.7.0-alpha) and you will have the full list. You're welcome!"
+  },
+  {
     "id": "2026-06-20-v060",
     "date": "Jun 20, 2026",
     "title": "v0.6 - Multi-Device Sync, Code Signing & Push Notifications",

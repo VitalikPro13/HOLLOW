@@ -1,6 +1,6 @@
 # Hollow Protocol Whitepaper
 
-**Version 0.6.0**\
+**Version 0.7.0**\
 **Author: Vitalii Rovinskyi**\
 *This document was generated with the assistance of Claude (AI). All technical content reflects the author's architecture and design decisions.*
 
@@ -1366,8 +1366,6 @@ The relay operator is **not trusted** with: message contents, encryption keys, f
 - **No traffic analysis protection.** The relay uses native TLS via uWebSockets C++ with OpenSSL (direct TLS termination, no reverse proxy), which protects message *content* from network eavesdroppers. However, message *timing and size patterns* remain visible — an observer can infer who is chatting with whom based on when messages are sent, even without reading them. Defeating this would require constant-rate padding (sending dummy traffic to hide real messages), which is impractical for a chat app.
 - **Single relay dependency.** Multi-relay support with cross-relay room gossip is designed but not yet deployed. Horizontal scaling to millions of users via a swarm of relay nodes is the planned architecture.
 - **No social recovery.** Shamir's Secret Sharing for key recovery via trusted contacts is designed but not implemented.
-- **Channel visibility is cryptographically enforced for text; voice is the remaining gap.** Restricted *text* channels use per-channel MLS subgroups (§5.2), so non-qualifying members cannot decrypt them even with a modified client. Restricted *voice* channels still derive their SFrame media key from the server-wide group; deriving it from the channel subgroup is the planned next step.
-- **Multi-device push previews degrade gracefully.** When a person runs multiple devices, a fully force-killed phone may fall back to a generic "new message" banner if the relay-buffered ciphertext was sealed to a different device's Olm ratchet. The message itself is never lost — it arrives in full via live delivery and sibling backfill when the device next connects (§3.5).
 - **No web client.** Windows, macOS, Linux, Android, and iOS are supported. A Flutter Web build is a future target with no working build today.
 - **Mobile media constraints.** Voice and video calls (with SFrame E2EE), file transfer, DMs, MLS servers, vault, and archive all work on mobile. However, mobile clients cannot *originate* screen sharing or capture system audio (no platform equivalent of WASAPI loopback / Process Tap), and the large-file Share transport (>34 MB, STUN-only) is excluded on mobile because it does not survive carrier-grade NAT. Screen-share audio on desktop still uses different transport paths per platform (out-of-process Opus over a data channel on Windows, a WebRTC audio track on macOS).
 - **Files are not encrypted at rest.** SQLCipher encrypts messages and metadata, but downloaded file attachments (`~/.hollow/files/`), vault shards, and vault cache are stored as plaintext on disk. AES-256-GCM at-rest file encryption keyed from the identity is planned.

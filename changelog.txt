@@ -1,0 +1,294 @@
+v0.7 - Multi-Device Fixes, Channel Encryption Hardening & Storage Manager
+
+CHANNEL ENCRYPTION
+
+- Restricted channels are now encrypted under their own per-channel MLS subgroup instead of the server-wide group, so channel visibility is cryptographically enforced: a member who can't see a channel never receives a decryptable copy, even with a modified client
+- This now covers voice too: a restricted voice channel derives its SFrame media key from the channel's own subgroup, so a non-qualifying member can't derive the key and is rejected from joining. Demoting someone mid-call re-keys the remaining participants and drops the demoted member
+- Channel visibility and posting-access changes now take effect immediately in the UI on both desktop and mobile, and anyone viewing a channel that becomes hidden is moved out of it automatically
+
+MULTI-DEVICE
+
+- Fixed one-directional DMs between two fresh friends: a race between the friend-request handshake and key exchange could leave one side unable to send. Both sides now re-key promptly instead of waiting on the recovery sweep
+- Fixed remove-then-re-add of a friend (while both online) silently auto-accepting with no consent prompt
+- Server channel chat now shows a sender's real name, avatar and verified signature across all of their devices, instead of a raw device id with a generic avatar. Older messages stored before this fix self-heal when a verified copy syncs in
+- Multi-device push notifications now reach a fully-quit phone: the wake-and-fetch node connects as the correct device, so a buffered message is delivered and decrypted rather than lost
+- Reset Device List is now a real propagating revocation: every other device is tombstoned in one step, your friends drop them, and each removed device wipes itself
+
+VOICE & CALLS
+
+- Fixed quiet voice calls on every platform: a native makeup-gain stage with a soft limiter now runs after WebRTC's automatic gain control, and the mic-gain slider finally affects your outgoing audio (it was previously a no-op on the send side). Range is 34%-200%, applies live mid-call
+- Earpiece proximity (screen blanks when held to your ear) now works for any active call from any screen, not just while the call sheet is open
+
+STORAGE
+
+- New "Files & Storage" settings category with a storage dashboard: total usage, a segmented Downloads / Vault cache / Held shards bar, a per-conversation breakdown with inline clear, and a cleanup menu
+- The downloaded-files cache cap and vault cache cap are now actually enforced (they were no-op sliders before). Clearing file bytes keeps the message so it stays re-downloadable
+- Files larger than 34 MB now prompt a "Send as Share" confirmation instead of silently auto-converting or rejecting. Hollow Share now works in DMs too
+- Fixed a sender-side disk leak that left a duplicate encrypted copy of every relayed file on the server
+
+NOTIFICATIONS
+
+- Desktop: native OS toasts now fire whenever the window is unfocused (not only when minimized to tray), with rich Windows Action Center toasts (avatar, sender, message line, inline Reply). In-app notification cards show whenever the window is visible
+- Mobile: a real OS notification is posted when the app is backgrounded but still connected; in-app banners now appear only while you're inside a different chat
+- Added @mention autocomplete to the mobile channel composer
+
+INTERFACE
+
+- Redesigned the desktop Settings panel: a searchable side rail of ten focused categories with a card-based layout, replacing the cramped five-tab dialog. Settings now auto-save on change. Mirrored the same split on mobile
+- Connection status now reflects the real relay WebSocket state instead of just "node started", and greys out when the relay stops responding
+- NSFW servers: an is-NSFW server setting with a "proceed at your own risk" consent gate on join, plus an NSFW badge in the chat header
+- Channel and DM header polish: accurate online/offline and Encrypted status for multi-device members, NSFW badges, and cleaner DM header naming
+
+PRIVACY & ENGINE
+
+- Removed debugging logs from the relay (were left during initial experimenting) that could fingerprint who talks to whom: every line printing a peer id, room, push target, channel, server or token was removed, leaving only aggregate counts
+- Server-group MLS recovery hardening: the server owner is now the preferred coordinator for member changes, and CRDT operations are mirrored in plaintext alongside MLS so an out-of-sync member can't permanently lose server metadata such as a newly created channel
+
+v0.6 - Multi-Device Sync, Code Signing & Push Notifications
+
+MULTI-DEVICE SYNC
+
+- Link a new device to your identity with a 6-character code. The new device pulls your full identity and encrypted database from an online one, no QR codes
+- Your friends see you as ONE online identity across all your devices, not several strangers (presence, profiles, typing, DMs all collapse device to person)
+- DMs sync across your devices: messages you send from one device mirror to your others, and a friend will re-serve messages you sent from a device that was offline (sibling backfill)
+- Servers and channels are now fully multi-device: each device holds its own MLS encryption leaf, so channel messages and typing reach every one of your devices
+- Server lifecycle converges across your devices and offline members: create, delete (tombstone-based), kick, ban, roles, pins, layout and settings all reconcile on reconnect
+- Manual sync escape hatch: a "Sync from this device" button per device under Settings > Security > Your Devices
+- "Your Stats" card on Home (Friends/Servers/DM messages/Devices) to eyeball-compare sync state across devices
+
+DEVICE REVOCATION
+
+- Revoke a lost or compromised device from any device you control (Settings > Security > Your Devices)
+- A revoked device wipes its local data and returns to Welcome the moment it learns it was revoked
+- Revocation is enforced cryptographically: the revoker drops its encryption session to the dead device, and your friends stop sending to it
+
+PUSH NOTIFICATIONS (ANDROID & iOS)
+
+- Direct-message push notifications with the decrypted message content in the banner
+- Server channel push notifications, filtered by your per-server/per-channel notification preferences (mute, mentions-only, all)
+- Captioned image DMs delivered while offline, with signatures preserved
+- Grouped, per-sender notification banners with mention awareness ([@everyone](https://youtu.be/dQw4w9WgXcQ) / [@you](https://youtu.be/uOzPqiRpumc) / replies)
+- iOS: rich banners (sender name + avatar) and on-device decryption even when the app is force-killed, via a Notification Service Extension that fetches and decrypts without ever putting your message content in the push itself (no metadata leak to Apple/Google)
+
+PLATFORM & ENGINE
+
+- macOS: native traffic-light window controls and a startup-flash fix
+- Automated multi-node test harness for future development: spins up N real nodes in one process through an in-process relay, verifying the distributed-logic core (DMs, server joins, MLS formation, channel decrypt, device revocation, calls, file transfer, voice channels) on every push, in CI. Easily expandable, really useful for debugging, fixing bugs, and implementing new features
+- Windows code-signing and Inno Setup installer pipeline
+- In-app Help resource center
+- Microsecond message ordering to fix same-millisecond message interleaving
+- Storage hygiene: removed startup VACUUM/shard-probe contention and stderr noise
+- Server access controls, chat profile popups, busy-call toast, and Hollow Share STUN-only warning
+
+v0.5 - macOS Release, Cross-Platform Auto-Updater & Mobile Port
+
+NATIVE macOS RELEASE
+- First fully signed and notarized macOS build (Developer ID + Hardened Runtime, stapled)
+- Universal binary: runs natively on both Apple Silicon and Intel Macs
+- Proper app identity: "Hollow" name and the real Hollow icon throughout the Dock, menu bar, and Launchpad
+- Native window behavior: closing the window keeps Hollow running in the Dock with the active dot (the macOS-native idiom); click the Dock icon to reopen — no more odd minimize-to-taskbar
+- Requires macOS 14.2+ (full feature set including screen-share system audio)
+
+CROSS-PLATFORM AUTO-UPDATER
+- The in-app updater now works on macOS, not just Windows
+- macOS updates swap the .app bundle in place (ditto-based), preserving the code signature, then relaunch automatically
+- Per-platform release manifest: each OS downloads the correct build
+- Quarantine handling so updated builds launch without friction
+
+EXPERIMENTAL MOBILE SUPPORT (ANDROID & iOS)
+- Full mobile port with every feature ported from the desktop version
+- Universal APK for Android (7.0 to 16); iOS needs a proper App Store/TestFlight release
+
+OVERALL IMPROVEMENTS
+- DM call voice activity detection with animated speaking border
+- Mic gain slider in audio settings; mid-call changes apply live
+- Offline peer profile fetching via relay proxy
+- Temporary nicknames for friend requests (relay-scoped, ephemeral)
+
+PLATFORM & ENGINE
+- Flutter 3.44 upgrade
+- MLS secret tree persistence and recovery-sync fixes
+- Olm key exchange glare resolution, voice channel plaintext fallback, edit-sync and peer-liveness fixes
+
+v0.4.2 - Identity Protection Patch, Linux/Android Support (Experimental)
+
+IDENTITY PROTECTION REDESIGN
+- Replace raw DPAPI blob storage with Windows Credential Manager (CredWriteW/CredReadW) as primary, DPAPI blob as fallback — dual-write on store, auto-migration on retrieve
+- Remove silent auto-encryption: plaintext identities are never automatically encrypted by DPAPI. All protection is now explicit opt-in from Settings → Security
+- New "Ask for password on launch" toggle: when password is set, toggling this off caches the password-derived key in OS keychain (flags=0x03) — identity file stays encrypted but the app opens silently on the same device
+- Password removal now writes plaintext instead of silently transitioning to keychain-only encryption
+- Change password preserves the launch toggle setting and updates keychain if in silent mode
+- Backup import no longer auto-protects restored identities
+- Device Protection section in Settings for standalone OS keychain encryption (no password)
+- Updated security descriptions to clarify that password protects both identity and app access
+
+TESTING & CI
+- 46 new unit tests for CRDT operations, server state, identity, and platform keystore
+- Windows Credential Manager round-trip and dual-storage tests
+
+EXPERIMENTAL LINUX SUPPORT
+- Flatpak package for all Linux distros (28 MB, Freedesktop 24.08 runtime)
+- Window close minimizes to taskbar — app stays running in background
+- Taskbar right-click Quit for clean shutdown
+- XDG desktop integration (app icon + launcher entry auto-installed)
+- Core features working: messaging, servers, file transfers, screen share
+- Known limitations: mic test in Settings unavailable, voice calls untested on real hardware
+
+Install: flatpak install --user hollow-0.4.2-linux-x86_64.flatpak
+Run: flatpak run com.anonlisten.Hollow
+
+EXPERIMENTAL MOBILE SUPPORT
+- Universal APK for Android (versions from 7.0 to 16)
+- iOS should work too but needs a proper App Store release
+
+v0.4.1 - Public Channels, Identity Protection, Native Screen Sharing & Bug Fixes
+
+IDENTITY AT-REST PROTECTION
+- Two-layer encryption for identity.key: optional app password (Argon2id + AES-256-GCM) and automatic OS keychain binding (DPAPI on Windows, Keychain on macOS)
+- Full-screen lock dialog on launch with retry loop, recovery via 24-word mnemonic
+- HKEYV1 file format with backward-compatible plaintext auto-detection
+- Settings → Security tab with App Lock section
+
+PUBLIC CHANNELS
+- Per-channel public flag (globe icon in channel settings, MANAGE_CHANNELS permission)
+- Guest sync protocol: non-members can browse public channels read-only
+- Paginated message history serving (50 per batch, latest first)
+- Sender profiles with 64×64 WebP avatar thumbnails for guest viewers
+
+PUBLIC CHANNEL BROWSER
+- Globe icon in bottom bar toggles a first-class browsing panel (Share/Archive pattern)
+- Saved servers persist to SQLCipher with configurable fetch modes (real-time, on-launch, manual, periodic)
+- Accordion sidebar with tree-style channel indentation and SelectionShimmer
+- Real-time streaming via SendToRoom broadcasts to guest WS room members
+- Inline search, message proof dialog, right-click context menus
+
+RELAY HARDENING
+- Guest connection mode: invisible to members, max 3 rooms, 10 binary/min, no SendDirect, 30-min idle timeout
+- Per-IP rate limits: max 34 connections/IP, 10 new/min/IP (in-memory, never logged)
+
+NATIVE SCREEN SHARE
+- Bypass libwebrtc's desktop capturer which ignores all resolution constraints
+- Windows: Graphics Capture API + D3D11 native capture with bilinear downscale to target resolution
+- macOS: ScreenCaptureKit with GPU-accelerated downscale, window capture support
+- Thread-safe stop + always-scale path to fix GPU row pitch padding corruption
+
+OLM KEY EXCHANGE & VOICE FIXES
+- Fix dual KeyRequest glare: higher peer ID yields to prevent both sides creating outbound Olm sessions (MAC tag mismatch)
+- Voice channel join/leave now always sends plaintext alongside MLS, surviving stale epochs
+
+EDIT & SYNC FIXES
+- Edited messages properly stamp edited_at during sync batch insert
+- DM edits while peer is offline update the pending_messages queue in-place
+- Pending messages preserved across WS disconnects (no more message loss during brief reconnections)
+- Silence false edit rejections when the original message hasn't synced yet
+
+PEER LIVENESS
+- 60-second timer checks offline friends against the relay via check_peers command
+- Re-joins DM/inbox rooms if relay confirms a friend is actually connected
+
+v0.4.0 - Native Capture, Mobile Port & Optimization
+
+ANDROID MOBILE PORT (In progress)
+- Full custom mobile UI with 4-tab navigation (Chats/Friends/Archive/Settings)
+- Mobile chat with profile sheets, voice messages, file sharing, link previews
+- Emoji picker, channel search, server settings with permissions, unread badges
+- Mobile design polish: ambient background, nav glow, shimmer line, dark splash screen
+- App icons for Android
+- Long-press message actions with quick reactions, inline edit, delete confirmation
+- Channel management, posting/read permissions gating, sync status indicator
+- Battery optimization exemption + WiFi lock for stable connections
+- Text scaling clamped 0.8–1.3x
+
+macOS DESKTOP PORT (In progress of Release)
+- Full macOS desktop support (contributed by [DrFaust555](https://github.com/DrFaust555))
+- VP8 codec workarounds, CoreAudio device handling
+- Process Tap for system audio capture
+- ScreenCaptureKit-based native screen share
+
+SCREEN SHARE AUDIO (Windows)
+- Out-of-process WASAPI capture with Opus encoding over WebRTC data channels
+- Per-window audio capture on Windows 10 2004+ (process-specific via --pid)
+- Separate capture/render executables to avoid ADM audio looping
+- Cross-platform receiver (waveOut/AudioQueue/PulseAudio)
+
+NATIVE SCREEN/CALL RECORDING
+- Windows: Graphics Capture API + Media Foundation encoder (H.264+AAC MP4)
+- macOS: ScreenCaptureKit + AVAssetWriter
+- System audio + mic, no ffmpeg dependency for recording
+- Screen-wide annotation overlay (draw during calls or whenever needed)
+- Record voice/video calls locally
+- Call UI sizing fixes
+
+OPTIMIZED FFMPEG
+- Custom minimal build: 164 MB → 5.9 MB
+- GitHub Actions build workflow for reproducible cross-compilation
+- Still used for voice message playback, but recording is fully native now
+
+MLS ENCRYPTION FIXES
+- Auto-recovery now works for any peer, including the owner losing their group
+- Coordinator election excludes the sender (prevents recovery deadlock)
+
+CLEANUP
+- Vendored forked flutter_webrtc into the repo
+- Replaced discontinued flutter_markdown
+- Rust license compliance audit
+- Chat edit scroll fix
+
+v0.3.1 - Self-hosting & Performance (again)
+
+RUST BACKEND PERFORMANCE (8-Phase Audit)
+- WAL mode + PRAGMA tuning (synchronous=NORMAL, 8 MB cache, temp_store=MEMORY)
+- One-time FTS5 rebuild (was rebuilding full-text index on every DB open)
+- prepare_cached for 48 SQL statements across messages.rs + content_store.rs
+- Pre-computed db_path/db_passphrase at event loop start, passed to all handlers (eliminated ~100 redundant identity loads)
+- MLS state persist debounced to 2s dirty-flag timer (was serializing entire OpenMLS storage on every encrypt AND decrypt)
+- Olm split: per-message ratchet persist vs full account pickle only on session lifecycle
+- Skipped op_log in ServerState serialization (#[serde(skip_serializing)] on up to 1000 CrdtOps, 60-80% less JSON per CRDT mutation)
+- Lazy envelope_json: moved serialization into Olm fallback branches (MLS success path skips entirely)
+- Boxed fat MessageEnvelope variants (~405 -> ~136 bytes per enum, wire-compatible)
+- Transaction-wrapped sync batch inserts (10-50x faster)
+- CrdtStore flush batching
+- Cached PeerId derivation in signature verification
+- Zero-copy compute_delta for CRDT sync
+- Batch file metadata queries (single IN clause instead of N queries)
+- Cached peer_id on NativeKeypair struct (computed once at construction)
+- All 14 crdt.rs FFI functions use STORE singleton instead of re-opening DB
+- CACHED_PEER_ID OnceLock for role/permission queries (eliminates 7 identity loads + 7 DB opens per server switch)
+- Serialize-once broadcast: send_raw_to_peer() for pre-serialized bytes across 8 broadcast loops
+- Single prepare_upload() closure: eliminates redundant Reed-Solomon encoding (~340ms + ~70 MB per vault upload)
+- std::mem::take for file buffers: zero-copy move instead of 34 MB clone
+- Vault-only AES skip: generates key+nonce without encrypting when vault-only mode (6+ members, non-image)
+- tokio::fs for 6 critical std::fs::read/write sites in file_handler.rs (prevents event loop stalls on 34 MB files)
+- In-memory shard streaming: shards stream from Cursor instead of disk (~44 MB disk round-trip eliminated per vault upload)
+- StateVector pre-computation: sv_cache built once per server before peer loops (20 peers x 5 servers = 100 computations -> 5)
+- sign() returns [u8;64] instead of heap Vec<u8>
+- Boxed fat NodeCommand variants (SendFile, VaultUploadFile)
+- Voice rate-limit map eviction (>10 min idle, >16 entries)
+- Mention parsing early exit when no @ present
+- Combined count_unread_dm/channel into a single COALESCE query
+
+DART UI REBUILD OPTIMIZATION
+- Surgical .select() additions across 18 files to eliminate unnecessary provider rebuilds
+- HollowAvatar watches only its own peerId in the avatar cache (was rebuilding ALL avatars on any load)
+- ChannelMessageBubble watches only its sender's profile/nickname
+- Unread and notification providers use .select() with instance methods for per-channel/server granularity
+- ValueKeys added to unplaced channel tiles and member panel items
+- RepaintBoundary wrapping for 3 CustomPaints (status_dot pulse, tree connector, crop overlay)
+- WAL checkpoint before backup export (prevents data loss from unflushed WAL writes)
+
+SELF-HOSTING SUPPORT
+- Relay domain is now fully configurable (was hardcoded to relay.anonlisten.com)
+- Rust FFI set_relay_url() passes domain through spawn_node() to ws_client and signaling
+- All STUN/TURN/signaling URLs derive from the configured domain
+- Welcome dialog has an Advanced section for first-launch relay config
+- Settings System tab has a selectable relay list with Add/Remove and Apply & Restart
+- ConnectionProgress shows "Custom Network" indicator when on a non-default relay
+- Dockerfile + docker-compose.yml for one-command relay deployment with certbot + coturn
+- .env.example and turnserver.conf.example templates for easy setup
+- Full relay README with build, run, Docker, architecture, and security docs
+
+CLEANUP
+- Removed dead KickBot widget, legacy Rust relay, old loadtest dirs, duplicate root logos
+- Removed dead CRDT relay_url code from swarm.rs
+- Consolidated relay into main repo (hollow-relay archived)
+- Rotated TURN secret on VPS, replaced with placeholder in repo
