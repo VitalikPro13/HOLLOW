@@ -1967,6 +1967,7 @@ class _MobileChatHeader extends ConsumerWidget {
         children: [
           HollowPressable(
             onTap: () => Navigator.of(context).pop(),
+            semanticLabel: 'Back',
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.all(HollowSpacing.sm),
             child: Icon(LucideIcons.arrowLeft, size: 22, color: hollow.textPrimary),
@@ -2064,6 +2065,7 @@ class _MobileChatHeader extends ConsumerWidget {
           if (!isDm && serverId != null)
             HollowPressable(
               onTap: () => showMobileMemberPanel(context, serverId!),
+              semanticLabel: 'Members',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(HollowSpacing.sm),
               child: Icon(LucideIcons.users, size: 20, color: hollow.textSecondary),
@@ -2076,6 +2078,7 @@ class _MobileChatHeader extends ConsumerWidget {
               return HollowPressable(
                 onTap: () => _showPinnedMessagesSheet(
                     context, ref, serverId!, channelId!, pinnedIds),
+                semanticLabel: 'Pinned messages',
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.all(HollowSpacing.sm),
                 child: Row(
@@ -2097,6 +2100,7 @@ class _MobileChatHeader extends ConsumerWidget {
           if (!isDm && onSearchToggle != null)
             HollowPressable(
               onTap: onSearchToggle,
+              semanticLabel: 'Search messages',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(HollowSpacing.sm),
               child: Icon(
@@ -2362,6 +2366,7 @@ class _MobileInputBar extends StatelessWidget {
           // on small screens like the iPhone 13 mini).
           HollowPressable(
             onTap: onAttach,
+            semanticLabel: 'Attach photo or file',
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.sm),
             child: Icon(LucideIcons.plus, color: hollow.textSecondary, size: 24),
@@ -2391,6 +2396,7 @@ class _MobileInputBar extends StatelessWidget {
                   // room for the text field to breathe.
                   suffixIcon: HollowPressable(
                     onTap: onEmoji,
+                    semanticLabel: 'Emoji',
                     borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.sm),
                     child: Icon(LucideIcons.smile,
@@ -2412,6 +2418,7 @@ class _MobileInputBar extends StatelessWidget {
           const SizedBox(width: HollowSpacing.xs),
           HollowPressable(
             onTap: onMic,
+            semanticLabel: 'Record voice message',
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.sm),
             child: Icon(
@@ -2425,6 +2432,7 @@ class _MobileInputBar extends StatelessWidget {
           const SizedBox(width: HollowSpacing.xs),
           HollowPressable(
             onTap: onSend,
+            semanticLabel: 'Send',
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             backgroundColor: hollow.accent,
             padding: const EdgeInsets.all(HollowSpacing.sm + 2),
@@ -2489,6 +2497,7 @@ class _ReplyPreview extends StatelessWidget {
           ),
           HollowPressable(
             onTap: onCancel,
+            semanticLabel: 'Cancel reply',
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.all(HollowSpacing.xs),
             child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
@@ -2522,6 +2531,7 @@ class _DmMuteButton extends ConsumerWidget {
           type: HollowToastType.info,
         );
       },
+      semanticLabel: enabled ? 'Mute notifications' : 'Unmute notifications',
       borderRadius: BorderRadius.circular(hollow.radiusSm),
       padding: const EdgeInsets.all(HollowSpacing.sm),
       child: Icon(
@@ -2579,6 +2589,7 @@ class _DmCallButtons extends ConsumerWidget {
                         ),
                       )
                   : null,
+          semanticLabel: 'Voice call',
           borderRadius: BorderRadius.circular(hollow.radiusSm),
           padding: const EdgeInsets.all(HollowSpacing.sm),
           child: Icon(
@@ -2595,6 +2606,7 @@ class _DmCallButtons extends ConsumerWidget {
           onTap: canCall
               ? () => startAndOpen(withVideo: true)
               : null,
+          semanticLabel: 'Video call',
           borderRadius: BorderRadius.circular(hollow.radiusSm),
           padding: const EdgeInsets.all(HollowSpacing.sm),
           child: Icon(
@@ -2678,6 +2690,7 @@ class _StagedFilePreview extends StatelessWidget {
           ),
           HollowPressable(
             onTap: onCancel,
+            semanticLabel: 'Remove attachment',
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.all(HollowSpacing.xs),
             child: Icon(LucideIcons.x, size: 18, color: hollow.textSecondary),

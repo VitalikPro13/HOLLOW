@@ -92,7 +92,13 @@ class _SpeakingBorderState extends State<SpeakingBorder>
           child: child,
         );
       },
-      child: widget.child,
+      // The accent glow is the visual "speaking" cue. Mirror it to screen
+      // readers so the state isn't color-only: when speaking, annotate the
+      // subtree with "Speaking" — it merges with the child avatar's existing
+      // name (→ "Alice, Speaking"). When silent, add nothing.
+      child: widget.isSpeaking
+          ? Semantics(label: 'Speaking', container: true, child: widget.child)
+          : widget.child,
     );
   }
 }

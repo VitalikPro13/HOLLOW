@@ -107,11 +107,12 @@ class _MobileVoiceChannelPillState
               final size = MediaQuery.sizeOf(context);
               final topInset = MediaQuery.viewPaddingOf(context).top;
               final next = _dragOffset + details.delta;
-              setState(() => _dragOffset = Offset(
-                    next.dx.clamp(
-                        -(size.width / 2 - 80), size.width / 2 - 80),
-                    next.dy.clamp(-(size.height - 80 - 48 - topInset - 8), 0.0),
-                  ));
+              setState(
+                () => _dragOffset = Offset(
+                  next.dx.clamp(-(size.width / 2 - 80), size.width / 2 - 80),
+                  next.dy.clamp(-(size.height - 80 - 48 - topInset - 8), 0.0),
+                ),
+              );
             },
             onTap: () => _openVoiceRoute(vcState, channelName),
             child: Material(
@@ -164,13 +165,12 @@ class _MobileVoiceChannelPillState
                     const SizedBox(width: HollowSpacing.md),
                     // Mute
                     HollowPressable(
+                      semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
                       onTap: () => vcNotifier.toggleMute(),
                       borderRadius: BorderRadius.circular(hollow.radiusSm),
                       padding: const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(
-                        vcState.isMuted
-                            ? LucideIcons.micOff
-                            : LucideIcons.mic,
+                        vcState.isMuted ? LucideIcons.micOff : LucideIcons.mic,
                         size: 20,
                         color: vcState.isMuted
                             ? hollow.error
@@ -180,6 +180,7 @@ class _MobileVoiceChannelPillState
                     const SizedBox(width: HollowSpacing.xs),
                     // Deafen
                     HollowPressable(
+                      semanticLabel: vcState.isDeafened ? 'Undeafen' : 'Deafen',
                       onTap: () => vcNotifier.toggleDeafen(),
                       borderRadius: BorderRadius.circular(hollow.radiusSm),
                       padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -194,6 +195,7 @@ class _MobileVoiceChannelPillState
                     const SizedBox(width: HollowSpacing.xs),
                     // Leave
                     HollowPressable(
+                      semanticLabel: 'Leave call',
                       onTap: () => vcNotifier.leaveChannel(),
                       borderRadius: BorderRadius.circular(hollow.radiusSm),
                       padding: const EdgeInsets.all(HollowSpacing.xs),

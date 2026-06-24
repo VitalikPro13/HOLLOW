@@ -326,6 +326,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                         ),
                       ),
                       HollowPressable(
+                        semanticLabel: 'Assign label',
                         onTap: () => _showAssignDialog(label),
                         borderRadius: BorderRadius.circular(hollow.radiusSm),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -334,6 +335,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                       ),
                       const SizedBox(width: HollowSpacing.xs),
                       HollowPressable(
+                        semanticLabel: 'Delete label',
                         onTap: () => _deleteLabel(label.labelId),
                         borderRadius: BorderRadius.circular(hollow.radiusSm),
                         padding: const EdgeInsets.all(HollowSpacing.xs),

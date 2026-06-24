@@ -256,6 +256,7 @@ class _NotificationCardWidgetState
                               BorderRadius.circular(hollow.radiusSm),
                           padding:
                               const EdgeInsets.all(HollowSpacing.xxs),
+                          semanticLabel: 'Dismiss notification',
                           child: Icon(
                             LucideIcons.x,
                             size: 14,

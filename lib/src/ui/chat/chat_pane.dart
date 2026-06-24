@@ -958,6 +958,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                       ? 'In call'
                       : (isOnline && !isInCall ? 'Start voice call' : 'Voice call'),
                   child: HollowPressable(
+                    semanticLabel: isCallWithThisPeer
+                        ? 'In call'
+                        : 'Start voice call',
                     onTap: isOnline && !isInCall
                         ? () => ref.read(callProvider.notifier).startCall(widget.peerId)
                         : null,
@@ -985,6 +988,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                 return HollowTooltip(
                   message: 'Start video call',
                   child: HollowPressable(
+                    semanticLabel: 'Start video call',
                     onTap: isOnline && !isInCall
                         ? () => ref.read(callProvider.notifier).startCall(widget.peerId, withVideo: true)
                         : null,
@@ -1004,6 +1008,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
               HollowTooltip(
                 message: showProfilePanel ? 'Hide profile' : 'Show profile',
                 child: HollowPressable(
+                  semanticLabel: showProfilePanel ? 'Hide profile' : 'Show profile',
                   onTap: () {
                     ref.read(dmProfilePanelProvider.notifier).state = !showProfilePanel;
                   },
@@ -1020,6 +1025,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                     ? 'Mute notifications'
                     : 'Unmute notifications',
                 child: HollowPressable(
+                  semanticLabel: ref.watch(notificationSettingsProvider
+                          .select((s) => s.dmEnabled[widget.peerId] ?? true))
+                      ? 'Mute notifications'
+                      : 'Unmute notifications',
                   onTap: () {
                     final current = ref
                         .read(notificationSettingsProvider.notifier)
@@ -1051,6 +1060,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                       ? 'Close this pane'
                       : 'Split view',
                   child: HollowPressable(
+                    semanticLabel: ref.watch(splitViewProvider).isSplit
+                        ? 'Close this pane'
+                        : 'Split view',
                     onTap: () => _handleSplitToggle(ref),
                     borderRadius: BorderRadius.circular(hollow.radiusSm),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -1670,6 +1682,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                 ),
               ),
               HollowPressable(
+                semanticLabel: 'Cancel reply',
                 onTap: () => setState(() {
                   _replyToMessageId = null;
                   _replyToText = null;
@@ -1726,6 +1739,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                 ),
               ),
               HollowPressable(
+                semanticLabel: 'Remove attachment',
                 onTap: () => setState(() {
                   _stagedFilePath = null;
                   _stagedFileName = null;
@@ -1789,6 +1803,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             : Row(
                 children: [
                   HollowPressable(
+                    semanticLabel: 'Attach file',
                     onTap: _pickAndStageFile,
                     borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.sm),
@@ -1800,6 +1815,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                   ),
                   const SizedBox(width: HollowSpacing.xs),
                   HollowPressable(
+                    semanticLabel: 'Record voice message',
                     onTap: _stagedFilePath != null
                         ? null
                         : () => setState(() => _isRecordingVoice = true),
@@ -1839,6 +1855,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                   ),
                   const SizedBox(width: HollowSpacing.sm),
                   HollowPressable(
+                    semanticLabel: 'Send message',
                     onTap: _handleSend,
                     borderRadius: BorderRadius.circular(hollow.radiusMd),
                     backgroundColor: hollow.accent,
@@ -2873,6 +2890,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
         HollowTooltip(
           message: call.isMuted ? 'Unmute' : 'Mute',
           child: HollowPressable(
+            semanticLabel: call.isMuted ? 'Unmute' : 'Mute',
             onTap: () => ref.read(callProvider.notifier).toggleMute(),
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: buttonPadding,
@@ -2887,6 +2905,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
         HollowTooltip(
           message: call.isDeafened ? 'Undeafen' : 'Deafen',
           child: HollowPressable(
+            semanticLabel: call.isDeafened ? 'Undeafen' : 'Deafen',
             onTap: call.status == CallStatus.active
                 ? () => ref.read(callProvider.notifier).toggleDeafen()
                 : null,
@@ -2905,6 +2924,9 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
               ? 'Turn off camera'
               : 'Turn on camera',
           child: HollowPressable(
+            semanticLabel: call.isVideoEnabled
+                ? 'Turn off camera'
+                : 'Turn on camera',
             onTap: call.status == CallStatus.active
                 ? () => ref.read(callProvider.notifier).toggleVideo()
                 : null,
@@ -2929,6 +2951,9 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                 ? 'Stop sharing'
                 : 'Share screen',
             child: HollowPressable(
+              semanticLabel: call.isScreenSharing
+                  ? 'Stop sharing screen'
+                  : 'Share screen',
               onTap: call.status == CallStatus.active
                   ? () => _handleScreenShareToggle(call)
                   : null,
@@ -2952,6 +2977,8 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
           HollowTooltip(
             message: rec.isMyRecording ? 'Stop recording' : 'Record this call',
             child: HollowPressable(
+              semanticLabel:
+                  rec.isMyRecording ? 'Stop recording' : 'Record this call',
               onTap: () {
                 final notifier = ref.read(recordingProvider.notifier);
                 if (rec.isMyRecording) {
@@ -2978,6 +3005,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
         HollowTooltip(
           message: 'End call',
           child: HollowPressable(
+            semanticLabel: 'End call',
             onTap: () => ref.read(callProvider.notifier).endCall(),
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.symmetric(
@@ -3560,6 +3588,7 @@ class _ScreenShareControlsOverlayState
           HollowTooltip(
             message: call.isMuted ? 'Unmute' : 'Mute',
             child: HollowPressable(
+              semanticLabel: call.isMuted ? 'Unmute' : 'Mute',
               onTap: () => ref.read(callProvider.notifier).toggleMute(),
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -3577,6 +3606,9 @@ class _ScreenShareControlsOverlayState
                 ? 'Turn off camera'
                 : 'Turn on camera',
             child: HollowPressable(
+              semanticLabel: call.isVideoEnabled
+                  ? 'Turn off camera'
+                  : 'Turn on camera',
               onTap: call.status == CallStatus.active
                   ? () => ref.read(callProvider.notifier).toggleVideo()
                   : null,
@@ -3600,6 +3632,9 @@ class _ScreenShareControlsOverlayState
               message:
                   call.isScreenSharing ? 'Stop sharing' : 'Share screen',
               child: HollowPressable(
+                semanticLabel: call.isScreenSharing
+                    ? 'Stop sharing screen'
+                    : 'Share screen',
                 onTap: call.status == CallStatus.active
                     ? () => _handleScreenShareToggle(call)
                     : null,
@@ -3622,6 +3657,7 @@ class _ScreenShareControlsOverlayState
           HollowTooltip(
             message: 'End call',
             child: HollowPressable(
+              semanticLabel: 'End call',
               onTap: () => ref.read(callProvider.notifier).endCall(),
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.symmetric(

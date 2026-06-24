@@ -383,6 +383,7 @@ class _BackHeader extends StatelessWidget {
       children: [
         HollowPressable(
           onTap: onBack,
+          semanticLabel: 'Back',
           padding: const EdgeInsets.all(HollowSpacing.xs),
           child: Icon(LucideIcons.arrowLeft, size: 20, color: hollow.textPrimary),
         ),

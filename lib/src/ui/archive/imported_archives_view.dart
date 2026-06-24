@@ -462,6 +462,7 @@ class _ArchiveEntryCard extends ConsumerWidget {
       onTap: () {
         ref.read(importedArchivePathsProvider.notifier).removePath(path);
       },
+      semanticLabel: 'Remove archive',
       borderRadius: BorderRadius.circular(4),
       padding: const EdgeInsets.all(2),
       child: Icon(LucideIcons.x, size: 12, color: hollow.textSecondary),
@@ -969,6 +970,7 @@ class _ImportedArchiveHeader extends StatelessWidget {
             const SizedBox(width: HollowSpacing.xs),
             HollowPressable(
               onTap: onJumpToDate,
+              semanticLabel: 'Jump to date',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.calendar, size: 16, color: hollow.textSecondary),
@@ -978,6 +980,7 @@ class _ImportedArchiveHeader extends StatelessWidget {
             const SizedBox(width: HollowSpacing.xs),
             HollowPressable(
               onTap: onToggleSearch,
+              semanticLabel: 'Search messages',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.search, size: 16,
@@ -1035,6 +1038,7 @@ class _ImportedFilterButton extends StatelessWidget {
           onSenderFilterChanged?.call(picked == '_clear_' ? null : picked);
         }
       },
+      semanticLabel: 'Filter by sender',
       borderRadius: BorderRadius.circular(hollow.radiusSm),
       padding: const EdgeInsets.all(6),
       child: Icon(LucideIcons.filter, size: 16,

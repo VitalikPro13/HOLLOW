@@ -80,6 +80,7 @@ class MobileNavBar extends ConsumerWidget {
                         label: 'Chats',
                         isActive: currentTab == 0,
                         badge: totalUnread,
+                        badgeNoun: 'unread',
                         onTap: () =>
                             ref.read(mobileTabProvider.notifier).state = 0,
                       ),
@@ -88,6 +89,7 @@ class MobileNavBar extends ConsumerWidget {
                         label: 'Friends',
                         isActive: currentTab == 1,
                         badge: pendingFriends,
+                        badgeNoun: 'friend request',
                         onTap: () =>
                             ref.read(mobileTabProvider.notifier).state = 1,
                       ),
@@ -97,6 +99,7 @@ class MobileNavBar extends ConsumerWidget {
                         label: 'Archive',
                         isActive: currentTab == 2,
                         badge: 0,
+                        badgeNoun: 'unread',
                         onTap: () =>
                             ref.read(mobileTabProvider.notifier).state = 2,
                       ),
@@ -105,6 +108,7 @@ class MobileNavBar extends ConsumerWidget {
                         label: 'Settings',
                         isActive: currentTab == 3,
                         badge: 0,
+                        badgeNoun: 'unread',
                         onTap: () =>
                             ref.read(mobileTabProvider.notifier).state = 3,
                       ),
@@ -130,25 +134,32 @@ class _AddButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return Expanded(
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: onTap,
-        child: Center(
-          child: Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: hollow.accent,
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-              boxShadow: [
-                BoxShadow(
-                  color: hollow.accent.withValues(alpha: 0.25),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
-                ),
-              ],
+      child: Semantics(
+        button: true,
+        label: 'New conversation',
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onTap,
+          child: Center(
+            child: Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: hollow.accent,
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
+                boxShadow: [
+                  BoxShadow(
+                    color: hollow.accent.withValues(alpha: 0.25),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: ExcludeSemantics(
+                child: Icon(LucideIcons.plus,
+                    size: 20, color: hollow.textOnAccent),
+              ),
             ),
-            child: Icon(LucideIcons.plus, size: 20, color: hollow.textOnAccent),
           ),
         ),
       ),
@@ -161,6 +172,11 @@ class _NavTab extends StatelessWidget {
   final String label;
   final bool isActive;
   final int badge;
+
+  /// What the [badge] count means, for the screen-reader label (e.g. "unread"
+  /// → "3 unread"; "friend request" → "3 friend requests"). The visible badge
+  /// is just a number, so a screen reader needs this to convey what it counts.
+  final String badgeNoun;
   final VoidCallback onTap;
 
   const _NavTab({
@@ -168,8 +184,20 @@ class _NavTab extends StatelessWidget {
     required this.label,
     required this.isActive,
     required this.badge,
+    required this.badgeNoun,
     required this.onTap,
   });
+
+  /// Composes the full screen-reader announcement: `tab, N noun` plus the
+  /// active state. e.g. "Chats, 3 unread" / "Settings".
+  String _semanticLabel() {
+    final buf = StringBuffer(label);
+    if (badge > 0) {
+      final noun = badge == 1 ? badgeNoun : '${badgeNoun}s';
+      buf.write(', $badge $noun');
+    }
+    return buf.toString();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -177,10 +205,18 @@ class _NavTab extends StatelessWidget {
     final color = isActive ? hollow.accentText : hollow.textSecondary;
 
     return Expanded(
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: onTap,
-        child: Column(
+      child: Semantics(
+        button: true,
+        selected: isActive,
+        label: _semanticLabel(),
+        // The inner Text nodes are just the glyph badge ("5") + visible label;
+        // exclude them so the composed label above is what's announced, not a
+        // meaningless "5, Chats".
+        child: ExcludeSemantics(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: onTap,
+            child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Stack(
@@ -224,6 +260,8 @@ class _NavTab extends StatelessWidget {
               ),
             ),
           ],
+        ),
+          ),
         ),
       ),
     );

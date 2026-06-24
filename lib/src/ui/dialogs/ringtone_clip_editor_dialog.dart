@@ -264,18 +264,22 @@ class _RingtoneClipEditorDialogState
                 _StepButton(
                     icon: LucideIcons.chevronsLeft,
                     onTap: () => _nudgeWindow(-5),
+                    label: 'Move window left 5 seconds',
                     hollow: hollow),
                 _StepButton(
                     icon: LucideIcons.chevronLeft,
                     onTap: () => _nudgeWindow(-1),
+                    label: 'Move window left 1 second',
                     hollow: hollow),
                 _StepButton(
                     icon: LucideIcons.chevronRight,
                     onTap: () => _nudgeWindow(1),
+                    label: 'Move window right 1 second',
                     hollow: hollow),
                 _StepButton(
                     icon: LucideIcons.chevronsRight,
                     onTap: () => _nudgeWindow(5),
+                    label: 'Move window right 5 seconds',
                     hollow: hollow),
               ],
             ),
@@ -370,7 +374,10 @@ class _NudgeField extends StatelessWidget {
         Row(
           children: [
             _StepButton(
-                icon: LucideIcons.minus, onTap: onMinus, hollow: hollow),
+                icon: LucideIcons.minus,
+                onTap: onMinus,
+                label: 'Decrease $label',
+                hollow: hollow),
             Expanded(
               child: Container(
                 alignment: Alignment.center,
@@ -386,7 +393,10 @@ class _NudgeField extends StatelessWidget {
               ),
             ),
             _StepButton(
-                icon: LucideIcons.plus, onTap: onPlus, hollow: hollow),
+                icon: LucideIcons.plus,
+                onTap: onPlus,
+                label: 'Increase $label',
+                hollow: hollow),
           ],
         ),
       ],
@@ -398,11 +408,13 @@ class _StepButton extends StatelessWidget {
   final IconData icon;
   final VoidCallback onTap;
   final HollowTheme hollow;
+  final String? label;
 
   const _StepButton({
     required this.icon,
     required this.onTap,
     required this.hollow,
+    this.label,
   });
 
   @override
@@ -411,6 +423,7 @@ class _StepButton extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(hollow.radiusSm),
       padding: const EdgeInsets.all(6),
+      semanticLabel: label,
       child: Icon(icon, size: 16, color: hollow.textSecondary),
     );
   }
@@ -502,7 +515,13 @@ class _WaveformSelectorState extends State<_WaveformSelector> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
-        return GestureDetector(
+        // Drag-to-scrub waveform — a screen reader can't meaningfully drag this
+        // to set the clip window; the accessible path is the labeled Start/End
+        // nudge fields below it. Keep the gesture for sighted users but exclude
+        // the painted surface from the semantics tree so it isn't an
+        // unlabeled, unusable node.
+        return ExcludeSemantics(
+          child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onHorizontalDragStart: (d) => _onDown(d.localPosition, width),
           onHorizontalDragUpdate: (d) => _onMove(d.localPosition, width),
@@ -526,6 +545,7 @@ class _WaveformSelectorState extends State<_WaveformSelector> {
               ),
             ),
           ),
+        ),
         );
       },
     );

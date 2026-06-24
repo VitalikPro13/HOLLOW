@@ -264,16 +264,20 @@ List<InlineSpan> _tokensToSpans(
         spans.add(WidgetSpan(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
-          child: MouseRegion(
-            cursor: SystemMouseCursors.click,
-            child: GestureDetector(
-              onTap: () => _openUrl(tok.text),
-              child: Text(
-                tok.text,
-                style: style.copyWith(
-                  color: hollow.accentText,
-                  decoration: TextDecoration.underline,
-                  decorationColor: hollow.accentText,
+          child: Semantics(
+            link: true,
+            label: tok.text,
+            child: MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: () => _openUrl(tok.text),
+                child: Text(
+                  tok.text,
+                  style: style.copyWith(
+                    color: hollow.accentText,
+                    decoration: TextDecoration.underline,
+                    decorationColor: hollow.accentText,
+                  ),
                 ),
               ),
             ),
@@ -283,17 +287,20 @@ List<InlineSpan> _tokensToSpans(
         spans.add(WidgetSpan(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-            decoration: BoxDecoration(
-              color: hollow.accent.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(3),
-            ),
-            child: Text(
-              '@${tok.text}',
-              style: style.copyWith(
-                color: hollow.accentText,
-                fontWeight: FontWeight.w600,
+          child: Semantics(
+            label: '@${tok.text}',
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+              decoration: BoxDecoration(
+                color: hollow.accent.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: Text(
+                '@${tok.text}',
+                style: style.copyWith(
+                  color: hollow.accentText,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ),
@@ -507,23 +514,27 @@ class _SpoilerTextState extends State<_SpoilerText> {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () => setState(() => _revealed = !_revealed),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-        decoration: BoxDecoration(
-          color: _revealed
-              ? widget.hollow.elevated
-              : widget.hollow.textSecondary,
-          borderRadius: BorderRadius.circular(3),
-        ),
-        child: Text(
-          widget.text,
-          style: widget.style.copyWith(
+    return Semantics(
+      button: true,
+      label: _revealed ? 'Hide spoiler' : 'Reveal spoiler',
+      child: GestureDetector(
+        onTap: () => setState(() => _revealed = !_revealed),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+          decoration: BoxDecoration(
             color: _revealed
-                ? widget.hollow.textPrimary
-                : Colors.transparent,
+                ? widget.hollow.elevated
+                : widget.hollow.textSecondary,
+            borderRadius: BorderRadius.circular(3),
+          ),
+          child: Text(
+            widget.text,
+            style: widget.style.copyWith(
+              color: _revealed
+                  ? widget.hollow.textPrimary
+                  : Colors.transparent,
+            ),
           ),
         ),
       ),

@@ -283,6 +283,7 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
                   Navigator.pop(context);
                   widget.onReaction!(emoji);
                 },
+                semanticLabel: 'React $emoji',
                 child: Center(
                   child: Text(emoji, style: const TextStyle(fontSize: 26)),
                 ),
@@ -432,6 +433,7 @@ class _QuickReactionsRow extends StatelessWidget {
           for (int i = 0; i < _kQuickReactionCount; i++)
             HollowPressable(
               onTap: () => onReaction(kReactionEmojis[i]),
+              semanticLabel: 'React ${kReactionEmojis[i]}',
               child: Container(
                 width: 42,
                 height: 42,
@@ -445,6 +447,7 @@ class _QuickReactionsRow extends StatelessWidget {
             ),
           HollowPressable(
             onTap: onMoreTap,
+            semanticLabel: 'More reactions',
             child: Container(
               width: 42,
               height: 42,

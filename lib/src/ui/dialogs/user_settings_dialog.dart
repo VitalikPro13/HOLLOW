@@ -561,6 +561,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                             subtle: true,
                             borderRadius: BorderRadius.circular(hollow.radiusMd),
                             padding: const EdgeInsets.all(HollowSpacing.xs),
+                            semanticLabel: 'Close',
                             child: Icon(LucideIcons.x,
                                 size: 18, color: hollow.textSecondary),
                           ),
@@ -1264,6 +1265,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                 child: Icon(
                   LucideIcons.x,
                   size: 14,
+                  semanticLabel: 'Remove relay',
                   color: hollow.textSecondary,
                 ),
               ),
@@ -3487,6 +3489,7 @@ class _DeviceRow extends ConsumerWidget {
               child: HollowButton.ghost(
                 compact: true,
                 onPressed: () => _syncFrom(context, ref),
+                semanticLabel: 'Sync servers & friends from this device',
                 icon: Icon(LucideIcons.refreshCw, size: 15,
                     color: device.online ? hollow.accent : hollow.textSecondary),
                 child: const SizedBox.shrink(),
@@ -3496,6 +3499,7 @@ class _DeviceRow extends ConsumerWidget {
           HollowButton.ghost(
             compact: true,
             onPressed: () => _rename(context, ref),
+            semanticLabel: 'Rename device',
             icon: Icon(LucideIcons.pencil, size: 15),
             child: const SizedBox.shrink(),
           ),
@@ -3504,6 +3508,7 @@ class _DeviceRow extends ConsumerWidget {
             HollowButton.ghost(
               compact: true,
               onPressed: () => _remove(context, ref),
+              semanticLabel: 'Remove device',
               icon: Icon(LucideIcons.trash2, size: 15, color: hollow.error),
               child: const SizedBox.shrink(),
             ),
@@ -4230,6 +4235,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
                     ref.read(ringtonePathProvider.notifier).setPath(null);
                   },
                   compact: true,
+                  semanticLabel: 'Remove ringtone',
                   child: Icon(LucideIcons.x,
                       size: 14, color: hollow.textSecondary),
                 ),
@@ -4630,6 +4636,7 @@ class _AccentColorPickerState extends ConsumerState<_AccentColorPicker> {
                     child: Icon(
                       LucideIcons.plus,
                       size: 12,
+                      semanticLabel: 'Save color preset',
                       color: hollow.textSecondary,
                     ),
                   ),
@@ -4748,6 +4755,7 @@ class _ImageRow extends StatelessWidget {
             onTap: onClear,
             subtle: true,
             padding: const EdgeInsets.all(HollowSpacing.xxs + 1),
+            semanticLabel: 'Remove $label',
             child: Icon(
               LucideIcons.trash2,
               size: 13,
@@ -4907,6 +4915,7 @@ class _UpdatesTabState extends ConsumerState<_UpdatesTab> {
                       if (state.status == UpdateStatus.downloading)
                         HollowPressable(
                           onTap: () => notifier.cancelDownload(),
+                          semanticLabel: 'Cancel download',
                           child: Padding(
                             padding: const EdgeInsets.all(4),
                             child: Icon(LucideIcons.x,
@@ -5467,6 +5476,7 @@ void _showLegalDocument(
                     ),
                     HollowPressable(
                       onTap: () => Navigator.of(ctx).pop(),
+                      semanticLabel: 'Close',
                       child: Padding(
                         padding: const EdgeInsets.all(8),
                         child: Icon(LucideIcons.x, size: 18,
@@ -5613,6 +5623,7 @@ class _BrandIconState extends State<_BrandIcon> {
               child: Icon(
                 widget.icon,
                 size: 20,
+                semanticLabel: widget.tooltip,
                 color: _hovering
                     ? widget.color
                     : hollow.textSecondary,
@@ -5672,6 +5683,7 @@ class _SvgBrandIconState extends State<_SvgBrandIcon> {
                 widget.asset,
                 width: 20,
                 height: 20,
+                semanticsLabel: widget.tooltip,
                 colorFilter: _hovering
                     ? null
                     : ColorFilter.mode(

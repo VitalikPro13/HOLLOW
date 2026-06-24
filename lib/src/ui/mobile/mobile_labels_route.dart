@@ -82,6 +82,7 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
                 children: [
                   HollowPressable(
                     onTap: () => Navigator.pop(context),
+                    semanticLabel: 'Back',
                     borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.sm),
                     child: Icon(LucideIcons.arrowLeft, size: 22, color: hollow.textPrimary),
@@ -95,6 +96,7 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
                   if (canManage)
                     HollowPressable(
                       onTap: () => _showCreateDialog(context),
+                      semanticLabel: 'Create label',
                       borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.sm),
                       child: Icon(LucideIcons.plus, size: 22, color: hollow.accent),
@@ -379,6 +381,7 @@ class _ManageSection extends ConsumerWidget {
                 ),
                 HollowPressable(
                   onTap: () => _showAssignDialog(context, ref, label),
+                  semanticLabel: 'Assign label to members',
                   borderRadius: BorderRadius.circular(hollow.radiusSm),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(LucideIcons.userPlus, size: 16, color: hollow.textSecondary),
@@ -386,6 +389,7 @@ class _ManageSection extends ConsumerWidget {
                 const SizedBox(width: HollowSpacing.xs),
                 HollowPressable(
                   onTap: () => _deleteLabel(context, label),
+                  semanticLabel: 'Delete label',
                   borderRadius: BorderRadius.circular(hollow.radiusSm),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(LucideIcons.trash2, size: 16, color: hollow.error),

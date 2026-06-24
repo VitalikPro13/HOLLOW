@@ -17,11 +17,22 @@ import 'package:hollow/src/ui/components/animated_gif_image.dart';
 ///
 /// Set [animate] to true for focused profile contexts (profile card,
 /// DM panel, settings preview). Defaults to false (static first frame).
+///
+/// Accessibility: pass [semanticLabel] (the person's display name) so a screen
+/// reader announces "`name`, image". When null the avatar is excluded from the
+/// semantics tree — a bare avatar with no name is decorative noise to a screen
+/// reader (its only fallback content is raw peer-id initials), so silence is
+/// better than reading those. Where the avatar sits next to a visible name that
+/// already names the row, leaving it null (excluded) is also correct.
 class HollowAvatar extends ConsumerWidget {
   final String peerId;
   final double size;
   final Uint8List? imageBytes;
   final bool animate;
+
+  /// Screen-reader label — the person's display name. Null = excluded from
+  /// semantics (decorative).
+  final String? semanticLabel;
 
   const HollowAvatar({
     super.key,
@@ -29,6 +40,7 @@ class HollowAvatar extends ConsumerWidget {
     this.size = 36,
     this.imageBytes,
     this.animate = false,
+    this.semanticLabel,
   });
 
   String _initialsFromId(String id) {
@@ -65,10 +77,12 @@ class HollowAvatar extends ConsumerWidget {
       bytes = ref.watch(avatarProvider.select((c) => c[peerId]));
       if (bytes == null) {
         Future.microtask(
-            () => ref.read(avatarProvider.notifier).loadAvatar(peerId));
+          () => ref.read(avatarProvider.notifier).loadAvatar(peerId),
+        );
       }
     }
 
+    Widget visual;
     if (bytes != null && bytes.isNotEmpty) {
       Widget image;
 
@@ -88,13 +102,20 @@ class HollowAvatar extends ConsumerWidget {
         );
       }
 
-      return ClipRRect(
+      visual = ClipRRect(
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         child: image,
       );
+    } else {
+      visual = _buildFallback(hollow);
     }
 
-    return _buildFallback(hollow);
+    // A named avatar announces "<name>, image"; an unnamed one is decorative
+    // (its only fallback is raw peer-id initials) and is excluded from the tree.
+    if (semanticLabel != null && semanticLabel!.isNotEmpty) {
+      return Semantics(label: semanticLabel, image: true, child: visual);
+    }
+    return ExcludeSemantics(child: visual);
   }
 }
 

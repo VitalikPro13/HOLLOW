@@ -215,6 +215,7 @@ class UserBar extends ConsumerWidget {
           HollowTooltip(
             message: 'Settings',
             child: HollowPressable(
+              semanticLabel: 'Settings',
               onTap: () => showUserSettingsDialog(context, ref),
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -231,6 +232,7 @@ class UserBar extends ConsumerWidget {
             HollowTooltip(
               message: 'Recovery phrase',
               child: HollowPressable(
+                semanticLabel: 'Recovery phrase',
                 onTap: () =>
                     showMnemonicDialog(context, identity.mnemonic!),
                 borderRadius: BorderRadius.circular(hollow.radiusSm),

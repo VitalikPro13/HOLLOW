@@ -1169,6 +1169,7 @@ class _ArchiveHeader extends StatelessWidget {
             const SizedBox(width: HollowSpacing.xs),
             HollowPressable(
               onTap: onJumpToDate,
+              semanticLabel: 'Jump to date',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.calendar,
@@ -1179,6 +1180,7 @@ class _ArchiveHeader extends StatelessWidget {
             const SizedBox(width: HollowSpacing.xs),
             HollowPressable(
               onTap: onToggleSearch,
+              semanticLabel: 'Search messages',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.search,
@@ -1192,6 +1194,7 @@ class _ArchiveHeader extends StatelessWidget {
             const SizedBox(width: HollowSpacing.xs),
             HollowPressable(
               onTap: onExport,
+              semanticLabel: 'Export conversation',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.fileOutput,
@@ -1257,6 +1260,7 @@ class _FilterButton extends StatelessWidget {
           onSenderFilterChanged?.call(picked == '_clear_' ? null : picked);
         }
       },
+      semanticLabel: 'Filter by sender',
       borderRadius: BorderRadius.circular(hollow.radiusSm),
       padding: const EdgeInsets.all(6),
       child: Icon(
@@ -1499,6 +1503,7 @@ class ArchiveSearchBarState extends State<ArchiveSearchBar> {
           const SizedBox(width: HollowSpacing.xs),
           HollowPressable(
             onTap: widget.onPrev,
+            semanticLabel: 'Previous match',
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.all(4),
             child: Icon(LucideIcons.chevronUp,
@@ -1509,6 +1514,7 @@ class ArchiveSearchBarState extends State<ArchiveSearchBar> {
           ),
           HollowPressable(
             onTap: widget.onNext,
+            semanticLabel: 'Next match',
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.all(4),
             child: Icon(LucideIcons.chevronDown,
@@ -1520,6 +1526,7 @@ class ArchiveSearchBarState extends State<ArchiveSearchBar> {
           const SizedBox(width: HollowSpacing.xs),
           HollowPressable(
             onTap: widget.onClose,
+            semanticLabel: 'Close search',
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.all(4),
             child: Icon(LucideIcons.x,
@@ -1723,6 +1730,7 @@ class _EditHistoryIndicatorState extends State<EditHistoryIndicator> {
                                       );
                                     }
                                   : null,
+                              semanticLabel: 'View signature details',
                               padding: const EdgeInsets.all(2),
                               child: Icon(
                                 hasSig

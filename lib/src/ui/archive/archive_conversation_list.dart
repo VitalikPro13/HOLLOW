@@ -317,6 +317,9 @@ class _DmRow extends ConsumerWidget {
               ),
               HollowPressable(
                 onTap: onToggleHidden,
+                semanticLabel: isHidden
+                    ? 'Show conversation'
+                    : 'Hide conversation',
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.all(4),
                 child: Icon(
@@ -510,6 +513,7 @@ class _ChannelList extends ConsumerWidget {
                             messageCount: totalMsgCount,
                           );
                         },
+                        semanticLabel: 'Export conversation',
                         borderRadius:
                             BorderRadius.circular(hollow.radiusSm),
                         padding: const EdgeInsets.all(3),

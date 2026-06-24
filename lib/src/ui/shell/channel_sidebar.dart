@@ -223,6 +223,7 @@ class ChannelSidebar extends StatelessWidget {
             HollowTooltip(
               message: 'Invite people',
               child: HollowPressable(
+                semanticLabel: 'Invite people',
                 onTap: () {
                   final link =
                       'hollow://join?server=${selectedServer!.serverId}';
@@ -241,6 +242,7 @@ class ChannelSidebar extends StatelessWidget {
             HollowTooltip(
               message: 'Storage',
               child: HollowPressable(
+                semanticLabel: 'Storage',
                 onTap: () => showStorageDashboardDialog(
                     context, selectedServer!.serverId),
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -255,6 +257,7 @@ class ChannelSidebar extends StatelessWidget {
             HollowTooltip(
               message: 'Server settings',
               child: HollowPressable(
+                semanticLabel: 'Server settings',
                 onTap: onOpenSettings,
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -430,6 +433,7 @@ class _ServerContentState extends State<_ServerContent> {
                 ),
                 if (w.canManageChannels)
                   HollowPressable(
+                    semanticLabel: 'Create channel',
                     onTap: w.onCreateChannel,
                     borderRadius: BorderRadius.circular(w.hollow.radiusSm),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -795,12 +799,14 @@ class _PendingRequestTile extends ConsumerWidget {
             ),
             if (direction == 'incoming') ...[
               HollowPressable(
+                semanticLabel: 'Accept friend request',
                 onTap: onAccept,
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.check, size: 16, color: hollow.success),
               ),
               HollowPressable(
+                semanticLabel: 'Reject friend request',
                 onTap: onReject,
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.all(HollowSpacing.xs),

@@ -661,6 +661,7 @@ class _CategoryRow extends StatelessWidget {
             ),
             HollowPressable(
               onTap: onRename,
+              semanticLabel: 'Rename category',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(HollowSpacing.xs),
               child: Icon(LucideIcons.pencil,
@@ -669,6 +670,7 @@ class _CategoryRow extends StatelessWidget {
             const SizedBox(width: HollowSpacing.xs),
             HollowPressable(
               onTap: onDelete,
+              semanticLabel: 'Delete category',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(HollowSpacing.xs),
               child:
@@ -784,6 +786,9 @@ class _ChannelRow extends StatelessWidget {
                   const SizedBox(width: 4),
                   HollowPressable(
                     onTap: onPublicToggled,
+                    semanticLabel: isPublic
+                        ? 'Make channel private, currently public'
+                        : 'Make channel public, currently private',
                     borderRadius: BorderRadius.circular(hollow.radiusSm),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(
@@ -795,6 +800,7 @@ class _ChannelRow extends StatelessWidget {
                   const SizedBox(width: HollowSpacing.xs),
                   HollowPressable(
                     onTap: onRename,
+                    semanticLabel: 'Rename channel',
                     borderRadius: BorderRadius.circular(hollow.radiusSm),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(LucideIcons.pencil,
@@ -803,6 +809,7 @@ class _ChannelRow extends StatelessWidget {
                   const SizedBox(width: HollowSpacing.xs),
                   HollowPressable(
                     onTap: onDelete,
+                    semanticLabel: 'Delete channel',
                     borderRadius: BorderRadius.circular(hollow.radiusSm),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child:
@@ -852,6 +859,7 @@ class _SeparatorRow extends StatelessWidget {
           const SizedBox(width: HollowSpacing.sm),
           HollowPressable(
             onTap: onDelete,
+            semanticLabel: 'Delete separator',
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.all(HollowSpacing.xs),
             child: Icon(LucideIcons.x, size: 12, color: hollow.textSecondary),

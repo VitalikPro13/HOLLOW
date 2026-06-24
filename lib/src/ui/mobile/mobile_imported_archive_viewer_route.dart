@@ -177,6 +177,7 @@ class _MobileImportedArchiveViewerRouteState
         children: [
           HollowPressable(
             onTap: () => Navigator.pop(context),
+            semanticLabel: 'Back',
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.all(8),
             child: Icon(LucideIcons.chevronLeft,
@@ -360,6 +361,7 @@ class _MobileImportedArchiveViewerRouteState
             children: [
               HollowPressable(
                 onTap: () => Navigator.pop(context),
+                semanticLabel: 'Back',
                 borderRadius:
                     BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.all(8),
@@ -407,6 +409,7 @@ class _MobileImportedArchiveViewerRouteState
                 HollowPressable(
                   onTap: () => _showFilterSheet(
                       uniqueSenders, filterSender, senderNames),
+                  semanticLabel: 'Filter by sender',
                   borderRadius:
                       BorderRadius.circular(hollow.radiusSm),
                   padding: const EdgeInsets.all(6),
@@ -429,6 +432,7 @@ class _MobileImportedArchiveViewerRouteState
                             .timestamp;
                     _pickDate(first, last);
                   },
+                  semanticLabel: 'Jump to date',
                   borderRadius:
                       BorderRadius.circular(hollow.radiusSm),
                   padding: const EdgeInsets.all(6),
@@ -437,6 +441,7 @@ class _MobileImportedArchiveViewerRouteState
                 ),
               HollowPressable(
                 onTap: _toggleSearch,
+                semanticLabel: 'Search messages',
                 borderRadius:
                     BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.all(6),

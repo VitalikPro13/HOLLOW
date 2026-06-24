@@ -70,20 +70,27 @@ class ProfileTapTarget extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () => showChatProfile(
-          context,
-          ref,
-          peerId: peerId,
-          nickname: nickname,
-          role: role,
-          twitchUsername: twitchUsername,
-          labels: labels,
+    final name = nickname;
+    return Semantics(
+      button: true,
+      label: (name != null && name.isNotEmpty)
+          ? "Open $name's profile"
+          : 'Open profile',
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => showChatProfile(
+            context,
+            ref,
+            peerId: peerId,
+            nickname: nickname,
+            role: role,
+            twitchUsername: twitchUsername,
+            labels: labels,
+          ),
+          child: child,
         ),
-        child: child,
       ),
     );
   }

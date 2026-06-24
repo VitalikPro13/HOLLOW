@@ -171,6 +171,7 @@ class _StagedHollowLinkCardState extends ConsumerState<StagedHollowLinkCard> {
           ),
           HollowPressable(
             onTap: widget.onDismiss,
+            semanticLabel: 'Remove link preview',
             padding: const EdgeInsets.all(HollowSpacing.xs),
             child:
                 Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),

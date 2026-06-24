@@ -170,6 +170,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
         children: [
           HollowPressable(
             onTap: () => Navigator.of(context).pop(),
+            semanticLabel: 'Minimize',
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.all(HollowSpacing.sm),
             child: Icon(LucideIcons.chevronDown,

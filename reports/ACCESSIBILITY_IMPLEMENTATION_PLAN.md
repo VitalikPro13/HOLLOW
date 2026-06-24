@@ -1,8 +1,10 @@
 # HOLLOW — Accessibility Implementation Plan
 
-**Status:** Phase 1 IMPLEMENTED (desktop/harness-verified; device-claim pending). Authored 2026-06-24, updated 2026-06-24.
+**Status:** Phase 1 + Phase 2 (2.1–2.5) IMPLEMENTED; 2.6 deferred; Phase 3 not started. Authored 2026-06-24, updated 2026-06-24.
 
-> **Progress (2026-06-24):** Phase 1.1 (Reduce Motion), 1.2 (Contrast), 1.3 (Differentiate Without Color), 1.4 (Accessibility settings shell), and 1.5 (Reduce Transparency) are all implemented and pass `flutter analyze` + 42 widget/unit tests. Phases 2 (VoiceOver/Voice Control) and 3 (Larger Text) are NOT started — both gate on Vitalik's real-device screen-reader/text-scale verification before any App Store box is claimed. Per-section state is marked inline below with ✅.
+> **Progress (2026-06-24):** **Phase 1** (1.1 Reduce Motion, 1.2 Contrast, 1.3 Differentiate Without Color, 1.4 Accessibility settings shell, 1.5 Reduce Transparency) — all implemented. **Phase 2** (VoiceOver/Voice Control): 2.1 semantics foundation ✅, 2.2 icon-only labels ✅, 2.3 avatar alt text ✅, 2.4 inline content ✅, 2.5 custom-painted widgets ✅. **2.6 (keyboard focus) DEFERRED** to its own session (higher-risk, needs a focus-ring design token + keyboard test). **Phase 3 (Larger Text) not started.** All 55 widget/unit tests pass + `flutter analyze` clean (0 errors). **CI guards:** `test/contrast_test.dart` (1.2), `test/widget/semantics_foundation_test.dart` (2.1, 12 tests, proves no double-fire), and `test/a11y_label_guard_test.dart` (2.2 — static scan that fails the build on any unlabeled icon-only `HollowPressable`/`HollowButton` AND raw `GestureDetector`/`InkWell`). Per-section state marked inline with ✅.
+>
+> **First device pass (Vitalik, TalkBack on Android, 2026-06-24):** core flow works — labels read, reduce-motion works, dark theme good. **Two fixes applied from it:** (1) mobile nav "+" button was unlabeled (a raw `GestureDetector` the guard didn't yet scan) → labeled "New conversation" + **guard extended to cover raw GestureDetector/InkWell**; (2) nav badges read "5, Chats" (meaningless number) → now "Chats, 5 unread" + selected state (WCAG 4.1.2 — label must convey purpose, not just glyph). **Next device pass (Vitalik, NEXT SESSION before 2.6):** sweep all labeled surfaces by ear for (a) controls reading as bare/unnamed, (b) rows announcing a name twice (MergeSemantics over-merge), (c) labels that read the glyph but not the meaning. Anything found → fix the control, and if it's a pattern, teach the guard. THEN do 2.6 keyboard focus. The App Store VoiceOver/Voice Control box stays UNCHECKED until this ear-sweep + an iOS VoiceOver pass confirm it sounds right.
 **Target:** Legitimately claim all 7 applicable App Store Connect accessibility features (everything except Captions and Audio Descriptions, which are N/A — Hollow ships no authored media content).
 **Scope decisions (locked with Vitalik):**
 - **Everything, claimable for real** — no box checked that we can't honestly back.
@@ -166,15 +168,17 @@ Work through by surface. Where a `HollowTooltip` string already exists, reuse it
 - [ ] `message_text_parser.dart`: tappable **URLs** (`:264-281`) and **spoilers** (`:319-324`) are built as `WidgetSpan`+`GestureDetector` and are invisible/unactionable to SR. Wrap the inner widget in `Semantics(link: true, label: url, onTap: …)` / `Semantics(button: true, label: "Reveal spoiler")`. Mentions (`:283-300`) — add `Semantics(label: "@username")`.
 - [ ] `ProfileTapTarget` (`profile_tap.dart:73-89`) — wraps avatars/usernames app-wide in a bare `GestureDetector` opening a profile card. Add `Semantics(button: true, label: "Open {name}'s profile")`.
 
-### 2.5 Custom-painted state widgets
-- [ ] `StatusDot` — once 1.3 adds a shape cue, also add `Semantics(label: "Online"/"Offline")` (color + shape + SR text = fully redundant).
-- [ ] `speaking_border.dart` — `Semantics(label: "{name} is speaking")` or a liveRegion in voice context.
-- [ ] Decorative `CustomPaint` (shimmer, ambient, annotation overlays, waveforms, crop overlays, tree connectors) → `ExcludeSemantics` for tree cleanliness. (Waveforms in `voice_recorder_bar`/`ringtone_clip_editor` do convey info — give them a text alternative or label.)
+### 2.5 Custom-painted state widgets — ✅ DONE 2026-06-24
+- [x] `StatusDot` — already has `Semantics(label: "Online"/"Offline")` from Phase 1.3 (shape cue + label). Nothing further needed.
+- [x] `speaking_border.dart` — when `isSpeaking`, wraps the child in `Semantics(label: 'Speaking', container: true)` which MERGES with the wrapped avatar's existing name → SR reads "Alice, Speaking". No call-site plumbing needed (the avatar inside already names the person). Silent passthrough when not speaking.
+- [x] Waveforms → `ExcludeSemantics`: `voice_recorder_bar` (live amplitude — non-informative to SR; recording state is carried by the timer + labeled Discard/Send) and `ringtone_clip_editor` drag-scrub surface (the accessible path is the labeled Start/End nudge fields). **Decision:** waveforms are NOT given text labels — live amplitude / drag-scrub convey nothing a SR can act on, so excluding them is more honest than announcing a meaningless region.
+- [x] Other decorative `CustomPaint` (shimmer, ambient, tree connectors, crop grid, annotation canvas) — **left as-is**: a childless `CustomPaint` with no `SemanticsProperties` already contributes NOTHING to the semantics tree, so wrapping them in `ExcludeSemantics` would be a no-op. Verified, not skipped.
 
-### 2.6 Focus traversal + keyboard (also serves Voice Control + keyboard-only users)
-- [ ] Today the custom buttons are **not keyboard-focusable** (built on `GestureDetector`, not `Focus`/`FocusableActionDetector`); only text fields are in the focus chain, and there is **no** `FocusTraversalGroup`/`FocusTraversalOrder` anywhere. Adding `Semantics(button:true)` helps SR, but for **keyboard** focus consider migrating the core components to `FocusableActionDetector` (or wrap in `Focus`) so Tab works and Voice Control's numbered overlays land correctly.
-- [ ] Add `FocusTraversalGroup` around major regions (sidebar, chat, member panel) to give a sane swipe/Tab order. Reading order should be logical, not geometric-accidental.
-- [ ] Consider an app-level `Shortcuts`/`Actions` layer for common actions (send, navigate channels) — benefits keyboard users and gives Voice Control named intents. Lower priority than labels.
+### 2.6 Focus traversal + keyboard — 🟡 DEFERRED (decision 2026-06-24), NOT a Phase-2 blocker
+> **Why deferred:** VoiceOver + Voice Control are already served by the labels + semantic roles — the foundation's `Semantics(onTap:)` gives Voice Control its activation path WITHOUT keyboard focus. 2.6 is a different, higher-risk class of change (it alters how the two most-used widgets behave) that deserves its own focused session + device/keyboard verification. The plan always marked it "lower priority than labels."
+- [ ] Today the custom buttons are **not keyboard-focusable** (built on `GestureDetector`, not `Focus`/`FocusableActionDetector`); only text fields are in the focus chain, and there is **no** `FocusTraversalGroup`/`FocusTraversalOrder` anywhere (confirmed via grep 2026-06-24). For **keyboard** focus, migrate the core components to `FocusableActionDetector` (or wrap in `Focus`) so Tab works and Voice Control's numbered overlays land correctly. **Prerequisite: a focus-ring design token** — Hollow's design system has no focus-ring spec today; adding focusability without one looks broken. **Risk:** changes Tab order + Enter/Space activation on every interactive surface → needs a real keyboard test pass (Vitalik).
+- [ ] Add `FocusTraversalGroup` around major regions (sidebar, chat, member panel) for a sane swipe/Tab order — only meaningful AFTER the components are focusable.
+- [ ] Consider an app-level `Shortcuts`/`Actions` layer for common actions (send, navigate channels). Lower priority than labels.
 
 ---
 
@@ -214,8 +218,10 @@ Replace `Container(height: N)` wrapping text with `ConstrainedBox(minHeight: N)`
 
 ## Testing & validation
 
+- [x] **Semantics foundation widget test** (`test/widget/semantics_foundation_test.dart`, 12 tests, Phase 2.1): asserts `HollowPressable`/`HollowButton`/`HollowToggle` expose the right role (button/toggled), enabled state, and label — AND that a `GestureDetector` under `Semantics(onTap:)` does **not** double-fire (physical tap once, assistive-tech activation once). Headless; stands in for the device pass on the foundation *mechanics* only (not announced label text).
+- [x] **A11y label CI guard** (`test/a11y_label_guard_test.dart`, Phase 2.2): static source scan of `lib/src/ui` that **fails the build** if an icon-only `HollowPressable`/`HollowButton` (child is a bare Icon/glyph, no Text) has no `semanticLabel`. This is the machine that keeps future controls labeled — the foundation widget test can't see the real tree, this can. Prints `file:line` + the icon for each offender. Escape hatch: `// a11y-ignore: <reason>` on the control's line. Text-child controls are auto-named and intentionally not flagged. **When it fails, add the label — do not suppress.** (Found 28 sweep-missed controls on first run; all labeled.)
 - [ ] **Widget tests:** the harness (`test/helpers/test_app.dart`, `pumpHollowMobile()`) already mocks `disableAnimationsProvider` — extend to cover `reduceMotionProvider` tri-state. Add golden/structure tests at 1.0× / 1.5× / 2.0× `textScaler` for the chat surfaces fixed in Phase 3 (assert no RenderFlex overflow).
-- [ ] **Contrast CI check** (1.2.x): token-pairing luminance test fails below 4.5:1 body / 3:1 UI.
+- [x] **Contrast CI check** (1.2.x): token-pairing luminance test fails below 4.5:1 body / 3:1 UI. (`test/contrast_test.dart`.)
 - [ ] **Manual VoiceOver/TalkBack pass** (Vitalik, on real devices) — the audit can't verify announced names; a real screen-reader sweep of the labeled surfaces is required before claiming VoiceOver/Voice Control. (Per `feedback_no_ios_build_command` + `feedback_vitalik_tests_*`: Vitalik runs the iOS/device verification; Claude can't.)
 - [ ] **OS Reduce-Motion runtime test:** toggle the OS setting while the app is open; confirm `onAccessibilityFeaturesChanged` stops motion live (not just on restart).
 - [ ] **App Store Connect:** only check a box after its phase is implemented AND device-verified. A false claim is worse than an empty one (Apple spot-checks; this was the original motivation).
@@ -227,10 +233,14 @@ Replace `Container(height: N)` wrapping text with `ConstrainedBox(minHeight: N)`
 1. ✅ **Phase 1.1 Reduce Motion** + **1.4 Accessibility section shell** → claim Reduced Motion. (Highest honesty-per-effort.) — DONE 2026-06-24
 2. ✅ **Phase 1.2 Contrast** + **1.3 Color-only** → claim Sufficient Contrast + Differentiate Without Color. — DONE 2026-06-24
 3. ✅ **Phase 1.5 Reduce Transparency** (bonus, cheap). — DONE 2026-06-24
-4. ⬜ **Phase 2.1 foundation** → then **2.2–2.5 labels** (the big push) → device-verify → claim VoiceOver + Voice Control. — NEXT SESSION
+4. 🟡 **Phase 2.1 foundation** ✅ + **2.2–2.4 labels** ✅ (icon-only controls, inline content, avatars) — DONE 2026-06-24. **Remaining before claiming VoiceOver + Voice Control:** 2.5 (custom-painted state widgets — speaking_border, etc.), 2.6 (focus traversal / keyboard), and the **device VoiceOver/TalkBack pass** (Vitalik).
 5. ⬜ **Phase 3 large-text** layout hardening → raise the cap → device-verify → claim Larger Text.
 
-> **NEXT SESSION starts at Phase 2.1** (the 3-component semantics foundation: `HollowPressable`/`HollowButton`/`HollowToggle`). Note the StatusDot work in 1.3 already added `semanticLabel` plumbing — Phase 2.5's StatusDot item is partly done. Heed the lesson from 1.3: the audit's per-section site lists are incomplete; grep for the real surface (e.g. `grep HollowTooltip`, icon-only buttons) rather than trusting the bullet lists.
+> **Phase 2.1–2.4 landed 2026-06-24.** Foundation: `HollowPressable`/`HollowButton`/`HollowToggle` wrap their gesture in `Semantics` (+`MergeSemantics` so each control is one SR node) with new `semanticLabel` (and `semanticButton` on Pressable) params; `HollowAvatar` gained `semanticLabel` (announces "name, image" or `ExcludeSemantics` when null). ~230 labels added across ~60 files via a parallel sweep, then a **CI guard** (`test/a11y_label_guard_test.dart`) caught 28 sweep-missed controls (all fixed). The guard now enforces labeling for all future icon-only controls.
+>
+> **LESSON (cost us a recovery):** several sweep agents ran `dart format`, which reflows entire files due to a `dart_style` version mismatch with HEAD (committed code is NOT format-clean), burying real changes in thousands of churn lines and once even reverting the foundation. **Do NOT run `dart format` on existing files in this repo during a labeling/edit pass** — hand-match the surrounding indentation; only format brand-new files. If a labeling diff shows deletions ≫ additions, formatting leaked in — revert and re-apply by hand.
+>
+> **NEXT (Phase 2 remainder):** 2.5 custom-painted widgets (StatusDot already has `semanticLabel` from 1.3; speaking_border, waveforms need labels/ExcludeSemantics), 2.6 focus traversal. Then Phase 3 (large text). Heed the 1.3 lesson: audit site-lists are incomplete — the guard + a fresh grep are the real surface, not the bullet lists.
 
 Dark Interface is already claimable now.
 

@@ -495,6 +495,7 @@ class _MobileServerSettingsRouteState
                 children: [
                   HollowPressable(
                     onTap: () => Navigator.pop(context),
+                    semanticLabel: 'Back',
                     borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.sm),
                     child: Icon(LucideIcons.arrowLeft,
@@ -824,6 +825,7 @@ class _MobileServerSettingsRouteState
                             HollowToast.show(context, 'Copied',
                                 type: HollowToastType.success);
                           },
+                          semanticLabel: 'Copy server ID',
                           borderRadius:
                               BorderRadius.circular(hollow.radiusSm),
                           padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -1834,11 +1836,13 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
             ),
             HollowPressable(
               onTap: () => _renameCategory(index, item.name),
+              semanticLabel: 'Rename category',
               padding: const EdgeInsets.all(HollowSpacing.xs),
               child: Icon(LucideIcons.pencil, size: 16, color: hollow.textSecondary),
             ),
             HollowPressable(
               onTap: () => setState(() => _layout.removeAt(index)),
+              semanticLabel: 'Remove category',
               padding: const EdgeInsets.all(HollowSpacing.xs),
               child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
             ),
@@ -1893,6 +1897,9 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                   HollowPressable(
                     onTap: () =>
                         _toggleChannelPublic(item.channelId, ch?.isPublic ?? false),
+                    semanticLabel: (ch?.isPublic ?? false)
+                        ? 'Make channel private, currently public'
+                        : 'Make channel public, currently private',
                     padding: const EdgeInsets.all(HollowSpacing.xs),
                     child: Icon(
                       LucideIcons.globe,
@@ -1904,11 +1911,13 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                   ),
                 HollowPressable(
                   onTap: () => _renameChannel(index, item.channelId, name),
+                  semanticLabel: 'Rename channel',
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(LucideIcons.pencil, size: 16, color: hollow.textSecondary),
                 ),
                 HollowPressable(
                   onTap: () => _deleteChannel(index, item.channelId, name),
+                  semanticLabel: 'Delete channel',
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(LucideIcons.trash2, size: 16, color: hollow.error),
                 ),
@@ -1967,6 +1976,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
           const SizedBox(width: HollowSpacing.sm),
           HollowPressable(
             onTap: () => setState(() => _layout.removeAt(index)),
+            semanticLabel: 'Remove separator',
             padding: const EdgeInsets.all(HollowSpacing.xs),
             child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
           ),

@@ -174,6 +174,7 @@ void showCreateServerDialog(BuildContext context) {
                         onTap: () => Navigator.of(dialogContext).pop(),
                         borderRadius: BorderRadius.circular(hollow.radiusSm),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
+                        semanticLabel: 'Close',
                         child: Icon(LucideIcons.x,
                             size: 18, color: hollow.textSecondary),
                       ),

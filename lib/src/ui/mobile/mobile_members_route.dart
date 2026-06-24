@@ -122,6 +122,7 @@ class _Header extends StatelessWidget {
         children: [
           HollowPressable(
             onTap: () => Navigator.pop(context),
+            semanticLabel: 'Back',
             borderRadius: BorderRadius.circular(hollow.radiusMd),
             padding: const EdgeInsets.all(HollowSpacing.sm),
             child: Icon(LucideIcons.arrowLeft, size: 22, color: hollow.textPrimary),
@@ -335,6 +336,7 @@ class _MemberRow extends ConsumerWidget {
             if (canManageThis)
               HollowPressable(
                 onTap: () => _showActions(context, ref),
+                semanticLabel: 'Member options',
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.all(HollowSpacing.sm),
                 child: Icon(LucideIcons.moreVertical, size: 16, color: hollow.textSecondary),

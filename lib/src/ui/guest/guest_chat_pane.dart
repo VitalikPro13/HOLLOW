@@ -134,6 +134,7 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                   HollowToast.show(context, 'Refreshing...',
                       type: HollowToastType.info);
                 },
+                semanticLabel: 'Retry',
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.all(4),
                 child:
@@ -148,6 +149,7 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                     _searchController.clear();
                   }
                 }),
+                semanticLabel: 'Search messages',
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.all(4),
                 child: Icon(

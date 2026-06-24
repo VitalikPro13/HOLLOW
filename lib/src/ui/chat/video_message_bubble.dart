@@ -829,8 +829,21 @@ class _IconBtn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    String label;
+    if (icon == LucideIcons.play) {
+      label = 'Play video';
+    } else if (icon == LucideIcons.pause) {
+      label = 'Pause video';
+    } else if (icon == LucideIcons.maximize2) {
+      label = 'Enter fullscreen';
+    } else if (icon == LucideIcons.minimize2) {
+      label = 'Exit fullscreen';
+    } else {
+      label = 'Video control';
+    }
     return HollowPressable(
       onTap: onTap,
+      semanticLabel: label,
       borderRadius: BorderRadius.circular(4),
       padding: const EdgeInsets.all(6),
       child: Icon(icon, color: Colors.white, size: 16),

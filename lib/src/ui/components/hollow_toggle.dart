@@ -10,10 +10,16 @@ class HollowToggle extends StatefulWidget {
   final bool value;
   final ValueChanged<bool>? onChanged;
 
+  /// Screen-reader label describing what this switch controls (e.g. "Reduce
+  /// motion"). The on/off state is announced automatically via the toggled
+  /// semantic; the label gives it a name.
+  final String? semanticLabel;
+
   const HollowToggle({
     super.key,
     required this.value,
     required this.onChanged,
+    this.semanticLabel,
   });
 
   @override
@@ -37,7 +43,9 @@ class _HollowToggleState extends State<HollowToggle>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 200),
+      duration: HollowDurations.animationsDisabled
+          ? Duration.zero
+          : const Duration(milliseconds: 200),
       value: widget.value ? 1.0 : 0.0,
     );
     _thumbPosition = CurvedAnimation(
@@ -79,49 +87,57 @@ class _HollowToggleState extends State<HollowToggle>
   Widget build(BuildContext context) {
     final isDisabled = widget.onChanged == null;
 
-    return GestureDetector(
-      onTap: isDisabled
-          ? null
-          : () => widget.onChanged!(!widget.value),
-      child: FadeTransition(
-        opacity: AlwaysStoppedAnimation(isDisabled ? 0.4 : 1.0),
-        child: MouseRegion(
-          cursor: isDisabled
-              ? SystemMouseCursors.basic
-              : SystemMouseCursors.click,
-          child: AnimatedBuilder(
-            animation: _thumbPosition,
-            builder: (context, _) {
-              final thumbLeft = 2.0 + (_thumbPosition.value * 16.0);
+    return MergeSemantics(
+      child: Semantics(
+        // Switch role: announces on/off state via `toggled`. The semantic onTap
+        // mirrors the gesture so Voice Control can flip it.
+        toggled: widget.value,
+        enabled: !isDisabled,
+        label: widget.semanticLabel,
+        onTap: isDisabled ? null : () => widget.onChanged!(!widget.value),
+        child: GestureDetector(
+          onTap: isDisabled ? null : () => widget.onChanged!(!widget.value),
+          child: FadeTransition(
+            opacity: AlwaysStoppedAnimation(isDisabled ? 0.4 : 1.0),
+            child: MouseRegion(
+              cursor: isDisabled
+                  ? SystemMouseCursors.basic
+                  : SystemMouseCursors.click,
+              child: AnimatedBuilder(
+                animation: _thumbPosition,
+                builder: (context, _) {
+                  final thumbLeft = 2.0 + (_thumbPosition.value * 16.0);
 
-              return SizedBox(
-                width: 36,
-                height: 20,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: _trackColorAnimation.value,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Stack(
-                    children: [
-                      Positioned(
-                        left: thumbLeft,
-                        top: 2,
-                        child: Container(
-                          width: 16,
-                          height: 16,
-                          decoration: const BoxDecoration(
-                            color: Colors.white,
-                            shape: BoxShape.circle,
-                            boxShadow: [_thumbShadow],
-                          ),
-                        ),
+                  return SizedBox(
+                    width: 36,
+                    height: 20,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: _trackColorAnimation.value,
+                        borderRadius: BorderRadius.circular(10),
                       ),
-                    ],
-                  ),
-                ),
-              );
-            },
+                      child: Stack(
+                        children: [
+                          Positioned(
+                            left: thumbLeft,
+                            top: 2,
+                            child: Container(
+                              width: 16,
+                              height: 16,
+                              decoration: const BoxDecoration(
+                                color: Colors.white,
+                                shape: BoxShape.circle,
+                                boxShadow: [_thumbShadow],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
           ),
         ),
       ),

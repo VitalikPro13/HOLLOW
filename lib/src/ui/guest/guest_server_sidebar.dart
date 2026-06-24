@@ -119,6 +119,7 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
                       _addController.clear();
                     }
                   }),
+                  semanticLabel: 'Add channel',
                   borderRadius: BorderRadius.circular(hollow.radiusSm),
                   padding: const EdgeInsets.all(4),
                   child: Icon(
@@ -409,6 +410,7 @@ class _GuestServerSection extends ConsumerWidget {
                     const SizedBox(width: 2),
                     HollowPressable(
                       onTap: onRefresh,
+                      semanticLabel: 'Refresh',
                       borderRadius: BorderRadius.circular(hollow.radiusSm),
                       padding: const EdgeInsets.all(2),
                       child: Icon(

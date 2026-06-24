@@ -226,7 +226,8 @@ class _CleanupMenu extends ConsumerWidget {
       tooltip: 'Clean up',
       icon: Icon(LucideIcons.ellipsis,
           size: 18,
-          color: enabled ? hollow.textSecondary : hollow.border),
+          color: enabled ? hollow.textSecondary : hollow.border,
+          semanticLabel: 'Cleanup options'),
       color: hollow.elevated,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(hollow.radiusMd),
@@ -409,7 +410,8 @@ class _RowTrashButton extends StatelessWidget {
         },
         child: Padding(
           padding: const EdgeInsets.all(6),
-          child: Icon(LucideIcons.trash2, size: 16, color: hollow.error),
+          child: Icon(LucideIcons.trash2, size: 16, color: hollow.error,
+              semanticLabel: 'Delete files'),
         ),
       ),
     );

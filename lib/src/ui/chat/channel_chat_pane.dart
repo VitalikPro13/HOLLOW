@@ -328,6 +328,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                     ),
                     const Spacer(),
                     HollowPressable(
+                      semanticLabel: 'Close',
                       onTap: () => Navigator.pop(ctx),
                       padding: const EdgeInsets.all(4),
                       child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
@@ -1340,6 +1341,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                 return HollowTooltip(
                   message: '${pinnedIds.length} pinned message${pinnedIds.length == 1 ? '' : 's'}',
                   child: HollowPressable(
+                    semanticLabel:
+                        '${pinnedIds.length} pinned message${pinnedIds.length == 1 ? '' : 's'}',
                     onTap: () => _showPinnedMessages(context, hollow, pinnedIds),
                     borderRadius: BorderRadius.circular(hollow.radiusSm),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -1364,6 +1367,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
               HollowTooltip(
                 message: 'Search messages',
                 child: HollowPressable(
+                  semanticLabel: 'Search messages',
                   onTap: () {
                     final current = ref.read(channelSearchOpenProvider);
                     ref.read(channelSearchOpenProvider.notifier).state = !current;
@@ -1387,6 +1391,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
               HollowTooltip(
                 message: 'Toggle member panel',
                 child: HollowPressable(
+                  semanticLabel: 'Toggle member panel',
                   onTap: () => ref.read(memberPanelProvider.notifier).state =
                       !ref.read(memberPanelProvider),
                   borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -1408,6 +1413,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                       ? 'Close this pane'
                       : 'Split view',
                   child: HollowPressable(
+                    semanticLabel: ref.watch(splitViewProvider).isSplit
+                        ? 'Close this pane'
+                        : 'Split view',
                     onTap: () => _handleSplitToggle(ref),
                     borderRadius: BorderRadius.circular(hollow.radiusSm),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -2084,6 +2092,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                   ),
                 ),
                 HollowPressable(
+                  semanticLabel: 'Cancel reply',
                   onTap: () => setState(() {
                     _replyToMessageId = null;
                     _replyToText = null;
@@ -2140,6 +2149,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                   ),
                 ),
                 HollowPressable(
+                  semanticLabel: 'Remove attachment',
                   onTap: () => setState(() {
                     _stagedFilePath = null;
                     _stagedFileName = null;
@@ -2224,6 +2234,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                   children: [
                     // File attachment button
                     HollowPressable(
+                      semanticLabel: 'Attach file',
                       onTap: _pickAndStageFile,
                       borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.sm),
@@ -2235,6 +2246,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                     ),
                     const SizedBox(width: HollowSpacing.xs),
                     HollowPressable(
+                      semanticLabel: 'Record voice message',
                       onTap: _stagedFilePath != null
                           ? null
                           : () => setState(() => _isRecordingVoice = true),
@@ -2317,6 +2329,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                     ),
                     const SizedBox(width: HollowSpacing.sm),
                     HollowPressable(
+                      semanticLabel: 'Send message',
                       onTap: _handleSend,
                       borderRadius: BorderRadius.circular(hollow.radiusMd),
                       backgroundColor: hollow.accent,
@@ -2515,6 +2528,7 @@ class _SyncIndicatorState extends ConsumerState<_SyncIndicator> {
         if (showRetry) ...[
           const SizedBox(width: HollowSpacing.xs),
           HollowPressable(
+            semanticLabel: 'Retry sync',
             onTap: _retry,
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.all(2),

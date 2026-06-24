@@ -203,6 +203,7 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
                     if (widget.onClose != null)
                       HollowPressable(
                         onTap: widget.onClose,
+                        semanticLabel: 'Close',
                         borderRadius:
                             BorderRadius.circular(hollow.radiusSm),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -495,6 +496,7 @@ class HelpLessonView extends StatelessWidget {
             children: [
               HollowPressable(
                 onTap: onBack,
+                semanticLabel: 'Back',
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.all(HollowSpacing.xs),
                 child: Icon(LucideIcons.arrowLeft,

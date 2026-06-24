@@ -35,6 +35,7 @@ class DownloadIconButton extends ConsumerWidget {
         },
         borderRadius: BorderRadius.circular(hollow.radiusSm),
         padding: const EdgeInsets.all(HollowSpacing.xs),
+        semanticLabel: 'Downloads',
         child: Stack(
           clipBehavior: Clip.none,
           children: [

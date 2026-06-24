@@ -140,11 +140,13 @@ class _WindowButton extends StatefulWidget {
   final VoidCallback onTap;
   final Color? hoverColor;
   final Widget child;
+  final String? semanticLabel;
 
   const _WindowButton({
     required this.onTap,
     required this.child,
     this.hoverColor,
+    this.semanticLabel,
   });
 
   @override
@@ -161,18 +163,22 @@ class _WindowButtonState extends State<_WindowButton> {
         ? (widget.hoverColor ?? hollow.elevated)
         : Colors.transparent;
 
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovering = true),
-      onExit: (_) => setState(() => _hovering = false),
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: AnimatedContainer(
-          duration: HollowDurations.fast,
-          width: 46,
-          height: 32,
-          color: bgColor,
-          alignment: Alignment.center,
-          child: widget.child,
+    return Semantics(
+      button: true,
+      label: widget.semanticLabel,
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hovering = true),
+        onExit: (_) => setState(() => _hovering = false),
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: HollowDurations.fast,
+            width: 46,
+            height: 32,
+            color: bgColor,
+            alignment: Alignment.center,
+            child: widget.child,
+          ),
         ),
       ),
     );
@@ -188,6 +194,7 @@ class _MinimizeButton extends StatelessWidget {
 
     return _WindowButton(
       onTap: () => windowManager.minimize(),
+      semanticLabel: 'Minimize',
       child: Icon(
         LucideIcons.minus,
         size: 16,
@@ -247,6 +254,7 @@ class _MaximizeButtonState extends State<_MaximizeButton> with WindowListener {
           await windowManager.maximize();
         }
       },
+      semanticLabel: _isMaximized ? 'Restore' : 'Maximize',
       child: Icon(
         _isMaximized ? LucideIcons.columns : LucideIcons.square,
         size: 14,
@@ -266,6 +274,7 @@ class _CloseButton extends StatelessWidget {
     return _WindowButton(
       onTap: () => windowManager.close(),
       hoverColor: const Color(0xFFE81123), // Standard red close hover
+      semanticLabel: 'Close',
       child: Icon(
         LucideIcons.x,
         size: 16,

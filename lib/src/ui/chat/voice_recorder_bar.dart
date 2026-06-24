@@ -171,6 +171,7 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
         // Cancel (discard).
         HollowPressable(
           onTap: _cancel,
+          semanticLabel: 'Discard recording',
           borderRadius: BorderRadius.circular(hollow.radiusMd),
           padding: const EdgeInsets.all(HollowSpacing.sm),
           child: Icon(LucideIcons.trash2,
@@ -216,14 +217,20 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
                 ),
                 const SizedBox(width: HollowSpacing.sm),
                 Expanded(
-                  child: RepaintBoundary(
-                    child: CustomPaint(
-                      painter: _WaveformPainter(
-                        samples: _waveform.toList(growable: false),
-                        color: hollow.accent,
-                        maxSamples: _waveformSamples,
+                  // Decorative live-amplitude visual — conveys nothing a screen
+                  // reader can use (the recording state is carried by the timer
+                  // text and the labeled Discard/Send controls). Keep it out of
+                  // the semantics tree.
+                  child: ExcludeSemantics(
+                    child: RepaintBoundary(
+                      child: CustomPaint(
+                        painter: _WaveformPainter(
+                          samples: _waveform.toList(growable: false),
+                          color: hollow.accent,
+                          maxSamples: _waveformSamples,
+                        ),
+                        child: const SizedBox.expand(),
                       ),
-                      child: const SizedBox.expand(),
                     ),
                   ),
                 ),
@@ -236,6 +243,7 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
         // Send.
         HollowPressable(
           onTap: _send,
+          semanticLabel: 'Send voice message',
           borderRadius: BorderRadius.circular(hollow.radiusMd),
           backgroundColor: hollow.accent,
           padding: const EdgeInsets.all(HollowSpacing.sm),

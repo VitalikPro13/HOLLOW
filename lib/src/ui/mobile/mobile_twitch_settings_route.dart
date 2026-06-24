@@ -158,6 +158,7 @@ class _MobileTwitchSettingsRouteState
                 children: [
                   HollowPressable(
                     onTap: () => Navigator.pop(context),
+                    semanticLabel: 'Back',
                     borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.sm),
                     child: Icon(LucideIcons.arrowLeft, size: 22, color: hollow.textPrimary),

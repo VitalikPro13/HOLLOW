@@ -66,6 +66,7 @@ void showInviteDialog(
                     borderRadius:
                         BorderRadius.circular(hollow.radiusSm),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
+                    semanticLabel: 'Copy invite link',
                     child: Icon(LucideIcons.copy,
                         size: 18, color: hollow.accent),
                   ),

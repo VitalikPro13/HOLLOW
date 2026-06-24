@@ -107,6 +107,7 @@ class VoiceChannelPanel extends ConsumerWidget {
               HollowTooltip(
                 message: vcState.isMuted ? 'Unmute' : 'Mute',
                 child: HollowPressable(
+                  semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
                   onTap: () =>
                       ref.read(voiceChannelProvider.notifier).toggleMute(),
                   borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -123,6 +124,7 @@ class VoiceChannelPanel extends ConsumerWidget {
               HollowTooltip(
                 message: vcState.isDeafened ? 'Undeafen' : 'Deafen',
                 child: HollowPressable(
+                  semanticLabel: vcState.isDeafened ? 'Undeafen' : 'Deafen',
                   onTap: () =>
                       ref.read(voiceChannelProvider.notifier).toggleDeafen(),
                   borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -141,6 +143,9 @@ class VoiceChannelPanel extends ConsumerWidget {
               HollowTooltip(
                 message: vcState.isCameraOn ? 'Turn off camera' : 'Turn on camera',
                 child: HollowPressable(
+                  semanticLabel: vcState.isCameraOn
+                      ? 'Turn off camera'
+                      : 'Turn on camera',
                   onTap: () =>
                       ref.read(voiceChannelProvider.notifier).toggleCamera(),
                   borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -162,6 +167,9 @@ class VoiceChannelPanel extends ConsumerWidget {
                       ? 'Stop sharing'
                       : 'Share screen',
                   child: HollowPressable(
+                    semanticLabel: vcState.isScreenSharing
+                        ? 'Stop sharing'
+                        : 'Share screen',
                     onTap: () => _handleScreenShareToggle(context, ref, vcState),
                     borderRadius: BorderRadius.circular(hollow.radiusSm),
                     padding: const EdgeInsets.all(HollowSpacing.sm),
@@ -180,6 +188,7 @@ class VoiceChannelPanel extends ConsumerWidget {
               HollowTooltip(
                 message: 'Disconnect',
                 child: HollowPressable(
+                  semanticLabel: 'Disconnect',
                   onTap: () =>
                       ref.read(voiceChannelProvider.notifier).leaveChannel(),
                   borderRadius: BorderRadius.circular(hollow.radiusSm),

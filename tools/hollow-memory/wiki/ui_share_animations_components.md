@@ -473,6 +473,8 @@ File: `lib/src/ui/components/hollow_pressable.dart`
 - `borderRadius`, `hoverColor`, `backgroundColor`, `padding` — visual config.
 - `disabled` — disables interaction, shows at 40% opacity.
 - `subtle` — list item mode: hover color change only, no press dim/scale.
+- `semanticLabel` (a11y, Phase 2.1) — screen-reader label. **Required for icon-only controls** (child is a bare `Icon`/glyph with no `Text`) — null otherwise (the child's text auto-names it). Enforced by `test/a11y_label_guard_test.dart`.
+- `semanticButton` (a11y, default `true`) — whether to announce the "button" role. Set `false` for tappable content rows/cards (e.g. a conversation row) so they're an actionable node without the button role.
 
 **Animation (non-subtle):**
 - `AnimationController`: 120ms forward, 200ms reverse.
@@ -486,7 +488,7 @@ File: `lib/src/ui/components/hollow_pressable.dart`
   - Without `backgroundColor`: transitions to `effectiveHoverColor` (default `hollow.elevated`).
   - With `backgroundColor`: `Color.lerp(backgroundColor, Colors.white, 0.15)` + `BoxShadow` glow.
 
-**Build hierarchy:** `MouseRegion` > `Listener` > `GestureDetector` > `AnimatedBuilder` (`FadeTransition` > `ScaleTransition`) > `AnimatedContainer`.
+**Build hierarchy:** `MergeSemantics` (when interactive) > `MouseRegion` > `Listener` > `Semantics` (`button`/`label`/`enabled` + mirrored `onTap`) > `GestureDetector` > `AnimatedBuilder` (`FadeTransition` > `ScaleTransition`) > `AnimatedContainer`. The `Semantics(onTap:)` mirrors the gesture handler for VoiceOver/Voice Control activation but does NOT double-fire on a physical tap (one is a pointer event, the other an a11y action — proven in `test/widget/semantics_foundation_test.dart`).
 
 
 ## HollowButton
@@ -506,7 +508,9 @@ File: `lib/src/ui/components/hollow_button.dart`
 
 **Named constructors:** `HollowButton.filled()`, `.ghost()`, `.outline()`, `.danger()`.
 
-**Parameters:** `onPressed`, `child`, `icon`, `variant`, `expand` (full width), `compact` (reduced padding).
+**Parameters:** `onPressed`, `child`, `icon`, `variant`, `expand` (full width), `compact` (reduced padding), `semanticLabel` (a11y, Phase 2.1).
+
+**Accessibility (Phase 2.1):** wrapped in `MergeSemantics` > … > `Semantics(button: true, enabled, label: semanticLabel)`. A button with a `Text` child auto-names itself (leave `semanticLabel` null). **Only set `semanticLabel` for icon-only buttons** (no text child) — enforced by `test/a11y_label_guard_test.dart`.
 
 **Animation:** Same pattern as `HollowPressable` — scale 1.0 to 0.98 + opacity 1.0 to 0.85, 120ms/200ms durations with spring reverse.
 
@@ -650,7 +654,9 @@ File: `lib/src/ui/components/hollow_toggle.dart`
 
 `StatefulWidget` with `SingleTickerProviderStateMixin`. Toggle switch with spring physics.
 
-**Parameters:** `value` (bool), `onChanged` (ValueChanged<bool>?).
+**Parameters:** `value` (bool), `onChanged` (ValueChanged<bool>?), `semanticLabel` (a11y, Phase 2.1 — names what the switch controls, e.g. "Reduce motion").
+
+**Accessibility (Phase 2.1):** wrapped in `MergeSemantics` > `Semantics(toggled: value, enabled, label: semanticLabel)` — announces on/off state to screen readers and is flippable by Voice Control.
 
 **Dimensions:** Track: 36x20px pill. Thumb: 16px circle. 2px padding on each side.
 
@@ -673,7 +679,9 @@ File: `lib/src/ui/components/hollow_avatar.dart`
 
 `ConsumerWidget`. User avatar with deterministic fallback. Auto-fetches avatar bytes from `avatarProvider` on mount.
 
-**Parameters:** `peerId` (String), `size` (default 36), `imageBytes` (Uint8List?, explicit override), `animate` (default false).
+**Parameters:** `peerId` (String), `size` (default 36), `imageBytes` (Uint8List?, explicit override), `animate` (default false), `semanticLabel` (a11y, Phase 2.3 — the person's display name).
+
+**Accessibility (Phase 2.3):** when `semanticLabel` is set, wraps the visual in `Semantics(label: semanticLabel, image: true)` → announces "name, image". When null, wraps in `ExcludeSemantics` (a bare avatar's only fallback is raw peer-id initials, so silence beats reading those; also correct when an adjacent visible name already labels the row). Thread the name only where it's cheaply in scope — do NOT plumb new params through call sites.
 
 **Avatar resolution order:**
 1. If `imageBytes` is passed (non-null), use it directly (for archive data or explicit overrides).

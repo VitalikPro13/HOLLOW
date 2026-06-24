@@ -295,7 +295,10 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
                                   ),
                                 ),
                                 child: HollowAvatar(
-                                    peerId: widget.peerId, size: 64, animate: true),
+                                    peerId: widget.peerId,
+                                    size: 64,
+                                    animate: true,
+                                    semanticLabel: shownName),
                               ),
 
                               const SizedBox(height: HollowSpacing.xs + 2),

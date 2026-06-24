@@ -158,6 +158,7 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> {
                   const SizedBox(width: HollowSpacing.md),
                   // Mute
                   HollowPressable(
+                    semanticLabel: call.isMuted ? 'Unmute' : 'Mute',
                     onTap: () =>
                         ref.read(callProvider.notifier).toggleMute(),
                     borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -172,6 +173,9 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> {
                   const SizedBox(width: HollowSpacing.xs),
                   // Camera
                   HollowPressable(
+                    semanticLabel: call.isVideoEnabled
+                        ? 'Turn off camera'
+                        : 'Turn on camera',
                     onTap: call.status == CallStatus.active
                         ? () =>
                               ref.read(callProvider.notifier).toggleVideo()
@@ -191,6 +195,7 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> {
                   const SizedBox(width: HollowSpacing.xs),
                   // Hangup
                   HollowPressable(
+                    semanticLabel: 'End call',
                     onTap: () =>
                         ref.read(callProvider.notifier).endCall(),
                     borderRadius: BorderRadius.circular(hollow.radiusSm),

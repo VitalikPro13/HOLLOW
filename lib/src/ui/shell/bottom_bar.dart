@@ -301,6 +301,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                   return HollowTooltip(
                     message: 'Browse Public Channels',
                     child: HollowPressable(
+                      semanticLabel: 'Browse public channels',
                       onTap: () {
                         if (guestOpen) {
                           ref.read(guestTabOpenProvider.notifier).state = false;
@@ -324,6 +325,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                 HollowTooltip(
                   message: 'Share',
                   child: HollowPressable(
+                    semanticLabel: 'Share',
                     onTap: () => _openShare(ref),
                     borderRadius:
                         BorderRadius.circular(hollow.radiusSm),
@@ -340,6 +342,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                 HollowTooltip(
                   message: 'Archive',
                   child: HollowPressable(
+                    semanticLabel: 'Archive',
                     onTap: () => _openArchive(ref),
                     borderRadius:
                         BorderRadius.circular(hollow.radiusSm),
@@ -357,6 +360,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                 HollowTooltip(
                   message: 'Settings',
                   child: HollowPressable(
+                    semanticLabel: 'Settings',
                     onTap: () => showUserSettingsDialog(context, ref, openSystemTab: true),
                     borderRadius:
                         BorderRadius.circular(hollow.radiusSm),
@@ -372,6 +376,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                   HollowTooltip(
                     message: 'Recovery phrase',
                     child: HollowPressable(
+                      semanticLabel: 'Recovery phrase',
                       onTap: () => showMnemonicDialog(
                           context, identity.mnemonic!),
                       borderRadius:
@@ -915,6 +920,12 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
 
     if (widget.tooltip != null) {
       icon = HollowTooltip(message: widget.tooltip!, child: icon);
+    }
+
+    // Tooltips don't surface to screen readers — give tappable icons a name.
+    final label = widget.tooltip;
+    if (label != null && widget.onTap != null) {
+      icon = Semantics(button: true, label: label, child: icon);
     }
 
     return icon;

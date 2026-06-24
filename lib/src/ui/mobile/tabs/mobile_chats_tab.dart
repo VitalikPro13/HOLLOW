@@ -1554,6 +1554,7 @@ class _NewConversationDialogState
                       ),
                       HollowPressable(
                         onTap: () => Navigator.of(context).pop(),
+                        semanticLabel: 'Close',
                         borderRadius:
                             BorderRadius.circular(hollow.radiusSm),
                         padding: const EdgeInsets.all(HollowSpacing.xs),

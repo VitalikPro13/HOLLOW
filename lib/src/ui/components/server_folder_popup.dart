@@ -386,6 +386,7 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
                                 hoverColor: hollow.border.withValues(alpha: 0.15),
                                 borderRadius: BorderRadius.circular(6),
                                 padding: const EdgeInsets.all(6),
+                                semanticLabel: 'Rename folder',
                                 child: Icon(
                                   LucideIcons.pencil,
                                   size: 12,
@@ -548,6 +549,7 @@ class _FolderServerItem extends StatelessWidget {
                       onTap: onRemove,
                       subtle: true,
                       padding: EdgeInsets.zero,
+                      semanticLabel: 'Remove from folder',
                       child: Container(
                         width: 16,
                         height: 16,

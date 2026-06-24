@@ -10,6 +10,14 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 ///
 /// Set [subtle] to true for list items — hover color change only, no
 /// press dim/scale animation.
+///
+/// Accessibility: when [onTap] is set the whole widget is exposed to screen
+/// readers / Voice Control as a button. Pass [semanticLabel] for icon-only
+/// controls (where the [child] carries no readable text). When the child is
+/// already meaningful text, leave it null. Set [semanticButton] to false for
+/// rows/cards that are tappable but shouldn't be announced as a "button"
+/// (e.g. list tiles, conversation rows) — they stay tappable via the semantic
+/// [onTap] action without the button role.
 class HollowPressable extends StatefulWidget {
   final Widget child;
   final VoidCallback? onTap;
@@ -20,6 +28,15 @@ class HollowPressable extends StatefulWidget {
   final EdgeInsetsGeometry? padding;
   final bool disabled;
   final bool subtle;
+
+  /// Screen-reader label. Only needed when [child] has no readable text
+  /// (icon-only buttons). Null = let the child supply the name.
+  final String? semanticLabel;
+
+  /// Whether to announce the "button" role. True for actual buttons; set
+  /// false for tappable list rows/cards (still actionable, just not labeled
+  /// as a button).
+  final bool semanticButton;
 
   const HollowPressable({
     super.key,
@@ -32,6 +49,8 @@ class HollowPressable extends StatefulWidget {
     this.padding,
     this.disabled = false,
     this.subtle = false,
+    this.semanticLabel,
+    this.semanticButton = true,
   });
 
   @override
@@ -53,8 +72,12 @@ class _HollowPressableState extends State<HollowPressable>
     if (!widget.subtle) {
       _controller = AnimationController(
         vsync: this,
-        duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 120),
-        reverseDuration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 200),
+        duration: HollowDurations.animationsDisabled
+            ? Duration.zero
+            : const Duration(milliseconds: 120),
+        reverseDuration: HollowDurations.animationsDisabled
+            ? Duration.zero
+            : const Duration(milliseconds: 200),
       );
       _scaleAnimation = Tween<double>(begin: 1.0, end: 0.98).animate(
         CurvedAnimation(
@@ -109,18 +132,14 @@ class _HollowPressableState extends State<HollowPressable>
       decoration: BoxDecoration(
         color: _hovering && isInteractive
             ? (widget.backgroundColor != null
-                ? Color.lerp(
-                    widget.backgroundColor!, Colors.white, 0.15)!
-                : effectiveHoverColor)
+                  ? Color.lerp(widget.backgroundColor!, Colors.white, 0.15)!
+                  : effectiveHoverColor)
             : (widget.backgroundColor ?? Colors.transparent),
         borderRadius: widget.borderRadius,
-        boxShadow: _hovering &&
-                isInteractive &&
-                widget.backgroundColor != null
+        boxShadow: _hovering && isInteractive && widget.backgroundColor != null
             ? [
                 BoxShadow(
-                  color: widget.backgroundColor!
-                      .withValues(alpha: 0.25),
+                  color: widget.backgroundColor!.withValues(alpha: 0.25),
                   blurRadius: 8,
                   spreadRadius: 0,
                 ),
@@ -146,17 +165,14 @@ class _HollowPressableState extends State<HollowPressable>
             opacity: widget.disabled
                 ? const AlwaysStoppedAnimation(0.4)
                 : _opacityAnimation!,
-            child: ScaleTransition(
-              scale: _scaleAnimation!,
-              child: child,
-            ),
+            child: ScaleTransition(scale: _scaleAnimation!, child: child),
           );
         },
         child: container,
       );
     }
 
-    return MouseRegion(
+    final Widget result = MouseRegion(
       cursor: isInteractive
           ? SystemMouseCursors.click
           : SystemMouseCursors.basic,
@@ -170,14 +186,31 @@ class _HollowPressableState extends State<HollowPressable>
         onPointerDown: _onPointerDown,
         onPointerUp: _onPointerUp,
         onPointerCancel: _onPointerCancel,
-        child: GestureDetector(
+        child: Semantics(
+          // Announce as a button (or a plain tappable node) so VoiceOver and
+          // Voice Control can find and invoke it. The semantic onTap mirrors
+          // the gesture handler — physical taps go through the GestureDetector;
+          // assistive-tech activation goes through this action. They don't
+          // double-fire (one is a pointer event, the other an a11y action).
+          button: isInteractive && widget.semanticButton,
+          label: widget.semanticLabel,
+          enabled: isInteractive,
           onTap: isInteractive ? widget.onTap : null,
-          onLongPress:
-              isInteractive ? widget.onLongPress : null,
-          behavior: HitTestBehavior.opaque,
-          child: inner,
+          onLongPress: isInteractive ? widget.onLongPress : null,
+          child: GestureDetector(
+            onTap: isInteractive ? widget.onTap : null,
+            onLongPress: isInteractive ? widget.onLongPress : null,
+            behavior: HitTestBehavior.opaque,
+            child: inner,
+          ),
         ),
       ),
     );
+
+    // Merge the control's role/label with its child content into one
+    // screen-reader node (e.g. an icon-only button reads as one stop; a
+    // conversation row reads "Alice, online, 2 unread" as one swipe). Only
+    // when interactive — a static pressable shouldn't flatten its subtree.
+    return isInteractive ? MergeSemantics(child: result) : result;
   }
 }

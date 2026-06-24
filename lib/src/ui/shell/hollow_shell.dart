@@ -550,6 +550,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                             children: [
                               if (hasBiometric) ...[
                                 HollowPressable(
+                                  semanticLabel: 'Unlock with biometrics',
                                   onTap: () =>
                                       Navigator.of(ctx).pop('__biometric__'),
                                   borderRadius:
@@ -1248,6 +1249,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
               HollowTooltip(
                 message: 'Toggle member panel',
                 child: HollowPressable(
+                  semanticLabel: 'Toggle member panel',
                   onTap: () => ref
                       .read(memberPanelProvider.notifier)
                       .state = !ref.read(memberPanelProvider),

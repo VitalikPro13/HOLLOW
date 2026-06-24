@@ -854,6 +854,7 @@ class _MobileArchiveHeader extends StatelessWidget {
         children: [
           HollowPressable(
             onTap: onBack,
+            semanticLabel: 'Back',
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.all(8),
             child: Icon(LucideIcons.chevronLeft,
@@ -902,6 +903,7 @@ class _MobileArchiveHeader extends StatelessWidget {
           if (onFilter != null)
             HollowPressable(
               onTap: onFilter,
+              semanticLabel: 'Filter by sender',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.filter,
@@ -913,6 +915,7 @@ class _MobileArchiveHeader extends StatelessWidget {
           if (onJumpToDate != null)
             HollowPressable(
               onTap: onJumpToDate,
+              semanticLabel: 'Jump to date',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.calendar,
@@ -921,6 +924,7 @@ class _MobileArchiveHeader extends StatelessWidget {
           if (onToggleSearch != null)
             HollowPressable(
               onTap: onToggleSearch,
+              semanticLabel: 'Search messages',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.search,
@@ -932,6 +936,7 @@ class _MobileArchiveHeader extends StatelessWidget {
           if (onExport != null)
             HollowPressable(
               onTap: onExport,
+              semanticLabel: 'Export conversation',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(LucideIcons.fileOutput,

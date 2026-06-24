@@ -158,6 +158,7 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
                   ),
                 ),
                 HollowPressable(
+                  semanticLabel: 'Close',
                   onTap: () {
                     if (widget.onClose != null) {
                       widget.onClose!();
@@ -212,6 +213,7 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
                 ),
               ),
               HollowPressable(
+                semanticLabel: 'Close',
                 onTap: () {
                   if (widget.onClose != null) {
                     widget.onClose!();

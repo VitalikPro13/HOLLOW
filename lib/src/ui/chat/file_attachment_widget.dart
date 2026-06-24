@@ -464,6 +464,7 @@ class _FullscreenImageView extends StatelessWidget {
               right: HollowSpacing.lg,
               child: HollowPressable(
                 onTap: () => Navigator.of(context).pop(),
+                semanticLabel: 'Close',
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
                 backgroundColor: hollow.elevated.withValues(alpha: 0.8),
                 padding: const EdgeInsets.all(HollowSpacing.sm),

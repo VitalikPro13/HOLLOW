@@ -509,6 +509,7 @@ class _ActionBarContent extends StatelessWidget {
           if (onDownload != null)
             HollowPressable(
               onTap: onDownload,
+              semanticLabel: 'Download',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(
@@ -520,6 +521,7 @@ class _ActionBarContent extends StatelessWidget {
           if (onCopy != null)
             HollowPressable(
               onTap: onCopy,
+              semanticLabel: 'Copy',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(
@@ -531,6 +533,7 @@ class _ActionBarContent extends StatelessWidget {
           if (onCopyImage != null)
             HollowPressable(
               onTap: onCopyImage,
+              semanticLabel: 'Copy image',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(
@@ -544,6 +547,7 @@ class _ActionBarContent extends StatelessWidget {
           if (onReply != null)
             HollowPressable(
               onTap: onReply,
+              semanticLabel: 'Reply',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(
@@ -555,6 +559,7 @@ class _ActionBarContent extends StatelessWidget {
           if (onInfo != null)
             HollowPressable(
               onTap: onInfo,
+              semanticLabel: 'View message proof',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(
@@ -566,6 +571,7 @@ class _ActionBarContent extends StatelessWidget {
           if (onPin != null)
             HollowPressable(
               onTap: onPin,
+              semanticLabel: 'Pin message',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(
@@ -577,6 +583,7 @@ class _ActionBarContent extends StatelessWidget {
           if (onEdit != null)
             HollowPressable(
               onTap: onEdit,
+              semanticLabel: 'Edit message',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(
@@ -588,6 +595,7 @@ class _ActionBarContent extends StatelessWidget {
           if (onDelete != null)
             HollowPressable(
               onTap: onDelete,
+              semanticLabel: 'Delete message',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(6),
               child: Icon(
@@ -620,6 +628,7 @@ class _EmojiButton extends StatelessWidget {
         final position = box?.localToGlobal(Offset.zero) ?? Offset.zero;
         onReaction(position);
       },
+      semanticLabel: 'Add reaction',
       borderRadius: BorderRadius.circular(hollow.radiusSm),
       padding: const EdgeInsets.all(6),
       child: Icon(

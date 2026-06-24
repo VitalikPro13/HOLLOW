@@ -585,6 +585,7 @@ class _MobileDmRow extends ConsumerWidget {
               ),
               HollowPressable(
                 onTap: onToggleHidden,
+                semanticLabel: isHidden ? 'Show conversation' : 'Hide conversation',
                 borderRadius:
                     BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.all(4),
@@ -794,6 +795,7 @@ class _MobileChannelList extends ConsumerWidget {
                             messageCount: totalMsgCount,
                           );
                         },
+                        semanticLabel: 'Export conversation',
                         borderRadius:
                             BorderRadius.circular(hollow.radiusSm),
                         padding: const EdgeInsets.all(4),

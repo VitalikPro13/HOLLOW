@@ -180,6 +180,7 @@ class _StorageDashboardContentState
                   onTap: () => Navigator.of(context).pop(),
                   borderRadius: BorderRadius.circular(hollow.radiusSm),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
+                  semanticLabel: 'Close',
                   child: Icon(
                     LucideIcons.x,
                     size: 16,

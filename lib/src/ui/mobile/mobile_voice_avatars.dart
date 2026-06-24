@@ -208,6 +208,9 @@ class MobileControlButton extends StatelessWidget {
   final Color backgroundColor;
   final VoidCallback? onTap;
 
+  /// Screen-reader name for this icon-only control (e.g. "Mute", "Leave call").
+  final String? semanticLabel;
+
   const MobileControlButton({
     super.key,
     required this.icon,
@@ -216,24 +219,30 @@ class MobileControlButton extends StatelessWidget {
     required this.color,
     required this.backgroundColor,
     this.onTap,
+    this.semanticLabel,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedOpacity(
-        opacity: onTap != null ? 1.0 : 0.4,
-        duration: const Duration(milliseconds: 150),
-        child: Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(
-            color: backgroundColor,
-            shape: BoxShape.circle,
-          ),
-          child: Center(
-            child: Icon(icon, size: iconSize, color: color),
+    return Semantics(
+      button: true,
+      enabled: onTap != null,
+      label: semanticLabel,
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedOpacity(
+          opacity: onTap != null ? 1.0 : 0.4,
+          duration: const Duration(milliseconds: 150),
+          child: Container(
+            width: size,
+            height: size,
+            decoration: BoxDecoration(
+              color: backgroundColor,
+              shape: BoxShape.circle,
+            ),
+            child: Center(
+              child: Icon(icon, size: iconSize, color: color),
+            ),
           ),
         ),
       ),

@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -66,7 +66,8 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
 
     // Surface recording lifecycle as toast notifications.
     ref.listen<RecordingState>(recordingProvider, (prev, next) {
-      if (next.lastFinished != null && next.lastFinished != prev?.lastFinished) {
+      if (next.lastFinished != null &&
+          next.lastFinished != prev?.lastFinished) {
         HollowToast.show(
           context,
           'Recording saved to ${next.lastFinished!.filePath}',
@@ -110,7 +111,10 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
 
     final hollow = HollowTheme.of(context);
     final peerId = call.peerId ?? '';
-    final displayName = displayNameForPeer(ref.watch(profileProvider.select((p) => p[peerId])), peerId);
+    final displayName = displayNameForPeer(
+      ref.watch(profileProvider.select((p) => p[peerId])),
+      peerId,
+    );
 
     return Positioned(
       top: 80, // below title bar + friends bar
@@ -189,6 +193,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                     HollowTooltip(
                       message: call.isMuted ? 'Unmute' : 'Mute',
                       child: HollowPressable(
+                        semanticLabel: call.isMuted ? 'Unmute' : 'Mute',
                         onTap: () =>
                             ref.read(callProvider.notifier).toggleMute(),
                         borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -208,6 +213,9 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                           ? 'Turn off camera'
                           : 'Turn on camera',
                       child: HollowPressable(
+                        semanticLabel: call.isVideoEnabled
+                            ? 'Turn off camera'
+                            : 'Turn on camera',
                         onTap: call.status == CallStatus.active
                             ? () =>
                                   ref.read(callProvider.notifier).toggleVideo()
@@ -235,10 +243,13 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                             ? 'Stop sharing'
                             : 'Sharing screen',
                         child: HollowPressable(
+                          semanticLabel: call.isScreenSharing
+                              ? 'Stop sharing'
+                              : 'Sharing screen',
                           onTap: call.isScreenSharing
                               ? () => ref
-                                  .read(callProvider.notifier)
-                                  .stopScreenShare()
+                                    .read(callProvider.notifier)
+                                    .stopScreenShare()
                               : null,
                           borderRadius: BorderRadius.circular(hollow.radiusSm),
                           padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -266,8 +277,13 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                             ? 'Stop recording'
                             : 'Record this call',
                         child: HollowPressable(
+                          semanticLabel: rec.isMyRecording
+                              ? 'Stop recording'
+                              : 'Record this call',
                           onTap: () {
-                            final notifier = ref.read(recordingProvider.notifier);
+                            final notifier = ref.read(
+                              recordingProvider.notifier,
+                            );
                             if (rec.isMyRecording) {
                               notifier.stopRecording();
                             } else {
@@ -292,6 +308,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                     HollowTooltip(
                       message: 'End call',
                       child: HollowPressable(
+                        semanticLabel: 'End call',
                         onTap: () => ref.read(callProvider.notifier).endCall(),
                         borderRadius: BorderRadius.circular(hollow.radiusSm),
                         padding: const EdgeInsets.all(HollowSpacing.xs),

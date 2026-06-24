@@ -620,6 +620,7 @@ class _PendingRow extends ConsumerWidget {
                 HollowToast.show(context, 'Friend request accepted',
                     type: HollowToastType.success);
               },
+              semanticLabel: 'Accept friend request',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(HollowSpacing.sm),
               child: Icon(LucideIcons.check, size: 20, color: hollow.success),
@@ -627,6 +628,7 @@ class _PendingRow extends ConsumerWidget {
             const SizedBox(width: HollowSpacing.xs),
             HollowPressable(
               onTap: () => ref.read(friendsProvider.notifier).rejectRequest(peerId),
+              semanticLabel: 'Decline friend request',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(HollowSpacing.sm),
               child: Icon(LucideIcons.x, size: 20, color: hollow.error),
@@ -634,6 +636,7 @@ class _PendingRow extends ConsumerWidget {
           ] else
             HollowPressable(
               onTap: () => ref.read(friendsProvider.notifier).rejectRequest(peerId),
+              semanticLabel: 'Cancel friend request',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(HollowSpacing.sm),
               child: Icon(LucideIcons.x, size: 18, color: hollow.textSecondary),

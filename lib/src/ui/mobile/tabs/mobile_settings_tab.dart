@@ -444,6 +444,7 @@ class _SettingsSubPage extends StatelessWidget {
                 children: [
                   HollowPressable(
                     onTap: () => Navigator.pop(context),
+                    semanticLabel: 'Back',
                     borderRadius: BorderRadius.circular(hollow.radiusMd),
                     padding: const EdgeInsets.all(HollowSpacing.sm),
                     child: Icon(LucideIcons.arrowLeft,
@@ -1189,6 +1190,7 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
                           setState(() => _selectedRelay = kDefaultRelayDomain);
                         }
                       },
+                      semanticLabel: 'Remove relay',
                       borderRadius: BorderRadius.circular(hollow.radiusSm),
                       padding: const EdgeInsets.all(HollowSpacing.xs),
                       child: Icon(LucideIcons.x, size: 14, color: hollow.textSecondary),
@@ -2306,6 +2308,7 @@ class _RingtonePicker extends ConsumerWidget {
           HollowPressable(
             onTap: () =>
                 ref.read(ringtonePathProvider.notifier).setPath(null),
+            semanticLabel: 'Remove ringtone',
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.all(HollowSpacing.xs),
             child:
@@ -4020,6 +4023,7 @@ class _AboutTab extends ConsumerWidget {
                       ),
                       HollowPressable(
                         onTap: () => Navigator.pop(context),
+                        semanticLabel: 'Close',
                         borderRadius: BorderRadius.circular(hollow.radiusSm),
                         padding: const EdgeInsets.all(HollowSpacing.xs),
                         child: Icon(LucideIcons.x, size: 18,

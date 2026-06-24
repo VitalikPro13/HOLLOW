@@ -45,7 +45,10 @@ class ReactionBar extends StatelessWidget {
           final isMine = reactors.contains(localPeerId);
 
           return HollowPressable(
-            onTap: onToggleReaction != null ? () => onToggleReaction!(emoji) : null,
+            onTap: onToggleReaction != null
+                ? () => onToggleReaction!(emoji)
+                : null,
+            semanticLabel: 'Reaction $emoji, ${reactors.length}',
             borderRadius: BorderRadius.circular(12),
             padding: EdgeInsets.zero,
             child: Container(

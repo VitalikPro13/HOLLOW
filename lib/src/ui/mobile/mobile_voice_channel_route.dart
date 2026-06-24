@@ -159,6 +159,7 @@ class _MobileVoiceChannelRouteState
       child: Row(
         children: [
           HollowPressable(
+            semanticLabel: 'Minimize',
             onTap: () => Navigator.of(context).pop(),
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -415,6 +416,7 @@ class _MobileVoiceChannelRouteState
             backgroundColor: vcState.isMuted
                 ? hollow.error.withValues(alpha: 0.15)
                 : hollow.elevated,
+            semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
             onTap: () => vcNotifier.toggleMute(),
           ),
           // Deafen
@@ -426,6 +428,7 @@ class _MobileVoiceChannelRouteState
             backgroundColor: vcState.isDeafened
                 ? hollow.error.withValues(alpha: 0.15)
                 : hollow.elevated,
+            semanticLabel: vcState.isDeafened ? 'Undeafen' : 'Deafen',
             onTap: () => vcNotifier.toggleDeafen(),
           ),
           // Speakerphone (mobile only)
@@ -439,6 +442,7 @@ class _MobileVoiceChannelRouteState
               backgroundColor: vcState.isSpeakerOn
                   ? hollow.accent.withValues(alpha: 0.15)
                   : hollow.elevated,
+              semanticLabel: 'Speaker',
               onTap: () => vcNotifier.toggleSpeaker(),
             ),
           // Camera
@@ -452,6 +456,9 @@ class _MobileVoiceChannelRouteState
             backgroundColor: vcState.isCameraOn
                 ? hollow.accent.withValues(alpha: 0.15)
                 : hollow.elevated,
+            semanticLabel: vcState.isCameraOn
+                ? 'Turn off camera'
+                : 'Turn on camera',
             onTap: () => vcNotifier.toggleCamera(),
           ),
           // Flip camera (mobile only, when camera is on)
@@ -462,6 +469,7 @@ class _MobileVoiceChannelRouteState
               size: buttonSize,
               color: hollow.textPrimary,
               backgroundColor: hollow.elevated,
+              semanticLabel: 'Flip camera',
               onTap: () => vcNotifier.switchCamera(),
             ),
           // Leave (red)
@@ -471,6 +479,7 @@ class _MobileVoiceChannelRouteState
             size: buttonSize,
             color: Colors.white,
             backgroundColor: hollow.error,
+            semanticLabel: 'Leave call',
             onTap: () {
               vcNotifier.leaveChannel();
             },

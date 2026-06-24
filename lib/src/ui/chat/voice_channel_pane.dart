@@ -1180,6 +1180,7 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
             HollowTooltip(
               message: vcState.isMuted ? 'Unmute' : 'Mute',
               child: HollowPressable(
+                semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
                 onTap: () =>
                     ref.read(voiceChannelProvider.notifier).toggleMute(),
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -1197,6 +1198,7 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
             HollowTooltip(
               message: vcState.isDeafened ? 'Undeafen' : 'Deafen',
               child: HollowPressable(
+                semanticLabel: vcState.isDeafened ? 'Undeafen' : 'Deafen',
                 onTap: () =>
                     ref.read(voiceChannelProvider.notifier).toggleDeafen(),
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -1215,6 +1217,9 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
             HollowTooltip(
               message: vcState.isCameraOn ? 'Turn off camera' : 'Turn on camera',
               child: HollowPressable(
+                semanticLabel: vcState.isCameraOn
+                    ? 'Turn off camera'
+                    : 'Turn on camera',
                 onTap: () =>
                     ref.read(voiceChannelProvider.notifier).toggleCamera(),
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -1235,6 +1240,9 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
                     ? 'Stop sharing'
                     : 'Share screen',
                 child: HollowPressable(
+                  semanticLabel: vcState.isScreenSharing
+                      ? 'Stop sharing'
+                      : 'Share screen',
                   onTap: () => _handleScreenShareToggle(vcState),
                   borderRadius: BorderRadius.circular(hollow.radiusSm),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -1252,6 +1260,7 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
             HollowTooltip(
               message: 'Disconnect',
               child: HollowPressable(
+                semanticLabel: 'Disconnect',
                 onTap: () =>
                     ref.read(voiceChannelProvider.notifier).leaveChannel(),
                 borderRadius: BorderRadius.circular(hollow.radiusSm),

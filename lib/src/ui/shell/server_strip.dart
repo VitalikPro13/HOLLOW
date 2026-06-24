@@ -55,6 +55,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       child: _ServerIcon(
         isSelected: selectedServerId == null && !archiveOpen && !shareOpen,
         backgroundColor: hollow.accent,
+        semanticLabel: 'Home',
         onTap: () {
           ref.read(archiveTabOpenProvider.notifier).state = false;
           ref.read(shareTabOpenProvider.notifier).state = false;
@@ -646,6 +647,7 @@ class _ServerIcon extends StatefulWidget {
   final Color backgroundColor;
   final VoidCallback? onTap;
   final String? tooltip;
+  final String? semanticLabel;
   final bool isSelected;
   final bool showBorder;
 
@@ -654,6 +656,7 @@ class _ServerIcon extends StatefulWidget {
     required this.backgroundColor,
     this.onTap,
     this.tooltip,
+    this.semanticLabel,
     this.isSelected = false,
     this.showBorder = true,
   });
@@ -710,6 +713,12 @@ class _ServerIconState extends State<_ServerIcon> {
 
     if (widget.tooltip != null) {
       icon = HollowTooltip(message: widget.tooltip!, child: icon);
+    }
+
+    // Tooltips don't surface to screen readers — give tappable icons a name.
+    final label = widget.semanticLabel ?? widget.tooltip;
+    if (label != null && widget.onTap != null) {
+      icon = Semantics(button: true, label: label, child: icon);
     }
 
     return icon;

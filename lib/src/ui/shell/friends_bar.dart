@@ -68,6 +68,7 @@ class FriendsBar extends ConsumerWidget {
               HollowTooltip(
                 message: 'Add Friend',
                 child: HollowPressable(
+                  semanticLabel: 'Add friend',
                   onTap: () => _showAddFriendDialog(context, ref, hollow),
                   borderRadius: BorderRadius.circular(hollow.radiusSm),
                   padding: const EdgeInsets.symmetric(
@@ -172,6 +173,7 @@ class FriendsBar extends ConsumerWidget {
             return HollowTooltip(
               message: 'Help',
               child: HollowPressable(
+                semanticLabel: 'Help',
                 onTap: () => ref
                     .read(helpPanelOpenProvider.notifier)
                     .state = !helpOpen,
@@ -321,6 +323,7 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
                   ),
                   const Spacer(),
                   HollowPressable(
+                    semanticLabel: 'Close',
                     onTap: () => Navigator.pop(context),
                     borderRadius:
                         BorderRadius.circular(hollow.radiusSm),
@@ -612,6 +615,9 @@ class _FriendsListTab extends ConsumerWidget {
                         ? 'Remove from favourites'
                         : 'Add to favourites',
                     child: HollowPressable(
+                      semanticLabel: isFav
+                          ? 'Remove from favourites'
+                          : 'Add to favourites',
                       onTap: () => ref
                           .read(favouriteFriendsProvider.notifier)
                           .toggle(friend.peerId),
@@ -632,6 +638,7 @@ class _FriendsListTab extends ConsumerWidget {
                 HollowTooltip(
                   message: 'Remove friend',
                   child: HollowPressable(
+                    semanticLabel: 'Remove friend',
                     onTap: () {
                       final peerId = friend.peerId;
                       ref
@@ -787,6 +794,7 @@ class _FavouritesReorderTab extends ConsumerWidget {
                 HollowTooltip(
                   message: 'Remove from favourites',
                   child: HollowPressable(
+                    semanticLabel: 'Remove from favourites',
                     onTap: () => ref
                         .read(favouriteFriendsProvider.notifier)
                         .remove(peerId),
@@ -975,6 +983,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
                   HollowTooltip(
                     message: 'Accept',
                     child: HollowPressable(
+                      semanticLabel: 'Accept friend request',
                       onTap: () => ref
                           .read(friendsProvider.notifier)
                           .acceptRequest(req.peerId),
@@ -989,6 +998,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
                   HollowTooltip(
                     message: 'Reject',
                     child: HollowPressable(
+                      semanticLabel: 'Reject friend request',
                       onTap: () => ref
                           .read(friendsProvider.notifier)
                           .rejectRequest(req.peerId),
@@ -1004,6 +1014,7 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
                   HollowTooltip(
                     message: 'Cancel request',
                     child: HollowPressable(
+                      semanticLabel: 'Cancel friend request',
                       onTap: () => ref
                           .read(friendsProvider.notifier)
                           .rejectRequest(req.peerId),

@@ -22,6 +22,11 @@ class HollowButton extends StatefulWidget {
   final bool expand;
   final bool compact;
 
+  /// Screen-reader label override. Usually null — the [child] text auto-names
+  /// the button. Only set this for icon-only buttons (no text child) or when
+  /// the visible text isn't the right thing to announce.
+  final String? semanticLabel;
+
   const HollowButton({
     super.key,
     required this.onPressed,
@@ -30,6 +35,7 @@ class HollowButton extends StatefulWidget {
     this.variant = HollowButtonVariant.filled,
     this.expand = false,
     this.compact = false,
+    this.semanticLabel,
   });
 
   const HollowButton.filled({
@@ -39,6 +45,7 @@ class HollowButton extends StatefulWidget {
     this.icon,
     this.expand = false,
     this.compact = false,
+    this.semanticLabel,
   }) : variant = HollowButtonVariant.filled;
 
   const HollowButton.ghost({
@@ -48,6 +55,7 @@ class HollowButton extends StatefulWidget {
     this.icon,
     this.expand = false,
     this.compact = false,
+    this.semanticLabel,
   }) : variant = HollowButtonVariant.ghost;
 
   const HollowButton.outline({
@@ -57,6 +65,7 @@ class HollowButton extends StatefulWidget {
     this.icon,
     this.expand = false,
     this.compact = false,
+    this.semanticLabel,
   }) : variant = HollowButtonVariant.outline;
 
   const HollowButton.danger({
@@ -66,6 +75,7 @@ class HollowButton extends StatefulWidget {
     this.icon,
     this.expand = false,
     this.compact = false,
+    this.semanticLabel,
   }) : variant = HollowButtonVariant.danger;
 
   @override
@@ -86,8 +96,12 @@ class _HollowButtonState extends State<HollowButton>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 120),
-      reverseDuration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 200),
+      duration: HollowDurations.animationsDisabled
+          ? Duration.zero
+          : const Duration(milliseconds: 120),
+      reverseDuration: HollowDurations.animationsDisabled
+          ? Duration.zero
+          : const Duration(milliseconds: 200),
     );
 
     _scaleAnimation = Tween<double>(begin: 1.0, end: 0.98).animate(
@@ -153,11 +167,12 @@ class _HollowButtonState extends State<HollowButton>
         glowColor = hollow.error;
     }
 
-    final effectiveBg =
-        _hovering && isInteractive ? hoverBg : bg;
+    final effectiveBg = _hovering && isInteractive ? hoverBg : bg;
 
     // Subtle glow on hover for filled, outline, and danger variants.
-    final hoverShadow = _hovering && isInteractive &&
+    final hoverShadow =
+        _hovering &&
+            isInteractive &&
             widget.variant != HollowButtonVariant.ghost
         ? [
             BoxShadow(
@@ -192,68 +207,78 @@ class _HollowButtonState extends State<HollowButton>
     );
 
     if (widget.expand) {
-      content = SizedBox(
-        width: double.infinity,
-        child: content,
-      );
+      content = SizedBox(width: double.infinity, child: content);
     }
 
-    return MouseRegion(
-      cursor: isInteractive
-          ? SystemMouseCursors.click
-          : SystemMouseCursors.basic,
-      onEnter: (_) {
-        if (isInteractive) setState(() => _hovering = true);
-      },
-      onExit: (_) => setState(() => _hovering = false),
-      child: Listener(
-        onPointerDown: (_) {
-          if (!isInteractive) return;
-          setState(() => _pressing = true);
-          _controller.forward();
+    return MergeSemantics(
+      child: MouseRegion(
+        cursor: isInteractive
+            ? SystemMouseCursors.click
+            : SystemMouseCursors.basic,
+        onEnter: (_) {
+          if (isInteractive) setState(() => _hovering = true);
         },
-        onPointerUp: (_) {
-          if (!_pressing) return;
-          setState(() => _pressing = false);
-          _controller.reverse();
-        },
-        onPointerCancel: (_) {
-          if (!_pressing) return;
-          setState(() => _pressing = false);
-          _controller.reverse();
-        },
-        child: GestureDetector(
-          onTap: isInteractive ? widget.onPressed : null,
-          behavior: HitTestBehavior.opaque,
-          child: AnimatedBuilder(
-            animation: _controller,
-            builder: (context, child) {
-              return FadeTransition(
-                opacity: isDisabled
-                    ? const AlwaysStoppedAnimation(0.4)
-                    : _opacityAnimation,
-                child: ScaleTransition(
-                  scale: _scaleAnimation,
-                  child: child,
+        onExit: (_) => setState(() => _hovering = false),
+        child: Listener(
+          onPointerDown: (_) {
+            if (!isInteractive) return;
+            setState(() => _pressing = true);
+            _controller.forward();
+          },
+          onPointerUp: (_) {
+            if (!_pressing) return;
+            setState(() => _pressing = false);
+            _controller.reverse();
+          },
+          onPointerCancel: (_) {
+            if (!_pressing) return;
+            setState(() => _pressing = false);
+            _controller.reverse();
+          },
+          child: Semantics(
+            // Button role for assistive tech. semanticLabel is null for normal
+            // text buttons (the child Text auto-names them); set it only for
+            // icon-only buttons. Semantic onTap mirrors the gesture handler.
+            button: true,
+            enabled: isInteractive,
+            label: widget.semanticLabel,
+            onTap: isInteractive ? widget.onPressed : null,
+            child: GestureDetector(
+              onTap: isInteractive ? widget.onPressed : null,
+              behavior: HitTestBehavior.opaque,
+              child: AnimatedBuilder(
+                animation: _controller,
+                builder: (context, child) {
+                  return FadeTransition(
+                    opacity: isDisabled
+                        ? const AlwaysStoppedAnimation(0.4)
+                        : _opacityAnimation,
+                    child: ScaleTransition(
+                      scale: _scaleAnimation,
+                      child: child,
+                    ),
+                  );
+                },
+                child: AnimatedContainer(
+                  duration: HollowDurations.fast,
+                  curve: HollowCurves.subtle,
+                  padding: EdgeInsets.symmetric(
+                    horizontal: widget.compact
+                        ? HollowSpacing.md
+                        : HollowSpacing.lg,
+                    vertical: widget.compact
+                        ? HollowSpacing.sm
+                        : HollowSpacing.sm + 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: effectiveBg,
+                    border: border,
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
+                    boxShadow: hoverShadow,
+                  ),
+                  child: content,
                 ),
-              );
-            },
-            child: AnimatedContainer(
-              duration: HollowDurations.fast,
-              curve: HollowCurves.subtle,
-              padding: EdgeInsets.symmetric(
-                horizontal:
-                    widget.compact ? HollowSpacing.md : HollowSpacing.lg,
-                vertical:
-                    widget.compact ? HollowSpacing.sm : HollowSpacing.sm + 2,
               ),
-              decoration: BoxDecoration(
-                color: effectiveBg,
-                border: border,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                boxShadow: hoverShadow,
-              ),
-              child: content,
             ),
           ),
         ),

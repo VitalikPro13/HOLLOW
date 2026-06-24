@@ -126,6 +126,7 @@ class RecoveryPoolDashboard extends ConsumerWidget {
                       Clipboard.setData(ClipboardData(text: pool.inviteLink));
                       HollowToast.show(context, 'Link copied', type: HollowToastType.success);
                     },
+                    semanticLabel: 'Copy',
                     borderRadius: BorderRadius.circular(4),
                     padding: const EdgeInsets.all(6),
                     child: Icon(LucideIcons.copy, size: 14, color: hollow.textSecondary),

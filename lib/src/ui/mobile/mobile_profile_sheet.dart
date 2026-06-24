@@ -167,7 +167,7 @@ class MobileProfileSheet extends ConsumerWidget {
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
                   border: Border.all(color: hollow.surface, width: 3),
                 ),
-                child: HollowAvatar(peerId: peerId, size: 72),
+                child: HollowAvatar(peerId: peerId, size: 72, semanticLabel: name),
               ),
               const SizedBox(height: HollowSpacing.sm),
 
