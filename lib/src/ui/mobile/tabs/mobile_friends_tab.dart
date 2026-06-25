@@ -18,6 +18,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -304,7 +305,7 @@ class _FriendRow extends ConsumerWidget {
       onTap: () {
         ref.read(selectedPeerProvider.notifier).state = peerId;
         Navigator.of(context, rootNavigator: true).push(
-          MaterialPageRoute(
+          hollowMobileRoute(
             builder: (_) => MobileChatRoute(peerId: peerId),
           ),
         ).then((_) {
@@ -413,7 +414,7 @@ class _FriendRow extends ConsumerWidget {
                 Navigator.pop(context);
                 ref.read(selectedPeerProvider.notifier).state = peerId;
                 Navigator.of(context, rootNavigator: true).push(
-                  MaterialPageRoute(builder: (_) => MobileChatRoute(peerId: peerId)),
+                  hollowMobileRoute(builder: (_) => MobileChatRoute(peerId: peerId)),
                 ).then((_) {
                   ref.read(selectedPeerProvider.notifier).state = null;
                 });

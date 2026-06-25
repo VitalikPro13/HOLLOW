@@ -6,6 +6,7 @@ import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -220,30 +221,35 @@ class FileAttachmentWidget extends ConsumerWidget {
       final isGif = attachment.fileExt.toLowerCase() == 'gif';
 
       // Show the actual image — tap to open fullscreen.
-      return GestureDetector(
-        onTap: () => _showFullscreen(context, diskPath, isGif: isGif),
-        child: MouseRegion(
-          cursor: SystemMouseCursors.click,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(
-              maxWidth: maxWidth,
-              maxHeight: maxHeight,
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              child: isGif
-                  ? GifFileImage(
-                      diskPath: diskPath,
-                      fit: BoxFit.contain,
-                      errorWidget: _buildPlaceholder(
-                          hollow, displayWidth, displayHeight, false, 1.0, 0, null),
-                    )
-                  : Image.file(
-                      File(diskPath),
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, e, st) => _buildPlaceholder(
-                          hollow, displayWidth, displayHeight, false, 1.0, 0, null),
-                    ),
+      return HollowFocusRing(
+        enabled: true,
+        onActivate: () => _showFullscreen(context, diskPath, isGif: isGif),
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        child: GestureDetector(
+          onTap: () => _showFullscreen(context, diskPath, isGif: isGif),
+          child: MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                maxWidth: maxWidth,
+                maxHeight: maxHeight,
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                child: isGif
+                    ? GifFileImage(
+                        diskPath: diskPath,
+                        fit: BoxFit.contain,
+                        errorWidget: _buildPlaceholder(
+                            hollow, displayWidth, displayHeight, false, 1.0, 0, null),
+                      )
+                    : Image.file(
+                        File(diskPath),
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, e, st) => _buildPlaceholder(
+                            hollow, displayWidth, displayHeight, false, 1.0, 0, null),
+                      ),
+              ),
             ),
           ),
         ),

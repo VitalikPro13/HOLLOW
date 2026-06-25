@@ -18,6 +18,7 @@ import 'package:hollow/src/ui/chat/message_text_parser.dart';
 import 'package:hollow/src/ui/chat/profile_tap.dart';
 import 'package:hollow/src/ui/chat/reaction_bar.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 
 /// Flat message row for DMs — no bubbles.
 ///
@@ -130,11 +131,16 @@ class MessageBubble extends ConsumerWidget {
       replyWidget = Padding(
         padding: const EdgeInsets.only(bottom: 4),
         child: onReplyTap != null
-            ? MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  onTap: onReplyTap,
-                  child: replyContent,
+            ? HollowFocusRing(
+                enabled: onReplyTap != null,
+                onActivate: onReplyTap,
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: GestureDetector(
+                    onTap: onReplyTap,
+                    child: replyContent,
+                  ),
                 ),
               )
             : replyContent,
@@ -243,16 +249,20 @@ class MessageBubble extends ConsumerWidget {
                   children: [
                     Row(
                       children: [
-                        ProfileTapTarget(
-                          peerId: senderId,
-                          child: Text(
-                            senderName,
-                            style: HollowTypography.body.copyWith(
-                              color: isMe
-                                  ? hollow.accent
-                                  : nameColorFromId(senderId),
-                              fontWeight: FontWeight.w600,
-                              fontSize: 13,
+                        Flexible(
+                          child: ProfileTapTarget(
+                            peerId: senderId,
+                            child: Text(
+                              senderName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: HollowTypography.body.copyWith(
+                                color: isMe
+                                    ? hollow.accent
+                                    : nameColorFromId(senderId),
+                                fontWeight: FontWeight.w600,
+                                fontSize: 13,
+                              ),
                             ),
                           ),
                         ),

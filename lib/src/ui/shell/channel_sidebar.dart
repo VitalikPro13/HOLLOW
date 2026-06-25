@@ -209,14 +209,19 @@ class ChannelSidebar extends StatelessWidget {
       child: Row(
         children: [
           Expanded(
-            child: TypewriterText(
-              text: label,
-              animation: headerTextReveal,
-              style: HollowTypography.subheading.copyWith(
-                color: hollow.textPrimary,
-                fontWeight: FontWeight.w600,
+            // a11y Phase 3: fixed-height (48px) sidebar header chrome — cap the
+            // title scale so it stays in the bar at high OS text size.
+            child: MediaQuery.withClampedTextScaling(
+              maxScaleFactor: 1.3,
+              child: TypewriterText(
+                text: label,
+                animation: headerTextReveal,
+                style: HollowTypography.subheading.copyWith(
+                  color: hollow.textPrimary,
+                  fontWeight: FontWeight.w600,
+                ),
+                overflow: TextOverflow.ellipsis,
               ),
-              overflow: TextOverflow.ellipsis,
             ),
           ),
           if (selectedServer != null) ...[

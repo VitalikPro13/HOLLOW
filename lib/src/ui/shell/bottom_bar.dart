@@ -147,15 +147,20 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                         ),
                         const SizedBox(width: 4),
                         Expanded(
-                          child: Text(
-                            myDisplayName,
-                            style: HollowTypography.caption.copyWith(
-                              color: hollow.textPrimary,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 12,
+                          // a11y Phase 3: fixed-height dock chrome — cap the
+                          // label scale (tab-bar norm) so it stays in the bar.
+                          child: MediaQuery.withClampedTextScaling(
+                            maxScaleFactor: 1.3,
+                            child: Text(
+                              myDisplayName,
+                              style: HollowTypography.caption.copyWith(
+                                color: hollow.textPrimary,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 12,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
                       ],

@@ -51,6 +51,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:hollow/src/ui/dialogs/twitch_device_code_dialog.dart';
 import 'package:hollow/src/ui/guides/help_panel.dart';
 import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -60,7 +61,7 @@ class MobileSettingsTab extends ConsumerWidget {
 
   void _push(BuildContext context, String title, Widget child) {
     Navigator.of(context).push(
-      MaterialPageRoute(
+      hollowMobileRoute(
         builder: (_) => _SettingsSubPage(title: title, child: child),
       ),
     );

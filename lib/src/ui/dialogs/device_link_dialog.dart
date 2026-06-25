@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -416,25 +417,30 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
   }
 
   Widget _checkRow(HollowTheme hollow, String label, bool value, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Row(
-        children: [
-          Container(
-            width: 18,
-            height: 18,
-            decoration: BoxDecoration(
-              color: value ? hollow.accent : Colors.transparent,
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(color: value ? hollow.accent : hollow.border, width: 1.5),
+    return HollowFocusRing(
+      enabled: true,
+      onActivate: onTap,
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Row(
+          children: [
+            Container(
+              width: 18,
+              height: 18,
+              decoration: BoxDecoration(
+                color: value ? hollow.accent : Colors.transparent,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: value ? hollow.accent : hollow.border, width: 1.5),
+              ),
+              child: value ? const Icon(LucideIcons.check, size: 12, color: Colors.white) : null,
             ),
-            child: value ? const Icon(LucideIcons.check, size: 12, color: Colors.white) : null,
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          Text(label,
-              style: HollowTypography.body.copyWith(color: hollow.textPrimary, fontSize: 13)),
-        ],
+            const SizedBox(width: HollowSpacing.sm),
+            Text(label,
+                style: HollowTypography.body.copyWith(color: hollow.textPrimary, fontSize: 13)),
+          ],
+        ),
       ),
     );
   }

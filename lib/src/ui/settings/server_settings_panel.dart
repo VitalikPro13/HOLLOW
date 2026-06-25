@@ -232,43 +232,53 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
         ),
 
         // Tab bar
-        Container(
-          height: 40,
-          padding:
-              const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-          decoration: BoxDecoration(
-            color: hollow.surface,
-            border: Border(bottom: BorderSide(color: hollow.border)),
-          ),
-          child: Row(
-            children: List.generate(tabs.length, (i) {
-              final tab = tabs[i];
-              final isSelected = i == _selectedTab;
-              return _TabButton(
-                icon: tab.icon,
-                label: tab.label,
-                isSelected: isSelected,
-                isDanger: tab.isDanger,
-                onTap: () => setState(() => _selectedTab = i),
-              );
-            }),
+        // Own traversal group (a11y 2.6): Tab cycles the section selector on
+        // its own, separate from the content pane below.
+        FocusTraversalGroup(
+          policy: ReadingOrderTraversalPolicy(),
+          child: Container(
+            height: 40,
+            padding:
+                const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+            decoration: BoxDecoration(
+              color: hollow.surface,
+              border: Border(bottom: BorderSide(color: hollow.border)),
+            ),
+            child: Row(
+              children: List.generate(tabs.length, (i) {
+                final tab = tabs[i];
+                final isSelected = i == _selectedTab;
+                return _TabButton(
+                  icon: tab.icon,
+                  label: tab.label,
+                  isSelected: isSelected,
+                  isDanger: tab.isDanger,
+                  onTap: () => setState(() => _selectedTab = i),
+                );
+              }),
+            ),
           ),
         ),
 
         // Tab content
+        // Own traversal group (a11y 2.6): Tab stays WITHIN the active section
+        // body instead of leaking back into the tab selector as you move down.
         Expanded(
-          child: AnimatedSwitcher(
-            duration: HollowDurations.normal,
-            layoutBuilder: (currentChild, previousChildren) {
-              return Stack(
-                alignment: Alignment.topCenter,
-                children: [
-                  ...previousChildren,
-                  ?currentChild,
-                ],
-              );
-            },
-            child: _buildTabContent(currentServer, tabs, permissions),
+          child: FocusTraversalGroup(
+            policy: ReadingOrderTraversalPolicy(),
+            child: AnimatedSwitcher(
+              duration: HollowDurations.normal,
+              layoutBuilder: (currentChild, previousChildren) {
+                return Stack(
+                  alignment: Alignment.topCenter,
+                  children: [
+                    ...previousChildren,
+                    ?currentChild,
+                  ],
+                );
+              },
+              child: _buildTabContent(currentServer, tabs, permissions),
+            ),
           ),
         ),
       ],

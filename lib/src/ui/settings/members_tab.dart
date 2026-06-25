@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -484,26 +485,31 @@ class _BannedMembersSectionState extends ConsumerState<_BannedMembersSection> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const SizedBox(height: HollowSpacing.lg),
-        GestureDetector(
-          onTap: () => setState(() => _expanded = !_expanded),
-          child: Row(
-            children: [
-              Icon(
-                _expanded ? LucideIcons.chevronDown : LucideIcons.chevronRight,
-                size: 14,
-                color: hollow.textSecondary,
-              ),
-              const SizedBox(width: HollowSpacing.xs),
-              Icon(LucideIcons.ban, size: 14, color: hollow.error),
-              const SizedBox(width: HollowSpacing.xs),
-              Text(
-                'Banned (${banned.length})',
-                style: HollowTypography.label.copyWith(
-                  color: hollow.error,
-                  fontWeight: FontWeight.w600,
+        HollowFocusRing(
+          enabled: true,
+          onActivate: () => setState(() => _expanded = !_expanded),
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          child: GestureDetector(
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Row(
+              children: [
+                Icon(
+                  _expanded ? LucideIcons.chevronDown : LucideIcons.chevronRight,
+                  size: 14,
+                  color: hollow.textSecondary,
                 ),
-              ),
-            ],
+                const SizedBox(width: HollowSpacing.xs),
+                Icon(LucideIcons.ban, size: 14, color: hollow.error),
+                const SizedBox(width: HollowSpacing.xs),
+                Text(
+                  'Banned (${banned.length})',
+                  style: HollowTypography.label.copyWith(
+                    color: hollow.error,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
         if (_expanded) ...[

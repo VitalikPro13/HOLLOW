@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
@@ -241,7 +242,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     setState(() => _highlightIndex = index);
     _scrollController.scrollTo(
       index: index,
-      duration: const Duration(milliseconds: 300),
+      duration: ReduceMotionController.instance.isReduced
+          ? Duration.zero
+          : const Duration(milliseconds: 300),
       curve: Curves.easeOutCubic,
       alignment: 0.3,
     );
@@ -1957,7 +1960,7 @@ class _MobileChatHeader extends ConsumerWidget {
     final isOnline = isDm && identityIsOnline(ref, peerId!);
 
     return Container(
-      height: 52,
+      constraints: const BoxConstraints(minHeight: 52),
       decoration: BoxDecoration(
         color: hollow.surface,
         border: Border(bottom: BorderSide(color: hollow.border)),

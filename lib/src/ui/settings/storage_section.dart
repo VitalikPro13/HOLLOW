@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 
 /// Shared Storage Manager widgets used by both the desktop settings dialog
 /// (`user_settings_dialog.dart`) and the mobile settings tab
@@ -395,23 +396,30 @@ class _RowTrashButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-        onTap: () async {
-          final ok = await _confirm(
-            context,
-            'Clear "$label"?',
-            'Deletes the downloaded files for this conversation from disk. '
-                'The messages stay — files can be downloaded again later.',
-          );
-          if (ok) await onConfirmed();
-        },
-        child: Padding(
-          padding: const EdgeInsets.all(6),
-          child: Icon(LucideIcons.trash2, size: 16, color: hollow.error,
-              semanticLabel: 'Delete files'),
+    void handleTap() async {
+      final ok = await _confirm(
+        context,
+        'Clear "$label"?',
+        'Deletes the downloaded files for this conversation from disk. '
+            'The messages stay — files can be downloaded again later.',
+      );
+      if (ok) await onConfirmed();
+    }
+
+    return HollowFocusRing(
+      enabled: true,
+      onActivate: handleTap,
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          onTap: handleTap,
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Icon(LucideIcons.trash2, size: 16, color: hollow.error,
+                semanticLabel: 'Delete files'),
+          ),
         ),
       ),
     );

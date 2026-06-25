@@ -57,7 +57,12 @@ class FriendsBar extends ConsumerWidget {
           bottom: BorderSide(color: hollow.border),
         ),
       ),
-      child: Row(
+      // a11y Phase 3: fixed-height (44px) friends-bar chrome — cap label scale
+      // across the whole strip (chip names, counts, empty state) so it stays in
+      // the bar at high OS text size. Content areas honor full 2.0×.
+      child: MediaQuery.withClampedTextScaling(
+        maxScaleFactor: 1.3,
+        child: Row(
         children: [
           const SizedBox(width: HollowSpacing.sm),
 
@@ -192,6 +197,7 @@ class FriendsBar extends ConsumerWidget {
           }),
           const SizedBox(width: HollowSpacing.sm),
         ],
+      ),
       ),
     );
   }

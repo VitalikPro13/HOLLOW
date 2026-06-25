@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -50,7 +51,9 @@ class MobileNavBar extends ConsumerWidget {
                 children: [
                   // Animated glow behind active tab
                   AnimatedPositioned(
-                    duration: const Duration(milliseconds: 300),
+                    duration: ReduceMotionController.instance.isReduced
+                        ? Duration.zero
+                        : const Duration(milliseconds: 300),
                     curve: Curves.easeOutCubic,
                     left: glowLeft - 14,
                     top: -10,
@@ -252,11 +255,20 @@ class _NavTab extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 2),
-            Text(
-              label,
-              style: HollowTypography.caption.copyWith(
-                color: color,
-                fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
+            // a11y Phase 3: the bottom nav is a fixed-height control (a stacked
+            // icon + tiny label in a 5-slot grid); like iOS/Android tab bars it
+            // caps label scaling so the label stays legible without bursting the
+            // bar. The content areas still honor the full 2.0× OS scale.
+            MediaQuery.withClampedTextScaling(
+              maxScaleFactor: 1.3,
+              child: Text(
+                label,
+                style: HollowTypography.caption.copyWith(
+                  color: color,
+                  fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],

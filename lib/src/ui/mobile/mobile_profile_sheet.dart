@@ -21,6 +21,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -333,7 +334,7 @@ class MobileProfileSheet extends ConsumerWidget {
                               Navigator.of(context).pop();
                               ref.read(selectedPeerProvider.notifier).state = peerId;
                               Navigator.of(context, rootNavigator: true).push(
-                                MaterialPageRoute(
+                                hollowMobileRoute(
                                   builder: (_) => MobileChatRoute(peerId: peerId),
                                 ),
                               );

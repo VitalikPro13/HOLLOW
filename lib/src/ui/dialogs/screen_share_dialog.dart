@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 
 /// Resolution presets for screen sharing.
@@ -348,28 +349,33 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
 
   Widget _buildTab(
       HollowTheme hollow, String label, bool active, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.md,
-          vertical: HollowSpacing.xs + 2,
-        ),
-        decoration: BoxDecoration(
-          color: active
-              ? hollow.accent.withValues(alpha: 0.15)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: active
-              ? Border.all(color: hollow.accent.withValues(alpha: 0.3))
-              : null,
-        ),
-        child: Text(
-          label,
-          style: HollowTypography.caption.copyWith(
-            color: active ? hollow.accent : hollow.textSecondary,
-            fontWeight: active ? FontWeight.w600 : FontWeight.normal,
-            fontSize: 12,
+    return HollowFocusRing(
+      enabled: true,
+      onActivate: onTap,
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.md,
+            vertical: HollowSpacing.xs + 2,
+          ),
+          decoration: BoxDecoration(
+            color: active
+                ? hollow.accent.withValues(alpha: 0.15)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            border: active
+                ? Border.all(color: hollow.accent.withValues(alpha: 0.3))
+                : null,
+          ),
+          child: Text(
+            label,
+            style: HollowTypography.caption.copyWith(
+              color: active ? hollow.accent : hollow.textSecondary,
+              fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+              fontSize: 12,
+            ),
           ),
         ),
       ),
@@ -380,62 +386,67 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
       HollowTheme hollow, DesktopCapturerSource source, bool isSelected) {
     final thumbnail = source.thumbnail;
 
-    return GestureDetector(
-      onTap: () => setState(() => _selectedSourceId = source.id),
-      child: Container(
-        decoration: BoxDecoration(
-          color: hollow.surface,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(
-            color: isSelected
-                ? hollow.accent
-                : hollow.border,
-            width: isSelected ? 2 : 1,
-          ),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Thumbnail
-            Expanded(
-              child: thumbnail != null && thumbnail.isNotEmpty
-                  ? Image.memory(
-                      Uint8List.fromList(thumbnail),
-                      fit: BoxFit.cover,
-                      gaplessPlayback: true,
-                    )
-                  : Container(
-                      color: hollow.elevated,
-                      child: Icon(
-                        Icons.desktop_windows_outlined,
-                        color: hollow.textSecondary.withValues(alpha: 0.3),
-                        size: 32,
-                      ),
-                    ),
-            ),
-            // Name
-            Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.xs + 2,
-                vertical: HollowSpacing.xs,
-              ),
+    return HollowFocusRing(
+      enabled: true,
+      onActivate: () => setState(() => _selectedSourceId = source.id),
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      child: GestureDetector(
+        onTap: () => setState(() => _selectedSourceId = source.id),
+        child: Container(
+          decoration: BoxDecoration(
+            color: hollow.surface,
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            border: Border.all(
               color: isSelected
-                  ? hollow.accent.withValues(alpha: 0.1)
-                  : hollow.elevated,
-              child: Text(
-                source.name,
-                style: HollowTypography.caption.copyWith(
-                  color: isSelected
-                      ? hollow.accent
-                      : hollow.textPrimary,
-                  fontSize: 11,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
+                  ? hollow.accent
+                  : hollow.border,
+              width: isSelected ? 2 : 1,
             ),
-          ],
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Thumbnail
+              Expanded(
+                child: thumbnail != null && thumbnail.isNotEmpty
+                    ? Image.memory(
+                        Uint8List.fromList(thumbnail),
+                        fit: BoxFit.cover,
+                        gaplessPlayback: true,
+                      )
+                    : Container(
+                        color: hollow.elevated,
+                        child: Icon(
+                          Icons.desktop_windows_outlined,
+                          color: hollow.textSecondary.withValues(alpha: 0.3),
+                          size: 32,
+                        ),
+                      ),
+              ),
+              // Name
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.xs + 2,
+                  vertical: HollowSpacing.xs,
+                ),
+                color: isSelected
+                    ? hollow.accent.withValues(alpha: 0.1)
+                    : hollow.elevated,
+                child: Text(
+                  source.name,
+                  style: HollowTypography.caption.copyWith(
+                    color: isSelected
+                        ? hollow.accent
+                        : hollow.textPrimary,
+                    fontSize: 11,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -445,30 +456,35 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
       HollowTheme hollow, String label, bool active, VoidCallback onTap) {
     return Padding(
       padding: const EdgeInsets.only(right: 4),
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.sm,
-            vertical: HollowSpacing.xs,
-          ),
-          decoration: BoxDecoration(
-            color: active
-                ? hollow.accent.withValues(alpha: 0.15)
-                : hollow.surface,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            border: Border.all(
-              color: active
-                  ? hollow.accent.withValues(alpha: 0.4)
-                  : hollow.border,
+      child: HollowFocusRing(
+        enabled: true,
+        onActivate: onTap,
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        child: GestureDetector(
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: HollowSpacing.sm,
+              vertical: HollowSpacing.xs,
             ),
-          ),
-          child: Text(
-            label,
-            style: HollowTypography.caption.copyWith(
-              color: active ? hollow.accent : hollow.textSecondary,
-              fontSize: 11,
-              fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+            decoration: BoxDecoration(
+              color: active
+                  ? hollow.accent.withValues(alpha: 0.15)
+                  : hollow.surface,
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              border: Border.all(
+                color: active
+                    ? hollow.accent.withValues(alpha: 0.4)
+                    : hollow.border,
+              ),
+            ),
+            child: Text(
+              label,
+              style: HollowTypography.caption.copyWith(
+                color: active ? hollow.accent : hollow.textSecondary,
+                fontSize: 11,
+                fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+              ),
             ),
           ),
         ),

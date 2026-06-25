@@ -124,6 +124,7 @@ Future<void> pumpHollowMobile(
   WidgetTester tester, {
   Size viewportSize = const Size(400, 800),
   List<Override> extraOverrides = const [],
+  TextScaler textScaler = TextScaler.noScaling,
 }) async {
   _setupViewport(tester, viewportSize);
 
@@ -134,6 +135,12 @@ Future<void> pumpHollowMobile(
         title: 'Hollow Test',
         debugShowCheckedModeBanner: false,
         theme: HollowThemeData.dark(),
+        // a11y Phase 3: tests can pump the shell at an OS text scale (e.g.
+        // 2.0×) to assert the hardened layouts don't RenderFlex-overflow.
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+          child: child!,
+        ),
         home: const MobileShell(),
       ),
     ),

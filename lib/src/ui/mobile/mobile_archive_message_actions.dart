@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -63,7 +64,9 @@ class _ArchiveActionsSheetState extends State<_ArchiveActionsSheet>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 400),
+      duration: ReduceMotionController.instance.isReduced
+          ? Duration.zero
+          : const Duration(milliseconds: 400),
     )..forward();
   }
 

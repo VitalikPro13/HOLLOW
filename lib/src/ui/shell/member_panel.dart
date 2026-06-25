@@ -404,25 +404,30 @@ class _ServerMemberContent extends ConsumerWidget {
             ),
           ),
           alignment: Alignment.centerLeft,
-          child: isLoading
-              ? Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.sm + 2,
-                  ),
-                  child: Text('Members ...', style: captionStyle),
-                )
-              : error != null
-                  ? Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: HollowSpacing.sm + 2,
-                      ),
-                      child: Text('Members ?', style: captionStyle),
-                    )
-                  : _SectionDivider(
-                      label: 'Members',
-                      count: totalCount,
-                      isOnline: false,
+          // a11y Phase 3: fixed-height (48px) panel header chrome — cap the
+          // label scale so it stays in the bar at high OS text size.
+          child: MediaQuery.withClampedTextScaling(
+            maxScaleFactor: 1.3,
+            child: isLoading
+                ? Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: HollowSpacing.sm + 2,
                     ),
+                    child: Text('Members ...', style: captionStyle),
+                  )
+                : error != null
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: HollowSpacing.sm + 2,
+                        ),
+                        child: Text('Members ?', style: captionStyle),
+                      )
+                    : _SectionDivider(
+                        label: 'Members',
+                        count: totalCount,
+                        isOnline: false,
+                      ),
+          ),
         ),
 
         // Member list with online/offline sections

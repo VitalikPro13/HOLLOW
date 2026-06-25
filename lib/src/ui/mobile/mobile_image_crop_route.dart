@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 
 /// Shows a full-screen mobile crop route. Returns cropped PNG bytes or null.
 ///
@@ -23,7 +24,7 @@ Future<Uint8List?> showMobileImageCrop({
 }) {
   return Navigator.push<Uint8List?>(
     context,
-    MaterialPageRoute(
+    hollowMobileRoute<Uint8List?>(
       builder: (_) => MobileImageCropRoute(
         imageBytes: imageBytes,
         aspectRatio: aspectRatio,

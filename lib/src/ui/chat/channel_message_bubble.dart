@@ -20,6 +20,7 @@ import 'package:hollow/src/ui/chat/message_text_parser.dart';
 import 'package:hollow/src/ui/chat/profile_tap.dart';
 import 'package:hollow/src/ui/chat/reaction_bar.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 
 /// Flat message row for channel messages — no bubbles.
 ///
@@ -145,11 +146,16 @@ class ChannelMessageBubble extends ConsumerWidget {
       replyWidget = Padding(
         padding: const EdgeInsets.only(bottom: 4),
         child: onReplyTap != null
-            ? MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  onTap: onReplyTap,
-                  child: replyContent,
+            ? HollowFocusRing(
+                enabled: onReplyTap != null,
+                onActivate: onReplyTap,
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: GestureDetector(
+                    onTap: onReplyTap,
+                    child: replyContent,
+                  ),
                 ),
               )
             : replyContent,
@@ -265,19 +271,23 @@ class ChannelMessageBubble extends ConsumerWidget {
                 children: [
                   Row(
                     children: [
-                      ProfileTapTarget(
-                        peerId: senderMaster,
-                        nickname: (senderNickname?.isNotEmpty ?? false)
-                            ? senderNickname
-                            : null,
-                        child: Text(
-                          senderName,
-                          style: HollowTypography.body.copyWith(
-                            color: isMe
-                                ? hollow.accent
-                                : nameColorFromId(senderMaster),
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13,
+                      Flexible(
+                        child: ProfileTapTarget(
+                          peerId: senderMaster,
+                          nickname: (senderNickname?.isNotEmpty ?? false)
+                              ? senderNickname
+                              : null,
+                          child: Text(
+                            senderName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: HollowTypography.body.copyWith(
+                              color: isMe
+                                  ? hollow.accent
+                                  : nameColorFromId(senderMaster),
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13,
+                            ),
                           ),
                         ),
                       ),

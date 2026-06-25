@@ -16,6 +16,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/mobile/mobile_active_call_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_nav_bar.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_pill.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_archive_tab.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_chats_tab.dart'
@@ -92,7 +93,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(unreadProvider.notifier).markDmSeen(masterId, null);
     Navigator.of(context, rootNavigator: true)
-        .push(MaterialPageRoute(
+        .push(hollowMobileRoute(
       builder: (_) => MobileChatRoute(peerId: masterId),
     ))
         .then((_) {
@@ -122,7 +123,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     // (without this the channel only fetched messages on open, never real-time).
     _subscribeActiveChannel(serverId, channelId);
     Navigator.of(context, rootNavigator: true)
-        .push(MaterialPageRoute(
+        .push(hollowMobileRoute(
       builder: (_) => MobileChatRoute(
         serverId: serverId,
         channelId: channelId,

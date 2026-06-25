@@ -25,6 +25,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/animations/startup_reveal.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
@@ -269,7 +270,14 @@ class _ProfileColumn extends ConsumerWidget {
             }
             return Padding(
               padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: GestureDetector(
+              child: HollowFocusRing(
+                enabled: true,
+                onActivate: () => launchUrl(
+                  Uri.parse('https://twitch.tv/$username'),
+                  mode: LaunchMode.externalApplication,
+                ),
+                borderRadius: BorderRadius.circular(6),
+                child: GestureDetector(
                 onTap: () => launchUrl(
                   Uri.parse('https://twitch.tv/$username'),
                   mode: LaunchMode.externalApplication,
@@ -298,6 +306,7 @@ class _ProfileColumn extends ConsumerWidget {
                     ],
                   ),
                 ),
+              ),
               ),
             );
           },
@@ -1299,7 +1308,15 @@ class _NewsPanel extends ConsumerWidget {
                           color: hollow.accent,
                         ),
                       ),
-                      GestureDetector(
+                      HollowFocusRing(
+                        enabled: true,
+                        onActivate: () => showUserSettingsDialog(
+                          context,
+                          ref,
+                          openUpdatesTab: true,
+                        ),
+                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        child: GestureDetector(
                         onTap: () => showUserSettingsDialog(
                           context,
                           ref,
@@ -1347,9 +1364,30 @@ class _NewsPanel extends ConsumerWidget {
                           ),
                         ),
                       ),
+                      ),
                     ],
                     const Spacer(),
-                    GestureDetector(
+                    HollowFocusRing(
+                      enabled: true,
+                      onActivate: () async {
+                        final results = await Future.wait([
+                          ref.read(newsProvider.notifier).refresh(),
+                          ref
+                              .read(updaterProvider.notifier)
+                              .checkForUpdates()
+                              .then((_) => true)
+                              .catchError((_) => false),
+                        ]);
+                        if (context.mounted && results[0] == false) {
+                          HollowToast.show(
+                            context,
+                            'Failed to fetch news — check your connection',
+                            type: HollowToastType.error,
+                          );
+                        }
+                      },
+                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      child: GestureDetector(
                       onTap: () async {
                         final results = await Future.wait([
                           ref.read(newsProvider.notifier).refresh(),
@@ -1375,6 +1413,7 @@ class _NewsPanel extends ConsumerWidget {
                           color: hollow.textSecondary,
                         ),
                       ),
+                    ),
                     ),
                   ],
                 ),

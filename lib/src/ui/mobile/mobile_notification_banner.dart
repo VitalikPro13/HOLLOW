@@ -11,6 +11,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 
 /// Compact in-app banner — the ONLY mobile in-app notification. Shown WHILE the
 /// user is sitting inside a chat route, mounted inside [MobileChatRoute], so a
@@ -122,7 +123,7 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
       ref.read(selectedPeerProvider.notifier).state = card.peerId;
       ref.read(selectedServerProvider.notifier).state = null;
       ref.read(unreadProvider.notifier).markDmSeen(card.peerId!, null);
-      Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
+      Navigator.of(context, rootNavigator: true).push(hollowMobileRoute(
         builder: (_) => MobileChatRoute(peerId: card.peerId!),
       ));
     } else if (card.serverId != null && card.channelId != null) {
@@ -134,7 +135,7 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
         ref.read(selectedChannelProvider.notifier).state = card.channelId;
         ref.read(selectedServerProvider.notifier).state = card.serverId;
         ref.read(selectedPeerProvider.notifier).state = null;
-        Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
+        Navigator.of(context, rootNavigator: true).push(hollowMobileRoute(
           builder: (_) => MobileChatRoute(
             serverId: card.serverId!,
             channelId: card.channelId!,

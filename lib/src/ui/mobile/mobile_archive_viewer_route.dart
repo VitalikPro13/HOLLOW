@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
@@ -102,7 +103,9 @@ class _MobileArchiveViewerRouteState
     if (lo < messages.length && _scrollController.isAttached) {
       _scrollController.scrollTo(
         index: lo,
-        duration: const Duration(milliseconds: 300),
+        duration: ReduceMotionController.instance.isReduced
+            ? Duration.zero
+            : const Duration(milliseconds: 300),
         curve: Curves.easeOutCubic,
         alignment: 0.1,
       );
@@ -114,7 +117,9 @@ class _MobileArchiveViewerRouteState
     setState(() => _highlightIndex = index);
     _scrollController.scrollTo(
       index: index,
-      duration: const Duration(milliseconds: 300),
+      duration: ReduceMotionController.instance.isReduced
+          ? Duration.zero
+          : const Duration(milliseconds: 300),
       curve: Curves.easeOutCubic,
       alignment: 0.3,
     );
@@ -190,7 +195,9 @@ class _MobileArchiveViewerRouteState
             if (searchOpen) _buildSearchBar(allMessages.cast<dynamic>()),
             Expanded(
               child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 300),
+                duration: ReduceMotionController.instance.isReduced
+                    ? Duration.zero
+                    : const Duration(milliseconds: 300),
                 switchInCurve: Curves.easeOut,
                 child: messagesAsync.when(
                   loading: () =>
@@ -465,7 +472,9 @@ class _MobileArchiveViewerRouteState
               _buildSearchBar(filtered.cast<dynamic>()),
             Expanded(
               child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 300),
+                duration: ReduceMotionController.instance.isReduced
+                    ? Duration.zero
+                    : const Duration(milliseconds: 300),
                 switchInCurve: Curves.easeOut,
                 child: messagesAsync.when(
                   loading: () =>

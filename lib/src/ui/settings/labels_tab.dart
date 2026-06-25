@@ -8,6 +8,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -117,14 +118,19 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                 runSpacing: 8,
                 children: _presetColors.map((c) {
                   final isSelected = c == selectedColor;
-                  return GestureDetector(
-                    onTap: () => setDialogState(() => selectedColor = c),
-                    child: Container(
-                      width: 28, height: 28,
-                      decoration: BoxDecoration(
-                        color: c, shape: BoxShape.circle,
-                        border: isSelected
-                            ? Border.all(color: Colors.white, width: 2) : null,
+                  return HollowFocusRing(
+                    enabled: true,
+                    onActivate: () => setDialogState(() => selectedColor = c),
+                    borderRadius: BorderRadius.circular(14),
+                    child: GestureDetector(
+                      onTap: () => setDialogState(() => selectedColor = c),
+                      child: Container(
+                        width: 28, height: 28,
+                        decoration: BoxDecoration(
+                          color: c, shape: BoxShape.circle,
+                          border: isSelected
+                              ? Border.all(color: Colors.white, width: 2) : null,
+                        ),
                       ),
                     ),
                   );
@@ -232,33 +238,38 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
             children: labels.map((l) {
               final c = _parseColor(l.color);
               final selected = _myLabelIds.contains(l.labelId);
-              return GestureDetector(
-                onTap: () => _toggleSelfLabel(l.labelId),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: selected ? c.withValues(alpha: 0.25) : hollow.elevated,
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    border: Border.all(
-                      color: selected ? c : hollow.border,
+              return HollowFocusRing(
+                enabled: true,
+                onActivate: () => _toggleSelfLabel(l.labelId),
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
+                child: GestureDetector(
+                  onTap: () => _toggleSelfLabel(l.labelId),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: selected ? c.withValues(alpha: 0.25) : hollow.elevated,
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
+                      border: Border.all(
+                        color: selected ? c : hollow.border,
+                      ),
                     ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        selected ? LucideIcons.check : LucideIcons.circle,
-                        size: 12,
-                        color: c,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        l.name,
-                        style: HollowTypography.body.copyWith(
-                          color: selected ? c : hollow.textPrimary,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          selected ? LucideIcons.check : LucideIcons.circle,
+                          size: 12,
+                          color: c,
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 6),
+                        Text(
+                          l.name,
+                          style: HollowTypography.body.copyWith(
+                            color: selected ? c : hollow.textPrimary,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               );

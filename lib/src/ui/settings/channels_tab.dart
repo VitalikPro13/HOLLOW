@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -921,35 +922,40 @@ class _ChannelTypeChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: HollowDurations.fast,
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.md,
-          vertical: HollowSpacing.xs,
-        ),
-        decoration: BoxDecoration(
-          color: isSelected ? hollow.accentMuted : hollow.surface,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(
-            color: isSelected ? hollow.accent : hollow.border,
+    return HollowFocusRing(
+      enabled: true,
+      onActivate: onTap,
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: HollowDurations.fast,
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.md,
+            vertical: HollowSpacing.xs,
           ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 14,
-                color: isSelected ? hollow.accent : hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.xs),
-            Text(
-              label,
-              style: HollowTypography.caption.copyWith(
-                color: isSelected ? hollow.accent : hollow.textSecondary,
-                fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-              ),
+          decoration: BoxDecoration(
+            color: isSelected ? hollow.accentMuted : hollow.surface,
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            border: Border.all(
+              color: isSelected ? hollow.accent : hollow.border,
             ),
-          ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 14,
+                  color: isSelected ? hollow.accent : hollow.textSecondary),
+              const SizedBox(width: HollowSpacing.xs),
+              Text(
+                label,
+                style: HollowTypography.caption.copyWith(
+                  color: isSelected ? hollow.accent : hollow.textSecondary,
+                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

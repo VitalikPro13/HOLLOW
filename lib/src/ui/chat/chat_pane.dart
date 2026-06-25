@@ -4102,18 +4102,22 @@ class TypingIndicatorBar extends StatelessWidget {
     }
 
     return Container(
-      height: 24,
+      constraints: const BoxConstraints(minHeight: 24),
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
       alignment: Alignment.centerLeft,
       color: hollow.surface,
       child: Row(
         children: [
-          Text(
-            text,
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontStyle: FontStyle.italic,
-              fontSize: 11,
+          Flexible(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+                fontStyle: FontStyle.italic,
+                fontSize: 11,
+              ),
             ),
           ),
           const SizedBox(width: HollowSpacing.xs),

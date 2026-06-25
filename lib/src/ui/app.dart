@@ -93,9 +93,16 @@ class HollowApp extends ConsumerWidget {
             ),
           );
         }
+        // a11y Phase 3 (Larger Text): honor OS text scaling up to 2.0×, the
+        // platform max on iOS/Android. Was clamped to 1.3× (which silently
+        // shrank a 200% OS setting to 130% — the dishonest state). The chat
+        // surfaces, chrome bars and tight rows were hardened to survive 2.0×
+        // (fixed-height bars → min-height, names → Flexible+ellipsis); a
+        // textScaler golden test guards against RenderFlex overflow at 2.0×.
+        // Desktop has no clamp (full OS scaling already flows through).
         return MediaQuery.withClampedTextScaling(
           minScaleFactor: 0.8,
-          maxScaleFactor: 1.3,
+          maxScaleFactor: 2.0,
           child: Stack(
             children: [
               child,

@@ -5,6 +5,7 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Notifications settings tab in Server Settings.
@@ -201,44 +202,49 @@ class _LevelChip extends StatelessWidget {
     final hollow = HollowTheme.of(context);
     final color = activeColor ?? hollow.accent;
 
-    return GestureDetector(
-      onTap: onTap,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.md,
-            vertical: HollowSpacing.sm,
-          ),
-          decoration: BoxDecoration(
-            color: isSelected
-                ? color.withValues(alpha: 0.15)
-                : hollow.surface,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(
-              color: isSelected ? color : hollow.border,
+    return HollowFocusRing(
+      enabled: true,
+      onActivate: onTap,
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
+      child: GestureDetector(
+        onTap: onTap,
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            padding: const EdgeInsets.symmetric(
+              horizontal: HollowSpacing.md,
+              vertical: HollowSpacing.sm,
             ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                icon,
-                size: 14,
-                color: isSelected ? color : hollow.textSecondary,
+            decoration: BoxDecoration(
+              color: isSelected
+                  ? color.withValues(alpha: 0.15)
+                  : hollow.surface,
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
+              border: Border.all(
+                color: isSelected ? color : hollow.border,
               ),
-              const SizedBox(width: HollowSpacing.xs),
-              Text(
-                label,
-                style: HollowTypography.body.copyWith(
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  icon,
+                  size: 14,
                   color: isSelected ? color : hollow.textSecondary,
-                  fontSize: 12,
-                  fontWeight:
-                      isSelected ? FontWeight.w600 : FontWeight.w400,
                 ),
-              ),
-            ],
+                const SizedBox(width: HollowSpacing.xs),
+                Text(
+                  label,
+                  style: HollowTypography.body.copyWith(
+                    color: isSelected ? color : hollow.textSecondary,
+                    fontSize: 12,
+                    fontWeight:
+                        isSelected ? FontWeight.w600 : FontWeight.w400,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

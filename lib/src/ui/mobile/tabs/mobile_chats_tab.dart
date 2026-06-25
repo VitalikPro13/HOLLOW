@@ -61,7 +61,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     ref.read(selectedPeerProvider.notifier).state = peerId;
     ref.read(selectedServerProvider.notifier).state = null;
     Navigator.of(context, rootNavigator: true).push(
-      MaterialPageRoute(
+      hollowMobileRoute(
         builder: (_) => MobileChatRoute(peerId: peerId),
       ),
     ).then((_) {
@@ -104,7 +104,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
           onNavigateSettings: () {
             Navigator.pop(context);
             Navigator.of(context, rootNavigator: true).push(
-              MaterialPageRoute(
+              hollowMobileRoute(
                 builder: (_) => MobileServerSettingsRoute(serverId: serverId),
               ),
             );
@@ -118,7 +118,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     ref.read(selectedServerProvider.notifier).state = serverId;
     ref.read(selectedChannelProvider.notifier).state = channel.channelId;
     Navigator.of(context, rootNavigator: true).push(
-      MaterialPageRoute(
+      hollowMobileRoute(
         builder: (_) => MobileChatRoute(
           serverId: serverId,
           channelId: channel.channelId,
@@ -153,7 +153,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       ref.read(selectedServerProvider.notifier).state = serverId;
       ref.read(selectedChannelProvider.notifier).state = channel.channelId;
       nav.push(
-        MaterialPageRoute(
+        hollowMobileRoute(
           builder: (_) => MobileChatRoute(
             serverId: serverId,
             channelId: channel.channelId,
@@ -213,7 +213,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     ref.read(selectedServerProvider.notifier).state = serverId;
     ref.read(selectedChannelProvider.notifier).state = channel.channelId;
     nav.push(
-      MaterialPageRoute(
+      hollowMobileRoute(
         builder: (_) => MobileChatRoute(
           serverId: serverId,
           channelId: channel.channelId,
@@ -226,18 +226,12 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
         ref.read(selectedChannelProvider.notifier).state = null;
       }
     });
-    nav.push(PageRouteBuilder(
-      pageBuilder: (_, __, ___) => MobileVoiceChannelRoute(
+    nav.push(hollowMobileRoute(
+      transition: HollowRouteTransition.slideUp,
+      builder: (_) => MobileVoiceChannelRoute(
         serverId: serverId,
         channelId: channel.channelId,
         channelName: channel.name,
-      ),
-      transitionsBuilder: (_, anim, __, child) => SlideTransition(
-        position: Tween<Offset>(
-          begin: const Offset(0, 1),
-          end: Offset.zero,
-        ).animate(CurvedAnimation(parent: anim, curve: Curves.easeOut)),
-        child: child,
       ),
     ));
   }

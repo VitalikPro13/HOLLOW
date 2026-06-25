@@ -23,6 +23,7 @@ import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_storage_route.dart';
 import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
@@ -734,7 +735,7 @@ class _MobileServerSettingsRouteState
                     label: 'Members',
                     onTap: () => Navigator.push(
                       context,
-                      MaterialPageRoute(
+                      hollowMobileRoute(
                         builder: (_) => MobileMembersRoute(serverId: widget.serverId),
                       ),
                     ),
@@ -745,7 +746,7 @@ class _MobileServerSettingsRouteState
                       label: 'Roles',
                       onTap: () => Navigator.push(
                         context,
-                        MaterialPageRoute(
+                        hollowMobileRoute(
                           builder: (_) => MobileRolesRoute(serverId: widget.serverId),
                         ),
                       ),
@@ -755,7 +756,7 @@ class _MobileServerSettingsRouteState
                     label: 'Labels',
                     onTap: () => Navigator.push(
                       context,
-                      MaterialPageRoute(
+                      hollowMobileRoute(
                         builder: (_) => MobileLabelsRoute(serverId: widget.serverId),
                       ),
                     ),
@@ -766,7 +767,7 @@ class _MobileServerSettingsRouteState
                       label: 'Twitch Verification',
                       onTap: () => Navigator.push(
                         context,
-                        MaterialPageRoute(
+                        hollowMobileRoute(
                           builder: (_) => MobileTwitchSettingsRoute(serverId: widget.serverId),
                         ),
                       ),
@@ -784,7 +785,7 @@ class _MobileServerSettingsRouteState
                     label: 'Storage',
                     onTap: () => Navigator.push(
                       context,
-                      MaterialPageRoute(
+                      hollowMobileRoute(
                         builder: (_) => MobileStorageRoute(serverId: widget.serverId),
                       ),
                     ),

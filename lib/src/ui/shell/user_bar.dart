@@ -168,7 +168,12 @@ class UserBar extends ConsumerWidget {
                 padding: const EdgeInsets.symmetric(
                   vertical: HollowSpacing.xs,
                 ),
-                child: Column(
+                // a11y Phase 3: this user panel is fixed-height chrome (52px);
+                // cap its label scale (like a tab bar) so the two lines stay in
+                // the bar at high OS text size. Content areas honor full 2.0×.
+                child: MediaQuery.withClampedTextScaling(
+                  maxScaleFactor: 1.3,
+                  child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -203,6 +208,7 @@ class UserBar extends ConsumerWidget {
                       ],
                     ),
                   ],
+                ),
                 ),
               ),
             ),

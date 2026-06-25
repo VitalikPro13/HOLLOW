@@ -93,11 +93,19 @@ class _NavTab extends StatelessWidget {
               color: isActive ? hollow.accent : hollow.textSecondary,
             ),
             const SizedBox(height: 2),
-            Text(
-              label,
-              style: HollowTypography.caption.copyWith(
-                color: isActive ? hollow.accent : hollow.textSecondary,
-                fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
+            // a11y Phase 3: bottom-nav labels cap their scale (like iOS/Android
+            // tab bars) so the fixed-height bar stays intact; content areas
+            // still honor the full 2.0× OS scale.
+            MediaQuery.withClampedTextScaling(
+              maxScaleFactor: 1.3,
+              child: Text(
+                label,
+                style: HollowTypography.caption.copyWith(
+                  color: isActive ? hollow.accent : hollow.textSecondary,
+                  fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],

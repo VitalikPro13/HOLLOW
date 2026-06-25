@@ -1197,93 +1197,98 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     final isActive = domain == _initialRelayDomain;
     final isOfficial = domain == kDefaultRelayDomain;
 
-    return GestureDetector(
-      onTap: () => setState(() => _selectedRelay = domain),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.md,
-          vertical: HollowSpacing.sm,
-        ),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? hollow.accent.withValues(alpha: 0.08)
-              : hollow.surface.withValues(alpha: 0.5),
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          border: Border.all(
-            color: isSelected
-                ? hollow.accent.withValues(alpha: 0.4)
-                : hollow.border.withValues(alpha: 0.3),
+    return HollowFocusRing(
+      enabled: true,
+      onActivate: () => setState(() => _selectedRelay = domain),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
+      child: GestureDetector(
+        onTap: () => setState(() => _selectedRelay = domain),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.md,
+            vertical: HollowSpacing.sm,
           ),
-        ),
-        child: Row(
-          children: [
-            Icon(
-              isSelected ? LucideIcons.checkCircle : LucideIcons.circle,
-              size: 16,
-              color: isSelected ? hollow.accent : hollow.textSecondary,
+          decoration: BoxDecoration(
+            color: isSelected
+                ? hollow.accent.withValues(alpha: 0.08)
+                : hollow.surface.withValues(alpha: 0.5),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            border: Border.all(
+              color: isSelected
+                  ? hollow.accent.withValues(alpha: 0.4)
+                  : hollow.border.withValues(alpha: 0.3),
             ),
-            const SizedBox(width: HollowSpacing.sm),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    domain,
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textPrimary,
-                      fontSize: 13,
-                      fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-                    ),
-                  ),
-                  if (isActive)
+          ),
+          child: Row(
+            children: [
+              Icon(
+                isSelected ? LucideIcons.checkCircle : LucideIcons.circle,
+                size: 16,
+                color: isSelected ? hollow.accent : hollow.textSecondary,
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                     Text(
-                      'Currently active',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 11,
+                      domain,
+                      style: HollowTypography.body.copyWith(
+                        color: hollow.textPrimary,
+                        fontSize: 13,
+                        fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
                       ),
                     ),
-                ],
+                    if (isActive)
+                      Text(
+                        'Currently active',
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.textSecondary,
+                          fontSize: 11,
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
-            if (isOfficial)
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm,
-                  vertical: 2,
-                ),
-                decoration: BoxDecoration(
-                  color: hollow.accent.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
-                ),
-                child: Text(
-                  'Official',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.accent,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
+              if (isOfficial)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: HollowSpacing.sm,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: hollow.accent.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  ),
+                  child: Text(
+                    'Official',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.accent,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
-              ),
-            if (!isOfficial) ...[
-              const SizedBox(width: HollowSpacing.sm),
-              GestureDetector(
-                onTap: () async {
-                  await ref.read(savedRelayListProvider.notifier).removeRelay(domain);
-                  if (_selectedRelay == domain) {
-                    setState(() => _selectedRelay = kDefaultRelayDomain);
-                  }
-                },
-                child: Icon(
-                  LucideIcons.x,
-                  size: 14,
-                  semanticLabel: 'Remove relay',
-                  color: hollow.textSecondary,
+              if (!isOfficial) ...[
+                const SizedBox(width: HollowSpacing.sm),
+                GestureDetector(
+                  onTap: () async {
+                    await ref.read(savedRelayListProvider.notifier).removeRelay(domain);
+                    if (_selectedRelay == domain) {
+                      setState(() => _selectedRelay = kDefaultRelayDomain);
+                    }
+                  },
+                  child: Icon(
+                    LucideIcons.x,
+                    size: 14,
+                    semanticLabel: 'Remove relay',
+                    color: hollow.textSecondary,
+                  ),
                 ),
-              ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );

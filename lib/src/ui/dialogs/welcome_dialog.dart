@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
@@ -234,24 +235,29 @@ class _WelcomeContentState extends State<_WelcomeContent> {
         const SizedBox(height: HollowSpacing.lg),
 
         // Advanced section — relay domain for self-hosters.
-        GestureDetector(
-          onTap: () => setState(() => _showAdvanced = !_showAdvanced),
-          child: Row(
-            children: [
-              Icon(
-                _showAdvanced ? LucideIcons.chevronDown : LucideIcons.chevronRight,
-                size: 14,
-                color: hollow.textSecondary,
-              ),
-              const SizedBox(width: HollowSpacing.xs),
-              Text(
-                'Advanced',
-                style: HollowTypography.caption.copyWith(
+        HollowFocusRing(
+          enabled: true,
+          onActivate: () => setState(() => _showAdvanced = !_showAdvanced),
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          child: GestureDetector(
+            onTap: () => setState(() => _showAdvanced = !_showAdvanced),
+            child: Row(
+              children: [
+                Icon(
+                  _showAdvanced ? LucideIcons.chevronDown : LucideIcons.chevronRight,
+                  size: 14,
                   color: hollow.textSecondary,
-                  fontSize: 12,
                 ),
-              ),
-            ],
+                const SizedBox(width: HollowSpacing.xs),
+                Text(
+                  'Advanced',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
 
@@ -308,67 +314,72 @@ class _OptionCardState extends State<_OptionCard> {
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
       cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          padding: const EdgeInsets.all(HollowSpacing.md),
-          decoration: BoxDecoration(
-            color: _hovered
-                ? hollow.surface.withValues(alpha: 0.8)
-                : hollow.surface.withValues(alpha: 0.4),
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(
+      child: HollowFocusRing(
+        enabled: true,
+        onActivate: widget.onTap,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            padding: const EdgeInsets.all(HollowSpacing.md),
+            decoration: BoxDecoration(
               color: _hovered
-                  ? hollow.accent.withValues(alpha: 0.3)
-                  : hollow.border,
+                  ? hollow.surface.withValues(alpha: 0.8)
+                  : hollow.surface.withValues(alpha: 0.4),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
+              border: Border.all(
+                color: _hovered
+                    ? hollow.accent.withValues(alpha: 0.3)
+                    : hollow.border,
+              ),
             ),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: hollow.accent.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+            child: Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: hollow.accent.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  ),
+                  child: Icon(
+                    widget.icon,
+                    size: 20,
+                    color: hollow.accent,
+                  ),
                 ),
-                child: Icon(
-                  widget.icon,
-                  size: 20,
-                  color: hollow.accent,
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.md),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      widget.title,
-                      style: HollowTypography.body.copyWith(
-                        color: hollow.textPrimary,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 14,
+                const SizedBox(width: HollowSpacing.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.title,
+                        style: HollowTypography.body.copyWith(
+                          color: hollow.textPrimary,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      widget.subtitle,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 11,
+                      const SizedBox(height: 2),
+                      Text(
+                        widget.subtitle,
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.textSecondary,
+                          fontSize: 11,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-              Icon(
-                LucideIcons.chevronRight,
-                size: 16,
-                color: hollow.textSecondary.withValues(alpha: 0.5),
-              ),
-            ],
+                Icon(
+                  LucideIcons.chevronRight,
+                  size: 16,
+                  color: hollow.textSecondary.withValues(alpha: 0.5),
+                ),
+              ],
+            ),
           ),
         ),
       ),

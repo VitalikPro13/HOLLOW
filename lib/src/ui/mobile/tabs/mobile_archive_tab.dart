@@ -20,6 +20,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_archive_viewer_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/core/providers/recovery_pool_provider.dart';
 import 'package:hollow/src/core/providers/vault_file_status_provider.dart';
 import 'package:hollow/src/ui/archive/recovery_pool_dashboard.dart';
@@ -422,7 +423,7 @@ class _MobileDmList extends ConsumerWidget {
     ref.read(archiveSelectedDmProvider.notifier).state = peerId;
     ref.read(archiveSelectedChannelProvider.notifier).state = null;
     Navigator.of(context, rootNavigator: true)
-        .push(MaterialPageRoute(
+        .push(hollowMobileRoute(
           builder: (_) =>
               MobileArchiveViewerRoute(peerId: peerId),
         ))
@@ -828,7 +829,7 @@ class _MobileChannelList extends ConsumerWidget {
     ref.read(archiveSelectedChannelProvider.notifier).state = key;
     ref.read(archiveSelectedDmProvider.notifier).state = null;
     Navigator.of(context, rootNavigator: true)
-        .push(MaterialPageRoute(
+        .push(hollowMobileRoute(
           builder: (_) => MobileArchiveViewerRoute(
             serverId: ch.serverId,
             channelId: ch.channelId,
@@ -1674,7 +1675,7 @@ class _MobileImportedArchivesViewState
   void _openArchiveViewer(BuildContext context, String path) {
     ref.read(selectedImportedArchiveProvider.notifier).state = path;
     Navigator.of(context, rootNavigator: true)
-        .push(MaterialPageRoute(
+        .push(hollowMobileRoute(
           builder: (_) =>
               MobileImportedArchiveViewerRoute(path: path),
         ))

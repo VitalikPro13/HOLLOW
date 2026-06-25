@@ -21,6 +21,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 
 /// Renders a video attachment inline in a message bubble.
@@ -406,7 +407,11 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
         (isInVaultCache ? _findShareRootHash(resolvedDiskPath!) : null);
     final showKeepAndSeed = shareRoot != null && isInVaultCache;
 
-    return MouseRegion(
+    return HollowFocusRing(
+      enabled: canPlay,
+      onActivate: canPlay ? _onPlayTapped : null,
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      child: MouseRegion(
       cursor: canPlay ? SystemMouseCursors.click : MouseCursor.defer,
       child: GestureDetector(
         onTap: canPlay ? _onPlayTapped : null,
@@ -510,6 +515,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
               ),
           ],
         ),
+      ),
       ),
     );
   }

@@ -1306,8 +1306,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       children: [
         // Channel header
         Container(
-          height: 48,
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.lg,
+            vertical: HollowSpacing.sm + 2,
+          ),
           decoration: BoxDecoration(
             color: hollow.surface,
             border: Border(bottom: BorderSide(color: hollow.border)),
@@ -1316,11 +1318,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             children: [
               Icon(LucideIcons.hash, size: 20, color: hollow.textSecondary),
               const SizedBox(width: HollowSpacing.sm),
-              Text(
-                widget.channelName,
-                style: HollowTypography.subheading.copyWith(
-                  color: hollow.textPrimary,
-                  fontWeight: FontWeight.w600,
+              Expanded(
+                child: Text(
+                  widget.channelName,
+                  style: HollowTypography.subheading.copyWith(
+                    color: hollow.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
               if (ref.watch(serverIsNsfwProvider(widget.serverId)).valueOrNull ??
@@ -1333,7 +1339,6 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                 serverId: widget.serverId,
                 channelId: widget.channelId,
               ),
-              const Spacer(),
               Builder(builder: (context) {
                 final pinKey = '${widget.serverId}:${widget.channelId}';
                 final pinnedIds = ref.watch(pinnedProvider)[pinKey] ?? [];
