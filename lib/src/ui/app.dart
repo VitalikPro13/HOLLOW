@@ -65,6 +65,14 @@ class HollowApp extends ConsumerWidget {
       theme: themeData,
       home: const HollowShell(),
       builder: (context, child) {
+        // a11y 2.6: clear the keyboard focus ring as soon as the user reaches
+        // for the mouse/touch. Flutter keeps `traditional` highlight mode after
+        // a desktop mouse click, so a ring left on the last Tab-focused control
+        // would otherwise linger. Demote focus on any pointer-down WHILE rings
+        // are showing; text fields re-acquire focus on their own tap-up (which
+        // fires after this), so tapping into an input still works.
+        child = _PointerFocusDismisser(child: child ?? const SizedBox.shrink());
+
         if (isDesktop) {
           return Material(
             type: MaterialType.transparency,
@@ -76,7 +84,7 @@ class HollowApp extends ConsumerWidget {
                     if (!annotation) const WindowTitleBar(),
                     Expanded(
                       child: ClipRect(
-                        child: child ?? const SizedBox.shrink(),
+                        child: child,
                       ),
                     ),
                   ],
@@ -90,7 +98,7 @@ class HollowApp extends ConsumerWidget {
           maxScaleFactor: 1.3,
           child: Stack(
             children: [
-              child ?? const SizedBox.shrink(),
+              child,
               const IncomingCallOverlay(),
               // Global earpiece proximity (mobile): blanks the screen on
               // ear-hold for any active call, not just while the call sheet
@@ -100,6 +108,31 @@ class HollowApp extends ConsumerWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Clears a lingering keyboard focus ring when the user switches to the mouse
+/// (a11y 2.6). Wraps the app body in a translucent [Listener] (so it never eats
+/// taps) and, on any pointer-down WHILE the focus highlight is in keyboard mode,
+/// unfocuses the current node — which collapses every [HollowFocusRing] to its
+/// hidden state. A no-op during pure mouse use (highlight already non-keyboard),
+/// and text fields still focus because their own tap-up fires after this.
+class _PointerFocusDismisser extends StatelessWidget {
+  final Widget child;
+  const _PointerFocusDismisser({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) {
+        if (FocusManager.instance.highlightMode ==
+            FocusHighlightMode.traditional) {
+          FocusManager.instance.primaryFocus?.unfocus();
+        }
+      },
+      child: child,
     );
   }
 }

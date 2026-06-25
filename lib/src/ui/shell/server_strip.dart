@@ -15,6 +15,7 @@ import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -687,26 +688,31 @@ class _ServerIconState extends State<_ServerIcon> {
           : SystemMouseCursors.basic,
       onEnter: (_) => setState(() => _hovering = true),
       onExit: (_) => setState(() => _hovering = false),
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: AnimatedContainer(
-          duration: HollowDurations.fast,
-          curve: Curves.easeOutCubic,
-          width: 48,
-          height: 48,
-          clipBehavior: Clip.antiAlias,
-          decoration: BoxDecoration(
-            color: effectiveBg,
-            borderRadius: BorderRadius.circular(radius),
-            border: (widget.isSelected && widget.showBorder)
-                ? Border.all(
-                    color: hollow.accent.withValues(alpha: 0.6),
-                    width: 2,
-                  )
-                : null,
+      child: HollowFocusRing(
+        enabled: widget.onTap != null,
+        onActivate: widget.onTap,
+        borderRadius: BorderRadius.circular(radius),
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: HollowDurations.fast,
+            curve: Curves.easeOutCubic,
+            width: 48,
+            height: 48,
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: effectiveBg,
+              borderRadius: BorderRadius.circular(radius),
+              border: (widget.isSelected && widget.showBorder)
+                  ? Border.all(
+                      color: hollow.accent.withValues(alpha: 0.6),
+                      width: 2,
+                    )
+                  : null,
+            ),
+            alignment: Alignment.center,
+            child: widget.child,
           ),
-          alignment: Alignment.center,
-          child: widget.child,
         ),
       ),
     );

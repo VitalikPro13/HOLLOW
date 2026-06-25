@@ -488,7 +488,31 @@ File: `lib/src/ui/components/hollow_pressable.dart`
   - Without `backgroundColor`: transitions to `effectiveHoverColor` (default `hollow.elevated`).
   - With `backgroundColor`: `Color.lerp(backgroundColor, Colors.white, 0.15)` + `BoxShadow` glow.
 
-**Build hierarchy:** `MergeSemantics` (when interactive) > `MouseRegion` > `Listener` > `Semantics` (`button`/`label`/`enabled` + mirrored `onTap`) > `GestureDetector` > `AnimatedBuilder` (`FadeTransition` > `ScaleTransition`) > `AnimatedContainer`. The `Semantics(onTap:)` mirrors the gesture handler for VoiceOver/Voice Control activation but does NOT double-fire on a physical tap (one is a pointer event, the other an a11y action — proven in `test/widget/semantics_foundation_test.dart`).
+**Build hierarchy:** `MergeSemantics` (when interactive) > `HollowFocusRing` > `MouseRegion` > `Listener` > `Semantics` (`button`/`label`/`enabled` + mirrored `onTap`) > `GestureDetector` > `AnimatedBuilder` (`FadeTransition` > `ScaleTransition`) > `AnimatedContainer`. The `Semantics(onTap:)` mirrors the gesture handler for VoiceOver/Voice Control activation but does NOT double-fire on a physical tap (one is a pointer event, the other an a11y action — proven in `test/widget/semantics_foundation_test.dart`).
+
+**Keyboard focus (a11y, Phase 2.6):** when interactive, the whole control is wrapped in a `HollowFocusRing` (see its own section) so it joins the Tab/arrow focus chain and activates on Enter/Space. The ring hugs the control's own `borderRadius`. Non-interactive pressables (`onTap == null`) are NOT focusable.
+
+
+## HollowFocusRing
+
+File: `lib/src/ui/components/hollow_focus_ring.dart` (a11y Phase 2.6)
+
+`StatefulWidget` (with `SingleTickerProviderStateMixin` for the fade). The single chokepoint that makes the whole app keyboard-operable: `HollowPressable`/`HollowButton`/`HollowToggle` each wrap their content in one of these, so ~645 call sites became keyboard-focusable from 3 edits. Other raw-`GestureDetector` controls (e.g. `server_strip._ServerIcon` = the Home/server icons, `bottom_bar._BottomServerIcon`, the Image-Quality pills + accent swatches in `user_settings_dialog`) wrap themselves in it directly.
+
+**Parameters:** `child`, `onActivate` (keyboard activation callback — mirror the host's tap; `null` ⇒ not focusable), `enabled` (false ⇒ out of the focus chain), `borderRadius` (match the host control's shape so the ring hugs it), `focusNode`/`autofocus` (rarely needed).
+
+**Behaviour:**
+- Wraps `child` in a `FocusableActionDetector` → joins the Tab/arrow focus chain (and Voice-Control's numbered overlays land on it). Local `Shortcuts` map Enter / Space / NumpadEnter → `ActivateIntent` → a `CallbackAction` calling `onActivate`. Fires **exactly once** — no double-fire with the host's `GestureDetector` + `Semantics(onTap:)`.
+- `onShowFocusHighlight` tracks **keyboard** focus only (true for non-pointer focus, never on mouse hover/press), driving an `AnimationController` fade (collapses to zero under reduce-motion).
+- `mouseCursor: MouseCursor.defer` — the host's own `MouseRegion` owns the cursor.
+
+**Ring rendering (`_FocusRingPainter`, the load-bearing detail):** drawn by a **`CustomPaint` `foregroundPainter` wrapping the child directly** — so the painter's `size` IS the child's exact rendered box. This is why the ring always hugs the visible control even when an ancestor stretches it wider than its content (e.g. a `SizedBox(width: ∞)` around a `MainAxisSize.min` button). **Do NOT** use a `Stack`+`Positioned.fill` overlay for this — that fills the *stretched* Stack box, not the child, so the ring renders larger + off-centre. The painter draws an accent stroke (`HollowTheme.focusRing`) **outlined on both edges by a contrasting `casing` stroke (`hollow.background`)** so the ring stays visible even on an accent-FILLED control (the teal Home "H", an ON toggle's accent track, a filled button) — there an accent-only ring would vanish. Both strokes are inset (`~casingStroke/2 + 0.5`) so the whole ring stays INSIDE the control's box (no bleed onto neighbours/panel edges). Geometry is CI-locked by `test/widget/focus_traversal_test.dart` (ring size == `AnimatedContainer` size, content-width and stretched).
+
+**Token:** `HollowTheme.focusRing` = `Contrast.ensureContrast(accent, background, targetRatio: 3.0)` (WCAG non-text-contrast min; light theme reuses `accentTextLight`). NOT faded by `withPanelOpacity`.
+
+**Tab order:** `FocusTraversalGroup(ReadingOrderTraversalPolicy())` wraps the desktop shell body (`hollow_shell.dart`), the mobile `Scaffold` (`mobile_shell.dart`), and the user-settings dialog's content pane + category rail separately (so Tab stays inside the open setting). `_PointerFocusDismisser` in `app.dart` clears the ring on a mouse click (desktop otherwise keeps `traditional` highlight after a click).
+
+**CI guard:** `test/focus_ring_guard_test.dart` (static) fails the build if any of the 3 core components stops wiring `HollowFocusRing` or `HollowTheme` loses the `focusRing` token.
 
 
 ## HollowButton
@@ -510,7 +534,9 @@ File: `lib/src/ui/components/hollow_button.dart`
 
 **Parameters:** `onPressed`, `child`, `icon`, `variant`, `expand` (full width), `compact` (reduced padding), `semanticLabel` (a11y, Phase 2.1).
 
-**Accessibility (Phase 2.1):** wrapped in `MergeSemantics` > … > `Semantics(button: true, enabled, label: semanticLabel)`. A button with a `Text` child auto-names itself (leave `semanticLabel` null). **Only set `semanticLabel` for icon-only buttons** (no text child) — enforced by `test/a11y_label_guard_test.dart`.
+**Accessibility (Phase 2.1):** wrapped in `MergeSemantics` > `HollowFocusRing` > … > `Semantics(button: true, enabled, label: semanticLabel)`. A button with a `Text` child auto-names itself (leave `semanticLabel` null). **Only set `semanticLabel` for icon-only buttons** (no text child) — enforced by `test/a11y_label_guard_test.dart`.
+
+**Keyboard focus (Phase 2.6):** wrapped in `HollowFocusRing` (ring radius `radiusMd`) → Tab-focusable + Enter/Space activates. Disabled buttons (`onPressed == null`) are not focusable.
 
 **Animation:** Same pattern as `HollowPressable` — scale 1.0 to 0.98 + opacity 1.0 to 0.85, 120ms/200ms durations with spring reverse.
 
@@ -656,7 +682,7 @@ File: `lib/src/ui/components/hollow_toggle.dart`
 
 **Parameters:** `value` (bool), `onChanged` (ValueChanged<bool>?), `semanticLabel` (a11y, Phase 2.1 — names what the switch controls, e.g. "Reduce motion").
 
-**Accessibility (Phase 2.1):** wrapped in `MergeSemantics` > `Semantics(toggled: value, enabled, label: semanticLabel)` — announces on/off state to screen readers and is flippable by Voice Control.
+**Accessibility (Phase 2.1):** wrapped in `MergeSemantics` > `HollowFocusRing` > `Semantics(toggled: value, enabled, label: semanticLabel)` — announces on/off state to screen readers and is flippable by Voice Control. **Keyboard focus (Phase 2.6):** the `HollowFocusRing` (pill radius) makes it Tab-focusable; Enter/Space flips it. Disabled toggles (`onChanged == null`) are not focusable.
 
 **Dimensions:** Track: 36x20px pill. Thumb: 16px circle. 2px padding on each side.
 

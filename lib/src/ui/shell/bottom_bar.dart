@@ -21,6 +21,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
@@ -834,7 +835,11 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
           : SystemMouseCursors.basic,
       onEnter: (_) => setState(() => _hovering = true),
       onExit: (_) => setState(() => _hovering = false),
-      child: GestureDetector(
+      child: HollowFocusRing(
+        enabled: widget.onTap != null,
+        onActivate: widget.onTap,
+        borderRadius: BorderRadius.circular(radius),
+        child: GestureDetector(
         onTap: widget.onTap,
         child: Stack(
           alignment: Alignment.center,
@@ -915,6 +920,7 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
             ),
           ],
         ),
+      ),
       ),
     );
 

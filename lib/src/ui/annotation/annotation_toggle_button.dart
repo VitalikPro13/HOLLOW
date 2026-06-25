@@ -1,6 +1,7 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import 'package:hollow/src/theme/hollow_theme.dart';
 import 'annotation_overlay.dart';
 
 /// Small icon button that toggles the [AnnotationOverlay]. Designed to sit
@@ -25,7 +26,10 @@ class _AnnotationToggleButtonState extends State<AnnotationToggleButton> {
 
   @override
   Widget build(BuildContext context) {
-    final color = widget.color ?? const Color(0xFFFFFFFF);
+    // Default to a theme foreground colour so the icon/label stay visible on
+    // BOTH themes — hardcoded white vanished on the light-theme title bar.
+    final hollow = HollowTheme.of(context);
+    final color = widget.color ?? hollow.textSecondary;
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       onEnter: (_) => setState(() => _hovered = true),
@@ -36,7 +40,7 @@ class _AnnotationToggleButtonState extends State<AnnotationToggleButton> {
           duration: const Duration(milliseconds: 150),
           curve: Curves.easeOut,
           height: widget.size,
-          color: _hovered ? const Color(0x22FFFFFF) : Colors.transparent,
+          color: _hovered ? hollow.elevated : Colors.transparent,
           padding: EdgeInsets.symmetric(horizontal: _hovered ? 10 : 0),
           child: Row(
             mainAxisSize: MainAxisSize.min,

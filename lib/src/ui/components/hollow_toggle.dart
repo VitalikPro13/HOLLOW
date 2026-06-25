@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 
 /// Hollow-styled toggle switch — spring physics thumb, smooth track crossfade.
 ///
@@ -88,16 +89,20 @@ class _HollowToggleState extends State<HollowToggle>
     final isDisabled = widget.onChanged == null;
 
     return MergeSemantics(
-      child: Semantics(
-        // Switch role: announces on/off state via `toggled`. The semantic onTap
-        // mirrors the gesture so Voice Control can flip it.
-        toggled: widget.value,
+      child: HollowFocusRing(
         enabled: !isDisabled,
-        label: widget.semanticLabel,
-        onTap: isDisabled ? null : () => widget.onChanged!(!widget.value),
-        child: GestureDetector(
+        borderRadius: BorderRadius.circular(10),
+        onActivate: isDisabled ? null : () => widget.onChanged!(!widget.value),
+        child: Semantics(
+          // Switch role: announces on/off state via `toggled`. The semantic
+          // onTap mirrors the gesture so Voice Control can flip it.
+          toggled: widget.value,
+          enabled: !isDisabled,
+          label: widget.semanticLabel,
           onTap: isDisabled ? null : () => widget.onChanged!(!widget.value),
-          child: FadeTransition(
+          child: GestureDetector(
+            onTap: isDisabled ? null : () => widget.onChanged!(!widget.value),
+            child: FadeTransition(
             opacity: AlwaysStoppedAnimation(isDisabled ? 0.4 : 1.0),
             child: MouseRegion(
               cursor: isDisabled
@@ -140,6 +145,7 @@ class _HollowToggleState extends State<HollowToggle>
             ),
           ),
         ),
+      ),
       ),
     );
   }

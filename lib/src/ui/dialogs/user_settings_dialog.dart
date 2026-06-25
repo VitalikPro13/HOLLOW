@@ -44,6 +44,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
 import 'package:hollow/src/ui/dialogs/ringtone_clip_editor_dialog.dart';
 import 'package:hollow/src/ui/dialogs/twitch_device_code_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -471,7 +472,11 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   // ── Left: searchable category rail ──
-                  Container(
+                  // Own traversal group so Tab cycles the categories on their
+                  // own, separate from the content pane (a11y 2.6).
+                  FocusTraversalGroup(
+                    policy: ReadingOrderTraversalPolicy(),
+                    child: Container(
                     width: 188,
                     color: hollow.surface.withValues(alpha: 0.4),
                     child: Column(
@@ -544,29 +549,37 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                       ],
                     ),
                   ),
+                  ),
 
                   // Vertical divider.
                   Container(width: 1, color: hollow.border),
 
                   // ── Right: content area (cards) + close button ──
+                  // Own traversal group (a11y 2.6): Tab stays WITHIN the active
+                  // settings pane instead of leaking back into the category
+                  // rail as you move down a section.
                   Expanded(
-                    child: Stack(
-                      children: [
-                        _buildCategoryContent(hollow, activeForContent),
-                        Positioned(
-                          top: HollowSpacing.sm,
-                          right: HollowSpacing.sm,
-                          child: HollowPressable(
-                            onTap: () => Navigator.of(context).pop(),
-                            subtle: true,
-                            borderRadius: BorderRadius.circular(hollow.radiusMd),
-                            padding: const EdgeInsets.all(HollowSpacing.xs),
-                            semanticLabel: 'Close',
-                            child: Icon(LucideIcons.x,
-                                size: 18, color: hollow.textSecondary),
+                    child: FocusTraversalGroup(
+                      policy: ReadingOrderTraversalPolicy(),
+                      child: Stack(
+                        children: [
+                          _buildCategoryContent(hollow, activeForContent),
+                          Positioned(
+                            top: HollowSpacing.sm,
+                            right: HollowSpacing.sm,
+                            child: HollowPressable(
+                              onTap: () => Navigator.of(context).pop(),
+                              subtle: true,
+                              borderRadius:
+                                  BorderRadius.circular(hollow.radiusMd),
+                              padding: const EdgeInsets.all(HollowSpacing.xs),
+                              semanticLabel: 'Close',
+                              child: Icon(LucideIcons.x,
+                                  size: 18, color: hollow.textSecondary),
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ],
@@ -3600,7 +3613,10 @@ class _ImageQualitySelector extends ConsumerWidget {
       HollowTheme hollow, String label, bool active, VoidCallback onTap) {
     return Padding(
       padding: const EdgeInsets.only(right: 4),
-      child: GestureDetector(
+      child: HollowFocusRing(
+        onActivate: onTap,
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        child: GestureDetector(
         onTap: onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 150),
@@ -3628,6 +3644,7 @@ class _ImageQualitySelector extends ConsumerWidget {
             ),
           ),
         ),
+      ),
       ),
     );
   }
@@ -4669,24 +4686,32 @@ class _ColorSwatch extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      onSecondaryTapUp: onRemove != null ? (_) => onRemove!() : null,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: HollowTooltip(
-          message: label ?? 'Right-click to remove',
-          child: Container(
-            width: 22,
-            height: 22,
-            decoration: BoxDecoration(
-              color: accentFromHue(hue),
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(
-                color: isSelected
-                    ? Colors.white
-                    : Colors.white.withValues(alpha: 0.15),
-                width: isSelected ? 2 : 1,
+    return HollowFocusRing(
+      onActivate: onTap,
+      borderRadius: BorderRadius.circular(4),
+      child: Semantics(
+        button: true,
+        label: label ?? 'Accent color',
+        child: GestureDetector(
+          onTap: onTap,
+          onSecondaryTapUp: onRemove != null ? (_) => onRemove!() : null,
+          child: MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: HollowTooltip(
+              message: label ?? 'Right-click to remove',
+              child: Container(
+                width: 22,
+                height: 22,
+                decoration: BoxDecoration(
+                  color: accentFromHue(hue),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(
+                    color: isSelected
+                        ? Colors.white
+                        : Colors.white.withValues(alpha: 0.15),
+                    width: isSelected ? 2 : 1,
+                  ),
+                ),
               ),
             ),
           ),

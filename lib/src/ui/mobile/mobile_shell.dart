@@ -180,6 +180,14 @@ class _MobileShellState extends ConsumerState<MobileShell> {
       ),
     );
 
+    // Reading-order Tab/traversal for external keyboards + Switch Access on
+    // mobile (a11y 2.6) — follows the visual layout instead of widget-tree
+    // order. Cheap and harmless when no keyboard is attached.
+    scaffold = FocusTraversalGroup(
+      policy: ReadingOrderTraversalPolicy(),
+      child: scaffold,
+    );
+
     if (bg.hasBackground) {
       final darkenAlpha = bg.panelOpacity.clamp(0.0, 0.92);
       scaffold = Stack(

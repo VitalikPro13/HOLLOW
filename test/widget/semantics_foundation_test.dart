@@ -28,7 +28,9 @@ void main() {
       );
 
       final node = tester.getSemantics(find.text('Save'));
-      expect(node, matchesSemantics(label: 'Save', isButton: true, hasTapAction: true, hasEnabledState: true, isEnabled: true));
+      // Phase 2.6: the control is now keyboard-focusable, so the node also
+      // carries the focus action + isFocusable flag.
+      expect(node, matchesSemantics(label: 'Save', isButton: true, hasTapAction: true, hasEnabledState: true, isEnabled: true, hasFocusAction: true, isFocusable: true));
     });
 
     testWidgets('semanticLabel overrides for icon-only button', (tester) async {
@@ -108,6 +110,9 @@ void main() {
         hasTapAction: true,
         hasEnabledState: true,
         isEnabled: true,
+        // Phase 2.6: keyboard-focusable.
+        hasFocusAction: true,
+        isFocusable: true,
       ));
     });
 
@@ -128,6 +133,9 @@ void main() {
         hasTapAction: true,
         hasEnabledState: true,
         isEnabled: true,
+        // Phase 2.6: keyboard-focusable.
+        hasFocusAction: true,
+        isFocusable: true,
       ));
     });
 
@@ -169,6 +177,9 @@ void main() {
         hasTapAction: true,
         hasEnabledState: true,
         isEnabled: true,
+        // Phase 2.6: keyboard-focusable.
+        hasFocusAction: true,
+        isFocusable: true,
       ));
     });
 
@@ -186,11 +197,14 @@ void main() {
       final node = tester.getSemantics(find.bySemanticsLabel('Conversation row'));
       // Not a button, but the tap action is present so Voice Control can invoke.
       // (Semantics(enabled:) adds the enabled flags even without the button role.)
+      // Phase 2.6: a tappable row is keyboard-focusable too.
       expect(node, matchesSemantics(
         label: 'Conversation row',
         hasTapAction: true,
         hasEnabledState: true,
         isEnabled: true,
+        hasFocusAction: true,
+        isFocusable: true,
       ));
       expect(node.hasFlag(SemanticsFlag.isButton), isFalse,
           reason: 'row should NOT announce the button role');

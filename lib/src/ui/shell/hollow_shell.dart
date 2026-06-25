@@ -1507,6 +1507,15 @@ class _HollowShellState extends ConsumerState<HollowShell>
           body = DragToResizeArea(child: body);
         }
 
+        // Give the desktop shell a sane keyboard Tab order (a11y 2.6): reading
+        // order follows the visual layout left-to-right, top-to-bottom
+        // (server strip → channel list → chat → member panel) without manual
+        // ordering. Dialogs/routes pushed above this trap their own focus.
+        body = FocusTraversalGroup(
+          policy: ReadingOrderTraversalPolicy(),
+          child: body,
+        );
+
         return _ShellScaffold(body: body);
       },
     );

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 
 /// Universal interactive widget for Hollow — replaces InkWell everywhere.
 ///
@@ -207,10 +208,18 @@ class _HollowPressableState extends State<HollowPressable>
       ),
     );
 
-    // Merge the control's role/label with its child content into one
-    // screen-reader node (e.g. an icon-only button reads as one stop; a
-    // conversation row reads "Alice, online, 2 unread" as one swipe). Only
-    // when interactive — a static pressable shouldn't flatten its subtree.
-    return isInteractive ? MergeSemantics(child: result) : result;
+    if (!isInteractive) return result;
+
+    // Make the control keyboard-focusable + draw the focus ring (a11y 2.6).
+    // The ring hugs the control's own corner radius; Enter/Space activate it.
+    // Then merge the role/label with the child content into one screen-reader
+    // node (icon-only button = one stop; conversation row = one swipe).
+    return MergeSemantics(
+      child: HollowFocusRing(
+        borderRadius: widget.borderRadius ?? BorderRadius.zero,
+        onActivate: widget.onTap,
+        child: result,
+      ),
+    );
   }
 }

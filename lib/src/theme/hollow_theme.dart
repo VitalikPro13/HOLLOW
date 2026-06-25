@@ -19,6 +19,11 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
   /// [background] — clears ~4.5:1. Use this anywhere accent is text/icon;
   /// keep raw [accent] for fills (which pair with dark [textOnAccent]).
   final Color accentText;
+  /// Keyboard-focus ring color (a11y 2.6). Accent auto-adjusted to clear the
+  /// WCAG non-text-contrast minimum (~3:1) against [background], so the focus
+  /// indicator stays visible on every surface and custom accent hue. Drawn
+  /// ONLY on keyboard/assistive-tech focus — never on mouse hover/press.
+  final Color focusRing;
   final Color textPrimary;
   final Color textSecondary;
   /// Faded-metadata token (timestamps, "(edited)", counters) that still
@@ -42,6 +47,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     required this.accentHover,
     required this.accentMuted,
     required this.accentText,
+    required this.focusRing,
     required this.textPrimary,
     required this.textSecondary,
     required this.textTertiary,
@@ -67,6 +73,9 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         accentText: Contrast.ensureContrast(
             HollowColors.accent, HollowColors.background,
             targetRatio: 4.5),
+        focusRing: Contrast.ensureContrast(
+            HollowColors.accent, HollowColors.background,
+            targetRatio: 3.0),
         textPrimary: HollowColors.textPrimary,
         textSecondary: HollowColors.textSecondary,
         textTertiary: HollowColors.textTertiary,
@@ -90,6 +99,10 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         accentHover: HollowColors.accentHover,
         accentMuted: HollowColors.accentMutedLight,
         accentText: HollowColors.accentTextLight,
+        // Light-theme focus ring: the dark-on-teal accent is too light on white
+        // (~2.3:1) to ring against it; reuse the legible foreground variant
+        // (accentTextLight, 5.32:1 — comfortably past the 3:1 ring floor).
+        focusRing: HollowColors.accentTextLight,
         textPrimary: HollowColors.textPrimaryLight,
         textSecondary: HollowColors.textSecondaryLight,
         textTertiary: HollowColors.textTertiaryLight,
@@ -115,6 +128,9 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         accentText: Contrast.ensureContrast(
             accentFromHue(hue), HollowColors.background,
             targetRatio: 4.5),
+        focusRing: Contrast.ensureContrast(
+            accentFromHue(hue), HollowColors.background,
+            targetRatio: 3.0),
         textPrimary: HollowColors.textPrimary,
         textSecondary: HollowColors.textSecondary,
         textTertiary: HollowColors.textTertiary,
@@ -140,6 +156,9 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         accentText: Contrast.ensureContrast(
             accentFromHue(hue), HollowColors.backgroundLight,
             targetRatio: 4.5),
+        focusRing: Contrast.ensureContrast(
+            accentFromHue(hue), HollowColors.backgroundLight,
+            targetRatio: 3.0),
         textPrimary: HollowColors.textPrimaryLight,
         textSecondary: HollowColors.textSecondaryLight,
         textTertiary: HollowColors.textTertiaryLight,
@@ -180,6 +199,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
     Color? accentHover,
     Color? accentMuted,
     Color? accentText,
+    Color? focusRing,
     Color? textPrimary,
     Color? textSecondary,
     Color? textTertiary,
@@ -201,6 +221,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       accentHover: accentHover ?? this.accentHover,
       accentMuted: accentMuted ?? this.accentMuted,
       accentText: accentText ?? this.accentText,
+      focusRing: focusRing ?? this.focusRing,
       textPrimary: textPrimary ?? this.textPrimary,
       textSecondary: textSecondary ?? this.textSecondary,
       textTertiary: textTertiary ?? this.textTertiary,
@@ -227,6 +248,7 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       accentHover: Color.lerp(accentHover, other.accentHover, t)!,
       accentMuted: Color.lerp(accentMuted, other.accentMuted, t)!,
       accentText: Color.lerp(accentText, other.accentText, t)!,
+      focusRing: Color.lerp(focusRing, other.focusRing, t)!,
       textPrimary: Color.lerp(textPrimary, other.textPrimary, t)!,
       textSecondary: Color.lerp(textSecondary, other.textSecondary, t)!,
       textTertiary: Color.lerp(textTertiary, other.textTertiary, t)!,

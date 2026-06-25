@@ -3,6 +3,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 
 /// Button variant for Hollow-branded buttons.
 enum HollowButtonVariant { filled, ghost, outline, danger }
@@ -211,7 +212,11 @@ class _HollowButtonState extends State<HollowButton>
     }
 
     return MergeSemantics(
-      child: MouseRegion(
+      child: HollowFocusRing(
+        enabled: isInteractive,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        onActivate: widget.onPressed,
+        child: MouseRegion(
         cursor: isInteractive
             ? SystemMouseCursors.click
             : SystemMouseCursors.basic,
@@ -282,6 +287,7 @@ class _HollowButtonState extends State<HollowButton>
             ),
           ),
         ),
+      ),
       ),
     );
   }
