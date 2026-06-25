@@ -1105,8 +1105,9 @@ class _ArchiveHeader extends StatelessWidget {
         : '${messageCount ?? 0}';
 
     return Container(
-      height: 48,
-      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+      constraints: const BoxConstraints(minHeight: 48),
+      padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm),
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: hollow.border)),
       ),
@@ -1147,11 +1148,15 @@ class _ArchiveHeader extends StatelessWidget {
                   ),
           ),
           if (messageCount != null)
-            Text(
-              '$countText messages',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 11,
+            Flexible(
+              child: Text(
+                '$countText messages',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 11,
+                ),
               ),
             ),
           // Peer filter (channel archives only).
@@ -1469,8 +1474,9 @@ class ArchiveSearchBarState extends State<ArchiveSearchBar> {
     final hollow = HollowTheme.of(context);
 
     return Container(
-      height: 40,
-      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+      constraints: const BoxConstraints(minHeight: 40),
+      padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.md, vertical: HollowSpacing.xs),
       decoration: BoxDecoration(
         color: hollow.surface,
         border: Border(bottom: BorderSide(color: hollow.border)),
@@ -1491,13 +1497,17 @@ class ArchiveSearchBarState extends State<ArchiveSearchBar> {
           ),
           const SizedBox(width: HollowSpacing.sm),
           if (_controller.text.isNotEmpty)
-            Text(
-              widget.matchCount > 0
-                  ? '${widget.currentMatch + 1} of ${widget.matchCount}'
-                  : '0 results',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 11,
+            Flexible(
+              child: Text(
+                widget.matchCount > 0
+                    ? '${widget.currentMatch + 1} of ${widget.matchCount}'
+                    : '0 results',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 11,
+                ),
               ),
             ),
           const SizedBox(width: HollowSpacing.xs),

@@ -545,7 +545,9 @@ File: `lib/src/ui/components/hollow_button.dart`
 - Outline variant: border alpha increases from 0.4 to 0.6 on hover.
 - Disabled: opacity fixed at 0.4 via `AlwaysStoppedAnimation`.
 
-**Content layout:** Row with optional 16x16 icon (in `IconTheme` with `fg` color) + `DefaultTextStyle` using `HollowTypography.label`.
+**Content layout:** Row with an optional leading icon (in `IconTheme` with `fg` color) + `DefaultTextStyle` using `HollowTypography.label`.
+
+**Larger Text (a11y Phase 3):** the leading icon box (base 16×16, glyph 14) is scaled by `MediaQuery.textScalerOf(context)` so it grows alongside the scaling label — keeps a labeled icon+text button visually balanced at high OS text scale (both desktop and mobile). This is scoped ON PURPOSE to `HollowButton`'s label-adjacent icon only; standalone icon-only buttons (`HollowPressable` + raw `Icon`) and the app's other ~775 raw icons are NOT scaled (Apple "Larger Text" is about text legibility, not icons). See `project_accessibility_larger_text`.
 
 **Padding:** compact = `HollowSpacing.md` horizontal / `HollowSpacing.sm` vertical; normal = `HollowSpacing.lg` / `HollowSpacing.sm + 2`.
 

@@ -174,9 +174,9 @@ class _MobileImportedArchiveViewerRouteState
 
   Widget _backHeader(HollowTheme hollow) {
     return Container(
-      height: 52,
-      padding:
-          const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
+      constraints: const BoxConstraints(minHeight: 52),
+      padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.xs, vertical: HollowSpacing.sm),
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: hollow.border)),
       ),
@@ -190,11 +190,15 @@ class _MobileImportedArchiveViewerRouteState
             child: Icon(LucideIcons.chevronLeft,
                 size: 20, color: hollow.textPrimary),
           ),
-          Text('Imported Archive',
-              style: HollowTypography.body.copyWith(
-                color: hollow.textPrimary,
-                fontWeight: FontWeight.w600,
-              )),
+          Expanded(
+            child: Text('Imported Archive',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: HollowTypography.body.copyWith(
+                  color: hollow.textPrimary,
+                  fontWeight: FontWeight.w600,
+                )),
+          ),
         ],
       ),
     );
@@ -358,9 +362,9 @@ class _MobileImportedArchiveViewerRouteState
       children: [
         // Back + title header
         Container(
-          height: 52,
-          padding:
-              const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
+          constraints: const BoxConstraints(minHeight: 52),
+          padding: const EdgeInsets.symmetric(
+              horizontal: HollowSpacing.xs, vertical: HollowSpacing.sm),
           decoration: BoxDecoration(
             border: Border(bottom: BorderSide(color: hollow.border)),
           ),

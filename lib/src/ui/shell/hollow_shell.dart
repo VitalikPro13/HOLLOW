@@ -1228,8 +1228,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
       children: [
         // Channel header
         Container(
-          height: 48,
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+          constraints: const BoxConstraints(minHeight: 48),
+          padding: const EdgeInsets.symmetric(
+              horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm),
           decoration: BoxDecoration(
             color: hollow.surface,
             border: Border(bottom: BorderSide(color: hollow.border)),
@@ -1238,14 +1239,20 @@ class _HollowShellState extends ConsumerState<HollowShell>
             children: [
               Icon(LucideIcons.hash, size: 20, color: hollow.textSecondary),
               const SizedBox(width: HollowSpacing.sm),
-              Text(
-                channel?.name ?? 'Unknown Channel',
-                style: HollowTypography.subheading.copyWith(
-                  color: hollow.textPrimary,
-                  fontWeight: FontWeight.w600,
+              // Larger Text (a11y P3): name yields to the trailing action; the
+              // Expanded fills the gap (no Spacer needed) and ellipsizes.
+              Expanded(
+                child: Text(
+                  channel?.name ?? 'Unknown Channel',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: HollowTypography.subheading.copyWith(
+                    color: hollow.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
-              const Spacer(),
+              const SizedBox(width: HollowSpacing.sm),
               HollowTooltip(
                 message: 'Toggle member panel',
                 child: HollowPressable(

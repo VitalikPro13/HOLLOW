@@ -138,8 +138,9 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
       return Column(
         children: [
           Container(
-            height: 48,
-            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+            constraints: const BoxConstraints(minHeight: 48),
+            padding: const EdgeInsets.symmetric(
+                horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm),
             decoration: BoxDecoration(
               border: Border(bottom: BorderSide(color: hollow.border)),
             ),
@@ -191,9 +192,9 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
       children: [
         // Header bar
         Container(
-          height: 48,
-          padding:
-              const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+          constraints: const BoxConstraints(minHeight: 48),
+          padding: const EdgeInsets.symmetric(
+              horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm),
           decoration: BoxDecoration(
             border: Border(bottom: BorderSide(color: hollow.border)),
           ),
@@ -237,25 +238,32 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
         FocusTraversalGroup(
           policy: ReadingOrderTraversalPolicy(),
           child: Container(
-            height: 40,
+            constraints: const BoxConstraints(minHeight: 40),
             padding:
                 const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
             decoration: BoxDecoration(
               color: hollow.surface,
               border: Border(bottom: BorderSide(color: hollow.border)),
             ),
-            child: Row(
-              children: List.generate(tabs.length, (i) {
-                final tab = tabs[i];
-                final isSelected = i == _selectedTab;
-                return _TabButton(
-                  icon: tab.icon,
-                  label: tab.label,
-                  isSelected: isSelected,
-                  isDanger: tab.isDanger,
-                  onTap: () => setState(() => _selectedTab = i),
-                );
-              }),
+            // Larger Text (a11y P3): the tab strip is horizontal chrome — at
+            // high text scale the row of tabs can outgrow the panel width, so
+            // it scrolls instead of overflowing. Each label is also scale-
+            // capped (load-bearing chrome, iOS/Android tab-bar norm).
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: List.generate(tabs.length, (i) {
+                  final tab = tabs[i];
+                  final isSelected = i == _selectedTab;
+                  return _TabButton(
+                    icon: tab.icon,
+                    label: tab.label,
+                    isSelected: isSelected,
+                    isDanger: tab.isDanger,
+                    onTap: () => setState(() => _selectedTab = i),
+                  );
+                }),
+              ),
             ),
           ),
         ),
@@ -320,11 +328,18 @@ class _TabButton extends StatelessWidget {
         children: [
           Icon(icon, size: 14, color: color),
           const SizedBox(width: HollowSpacing.xs),
-          Text(
-            label,
-            style: HollowTypography.label.copyWith(
-              color: color,
-              fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+          // Load-bearing tab chrome: cap the label scale (1.3×) so the strip
+          // stays compact; content areas honor full 2.0× elsewhere.
+          MediaQuery.withClampedTextScaling(
+            maxScaleFactor: 1.3,
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: HollowTypography.label.copyWith(
+                color: color,
+                fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+              ),
             ),
           ),
         ],

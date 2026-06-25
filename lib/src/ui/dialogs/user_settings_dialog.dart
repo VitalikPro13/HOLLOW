@@ -4374,7 +4374,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         ),
         Expanded(
           child: Container(
-            height: 32,
+            constraints: const BoxConstraints(minHeight: 32),
             padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
             decoration: BoxDecoration(
               color: hollow.elevated,

@@ -262,10 +262,17 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                           color: c,
                         ),
                         const SizedBox(width: 6),
-                        Text(
-                          l.name,
-                          style: HollowTypography.body.copyWith(
-                            color: selected ? c : hollow.textPrimary,
+                        // Larger Text (a11y P3): label names are free-form user
+                        // content — ellipsize so a long name can't overflow the
+                        // chip Row at high text scale.
+                        Flexible(
+                          child: Text(
+                            l.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: HollowTypography.body.copyWith(
+                              color: selected ? c : hollow.textPrimary,
+                            ),
                           ),
                         ),
                       ],

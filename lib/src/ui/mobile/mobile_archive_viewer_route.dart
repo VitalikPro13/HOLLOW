@@ -853,9 +853,9 @@ class _MobileArchiveHeader extends StatelessWidget {
     final hollow = HollowTheme.of(context);
 
     return Container(
-      height: 52,
-      padding:
-          const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
+      constraints: const BoxConstraints(minHeight: 52),
+      padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.xs, vertical: HollowSpacing.sm),
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: hollow.border)),
       ),

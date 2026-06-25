@@ -317,9 +317,16 @@ class _SelfAssignSection extends StatelessWidget {
                       size: 14, color: color,
                     ),
                     const SizedBox(width: HollowSpacing.xs),
-                    Text(label.name, style: HollowTypography.bodySmall.copyWith(
-                      color: color, fontWeight: FontWeight.w500,
-                    )),
+                    // Larger Text (a11y P3): free-form label name — ellipsize
+                    // so it can't overflow the chip Row at high text scale.
+                    Flexible(
+                      child: Text(label.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: HollowTypography.bodySmall.copyWith(
+                            color: color, fontWeight: FontWeight.w500,
+                          )),
+                    ),
                   ],
                 ),
               ),

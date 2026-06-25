@@ -184,6 +184,13 @@ class _HollowButtonState extends State<HollowButton>
           ]
         : <BoxShadow>[];
 
+    // Larger Text (a11y P3): scale the icon alongside the label so an
+    // icon+text button stays visually balanced at high OS text scale (the
+    // label scales via textScaler; a fixed icon would look small next to it).
+    final textScaler = MediaQuery.textScalerOf(context);
+    final iconBox = textScaler.scale(16);
+    final iconGlyph = textScaler.scale(14);
+
     Widget content = Row(
       mainAxisSize: widget.expand ? MainAxisSize.max : MainAxisSize.min,
       mainAxisAlignment: MainAxisAlignment.center,
@@ -191,10 +198,10 @@ class _HollowButtonState extends State<HollowButton>
       children: [
         if (widget.icon != null) ...[
           SizedBox(
-            width: 16,
-            height: 16,
+            width: iconBox,
+            height: iconBox,
             child: IconTheme(
-              data: IconThemeData(color: fg, size: 14),
+              data: IconThemeData(color: fg, size: iconGlyph),
               child: widget.icon!,
             ),
           ),

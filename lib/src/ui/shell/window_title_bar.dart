@@ -36,12 +36,18 @@ class WindowTitleBar extends StatelessWidget {
     final buttonsReveal = StartupRevealScope.interval(context, 0.08, 0.20);
 
     // Centered title.
-    Widget title = Text(
-      'Hollow',
-      style: HollowTypography.label.copyWith(
-        color: hollow.accent,
-        fontWeight: FontWeight.w700,
-        fontSize: 13,
+    // Larger Text (a11y P3): the 32px OS title bar is fixed chrome (traffic-
+    // light alignment depends on it), so cap the brand label's scale rather
+    // than let it clip — the iOS/Android tab-bar norm.
+    Widget title = MediaQuery.withClampedTextScaling(
+      maxScaleFactor: 1.3,
+      child: Text(
+        'Hollow',
+        style: HollowTypography.label.copyWith(
+          color: hollow.accent,
+          fontWeight: FontWeight.w700,
+          fontSize: 13,
+        ),
       ),
     );
     if (brandReveal != null) {
@@ -86,12 +92,17 @@ class WindowTitleBar extends StatelessWidget {
 
     Widget branding = Padding(
       padding: const EdgeInsets.only(left: HollowSpacing.lg),
-      child: Text(
-        'Hollow',
-        style: HollowTypography.label.copyWith(
-          color: hollow.accent,
-          fontWeight: FontWeight.w700,
-          fontSize: 13,
+      // Larger Text (a11y P3): fixed 32px title-bar chrome — cap the brand
+      // label scale so it can't clip the band.
+      child: MediaQuery.withClampedTextScaling(
+        maxScaleFactor: 1.3,
+        child: Text(
+          'Hollow',
+          style: HollowTypography.label.copyWith(
+            color: hollow.accent,
+            fontWeight: FontWeight.w700,
+            fontSize: 13,
+          ),
         ),
       ),
     );
