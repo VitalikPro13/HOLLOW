@@ -135,6 +135,7 @@ yt_videos/
 packages/flutter_webrtc/third_party/
 # But keep the bootstrap files that CMake needs to auto-download libwebrtc
 !packages/flutter_webrtc/third_party/CMakeLists.txt
+!packages/flutter_webrtc/third_party/libwebrtc_version.ini
 !packages/flutter_webrtc/third_party/svpng/
 !packages/flutter_webrtc/third_party/svpng/svpng.hpp
 !packages/flutter_webrtc/third_party/svpng/LICENSE

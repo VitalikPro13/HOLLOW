@@ -493,15 +493,17 @@ Takes `localPeerId` and `iceServers`. State:
 
 ### Native Screen Capture (Resolution Enforcement)
 
-libwebrtc's desktop capturer ignores all resolution constraints (`scaleResolutionDownBy`, mandatory width/height). Native platform capture APIs replace it:
+libwebrtc's desktop capturer ignores all resolution constraints (`scaleResolutionDownBy`, mandatory width/height). Native platform capture APIs were used to replace it:
 
-**Windows:** `NativeScreenCapturer` (`packages/flutter_webrtc/windows/native_screen_capturer.{h,cc}`) uses Graphics Capture API + D3D11. Captures at native resolution, bilinear downscales to target via `ScaleBGRA()`, pushes frames via `RTCVideoFrame::CreateFromBGRA()` → `RTCVideoSource::OnCapturedFrame()`. `CreateCustomVideoSource()` replaces `CreateDesktopSource()` in `flutter_screen_capture.cc` when width/height are provided. Supports `StartMonitor(HMONITOR)` and `StartWindow(HWND)`.
+**Windows:** `NativeScreenCapturer` (`packages/flutter_webrtc/windows/native_screen_capturer.{h,cc}`) uses Graphics Capture API + D3D11, downscales via `ScaleBGRA()`, pushes frames via `RTCVideoFrame::CreateFromBGRA()` → `RTCVideoSource::OnCapturedFrame()`. **⚠️ As of the 1.5.2 / stock-libwebrtc-m144 rebase (2026-06-26) this is GATED OFF and screen-share video falls back to libwebrtc's own desktop capturer.** `CreateFromBGRA` only exists in the fork's OLD custom-patched libwebrtc; stock webrtc-sdk m144 lacks it. The file stays on disk and all its call sites in `flutter_screen_capture.{cc,h}` are behind `#if defined(_WIN32) && defined(HOLLOW_USE_NATIVE_SCREEN_CAPTURER)` — re-enable by defining that macro + linking a libwebrtc that exports `CreateFromBGRA` (or port the 2 call sites to stock `RTCVideoFrame::Create()` + a BGRA→I420 conversion). So Windows screen-share resolution control via the native capturer is currently INACTIVE; whether stock m144's quality scaler respects resolution on its own is an open question. `StartMonitor(HMONITOR)`/`StartWindow(HWND)` (gated). See `project_flutter_webrtc_152_upgrade`.
 
-**macOS:** `FlutterScreenCaptureKitCapturer` accepts `width:height:` params — `SCStreamConfiguration.width/height` set to target dimensions (GPU-accelerated downscale). Window capture via `SCContentFilter initWithDesktopIndependentWindow:`. Both screen and window sources use ScreenCaptureKit path.
+**macOS:** `FlutterScreenCaptureKitCapturer` accepts `width:height:` params — `SCStreamConfiguration.width/height` set to target dimensions (GPU-accelerated downscale). Window capture via `SCContentFilter initWithDesktopIndependentWindow:`. Both screen and window sources use ScreenCaptureKit path. (Unaffected by the rebase — does not use `CreateFromBGRA`.)
 
 **Linux:** Falls back to libwebrtc's desktop capturer.
 
-**Cleanup:** `CleanupNativeCapturersForStream(stream_id)` called from `streamDispose` in `flutter_webrtc.cc`. Stops `NativeScreenCapturer` (removes yellow capture border) and `WasapiLoopbackCapturer`.
+**Cleanup:** `CleanupNativeCapturersForStream(stream_id)` called from `streamDispose` in `flutter_webrtc.cc`. Stops `NativeScreenCapturer` (gated) and `WasapiLoopbackCapturer`.
+
+**NOTE — the `screen_audio_capturer.exe` is AUDIO-ONLY.** A common misconception is that a native capturer streams VIDEO over the data channel; it does not. `screen_audio_test.exe` (`test_apps/screen_audio_test/`) handles ONLY screen-share system audio (WASAPI loopback → Opus → data channel `0x03` → playback). All screen-share VIDEO goes through a WebRTC video track (native capturer when enabled, else libwebrtc's). A native-video-over-data-channel path does not exist (it's a candidate future architecture).
 
 ### Resolution and Bitrate Capping
 

@@ -48,6 +48,8 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_webrtc.cc"
   "../common/cpp/src/flutter_webrtc_base.cc"
   "../common/cpp/src/flutter_capture_gain_processor.cc"
+  "application_loopback_capturer.cc"
+  "loopback_capturer_factory.cc"
   "flutter_webrtc_plugin.cc"
   "task_runner_windows.cc"
   "wasapi_loopback_capturer.cc"
@@ -57,7 +59,12 @@ add_library(${PLUGIN_NAME} SHARED
   "process_audio_capturer.cc"
   "wasapi_audio_renderer.cc"
   "screen_audio_capturer.cc"
-  "native_screen_capturer.cc"
+  # native_screen_capturer.cc dropped from the build: it depends on the custom
+  # libwebrtc CreateFromBGRA, absent in stock m144.7559.09 (adopted in the 1.5.2
+  # rebase). Screen share uses libwebrtc's own desktop capturer now; the file
+  # stays in-tree, re-add it + define HOLLOW_USE_NATIVE_SCREEN_CAPTURER + link a
+  # libwebrtc with CreateFromBGRA to restore the resolution-cap native path.
+  # See project_flutter_webrtc_152_upgrade.
 )
 
 include_directories(
@@ -79,7 +86,7 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
 target_link_libraries(${PLUGIN_NAME} PRIVATE
   flutter
   flutter_wrapper_plugin
-  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/win64/libwebrtc.dll.lib"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/libwebrtc.dll.lib"
   opus
   mfplat.lib
   mfreadwrite.lib
@@ -89,12 +96,19 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE
   dxgi.lib
   windowsapp.lib
   RuntimeObject.lib
+  # Added with upstream 1.5.2's application loopback capturer (#2060).
+  avrt.lib
+  ksuser.lib
+  mmdevapi.lib
+  ole32.lib
+  uuid.lib
+  winmm.lib
 )
 
 target_compile_options(${PLUGIN_NAME} PRIVATE /await)
 
 # List of absolute paths to libraries that should be bundled with the plugin
 set(flutter_webrtc_bundled_libraries
-  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/win64/libwebrtc.dll"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/libwebrtc.dll"
   PARENT_SCOPE
 )

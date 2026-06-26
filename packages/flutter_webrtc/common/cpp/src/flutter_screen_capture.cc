@@ -1,13 +1,19 @@
 #include "flutter_screen_capture.h"
 
 #if defined(_WIN32)
-#include "../../../windows/wasapi_loopback_capturer.h"
+// Hollow fork native paths kept across the 1.5.2 rebase: the data-channel
+// ScreenAudio render pipeline (screen_audio_capturer/opus_decoder/
+// wasapi_audio_renderer). The old in-track wasapi_loopback_capturer is gone —
+// upstream's loopback_capturer (#2060) supersedes it (see GetDisplayMedia).
+// native_screen_capturer is NOT included: it depends on the custom-libwebrtc
+// CreateFromBGRA, absent in stock m144. Screen share now uses libwebrtc's own
+// desktop capturer. See project_flutter_webrtc_152_upgrade.
 #include "../../../windows/screen_audio_capturer.h"
 #include "../../../windows/opus_decoder_wrapper.h"
 #include "../../../windows/wasapi_audio_renderer.h"
-#include "../../../windows/native_screen_capturer.h"
 #endif
 
+#include "loopback_capturer.h"
 #include "rtc_audio_source.h"
 #include "rtc_audio_track.h"
 
@@ -172,6 +178,13 @@ void FlutterScreenCapture::OnPaused(
 void FlutterScreenCapture::OnStop(scoped_refptr<RTCDesktopCapturer> capturer) {
   // std::cout << " OnStop: " << capturer->source()->id().std_string()
   //          << std::endl;
+  // Adopted from upstream 1.5.2: tear down the loopback audio session when the
+  // desktop capturer stops.
+  if (loopback_capturer_) {
+    loopback_capturer_->Stop();
+    loopback_capturer_.reset();
+    loopback_audio_source_ = nullptr;
+  }
 }
 
 void FlutterScreenCapture::OnError(scoped_refptr<RTCDesktopCapturer> capturer) {
@@ -246,69 +259,79 @@ void FlutterScreenCapture::GetDisplayMedia(
   params[EncodableValue("streamId")] = EncodableValue(uuid);
 
   // AUDIO
+  //
+  // Adopted from upstream 1.5.2 (#2060). The loopback capturer is a custom
+  // RTCAudioSource fed by WASAPI ApplicationLoopbackAudio (full desktop, or a
+  // single app when source_id is a window HWND) — it does NOT touch the ADM.
+  // This replaces the Hollow fork's old data-channel screen-audio path; the
+  // audio now rides the normal WebRTC audio track, so every peer (incl. phones)
+  // receives it. CreateLoopbackCapturer returns nullptr on non-Windows.
 
-  EncodableList audioTracks;
-  bool want_audio = false;
-  auto audio_it = constraints.find(EncodableValue("audio"));
-  if (audio_it != constraints.end()) {
-    if (TypeIs<bool>(audio_it->second)) {
-      want_audio = GetValue<bool>(audio_it->second);
-    } else if (TypeIs<EncodableMap>(audio_it->second)) {
-      // Any non-empty audio constraint map means "yes, capture audio".
-      want_audio = !GetValue<EncodableMap>(audio_it->second).empty();
-    }
-  }
-
-#if defined(_WIN32)
-  if (want_audio) {
-    scoped_refptr<RTCAudioSource> audio_source =
-        base_->factory_->CreateAudioSource(
-            "screen_capture_audio", RTCAudioSource::SourceType::kCustom,
-            RTCAudioOptions());
-
-    if (audio_source.get()) {
-      // Distinct track ID — the video track already uses `uuid`.
-      std::string audio_track_id = base_->GenerateUUID();
-      scoped_refptr<RTCAudioTrack> audio_track =
-          base_->factory_->CreateAudioTrack(audio_source,
-                                            audio_track_id.c_str());
-
-      if (audio_track.get()) {
-        auto capturer = std::make_unique<WasapiLoopbackCapturer>();
-        bool started = capturer->Start(
-            [audio_source](const void* data, int bits_per_sample,
-                           int sample_rate, size_t channels, size_t frames) {
-              audio_source->CaptureFrame(data, bits_per_sample, sample_rate,
-                                         channels, frames);
-            });
-
-        if (started) {
-          EncodableMap audio_info;
-          audio_info[EncodableValue("id")] =
-              EncodableValue(audio_track->id().std_string());
-          audio_info[EncodableValue("label")] =
-              EncodableValue(audio_track->id().std_string());
-          audio_info[EncodableValue("kind")] =
-              EncodableValue(audio_track->kind().std_string());
-          audio_info[EncodableValue("enabled")] =
-              EncodableValue(audio_track->enabled());
-          audioTracks.push_back(EncodableValue(audio_info));
-
-          base_->local_tracks_[audio_track->id().std_string()] = audio_track;
-          loopback_capturers_[uuid] = std::move(capturer);
-          // Do NOT call stream->AddTrack(audio_track). The prebuilt
-          // libwebrtc crashes during sender iteration / setParameters when
-          // a kCustom audio track is attached to a MediaStream. Dart adds
-          // the track directly to the RTCPeerConnection instead.
-        }
+  bool capture_audio = false;
+  {
+    auto audio_it = constraints.find(EncodableValue("audio"));
+    if (audio_it != constraints.end()) {
+      if (TypeIs<bool>(audio_it->second)) {
+        capture_audio = GetValue<bool>(audio_it->second);
+      } else if (TypeIs<EncodableMap>(audio_it->second)) {
+        capture_audio = true;
       }
     }
   }
-#else
-  (void)want_audio;  // platform not supported yet
-#endif
 
-  params[EncodableValue("audioTracks")] = EncodableValue(audioTracks);
+  if (capture_audio) {
+    // Stop any previous loopback session before starting a new one.
+    if (loopback_capturer_) {
+      loopback_capturer_->Stop();
+      loopback_capturer_.reset();
+    }
+
+    // Disable all audio processing for loopback capture.  Echo cancellation,
+    // AGC, and noise suppression are designed for microphone input; applied to
+    // system audio they treat the captured content as echo/noise and destroy it.
+    RTCAudioOptions loopback_opts;
+    loopback_opts.echo_cancellation = false;
+    loopback_opts.auto_gain_control = false;
+    loopback_opts.noise_suppression = false;
+    const std::string loopback_source_label =
+      "screen_loopback_input_" + base_->GenerateUUID();
+    loopback_audio_source_ = base_->factory_->CreateAudioSource(
+      loopback_source_label.c_str(), RTCAudioSource::SourceType::kCustom,
+        loopback_opts);
+
+    std::string audio_uuid = base_->GenerateUUID();
+    scoped_refptr<RTCAudioTrack> audio_track =
+        base_->factory_->CreateAudioTrack(loopback_audio_source_,
+                                          audio_uuid.c_str());
+
+    loopback_capturer_ = CreateLoopbackCapturer(source_id);
+
+    if (loopback_capturer_ && loopback_capturer_->Start(loopback_audio_source_)) {
+      EncodableMap audio_info;
+      audio_info[EncodableValue("id")] =
+          EncodableValue(audio_track->id().std_string());
+      audio_info[EncodableValue("label")] =
+          EncodableValue(audio_track->id().std_string());
+      audio_info[EncodableValue("kind")] =
+          EncodableValue(audio_track->kind().std_string());
+      audio_info[EncodableValue("enabled")] =
+          EncodableValue(audio_track->enabled());
+
+      EncodableList audioTracks;
+      audioTracks.push_back(EncodableValue(audio_info));
+      params[EncodableValue("audioTracks")] = EncodableValue(audioTracks);
+
+      stream->AddTrack(audio_track);
+      base_->local_tracks_[audio_track->id().std_string()] = audio_track;
+    } else {
+      // Loopback init failed or not supported — continue without audio.
+      loopback_capturer_.reset();
+      loopback_audio_source_ = nullptr;
+      params[EncodableValue("audioTracks")] = EncodableValue(EncodableList());
+    }
+  } else {
+    params[EncodableValue("audioTracks")] = EncodableValue(EncodableList());
+  }
 
   // VIDEO
 
@@ -334,7 +357,16 @@ void FlutterScreenCapture::GetDisplayMedia(
   scoped_refptr<RTCVideoSource> video_source;
   bool using_native_capturer = false;
 
-#if defined(_WIN32)
+// HOLLOW: the native Graphics-Capture video path (NativeScreenCapturer) depends
+// on RTCVideoFrame::CreateFromBGRA, a method only present in the fork's old
+// CUSTOM-patched libwebrtc — stock webrtc-sdk m144.7559.09 (adopted in the 1.5.2
+// rebase) does not have it. Per Vitalik's call (2026-06-25) we move to STOCK
+// libwebrtc and use its own desktop capturer for screen share; the custom native
+// capturer stays in-tree (gated off) for a possible future custom build. Define
+// HOLLOW_USE_NATIVE_SCREEN_CAPTURER + link a libwebrtc with CreateFromBGRA to
+// re-enable. The screen RECORDER (win_screen_recorder.cc) is independent and
+// keeps its custom path. See project_flutter_webrtc_152_upgrade.
+#if defined(_WIN32) && defined(HOLLOW_USE_NATIVE_SCREEN_CAPTURER)
   // Use native Graphics Capture when target resolution is specified.
   // This bypasses libwebrtc's desktop capturer which ignores resolution
   // constraints and always sends at native monitor resolution.
@@ -456,17 +488,25 @@ void FlutterScreenCapture::GetDisplayMedia(
 
 void FlutterScreenCapture::CleanupNativeCapturersForStream(
     const std::string& stream_id) {
-#if defined(_WIN32)
+  (void)stream_id;
+#if defined(_WIN32) && defined(HOLLOW_USE_NATIVE_SCREEN_CAPTURER)
+  // Native Graphics-Capture video is gated off on stock libwebrtc (see the
+  // include block + GetDisplayMedia). Map stays empty unless re-enabled.
   auto it = native_capturers_.find(stream_id);
   if (it != native_capturers_.end()) {
     it->second->Stop();
     native_capturers_.erase(it);
   }
+#endif
 
-  auto lit = loopback_capturers_.find(stream_id);
-  if (lit != loopback_capturers_.end()) {
-    lit->second->Stop();
-    loopback_capturers_.erase(lit);
+#if defined(_WIN32)
+  // Loopback audio is a single session (upstream 1.5.2 model), not keyed by
+  // stream_id. Hollow shares one screen at a time, so tearing it down when the
+  // share stream is disposed is correct.
+  if (loopback_capturer_) {
+    loopback_capturer_->Stop();
+    loopback_capturer_.reset();
+    loopback_audio_source_ = nullptr;
   }
 #endif
 }

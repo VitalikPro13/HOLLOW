@@ -563,7 +563,7 @@ packages:
       path: "packages/flutter_webrtc"
       relative: true
     source: path
-    version: "1.4.1"
+    version: "1.5.2"
   freezed:
     dependency: "direct dev"
     description:

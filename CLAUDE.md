@@ -57,7 +57,7 @@ HOLLOW/
 │       └── storage/      # SQLCipher message store
 ├── relay/                # Signaling HTTP + WS room router (Rust, legacy — superseded by relay-uws)
 ├── relay-uws/            # Production relay (uWebSockets C++, native TLS, deployed on OVH VPS)
-├── packages/flutter_webrtc/ # Forked flutter_webrtc 1.4.1 (WASAPI loopback, native screen recording, macOS ScreenCaptureKit screen share)
+├── packages/flutter_webrtc/ # Forked flutter_webrtc 1.5.2 on stock webrtc-sdk libwebrtc m144.7559.09 (WASAPI loopback, native screen recording, macOS ScreenCaptureKit screen share). Rebased from 1.4.1 2026-06-26; was on a CUSTOM-patched libwebrtc (CreateFromBGRA) — now stock, so native_screen_capturer is gated off (HOLLOW_USE_NATIVE_SCREEN_CAPTURER) & screen-share video uses libwebrtc's own desktop capturer. third_party/ gitignored except CMakeLists.txt + libwebrtc_version.ini + svpng (! exceptions); screen_audio_capturer.exe is a SEPARATE build target (scripts/build_screen_audio.ps1, built before flutter build). See project_flutter_webrtc_152_upgrade
 ├── rust_builder/         # flutter_rust_bridge build system (cargokit)
 ├── vendor/ffmpeg/        # Bundled native binaries (gitignored, see fetch_ffmpeg.ps1)
 ├── legal/                # Privacy Policy, Terms of Use, version manifest (manifest.json)

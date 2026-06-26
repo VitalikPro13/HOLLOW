@@ -175,18 +175,37 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
   void dispose() {
     for (final MediaStream mediaStream : localStreams.values()) {
-      streamDispose(mediaStream);
-      mediaStream.dispose();
+      try {
+        streamDispose(mediaStream);
+      } catch (Exception e) {
+        Log.w(TAG, "dispose(): error in streamDispose", e);
+      }
+      try {
+        mediaStream.audioTracks.clear();
+        mediaStream.videoTracks.clear();
+        mediaStream.preservedVideoTracks.clear();
+        mediaStream.dispose();
+      } catch (Exception e) {
+        Log.w(TAG, "dispose(): error disposing media stream", e);
+      }
     }
     localStreams.clear();
     synchronized (localTracks) {
       for (final LocalTrack track : localTracks.values()) {
-        track.dispose();
+        try {
+          track.dispose();
+        } catch (Exception e) {
+          Log.w(TAG, "dispose(): error disposing local track", e);
+        }
       }
       localTracks.clear();
     }
     for (final PeerConnectionObserver connection : mPeerConnectionObservers.values()) {
-      peerConnectionDispose(connection);
+      try {
+        peerConnectionDispose(connection);
+      } catch (Exception e) {
+        Log.w(TAG, "dispose(): error disposing peer connection", e);
+      }
     }
     mPeerConnectionObservers.clear();
   }
@@ -339,13 +358,13 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
     audioProcessingController = new AudioProcessingController();
 
+    factoryBuilder.setAudioProcessingFactory(audioProcessingController.externalAudioProcessingFactory);
+
     // Hollow fork: install the post-APM makeup gain + limiter so calls aren't
     // left at WebRTC's conservative AGC target. Process-global — covers DM
     // calls and voice channels alike. Gain is driven live via setCaptureGain.
     captureGainProcessor = new com.cloudwebrtc.webrtc.audio.CaptureGainProcessor();
     audioProcessingController.capturePostProcessing.addProcessor(captureGainProcessor);
-
-    factoryBuilder.setAudioProcessingFactory(audioProcessingController.externalAudioProcessingFactory);
 
     mFactory = factoryBuilder
             .setAudioDeviceModule(audioDeviceModule)
@@ -840,7 +859,9 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         result.success(null);
         break;
       case "requestCapturePermission": {
-        getUserMediaImpl.requestCapturePermission(result);
+        Boolean fullScreenOnlyArg = call.argument("fullScreenOnly");
+        boolean fullScreenOnly = fullScreenOnlyArg != null && fullScreenOnlyArg;
+        getUserMediaImpl.requestCapturePermission(result, fullScreenOnly);
         break;
       }
       case "getDisplayMedia": {
@@ -1564,6 +1585,11 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     return mFactory;
   }
 
+  @Nullable
+  public JavaAudioDeviceModule getAudioDeviceModule() {
+    return audioDeviceModule;
+  }
+
   @Override
   public PeerConnectionObserver getPeerConnectionObserver(String peerConnectionId) {
     return mPeerConnectionObservers.get(peerConnectionId);
@@ -2152,18 +2178,28 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   public void streamDispose(final MediaStream stream) {
     List<VideoTrack> videoTracks = stream.videoTracks;
     for (VideoTrack track : videoTracks) {
-      synchronized (localTracks) {
-        localTracks.remove(track.id());
+      try {
+        String trackId = track.id();
+        synchronized (localTracks) {
+          localTracks.remove(trackId);
+        }
+        getUserMediaImpl.removeVideoCapturer(trackId);
+        stream.removeTrack(track);
+      } catch (IllegalStateException e) {
+        Log.d(TAG, "streamDispose(): video track already disposed, skipping");
       }
-      getUserMediaImpl.removeVideoCapturer(track.id());
-      stream.removeTrack(track);
     }
     List<AudioTrack> audioTracks = stream.audioTracks;
     for (AudioTrack track : audioTracks) {
-      synchronized (localTracks) {
-        localTracks.remove(track.id());
+      try {
+        String trackId = track.id();
+        synchronized (localTracks) {
+          localTracks.remove(trackId);
+        }
+        stream.removeTrack(track);
+      } catch (IllegalStateException e) {
+        Log.d(TAG, "streamDispose(): audio track already disposed, skipping");
       }
-      stream.removeTrack(track);
     }
   }
 

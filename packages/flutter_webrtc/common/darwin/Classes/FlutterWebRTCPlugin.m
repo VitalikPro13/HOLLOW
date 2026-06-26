@@ -11,11 +11,12 @@
 #import "FlutterRTCFrameCryptor.h"
 #if TARGET_OS_IPHONE
 #import "FlutterRTCMediaRecorder.h"
+#endif
+#if TARGET_OS_IPHONE || TARGET_OS_OSX
 #import "FlutterRTCVideoPlatformViewFactory.h"
 #import "FlutterRTCVideoPlatformViewController.h"
 #endif
 #import "AudioManager.h"
-#import "CaptureGainProcessor.h"
 
 #import <AVFoundation/AVFoundation.h>
 #import <WebRTC/RTCFieldTrials.h>
@@ -28,6 +29,10 @@
 #import <CoreGraphics/CoreGraphics.h>
 #endif
 
+#import "LocalTrack.h"
+#import "LocalAudioTrack.h"
+#import "LocalVideoTrack.h"
+#import "CaptureGainProcessor.h"
 #if TARGET_OS_OSX
 #import "MacScreenShareAudioTap.h"
 #import "MacAudioDevices.h"
@@ -35,10 +40,6 @@
 #import "MacScreenRecorder.h"
 #import <objc/runtime.h>
 #endif
-
-#import "LocalTrack.h"
-#import "LocalAudioTrack.h"
-#import "LocalVideoTrack.h"
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wprotocol"
@@ -126,17 +127,29 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
   BOOL _speakerOnButPreferBluetooth;
   AVAudioSessionPort _preferredInput;
   AudioManager* _audioManager;
-  // Hollow fork: post-APM capture makeup gain + limiter, driven by
-  // setCaptureGain. Registered on the shared capture-post-processing adapter.
-  CaptureGainProcessor* _captureGainProcessor;
-#if TARGET_OS_IPHONE
-  FLutterRTCVideoPlatformViewFactory *_platformViewFactory;
+#if TARGET_OS_IPHONE || TARGET_OS_OSX
+  FlutterRTCVideoPlatformViewFactory *_platformViewFactory;
 #endif
 
   RTC_OBJC_TYPE(RTCCallbackLogger) * loggerCallback;
+
+  // Hollow fork: post-APM capture makeup gain + limiter, driven by
+  // setCaptureGain. Registered on the shared capture-post-processing adapter.
+  CaptureGainProcessor* _captureGainProcessor;
 }
 
 static FlutterWebRTCPlugin *sharedSingleton;
+
+// Process-global so it can be set from native code (e.g. another plugin) before
+// this plugin is even registered. Defaults to enabled. See
+// +setAudioSessionManagementEnabled:.
+static BOOL gAudioSessionManagementEnabled = YES;
+
+// Process-global RTCAudioDeviceModuleDelegate, set by an embedding plugin
+// (e.g. livekit_client) before the factory is created so it can own the audio
+// device module's engine-lifecycle callbacks. Held weakly — the embedder
+// retains it. See +setAudioDeviceModuleObserver:.
+static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 
 + (FlutterWebRTCPlugin *)sharedSingleton
 {
@@ -144,6 +157,18 @@ static FlutterWebRTCPlugin *sharedSingleton;
   {
     return sharedSingleton;
   }
+}
+
++ (void)setAudioSessionManagementEnabled:(BOOL)enabled {
+  gAudioSessionManagementEnabled = enabled;
+}
+
++ (void)setAudioDeviceModuleObserver:(id<RTCAudioDeviceModuleDelegate>)observer {
+  gAudioDeviceModuleObserver = observer;
+}
+
+- (BOOL)audioSessionManagementEnabled {
+  return gAudioSessionManagementEnabled;
 }
 
 @synthesize messenger = _messenger;
@@ -193,6 +218,7 @@ static FlutterWebRTCPlugin *sharedSingleton;
     _speakerOnButPreferBluetooth = NO;
     _eventChannel = eventChannel;
     _audioManager = AudioManager.sharedInstance;
+
     // Hollow fork: install the post-APM makeup gain + limiter so calls aren't
     // left at WebRTC's conservative AGC target. The capturePostProcessingAdapter
     // is process-global, so this covers DM calls and voice channels alike.
@@ -203,13 +229,18 @@ static FlutterWebRTCPlugin *sharedSingleton;
 #if TARGET_OS_IPHONE
     _preferredInput = AVAudioSessionPortHeadphones;
     self.viewController = viewController;
-    _platformViewFactory  = [[FLutterRTCVideoPlatformViewFactory alloc] initWithMessenger:messenger];
-    [registrar registerViewFactory:_platformViewFactory withId:FLutterRTCVideoPlatformViewFactoryID];
+#endif
+#if TARGET_OS_IPHONE || TARGET_OS_OSX
+    _platformViewFactory  = [[FlutterRTCVideoPlatformViewFactory alloc] initWithMessenger:messenger];
+    [registrar registerViewFactory:_platformViewFactory withId:FlutterRTCVideoPlatformViewFactoryID];
 #endif
   }
 
   NSDictionary* fieldTrials = @{kRTCFieldTrialUseNWPathMonitor : kRTCFieldTrialEnabledValue};
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
   RTCInitFieldTrialDictionary(fieldTrials);
+#pragma clang diagnostic pop
 
   self.peerConnections = [NSMutableDictionary new];
   self.localStreams = [NSMutableDictionary new];
@@ -319,17 +350,32 @@ static FlutterWebRTCPlugin *sharedSingleton;
         VideoEncoderFactorySimulcast* simulcastFactory =
             [[VideoEncoderFactorySimulcast alloc] initWithPrimary:encoderFactory fallback:encoderFactory];
 
-        // macOS Screen Share Audio Crash Fix:
-        // Use CoreAudio ADM (value 0) instead of AVAudioEngine (RTCAudioDeviceModuleTypeAudioEngine)
-        // AVAudioEngine crashes when screen share audio and microphone coexist due to
-        // format conflicts in AVAudioIONodeImpl::SetOutputFormat
-        // See: https://github.com/flutter-webrtc/flutter-webrtc/issues/1986
+        // Use the AVAudioEngine audio device module on both iOS and macOS.
+        //
+        // macOS previously used the CoreAudio ADM (value 0) to avoid an
+        // AVAudioIONodeImpl::SetOutputFormat sample-rate assertion when the
+        // microphone toggled during screen share (#1986, #1990). That crash
+        // predates the audio engine stability fixes shipped in WebRTC-SDK
+        // 144.7559.04+ (webrtc-sdk/webrtc#228: guarded connect:to:format:,
+        // state-based voice-processing checks, engine recreate ordering).
+        // The AudioEngine ADM enables platform voice processing (Apple
+        // AEC/NS/AGC) and the audio processing options API on macOS.
+        // iOS also requires the AudioEngine ADM because the CoreAudio ADM
+        // crashes when NSMicrophoneUsageDescription is absent (#2007, #2009).
+        RTCAudioDeviceModuleType audioDeviceModuleType = RTCAudioDeviceModuleTypeAudioEngine;
         _peerConnectionFactory =
-            [[RTCPeerConnectionFactory alloc] initWithAudioDeviceModuleType:0
+            [[RTCPeerConnectionFactory alloc] initWithAudioDeviceModuleType:audioDeviceModuleType
                                                       bypassVoiceProcessing:bypassVoiceProcessing
                                                              encoderFactory:simulcastFactory
                                                              decoderFactory:decoderFactory
                                                       audioProcessingModule:_audioManager.audioProcessingModule];
+
+        // Allow an embedding plugin (e.g. livekit_client) to own the audio
+        // device module's engine-lifecycle delegate. Only override the observer
+        // when one is registered, leaving default behavior unchanged otherwise.
+        if (gAudioDeviceModuleObserver != nil) {
+            _peerConnectionFactory.audioDeviceModule.observer = gAudioDeviceModuleObserver;
+        }
 
 #if TARGET_OS_OSX
         // CoreAudio ADM requires explicit device initialization on macOS
@@ -1130,7 +1176,7 @@ static FlutterWebRTCPlugin *sharedSingleton;
     [self rendererSetSrcObject:render stream:videoTrack];
     result(nil);
   }
-#if TARGET_OS_IPHONE
+#if TARGET_OS_IPHONE || TARGET_OS_OSX
   else if ([@"videoPlatformViewRendererSetSrcObject" isEqualToString:call.method]) {
       NSDictionary* argsMap = call.arguments;
       NSNumber* viewId = argsMap[@"viewId"];
@@ -1357,8 +1403,10 @@ static FlutterWebRTCPlugin *sharedSingleton;
     NSNumber* enable = argsMap[@"enable"];
     _speakerOn = enable.boolValue;
     _speakerOnButPreferBluetooth = NO;
-    [AudioUtils setSpeakerphoneOn:_speakerOn];
-    postEvent(self.eventSink, @{@"event" : @"onDeviceChange"});
+    if (self.audioSessionManagementEnabled) {
+      [AudioUtils setSpeakerphoneOn:_speakerOn];
+      postEvent(self.eventSink, @{@"event" : @"onDeviceChange"});
+    }
     result(nil);
   }
   else if ([@"ensureAudioSession" isEqualToString:call.method]) {
@@ -1368,13 +1416,17 @@ static FlutterWebRTCPlugin *sharedSingleton;
   else if ([@"enableSpeakerphoneButPreferBluetooth" isEqualToString:call.method]) {
     _speakerOn = YES;
     _speakerOnButPreferBluetooth = YES;
-    [AudioUtils setSpeakerphoneOnButPreferBluetooth];
+    if (self.audioSessionManagementEnabled) {
+      [AudioUtils setSpeakerphoneOnButPreferBluetooth];
+    }
     result(nil);
   }
   else if([@"setAppleAudioConfiguration" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSDictionary* configuration = argsMap[@"configuration"];
-    [AudioUtils setAppleAudioConfiguration:configuration];
+    if (self.audioSessionManagementEnabled) {
+      [AudioUtils setAppleAudioConfiguration:configuration];
+    }
     result(nil);
   }
 #endif
@@ -1919,7 +1971,7 @@ static FlutterWebRTCPlugin *sharedSingleton;
       });
     } else if ([@"isVoiceProcessingEnabled" isEqualToString:call.method]) {
       RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
-      NSNumber* admResult = [NSNumber numberWithBool:adm.isVoiceProcessingEnabled];
+      NSNumber* admResult = [NSNumber numberWithBool:adm.isPlatformVoiceProcessingAllowed];
       result(admResult);
     } else if ([@"isVoiceProcessingBypassed" isEqualToString:call.method]) {
       RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
@@ -1966,12 +2018,18 @@ static FlutterWebRTCPlugin *sharedSingleton;
 
 - (void)ensureAudioSession {
 #if TARGET_OS_IPHONE
+  if (!self.audioSessionManagementEnabled) {
+    return;
+  }
   [AudioUtils ensureAudioSessionWithRecording:[self hasLocalAudioTrack]];
 #endif
 }
 
 - (void)deactiveRtcAudioSession {
 #if TARGET_OS_IPHONE
+  if (!self.audioSessionManagementEnabled) {
+    return;
+  }
   if (![self hasLocalAudioTrack] && self.peerConnections.count == 0) {
     [AudioUtils deactiveRtcAudioSession];
   }

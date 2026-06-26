@@ -4,6 +4,9 @@
 #include "flutter_common.h"
 #include "flutter_webrtc_base.h"
 
+#include "loopback_capturer.h"
+#include "rtc_audio_source.h"
+#include "rtc_audio_track.h"
 #include "rtc_desktop_capturer.h"
 #include "rtc_desktop_media_list.h"
 
@@ -11,11 +14,12 @@
 
 #if defined(_WIN32)
 namespace flutter_webrtc_plugin {
-class WasapiLoopbackCapturer;
 class ScreenAudioCapturer;
 class OpusDecoderWrapper;
 class WasapiAudioRenderer;
+#if defined(HOLLOW_USE_NATIVE_SCREEN_CAPTURER)
 class NativeScreenCapturer;
+#endif
 }  // namespace flutter_webrtc_plugin
 #endif
 
@@ -78,10 +82,14 @@ class FlutterScreenCapture : public MediaListObserver,
   std::map<DesktopType, scoped_refptr<RTCDesktopMediaList>> medialist_;
   std::vector<scoped_refptr<MediaSource>> sources_;
 
-#if defined(_WIN32)
-  std::map<std::string, std::unique_ptr<WasapiLoopbackCapturer>>
-      loopback_capturers_;
+  // Loopback (system/app) audio session for screen share — adopted from
+  // upstream 1.5.2 (#2060). Single session (Hollow shares one screen at a
+  // time). CreateLoopbackCapturer returns nullptr off-Windows, so these stay
+  // null there. Cross-platform interface, so NOT inside the _WIN32 block.
+  std::unique_ptr<LoopbackCapturer> loopback_capturer_;
+  scoped_refptr<RTCAudioSource> loopback_audio_source_;
 
+#if defined(_WIN32)
   std::map<std::string, std::unique_ptr<ScreenAudioCapturer>>
       screen_audio_capturers_;
 
@@ -92,8 +100,12 @@ class FlutterScreenCapture : public MediaListObserver,
   std::map<std::string, std::unique_ptr<AudioRenderSession>>
       audio_render_sessions_;
 
+#if defined(HOLLOW_USE_NATIVE_SCREEN_CAPTURER)
+  // Native Graphics-Capture video — gated off on stock libwebrtc (depends on
+  // the custom CreateFromBGRA). See project_flutter_webrtc_152_upgrade.
   std::map<std::string, std::unique_ptr<NativeScreenCapturer>>
       native_capturers_;
+#endif
 #endif
 };
 
