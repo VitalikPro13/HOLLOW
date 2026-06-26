@@ -344,11 +344,11 @@ Default ICE servers: STUN only (relay.anonlisten.com:3478, stun.cloudflare.com:3
 
 ### Constructor and State
 
-Takes `localPeerId` and optional `iceServers`. Core state:
+Takes `localPeerId`, optional `iceServers`, and optional `resolveIdentity` (device→master resolver, injected from `deviceLinkProvider.identityOf`; defaults to a no-op — used ONLY for the multi-device glare tiebreaker, see `_handleOffer`). Core state:
 
-- `_connections`: Map<String, _PeerConn> -- active peer connections
+- `_connections`: Map<String, _PeerConn> -- active peer connections (keyed by DEVICE peer_id)
 - `_transfers`: Map<String, _IncomingTransfer> -- active incoming file transfers
-- `_pendingIceCandidates`: Map<String, List<RTCIceCandidate>> -- queued before connection created
+- `_pendingIceCandidates`: Map<String, List<RTCIceCandidate>> -- queued before connection created, KEYED BY conn_id (not peer_id; sibling-device-relabel safe)
 - `_intentionalClose`: Set<String> -- peers we're intentionally closing (prevents reconnect trigger)
 - `_connecting`: Set<String> -- guards against concurrent `connectToPeer()` calls for same peer
 - `_pingSentAt`: Map<String, DateTime> -- for RTT measurement
@@ -375,13 +375,16 @@ Takes `localPeerId` and optional `iceServers`. Core state:
 8. Starts 10s timeout: if data channel hasn't opened, cleans up and notifies Rust via `webrtcPeerDisconnected`
 
 `_handleOffer(peerId, payload, connId)`:
-- **Same connId** (renegotiation): handles renegotiation glare (lower peerId wins via rollback), creates answer
-- **Different connId** (initial glare): lower peerId is "polite" -- drops own connection and accepts incoming offer. Higher peerId is "impolite" -- ignores incoming offer
-- **New connection**: Creates PC, wires `onDataChannel` (answerer receives DC this way), `onIceCandidate`, `onConnectionState`. Sets remote description, creates answer, flushes pending ICE.
+- **Glare tiebreaker is MULTI-DEVICE-SAFE**: `politeSelf = resolveIdentity(localPeerId).compareTo(resolveIdentity(peerId)) < 0` — compares MASTER identities, NOT raw device ids. The relay tags a multi-device peer with a DIFFERENT device id on each side, so a raw-id compare is not antisymmetric → both sides could pick "impolite" → nobody answers → the channel never opens (the deadlock that broke screen-share audio, 2026-06-26). `resolveIdentity` is injected from `deviceLinkProvider.identityOf` (no-op on single-device).
+- **Same connId** (renegotiation): renegotiation glare — `politeSelf` rolls back, else ignores theirs.
+- **Different connId** (initial glare): `politeSelf` drops own connection and accepts incoming offer; else ignores it.
+- **New connection**: closes any prior connection for this peer_id first (close-before-replace, avoids an orphaned still-delivering channel), creates PC, wires `onDataChannel` (answerer receives DC this way — does NOT call `_onDataChannelReady` directly; the state handler is the single trigger), `onIceCandidate`, `onConnectionState`. Sets remote description, creates answer, flushes pending ICE (by conn_id).
 
-`_handleAnswer(peerId, payload, connId)`: Validates connId matches, sets remote description.
+`_handleAnswer(peerId, payload, connId)`: matches the connection by peer_id first, then FALLS BACK to `_findConnByConnId(connId)` — a multi-device peer's answer can arrive tagged with a DIFFERENT sibling device id than the offer target ("Answer from X but no connection exists" → timeout), and `conn_id` is the hop-invariant correlator. Then validates connId, sets remote description.
 
-`_handleIce(peerId, payload, connId)`: If no connection exists yet, queues candidate. Otherwise adds directly.
+`_handleIce(peerId, payload, connId)`: same peer_id-then-conn_id matching as `_handleAnswer`. If no PC found, queues the candidate KEYED BY conn_id (flushed by `_flushPendingIce(connId)`). Otherwise adds directly.
+
+`_findConnByConnId(connId)`: scans `_connections.values` for a matching `connId` regardless of which peer_id key it's stored under (multi-device sibling-device relabeling).
 
 ### Data Channel Setup
 
@@ -390,6 +393,7 @@ Takes `localPeerId` and optional `iceServers`. Core state:
 - `onMessage`: Routes to `_onDataChannelMessage()`, resets idle timer
 
 `_onDataChannelReady(peerId)`:
+0. Idempotency guard: returns early if the connection already has a keepalive timer (it can fire more than once for the same live channel — answerer `onDataChannel` + `onDataChannelState`, reconnect churn — which would double-start the keepalive + re-notify Rust)
 1. Resets idle timer
 2. Starts keepalive ping timer (every 30s sends `[0xFE]` byte)
 3. Notifies Rust via `network_api.webrtcPeerConnected()`

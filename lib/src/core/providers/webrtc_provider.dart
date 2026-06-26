@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -28,7 +29,14 @@ class WebRtcNotifier extends Notifier<WebRtcState> {
       final localPeerId = ref.read(identityProvider).peerId ?? '';
       final iceConfig = ref.read(iceConfigProvider);
       final relayDomain = ref.read(relayDomainProvider);
-      _service = WebRtcService(localPeerId: localPeerId, iceServers: iceConfig, relayDomain: relayDomain);
+      _service = WebRtcService(
+        localPeerId: localPeerId,
+        iceServers: iceConfig,
+        relayDomain: relayDomain,
+        // Live device→master resolver for the glare tiebreaker (multi-device).
+        // Read on each call so it reflects the latest device-link mirror.
+        resolveIdentity: (id) => ref.read(deviceLinkProvider).identityOf(id),
+      );
       _wireCallbacks();
     } else {
       // Keep ICE config up to date (TURN credentials refresh).

@@ -52,6 +52,19 @@ void _log(String msg) {
 class WebRtcService {
   final String localPeerId;
 
+  /// Resolve a (possibly per-device) peer_id to its MASTER identity
+  /// (multi-device, Phase 6). Used ONLY for the glare tiebreaker, which must
+  /// compare two ids of the same kind on BOTH peers or it isn't antisymmetric:
+  /// the relay reports DEVICE ids, but a multi-device peer may surface as
+  /// different device ids on each side (e.g. it offers as its master id while
+  /// the remote sees the device id), so comparing raw ids lets BOTH sides pick
+  /// "impolite" → neither answers → the data channel never opens (the same
+  /// device-vs-master deadlock as the Olm KeyBundle glare). Resolving both ids
+  /// to master makes the comparison identical on both machines. Defaults to a
+  /// no-op (single-device / unknown peer resolves to itself). Sockets, sends,
+  /// and connection keys stay on the DEVICE id — never resolve those.
+  final String Function(String peerId) resolveIdentity;
+
   /// ICE configuration (STUN + TURN). Updated by IceConfigProvider.
   Map<String, dynamic> iceServers;
 
@@ -98,8 +111,13 @@ class WebRtcService {
   /// Peers connected with STUN-only config (Share). Used to fire the right callback on failure.
   final Set<String> _stunOnlyPeers = {};
 
-  WebRtcService({required this.localPeerId, Map<String, dynamic>? iceServers, String relayDomain = 'relay.anonlisten.com'})
-      : iceServers = iceServers ?? _defaultIceServers(domain: relayDomain);
+  WebRtcService({
+    required this.localPeerId,
+    Map<String, dynamic>? iceServers,
+    String relayDomain = 'relay.anonlisten.com',
+    String Function(String peerId)? resolveIdentity,
+  })  : iceServers = iceServers ?? _defaultIceServers(domain: relayDomain),
+        resolveIdentity = resolveIdentity ?? ((p) => p);
 
   /// Check if a peer has an active data channel.
   bool hasPeerChannel(String peerId) {
@@ -378,17 +396,22 @@ class WebRtcService {
     _connecting.remove(peerId);
     _stunOnlyPeers.remove(peerId);
     final conn = _connections.remove(peerId);
-    if (conn != null) {
-      conn.idleTimer?.cancel();
-      conn.keepaliveTimer?.cancel();
-      try {
-        await conn.dataChannel?.close();
-      } catch (_) {}
-      try {
-        await conn.pc.close();
-        await conn.pc.dispose();
-      } catch (_) {}
-    }
+    if (conn != null) await _closeConn(conn);
+  }
+
+  /// Close a single connection's timers + channel + PC WITHOUT touching the
+  /// _connections map (the caller owns the map entry — e.g. when superseding an
+  /// orphaned connection that's being replaced for the same peer).
+  Future<void> _closeConn(_PeerConn conn) async {
+    conn.idleTimer?.cancel();
+    conn.keepaliveTimer?.cancel();
+    try {
+      await conn.dataChannel?.close();
+    } catch (_) {}
+    try {
+      await conn.pc.close();
+      await conn.pc.dispose();
+    } catch (_) {}
   }
 
   /// Dispose all connections.
@@ -409,6 +432,16 @@ class WebRtcService {
     // payload is the raw SDP string (not JSON).
     final sdp = payload;
 
+    // Glare tiebreaker: compare MASTER identities, not raw peer ids. The relay
+    // reports DEVICE ids and a multi-device peer can surface as different ids on
+    // each side (it offers as its master id; we see its device id), so a raw
+    // `localPeerId.compareTo(peerId)` is NOT antisymmetric across the two
+    // machines — both can compute "impolite" and neither answers, so the data
+    // channel never opens (same device-vs-master deadlock as the Olm glare bug).
+    // Resolving both to master makes the ordering identical on both peers.
+    final bool politeSelf =
+        resolveIdentity(localPeerId).compareTo(resolveIdentity(peerId)) < 0;
+
     final existing = _connections[peerId];
     if (existing != null) {
       // Same connId = renegotiation on existing connection (media track change).
@@ -419,7 +452,7 @@ class WebRtcService {
         // polite peer rolls back.
         final signalingState = existing.pc.signalingState;
         if (signalingState == RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
-          if (localPeerId.compareTo(peerId) < 0) {
+          if (politeSelf) {
             _log('[HOLLOW-WEBRTC-DART] Renegotiation glare: rolling back');
             await existing.pc.setLocalDescription(
                 RTCSessionDescription(null, 'rollback'));
@@ -446,7 +479,7 @@ class WebRtcService {
       }
 
       // Different connId = glare (initial connection collision).
-      if (localPeerId.compareTo(peerId) < 0) {
+      if (politeSelf) {
         _log('[HOLLOW-WEBRTC-DART] Glare: we are polite, dropping our connection to $peerId');
         await disconnectPeer(peerId);
         // Fall through to accept their offer below.
@@ -458,6 +491,17 @@ class WebRtcService {
 
     _log('[HOLLOW-WEBRTC-DART] Handling offer from $peerId (conn=$connId)');
 
+    // Close any prior connection we still hold for this peer before replacing it
+    // in the map — otherwise the old PC's data channel stays open, orphaned (no
+    // longer in _connections), and keeps delivering packets (duplicate audio /
+    // leaked channel). The glare "polite" branch already disconnected; this
+    // covers the non-glare overwrite + reconnect churn.
+    final prior = _connections[peerId];
+    if (prior != null) {
+      _log('[HOLLOW-WEBRTC-DART] Replacing prior connection to $peerId (closing orphan)');
+      _closeConn(prior);
+    }
+
     final pc = await createPeerConnection(iceServers);
     final conn = _PeerConn(
       pc: pc,
@@ -467,12 +511,14 @@ class WebRtcService {
     );
     _connections[peerId] = conn;
 
-    // Answer side receives data channel via onDataChannel.
+    // Answer side receives data channel via onDataChannel. Don't call
+    // _onDataChannelReady here — _setupDataChannel's onDataChannelState fires it
+    // on open (calling it both here AND there double-fires webrtcPeerConnected +
+    // starts two keepalive timers).
     pc.onDataChannel = (dc) {
       _log('[HOLLOW-WEBRTC-DART] onDataChannel fired for $peerId');
       conn.dataChannel = dc;
       _setupDataChannel(dc, peerId);
-      _onDataChannelReady(peerId);
     };
 
     pc.onIceCandidate = (candidate) {
@@ -509,18 +555,28 @@ class WebRtcService {
     _log('[HOLLOW-WEBRTC-DART] Sent answer to $peerId (conn=$connId)');
 
     // Flush any ICE candidates that arrived before the offer was processed.
-    await _flushPendingIce(peerId);
+    await _flushPendingIce(connId);
   }
 
   Future<void> _handleAnswer(
       String peerId, String payload, String connId) async {
-    final conn = _connections[peerId];
+    // Match by peer_id first, then fall back to conn_id. A multi-device peer's
+    // answer can arrive tagged with a DIFFERENT device id than the offer was
+    // sent to (the relay labels the envelope with whichever device of the
+    // peer's identity it routed through), so `_connections[peerId]` misses even
+    // though the PC exists. conn_id is the stable, hop-invariant correlator —
+    // it's identical in the offer and the answer — so use it to find the PC.
+    var conn = _connections[peerId];
+    if (conn == null || conn.connId != connId) {
+      final byConn = _findConnByConnId(connId);
+      if (byConn != null) conn = byConn;
+    }
     if (conn == null) {
-      _log('[HOLLOW-WEBRTC-DART] Answer from $peerId but no connection exists');
+      _log('[HOLLOW-WEBRTC-DART] Answer from $peerId but no connection exists (conn=$connId)');
       return;
     }
 
-    _log('[HOLLOW-WEBRTC-DART] Handling answer from $peerId (conn=$connId, ours=${conn.connId})');
+    _log('[HOLLOW-WEBRTC-DART] Handling answer from $peerId (conn=$connId, ours=${conn.connId}, key=${conn.peerId})');
 
     if (conn.connId != connId) {
       _log('[HOLLOW-WEBRTC-DART] Ignoring stale answer from $peerId (conn=$connId, current=${conn.connId})');
@@ -528,6 +584,16 @@ class WebRtcService {
     }
 
     await conn.pc.setRemoteDescription(RTCSessionDescription(payload, 'answer'));
+  }
+
+  /// Find an active connection by its [connId] regardless of which peer_id key
+  /// it's stored under. Needed because a multi-device peer's answer/ICE can
+  /// arrive labelled with a sibling device id different from the offer target.
+  _PeerConn? _findConnByConnId(String connId) {
+    for (final c in _connections.values) {
+      if (c.connId == connId) return c;
+    }
+    return null;
   }
 
   Future<void> _handleIce(
@@ -539,24 +605,33 @@ class WebRtcService {
       json['sdpMLineIndex'] as int?,
     );
 
-    final conn = _connections[peerId];
+    // Match by peer_id, then by conn_id (a sibling-device-labelled candidate for
+    // the same PC — see _handleAnswer). Only queue if neither finds the PC.
+    var conn = _connections[peerId];
+    if (conn == null || conn.connId != connId) {
+      final byConn = _findConnByConnId(connId);
+      if (byConn != null) conn = byConn;
+    }
     if (conn == null) {
       // Queue ICE candidate — the offer/answer handler is still async-processing.
-      _pendingIceCandidates.putIfAbsent(peerId, () => []).add(candidate);
-      _log('[HOLLOW-WEBRTC-DART] Queued ICE candidate for $peerId (no connection yet)');
+      // Key by conn_id so a sibling-device-labelled candidate still reunites with
+      // the right offer once its PC is created (flushed in _flushPendingIce).
+      _pendingIceCandidates.putIfAbsent(connId, () => []).add(candidate);
+      _log('[HOLLOW-WEBRTC-DART] Queued ICE candidate for $peerId (conn=$connId, no connection yet)');
       return;
     }
 
     await conn.pc.addCandidate(candidate);
   }
 
-  /// Flush any ICE candidates that were queued before the connection was created.
-  Future<void> _flushPendingIce(String peerId) async {
-    final queued = _pendingIceCandidates.remove(peerId);
+  /// Flush ICE candidates that were queued (by conn_id) before the connection
+  /// for [connId] was created.
+  Future<void> _flushPendingIce(String connId) async {
+    final queued = _pendingIceCandidates.remove(connId);
     if (queued == null || queued.isEmpty) return;
-    final conn = _connections[peerId];
+    final conn = _findConnByConnId(connId);
     if (conn == null) return;
-    _log('[HOLLOW-WEBRTC-DART] Flushing ${queued.length} queued ICE candidates for $peerId');
+    _log('[HOLLOW-WEBRTC-DART] Flushing ${queued.length} queued ICE candidates for conn=$connId');
     for (final candidate in queued) {
       await conn.pc.addCandidate(candidate);
     }
@@ -580,11 +655,17 @@ class WebRtcService {
   }
 
   void _onDataChannelReady(String peerId) {
+    final conn = _connections[peerId];
+    // Idempotency guard: _onDataChannelReady can fire more than once for the
+    // same live channel (the answerer's onDataChannel plus onDataChannelState,
+    // and reconnect churn), which would double-start the keepalive + re-notify
+    // Rust. If this channel already started its keepalive, it's a repeat fire.
+    if (conn != null && conn.keepaliveTimer != null) return;
+
     _log('[HOLLOW-WEBRTC-DART] Data channel OPEN with $peerId');
     _resetIdleTimer(peerId);
 
     // Start keepalive ping to prevent idle timeout.
-    final conn = _connections[peerId];
     if (conn != null) {
       conn.keepaliveTimer?.cancel();
       conn.keepaliveTimer = Timer.periodic(_kKeepaliveInterval, (_) {
