@@ -16,6 +16,7 @@ import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
+import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/screen_audio_renderer.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/voice_service.dart';
@@ -639,8 +640,11 @@ class CallNotifier extends Notifier<CallState> {
       _sendSignal(peerId, 'screen_state',
           jsonEncode({'call_id': callId, 'enabled': true, 'quality': qualityLabel}));
 
-      // Start screen audio capture on Windows via data channel.
-      if (shareAudio && Platform.isWindows) {
+      // Start screen audio capture via data channel on the data-channel-audio
+      // platforms: Windows (WASAPI) and macOS 13.0+ (ScreenCaptureKit).
+      final dcAudio = Platform.isWindows ||
+          (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio);
+      if (shareAudio && dcAudio) {
         final webrtc = ref.read(webRtcProvider.notifier).service;
         // Ensure the file-transfer DC exists with this peer.
         if (!webrtc.hasPeerChannel(peerId)) {

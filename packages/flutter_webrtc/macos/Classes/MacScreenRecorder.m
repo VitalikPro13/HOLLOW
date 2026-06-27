@@ -22,6 +22,32 @@ static NSString * const kDomain = @"MacScreenRecorder";
 @property(nonatomic) BOOL writerStarted;
 @property(nonatomic) BOOL lastRecordingCapturedSystemAudio;
 @property(nonatomic, copy, nullable) NSString *outputPath;
+// Which inputs were actually added to the writer (only these may be
+// markAsFinished'd; finishing an unattached input throws / corrupts the file).
+@property(nonatomic) BOOL hasSystemAudioInput;
+@property(nonatomic) BOOL hasMicInput;
+// Per-track sample counts — a track added to the writer that receives ZERO
+// sample buffers produces an unplayable MP4 (broken/empty track box).
+@property(nonatomic) uint64_t videoSamples;
+@property(nonatomic) uint64_t systemAudioSamples;
+@property(nonatomic) uint64_t micSamples;
+// PTS of the first video frame, used to start the writer session. Audio runs on
+// independent clocks (SCK system-audio + the mic's separate AVCaptureSession),
+// so a buffer can arrive with a timestamp BEFORE the session start. Appending a
+// pre-session sample makes AVAssetWriter go to Failed mid-record -> no moov atom
+// -> unplayable MP4 (the intermittent corruption). We drop any audio earlier
+// than this gate. kCMTimeInvalid until the first video frame establishes it.
+@property(nonatomic) CMTime sessionStartPts;
+// Audio buffers dropped because they predated the session start (diagnostic).
+@property(nonatomic) uint64_t systemAudioDropped;
+@property(nonatomic) uint64_t micDropped;
+// Which track's append FIRST flipped the writer to Failed, with the writer error
+// captured AT THAT MOMENT (the real trigger — by stop() the message is masked).
+@property(nonatomic, copy, nullable) NSString *firstFailTrack;
+// The SCK system-audio ASBD (rate/channels/float/planar) from the first buffer,
+// carried back to Dart in the stop diag so we can SEE what the AAC encoder is
+// being fed (NSLog is invisible over SSH).
+@property(nonatomic, copy, nullable) NSString *sysAudioAsbd;
 @end
 
 @implementation MacScreenRecorder
@@ -50,6 +76,16 @@ static NSString * const kDomain = @"MacScreenRecorder";
 
   self.outputPath = outputPath;
   self.writerStarted = NO;
+  self.hasSystemAudioInput = NO;
+  self.hasMicInput = NO;
+  self.videoSamples = 0;
+  self.systemAudioSamples = 0;
+  self.micSamples = 0;
+  self.systemAudioDropped = 0;
+  self.micDropped = 0;
+  self.firstFailTrack = nil;
+  self.sysAudioAsbd = nil;
+  self.sessionStartPts = kCMTimeInvalid;
 
   if (@available(macOS 13.0, *)) {
     [SCShareableContent
@@ -77,29 +113,82 @@ static NSString * const kDomain = @"MacScreenRecorder";
     [self.micSession stopRunning];
     self.micSession = nil;
 
-    [self.videoInput markAsFinished];
-    [self.systemAudioInput markAsFinished];
-    [self.micAudioInput markAsFinished];
-
     AVAssetWriter *w = self.writer;
-    if (w.status == AVAssetWriterStatusWriting) {
-      [w finishWritingWithCompletionHandler:^{
-        NSError *err = (w.status == AVAssetWriterStatusFailed) ? w.error : nil;
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(err); });
-        self.writer = nil;
-        self.videoInput = nil;
-        self.systemAudioInput = nil;
-        self.micAudioInput = nil;
-      }];
-    } else {
-      dispatch_async(dispatch_get_main_queue(), ^{
-        completion(streamErr ?: [self errorWithCode:-3 message:@"Writer in unexpected state"]);
-      });
+    NSLog(@"[MacScreenRecorder] finishing: status=%ld writerStarted=%d "
+          @"video=%llu sysAudio=%llu(added=%d,drop=%llu) "
+          @"mic=%llu(added=%d,drop=%llu) err=%@",
+          (long)w.status, self.writerStarted, self.videoSamples,
+          self.systemAudioSamples, self.hasSystemAudioInput, self.systemAudioDropped,
+          self.micSamples, self.hasMicInput, self.micDropped, w.error);
+
+    void (^cleanup)(void) = ^{
       self.writer = nil;
       self.videoInput = nil;
       self.systemAudioInput = nil;
       self.micAudioInput = nil;
+      self.hasSystemAudioInput = NO;
+      self.hasMicInput = NO;
+    };
+
+    // Diagnostic prefix surfaced to Dart (lands in hollow_debug.log).
+    // saDrop/micDrop = audio buffers dropped for predating the session start.
+    // firstFail = which track's append FIRST flipped the writer to Failed (the
+    // real trigger), captured at the moment of failure with the underlying error
+    // — the stop-time localizedDescription is just the generic masked message.
+    NSError *we = w.error;
+    NSError *under = we.userInfo[NSUnderlyingErrorKey];
+    NSString *diag = [NSString stringWithFormat:
+        @"status=%ld started=%d v=%llu sa=%llu(%d,drop=%llu) mic=%llu(%d,drop=%llu) "
+        @"firstFail=%@ asbd=[%@] wErr=[%@ %ld] under=[%@ %ld %@]",
+        (long)w.status, self.writerStarted, self.videoSamples,
+        self.systemAudioSamples, self.hasSystemAudioInput, self.systemAudioDropped,
+        self.micSamples, self.hasMicInput, self.micDropped,
+        self.firstFailTrack ?: @"none", self.sysAudioAsbd ?: @"?",
+        we.domain ?: @"-", (long)we.code,
+        under.domain ?: @"-", (long)under.code, under.localizedDescription ?: @"-"];
+
+    // If the writer already FAILED mid-recording (almost always a rejected
+    // audio sample buffer), finishWriting can't produce a moov -> corrupt file.
+    // Surface the real writer error instead of a generic message.
+    if (w.status == AVAssetWriterStatusFailed) {
+      NSLog(@"[MacScreenRecorder] writer FAILED before stop: %@", w.error);
+      [w cancelWriting];
+      NSError *e = [self errorWithCode:-6
+          message:[NSString stringWithFormat:@"writer failed mid-record: %@", diag]];
+      dispatch_async(dispatch_get_main_queue(), ^{ completion(e); });
+      cleanup();
+      return;
     }
+
+    // No video frames ever arrived -> nothing valid to finalize.
+    if (!self.writerStarted || w.status != AVAssetWriterStatusWriting) {
+      [w cancelWriting];
+      NSError *e = streamErr ?: [self errorWithCode:-3
+          message:[NSString stringWithFormat:@"no frames: %@", diag]];
+      dispatch_async(dispatch_get_main_queue(), ^{ completion(e); });
+      cleanup();
+      return;
+    }
+
+    // AVFoundation requires EVERY input added to the writer to be marked
+    // finished before finishWriting (else it stalls). So mark all added inputs.
+    [self.videoInput markAsFinished];
+    if (self.hasSystemAudioInput) [self.systemAudioInput markAsFinished];
+    if (self.hasMicInput) [self.micAudioInput markAsFinished];
+
+    [w finishWritingWithCompletionHandler:^{
+      NSError *err = nil;
+      if (w.status == AVAssetWriterStatusFailed) {
+        err = [self errorWithCode:-7
+            message:[NSString stringWithFormat:@"finishWriting failed: %@ | %@",
+                     w.error.localizedDescription ?: @"?", diag]];
+        NSLog(@"[MacScreenRecorder] finishWriting FAILED: %@", w.error);
+      } else {
+        NSLog(@"[MacScreenRecorder] finishWriting OK (%@) -> %@", diag, self.outputPath);
+      }
+      dispatch_async(dispatch_get_main_queue(), ^{ completion(err); });
+      cleanup();
+    }];
   };
 
   if (self.stream) {
@@ -173,12 +262,18 @@ static NSString * const kDomain = @"MacScreenRecorder";
   self.systemAudioInput.expectsMediaDataInRealTime = YES;
   if ([self.writer canAddInput:self.systemAudioInput]) {
     [self.writer addInput:self.systemAudioInput];
+    self.hasSystemAudioInput = YES;
+  } else {
+    self.systemAudioInput = nil;
   }
 
+  // 48 kHz to match the normalized mic delivery format (and the system-audio
+  // track) — no rate conversion anywhere. Hardcoding 44100 here while the mic
+  // delivers 48k was the prime suspect for the corrupt-MP4 + pitch issues.
   NSDictionary *micAudioSettings = @{
     AVFormatIDKey: @(kAudioFormatMPEG4AAC),
     AVNumberOfChannelsKey: @2,
-    AVSampleRateKey: @44100,
+    AVSampleRateKey: @48000,
     AVEncoderBitRateKey: @(160 * 1000),
   };
   self.micAudioInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeAudio
@@ -186,6 +281,9 @@ static NSString * const kDomain = @"MacScreenRecorder";
   self.micAudioInput.expectsMediaDataInRealTime = YES;
   if ([self.writer canAddInput:self.micAudioInput]) {
     [self.writer addInput:self.micAudioInput];
+    self.hasMicInput = YES;
+  } else {
+    self.micAudioInput = nil;
   }
 
   self.videoQueue = dispatch_queue_create("com.anonlisten.hollow.rec.video", DISPATCH_QUEUE_SERIAL);
@@ -213,6 +311,20 @@ static NSString * const kDomain = @"MacScreenRecorder";
     if (micInput && [self.micSession canAddInput:micInput]) {
       [self.micSession addInput:micInput];
       AVCaptureAudioDataOutput *micOutput = [[AVCaptureAudioDataOutput alloc] init];
+      // Normalize the mic delivery format to interleaved 16-bit stereo @ 48 kHz
+      // so it MATCHES the SCK system-audio shape. Without this the mic delivers
+      // its native format (often mono / float / a non-48k hardware rate), which
+      // forces extra conversion in the AAC encoder and is a corruption risk.
+      // Same shape for both audio sources = one predictable path into the muxer.
+      micOutput.audioSettings = @{
+        AVFormatIDKey: @(kAudioFormatLinearPCM),
+        AVSampleRateKey: @48000,
+        AVNumberOfChannelsKey: @2,
+        AVLinearPCMBitDepthKey: @16,
+        AVLinearPCMIsFloatKey: @NO,
+        AVLinearPCMIsBigEndianKey: @NO,
+        AVLinearPCMIsNonInterleaved: @NO,
+      };
       [micOutput setSampleBufferDelegate:self queue:self.micQueue];
       if ([self.micSession canAddOutput:micOutput]) {
         [self.micSession addOutput:micOutput];
@@ -268,51 +380,137 @@ static NSString * const kDomain = @"MacScreenRecorder";
       CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
       if ([self.writer startWriting]) {
         [self.writer startSessionAtSourceTime:pts];
+        // Written here on the video queue, read on the audio queues (see
+        // audioBufferWithinSession:) — guard the cross-thread CMTime store.
+        @synchronized(self) { self.sessionStartPts = pts; }  // audio before this is dropped
         self.writerStarted = YES;
       } else {
         return;
       }
     }
 
-    if (self.videoInput.readyForMoreMediaData) {
-      [self.videoInput appendSampleBuffer:sampleBuffer];
+    if ([self appendSample:sampleBuffer toInput:self.videoInput track:@"video"]) {
+      self.videoSamples++;
     }
     return;
   }
 
   if (type == SCStreamOutputTypeAudio) {
-    if (!self.writerStarted) return;
-    // Boost system audio (peer voices, music) — needs more gain than the
-    // mic because the underlying playback level is typically quieter than
-    // what comes off a hardware microphone.
-    CMSampleBufferRef boosted = [self gainedCopyOfSampleBuffer:sampleBuffer factor:6.0f]
-                                ?: sampleBuffer;
-    if (self.systemAudioInput.readyForMoreMediaData) {
-      [self.systemAudioInput appendSampleBuffer:boosted];
+    if (!self.writerStarted) return;        // audio before the video session start
+    if (!self.hasSystemAudioInput) return;  // input not attached to the writer
+    // Drop buffers that predate the writer session — appending one fails the
+    // writer mid-record (the intermittent no-moov corruption). SCK system audio
+    // shares the SCStream clock with video, so this rarely fires, but the very
+    // first audio buffer can still lead the first accepted video frame.
+    if (![self audioBufferWithinSession:sampleBuffer]) {
+      self.systemAudioDropped++;
+      return;
     }
-    if (boosted != sampleBuffer) {
-      CFRelease(boosted);
+    // Capture the SCK audio format ONCE into a property so the stop-result diag
+    // can carry it back to Dart (hollow_debug.log — NSLog is invisible over SSH).
+    // This is the ASBD the AAC encoder must accept; a mismatch is what throws
+    // OSStatus -12785 (kAudioCodecBadData) -> the corrupt-MP4 trigger.
+    if (self.sysAudioAsbd == nil) {
+      CMFormatDescriptionRef fmt = CMSampleBufferGetFormatDescription(sampleBuffer);
+      const AudioStreamBasicDescription *a =
+          fmt ? CMAudioFormatDescriptionGetStreamBasicDescription(fmt) : NULL;
+      if (a) {
+        self.sysAudioAsbd = [NSString stringWithFormat:
+            @"rate=%.0f ch=%u bits=%u flags=0x%x(f=%d planar=%d) bpf=%u fpp=%u",
+            a->mSampleRate, a->mChannelsPerFrame, a->mBitsPerChannel,
+            (unsigned)a->mFormatFlags,
+            (a->mFormatFlags & kAudioFormatFlagIsFloat) ? 1 : 0,
+            (a->mFormatFlags & kAudioFormatFlagIsNonInterleaved) ? 1 : 0,
+            a->mBytesPerFrame, a->mFramesPerPacket];
+        NSLog(@"[MacScreenRecorder] SCK sysaudio ASBD: %@", self.sysAudioAsbd);
+      }
+    }
+    // Append SCK's system-audio sample buffer DIRECTLY (no custom gain rebuild).
+    // The hand-rolled gainedCopyOfSampleBuffer rebuilds the CMSampleBuffer and is
+    // the prime suspect for the pitch-down ("bass boost") on macOS 15 / stock
+    // libwebrtc. Correct pitch matters more than the +6 dB boost; reinstate a
+    // safe gain later once the format is confirmed.
+    if ([self appendSample:sampleBuffer toInput:self.systemAudioInput track:@"sysaudio"]) {
+      self.systemAudioSamples++;
     }
     return;
   }
 }
 
-#pragma mark - Microphone capture (boosted +6 dB)
+#pragma mark - Microphone capture
 
 - (void)captureOutput:(AVCaptureOutput *)output
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
            fromConnection:(AVCaptureConnection *)connection {
   if (!self.recording || !self.writerStarted) return;
+  if (!self.hasMicInput) return;  // input not attached to the writer
   if (!CMSampleBufferIsValid(sampleBuffer)) return;
 
-  CMSampleBufferRef boosted = [self gainedCopyOfSampleBuffer:sampleBuffer factor:6.0f]
-                              ?: sampleBuffer;
-  if (self.micAudioInput.readyForMoreMediaData) {
-    [self.micAudioInput appendSampleBuffer:boosted];
+  // The mic is a SEPARATE AVCaptureSession with its OWN hardware clock, started
+  // before the first SCK video frame — so its early buffers routinely predate
+  // the writer session start. Appending one of those flips the writer to Failed
+  // and the file finalizes with no moov atom (the intermittent corruption).
+  // Drop anything earlier than the session start.
+  if (![self audioBufferWithinSession:sampleBuffer]) {
+    self.micDropped++;
+    return;
   }
-  if (boosted != sampleBuffer) {
-    CFRelease(boosted);
+
+  // Append directly (no custom gain rebuild — see system-audio note above).
+  if ([self appendSample:sampleBuffer toInput:self.micAudioInput track:@"mic"]) {
+    self.micSamples++;
   }
+}
+
+#pragma mark - Session gating
+
+/// YES if [sampleBuffer]'s presentation timestamp is at or after the writer
+/// session start. Audio from independent clocks can arrive before the session
+/// was started (at the first video frame's PTS); appending a pre-session sample
+/// makes AVAssetWriter fail mid-record. Returns NO (drop) until the first video
+/// frame has established the session start.
+- (BOOL)audioBufferWithinSession:(CMSampleBufferRef)sampleBuffer {
+  CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+  if (CMTIME_IS_INVALID(pts)) return NO;
+  // sessionStartPts is written on the video queue and read here on the audio
+  // queues — guard the cross-thread CMTime read against a torn read.
+  CMTime start;
+  @synchronized(self) { start = self.sessionStartPts; }
+  if (CMTIME_IS_INVALID(start)) return NO;
+  return CMTimeCompare(pts, start) >= 0;
+}
+
+/// Append [sampleBuffer] to [input] safely. The CRITICAL guard is
+/// writer.status == Writing BEFORE every append: once ANY append flips the
+/// writer to Failed (one track's rejected buffer), continuing to append on the
+/// OTHER tracks keeps a dead writer dead and guarantees finishWriting can't
+/// produce a moov -> corrupt MP4. So the first track to fail records the trigger
+/// (firstFailTrack + the writer error at that instant) and every track then
+/// stops appending. Returns YES if the sample was appended.
+- (BOOL)appendSample:(CMSampleBufferRef)sampleBuffer
+             toInput:(AVAssetWriterInput *)input
+               track:(NSString *)track {
+  AVAssetWriter *w = self.writer;
+  if (!w || w.status != AVAssetWriterStatusWriting) {
+    if (w && w.status == AVAssetWriterStatusFailed && self.firstFailTrack == nil) {
+      // Failed before THIS track even tried — another track was the trigger.
+      self.firstFailTrack = [NSString stringWithFormat:@"%@(after)", track];
+    }
+    return NO;
+  }
+  if (!input.readyForMoreMediaData) return NO;
+  if ([input appendSampleBuffer:sampleBuffer]) return YES;
+
+  // Append returned NO — capture the trigger ONCE (the first track to fail).
+  if (self.firstFailTrack == nil) {
+    NSError *e = w.error;
+    NSError *u = e.userInfo[NSUnderlyingErrorKey];
+    self.firstFailTrack = [NSString stringWithFormat:@"%@ [%@ %ld / %@ %ld %@]",
+        track, e.domain ?: @"-", (long)e.code,
+        u.domain ?: @"-", (long)u.code, u.localizedDescription ?: @"-"];
+    NSLog(@"[MacScreenRecorder] FIRST append fail on %@: %@", track, self.firstFailTrack);
+  }
+  return NO;
 }
 
 /// Multiply every PCM sample by [factor] with saturation. Supports int16

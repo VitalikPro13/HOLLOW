@@ -8,6 +8,18 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
   cmake_policy(SET CMP0135 NEW)
 endif()
 
+# macOS: build a universal (arm64 + x86_64) binary down to the same OS floor as
+# Hollow.app (10.15). The render path (AudioQueue) works on every supported
+# version — only the future SEND tap will be @available-gated to 14.2+.
+if(APPLE)
+  if(NOT CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "" FORCE)
+  endif()
+  if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "" FORCE)
+  endif()
+endif()
+
 include(FetchContent)
 
 # --- Opus v1.5.2 ---

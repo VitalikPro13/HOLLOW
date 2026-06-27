@@ -78,10 +78,17 @@ SYSLIBS=(
     libayatana-ido3-0.4.so.0
     libdbusmenu-glib.so.4
     libdbusmenu-gtk3.so.4
+    # libsecret (flutter_secure_storage_linux — OS keychain identity protection).
+    # Not in the Freedesktop runtime; without it the dynamic loader fails before
+    # main() with "libsecret-1.so.0: cannot open shared object file" (issue #16).
+    libsecret-1.so.0
 )
 
 for lib in "${SYSLIBS[@]}"; do
-    path=$(ldconfig -p 2>/dev/null | grep "$lib" | head -1 | awk '{print $NF}')
+    # Match the lib at a word/path boundary so e.g. "libsecret-1.so.0" can't
+    # also match an unrelated longer soname (the '.' in the name is a regex
+    # wildcard otherwise).
+    path=$(ldconfig -p 2>/dev/null | grep -F "$lib" | head -1 | awk '{print $NF}')
     if [ -z "$path" ]; then
         path=$(find /usr/lib /lib -name "$lib*" 2>/dev/null | head -1)
     fi
@@ -94,6 +101,35 @@ for lib in "${SYSLIBS[@]}"; do
         echo "  WARNING: $lib not found on host — Flatpak may fail at runtime"
     fi
 done
+
+# --- Dependency audit -------------------------------------------------------
+# The bundle ships three lib sources: the Freedesktop runtime, the libs Flutter
+# plugins self-bundle into lib/ (fvp's libmdk/ffmpeg, etc.), and our hand-picked
+# syslibs/ above. Any NEEDED soname not covered by one of those crashes the app
+# before main() with "cannot open shared object file" (issue #16, libsecret).
+# Catch that HERE on the build host instead of on a user's machine: ldd every
+# ELF in the bundle against a sandbox-like search path and fail on "not found".
+echo "Auditing bundled libraries for unresolved dependencies..."
+AUDIT_LIBPATH="$BUNDLE_DIR/lib:$BUNDLE_DIR/syslibs"
+missing_any=0
+while IFS= read -r elf; do
+    # Only inspect actual ELF objects (the binary + .so files).
+    file "$elf" 2>/dev/null | grep -q "ELF" || continue
+    while IFS= read -r dep; do
+        echo "  MISSING: $(basename "$dep") (needed by $(basename "$elf"))"
+        missing_any=1
+    done < <(LD_LIBRARY_PATH="$AUDIT_LIBPATH" ldd "$elf" 2>/dev/null \
+                | awk '/not found/ {print $1}')
+done < <(find "$BUNDLE_DIR" -type f \( -name 'hollow' -o -name '*.so' -o -name '*.so.*' \))
+
+if [ "$missing_any" -ne 0 ]; then
+    echo ""
+    echo "NOTE: 'not found' here means the host is missing the lib too; libs that"
+    echo "      live ONLY in the Freedesktop runtime (not on the host) are expected"
+    echo "      to appear and are fine. Review the list — add genuinely-missing"
+    echo "      sonames to SYSLIBS above. Continuing build."
+fi
+# ----------------------------------------------------------------------------
 
 # Build the Flatpak
 echo "Building Flatpak..."

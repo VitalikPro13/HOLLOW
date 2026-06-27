@@ -35,6 +35,7 @@
 #import "CaptureGainProcessor.h"
 #if TARGET_OS_OSX
 #import "MacScreenShareAudioTap.h"
+#import "MacScreenShareAudioCapturer.h"
 #import "MacAudioDevices.h"
 #import "MacRecordingAudioDevice.h"
 #import "MacScreenRecorder.h"
@@ -115,11 +116,36 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
     });
 }
 
+#if TARGET_OS_OSX
+// Dedicated stream handler for the macOS screen-share-audio PCM EventChannel
+// ("FlutterWebRTC/ScreenShareAudio"). Holds the Dart sink and forwards raw
+// interleaved s16 PCM (48k stereo) chunks from MacScreenShareAudioCapturer.
+@interface HollowScreenAudioStreamHandler : NSObject <FlutterStreamHandler>
+@property(nonatomic, copy, nullable) FlutterEventSink sink;
+@end
+
+@implementation HollowScreenAudioStreamHandler
+- (FlutterError * _Nullable)onListenWithArguments:(id)arguments
+                                        eventSink:(FlutterEventSink)events {
+  self.sink = events;
+  return nil;
+}
+- (FlutterError * _Nullable)onCancelWithArguments:(id)arguments {
+  self.sink = nil;
+  return nil;
+}
+@end
+#endif
+
 @implementation FlutterWebRTCPlugin {
 #pragma clang diagnostic pop
   FlutterMethodChannel* _methodChannel;
   FlutterEventSink _eventSink;
   FlutterEventChannel* _eventChannel;
+#if TARGET_OS_OSX
+  FlutterEventChannel* _screenAudioEventChannel;
+  HollowScreenAudioStreamHandler* _screenAudioStreamHandler;
+#endif
   id _registry;
   id _messenger;
   id _textures;
@@ -217,6 +243,13 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     _speakerOn = NO;
     _speakerOnButPreferBluetooth = NO;
     _eventChannel = eventChannel;
+#if TARGET_OS_OSX
+    _screenAudioStreamHandler = [[HollowScreenAudioStreamHandler alloc] init];
+    _screenAudioEventChannel =
+        [FlutterEventChannel eventChannelWithName:@"FlutterWebRTC/ScreenShareAudio"
+                                  binaryMessenger:messenger];
+    [_screenAudioEventChannel setStreamHandler:_screenAudioStreamHandler];
+#endif
     _audioManager = AudioManager.sharedInstance;
 
     // Hollow fork: install the post-APM makeup gain + limiter so calls aren't
@@ -350,19 +383,24 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
         VideoEncoderFactorySimulcast* simulcastFactory =
             [[VideoEncoderFactorySimulcast alloc] initWithPrimary:encoderFactory fallback:encoderFactory];
 
-        // Use the AVAudioEngine audio device module on both iOS and macOS.
+        // Audio device module selection differs per platform:
         //
-        // macOS previously used the CoreAudio ADM (value 0) to avoid an
-        // AVAudioIONodeImpl::SetOutputFormat sample-rate assertion when the
-        // microphone toggled during screen share (#1986, #1990). That crash
-        // predates the audio engine stability fixes shipped in WebRTC-SDK
-        // 144.7559.04+ (webrtc-sdk/webrtc#228: guarded connect:to:format:,
-        // state-based voice-processing checks, engine recreate ordering).
-        // The AudioEngine ADM enables platform voice processing (Apple
-        // AEC/NS/AGC) and the audio processing options API on macOS.
-        // iOS also requires the AudioEngine ADM because the CoreAudio ADM
-        // crashes when NSMicrophoneUsageDescription is absent (#2007, #2009).
+        // iOS: AVAudioEngine ADM (RTCAudioDeviceModuleTypeAudioEngine) — required
+        // because the CoreAudio ADM crashes when NSMicrophoneUsageDescription is
+        // absent (#2007, #2009).
+        //
+        // macOS: CoreAudio ADM (value 0). The AudioEngine ADM null-derefs inside
+        // -[AVAudioIONode setVoiceProcessingEnabled:] / AVAudioEngineImpl::
+        // GetOutputNode() on WebRTC-SDK 144.7559.09 (EXC_BAD_ACCESS on a plain
+        // voice call, macOS 15.x), so the 1.5.2 fork's switch to AudioEngine
+        // regressed macOS. CoreAudio ADM is the proven-good path that shipped in
+        // v0.5; it doesn't touch voice processing (we run our own makeup gain +
+        // limiter via the audioProcessingModule anyway).
+#if TARGET_OS_OSX
+        RTCAudioDeviceModuleType audioDeviceModuleType = (RTCAudioDeviceModuleType)0;  // CoreAudio
+#else
         RTCAudioDeviceModuleType audioDeviceModuleType = RTCAudioDeviceModuleTypeAudioEngine;
+#endif
         _peerConnectionFactory =
             [[RTCPeerConnectionFactory alloc] initWithAudioDeviceModuleType:audioDeviceModuleType
                                                       bypassVoiceProcessing:bypassVoiceProcessing
@@ -513,6 +551,39 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
   } else if ([@"disableScreenShareSystemAudio" isEqualToString:call.method]) {
 #if TARGET_OS_OSX
     [[MacScreenShareAudioTap sharedInstance] stop];
+    result(@(YES));
+#else
+    result([FlutterError errorWithCode:@"ERROR" message:@"macOS only" details:nil]);
+#endif
+  } else if ([@"startScreenShareAudioCapture" isEqualToString:call.method]) {
+    // macOS 13.0–14.1 SEND path: ScreenCaptureKit audio-only capture -> PCM is
+    // streamed to Dart over the FlutterWebRTC/ScreenShareAudio EventChannel,
+    // where the bundled exe Opus-encodes it for the data channel.
+#if TARGET_OS_OSX
+    __weak HollowScreenAudioStreamHandler* handler = _screenAudioStreamHandler;
+    NSError *err = nil;
+    BOOL ok = [[MacScreenShareAudioCapturer sharedInstance]
+        startWithCallback:^(NSData *pcm) {
+          FlutterEventSink sink = handler.sink;
+          if (sink == nil) return;
+          FlutterStandardTypedData *data =
+              [FlutterStandardTypedData typedDataWithBytes:pcm];
+          dispatch_async(dispatch_get_main_queue(), ^{ sink(data); });
+        }
+                    error:&err];
+    if (ok) {
+      result(@(YES));
+    } else {
+      result([FlutterError errorWithCode:@"SCREEN_AUDIO_CAPTURE_FAILED"
+                                 message:err.localizedDescription ?: @"Failed to start SCK audio capture"
+                                 details:nil]);
+    }
+#else
+    result([FlutterError errorWithCode:@"ERROR" message:@"macOS only" details:nil]);
+#endif
+  } else if ([@"stopScreenShareAudioCapture" isEqualToString:call.method]) {
+#if TARGET_OS_OSX
+    [[MacScreenShareAudioCapturer sharedInstance] stop];
     result(@(YES));
 #else
     result([FlutterError errorWithCode:@"ERROR" message:@"macOS only" details:nil]);

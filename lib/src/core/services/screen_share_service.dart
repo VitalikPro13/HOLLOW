@@ -7,6 +7,8 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../rust/api/network.dart' as network_api;
 import 'screen_audio_capturer.dart';
+import 'mac_sck_screen_audio_capturer.dart';
+import 'macos_version.dart';
 
 /// Method channel exposed by the forked `flutter_webrtc` for the macOS-only
 /// system audio Process Tap (see `MacScreenShareAudioTap.m`).
@@ -62,6 +64,8 @@ class ScreenShareService {
 
   // --- Screen audio via out-of-process capturer (Windows) ---
   ScreenAudioCapturer? _screenAudioCapturer;
+  // --- Screen audio via ScreenCaptureKit (macOS 13.0–14.1) ---
+  MacSckScreenAudioCapturer? _macSckAudioCapturer;
 
 
   ScreenShareService({
@@ -180,28 +184,23 @@ class ScreenShareService {
     await desktopCapturer.getSources(
         types: [SourceType.Screen, SourceType.Window]);
 
-    // On macOS the WebRTC fork can't deliver system-audio inside
-    // getDisplayMedia (no custom RTCAudioSource available). Instead we ask
-    // the native Process Tap + Aggregate Device to insert system audio into
-    // the system default input; the voice call's existing mic track then
-    // carries the mix to remote peers. So we leave `audio: false` here on
-    // macOS and toggle the tap via a method channel.
-    final useNativeTap = Platform.isMacOS && shareAudio;
-    // On Windows, audio goes via data channel — never request it in
-    // getDisplayMedia (the WASAPI→AudioSource path crashes).
-    final useDataChannelAudio = Platform.isWindows && shareAudio;
-    final getDisplayAudio = shareAudio && !useNativeTap && !useDataChannelAudio;
-
-    if (useNativeTap) {
-      try {
-        await _kFlutterWebRTCChannel
-            .invokeMethod<bool>('enableScreenShareSystemAudio');
-        _macSystemAudioActive = true;
-        _log('[HOLLOW-SCREEN] macOS Process Tap enabled');
-      } catch (e) {
-        _log('[HOLLOW-SCREEN] macOS Process Tap failed: $e — continuing without system audio');
-      }
-    }
+    // macOS system-audio routing:
+    //  - 13.0+ : ScreenCaptureKit audio-only -> data channel (0x03), same as
+    //    Windows. Started later via startScreenAudioCapture. We deliberately do
+    //    NOT use the CoreAudio Process Tap (14.2+) — it injects audio into the
+    //    system default input, which the CoreAudio ADM (our voice-call ADM on
+    //    macOS) doesn't follow, so it fed 0 tracks. The data-channel path is
+    //    ADM-independent and uniform across all macOS versions.
+    //  - <13.0 : no capture API; the UI locks the toggle off, so shareAudio is
+    //    false here anyway.
+    // Windows and macOS 13.0+ send audio via the data channel — never request
+    // it in getDisplayMedia (the WASAPI/AudioSource path crashes on Windows and
+    // isn't available on macOS). The macOS CoreAudio Process Tap is retired (it
+    // was ADM-coupled and fed 0 tracks under the CoreAudio ADM).
+    final useDataChannelAudio = shareAudio &&
+        (Platform.isWindows ||
+            (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio));
+    final getDisplayAudio = shareAudio && !useDataChannelAudio;
 
     _screenStream = await navigator.mediaDevices.getDisplayMedia({
       'video': {
@@ -428,35 +427,57 @@ class ScreenShareService {
   // Screen audio capture (Windows data-channel streaming)
   // ---------------------------------------------------------------------------
 
-  /// Start out-of-process WASAPI capture + Opus encoding. Encoded packets
-  /// are delivered to [onPacket] for sending over the data channel.
+  /// Start out-of-process system-audio capture + Opus encoding. Encoded packets
+  /// are delivered to [onPacket] for sending over the data channel (0x03).
   ///
-  /// Uses a separate exe to avoid libwebrtc's AudioDeviceModule interfering
-  /// with the WASAPI loopback capture (which causes audio looping).
+  /// - Windows: WASAPI loopback exe (`--mode pipe`). A separate process avoids
+  ///   libwebrtc's AudioDeviceModule interfering with the WASAPI capture.
+  /// - macOS 13.0–14.1: ScreenCaptureKit audio-only capture -> exe `--mode
+  ///   encode`. (macOS 14.2+ uses the Process Tap -> WebRTC track in createOffer,
+  ///   never this method.)
+  /// - macOS < 13.0 / other: no-op (no capture API; the toggle is locked off
+  ///   in the UI for those versions).
   Future<void> startScreenAudioCapture(
     String streamId, {
     String mode = 'system',
     int pid = 0,
     required void Function(Uint8List packet) onPacket,
   }) async {
-    if (!Platform.isWindows) return;
-    if (_screenAudioCapturer?.isActive == true) return;
+    if (Platform.isWindows) {
+      if (_screenAudioCapturer?.isActive == true) return;
+      _log('[HOLLOW-AU-SCREEN] Starting WASAPI capture (pid=$pid)');
+      _screenAudioCapturer = ScreenAudioCapturer();
+      final ok = await _screenAudioCapturer!.start(pid: pid, onPacket: onPacket);
+      if (!ok) {
+        _log('[HOLLOW-AU-SCREEN] Failed to start WASAPI capturer');
+        _screenAudioCapturer = null;
+      }
+      return;
+    }
 
-    _log('[HOLLOW-AU-SCREEN] Starting out-of-process capture (pid=$pid)');
-
-    _screenAudioCapturer = ScreenAudioCapturer();
-    final ok = await _screenAudioCapturer!.start(pid: pid, onPacket: onPacket);
-    if (!ok) {
-      _log('[HOLLOW-AU-SCREEN] Failed to start out-of-process capturer');
-      _screenAudioCapturer = null;
+    // macOS 13.0+: ScreenCaptureKit audio path (Process Tap retired).
+    if (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio) {
+      if (_macSckAudioCapturer?.isActive == true) return;
+      _log('[HOLLOW-AU-SCREEN] Starting ScreenCaptureKit audio capture');
+      _macSckAudioCapturer = MacSckScreenAudioCapturer();
+      final ok = await _macSckAudioCapturer!.start(onPacket: onPacket);
+      if (!ok) {
+        _log('[HOLLOW-AU-SCREEN] Failed to start SCK audio capturer');
+        _macSckAudioCapturer = null;
+      }
+      return;
     }
   }
 
   Future<void> _stopScreenAudioCapture() async {
-    if (_screenAudioCapturer == null) return;
-
-    await _screenAudioCapturer!.stop();
-    _screenAudioCapturer = null;
+    if (_screenAudioCapturer != null) {
+      await _screenAudioCapturer!.stop();
+      _screenAudioCapturer = null;
+    }
+    if (_macSckAudioCapturer != null) {
+      await _macSckAudioCapturer!.stop();
+      _macSckAudioCapturer = null;
+    }
   }
 
   // ---------------------------------------------------------------------------

@@ -105,6 +105,27 @@ class WebRtcService {
   void Function(String peerId, Uint8List data)? onScreenAudioReceived;
   int _screenAudioMissCount = 0;
 
+  // Screen-audio send backpressure. The 'hollow-data' channel is reliable +
+  // ordered (file transfers need that), but screen audio streams ~250 small
+  // packets/sec. If the channel can't drain fast enough (e.g. a TURN-relayed
+  // route), the SCTP send buffer climbs and libwebrtc CLOSES the channel the
+  // moment it hits its 16MB cap (proven: Mac->Win share died ~9s in over TURN).
+  // So we DROP screen-audio packets while the buffer is backed up beyond this
+  // threshold — for real-time audio a dropped stale packet is a tiny glitch,
+  // whereas a multi-MB backlog is seconds of latency followed by channel death.
+  static const int _kScreenAudioMaxBufferedBytes = 256 * 1024; // 256 KB
+  int _screenAudioSent = 0;
+  int _screenAudioDropped = 0;
+  // Desktop (Win/macOS) native flutter_webrtc does NOT push bufferedAmount-change
+  // events, so the cached `dc.bufferedAmount` getter stays 0 forever — we must
+  // poll the real value via the async getBufferedAmount(). Polling per packet
+  // (~250/sec) would flood the method channel, so we cache the last reading per
+  // peer and refresh it at most once per _kBufferPollEveryNSends sends.
+  final Map<String, int> _screenAudioBufferedCache = {};
+  final Set<String> _screenAudioBufferPolling = {};
+  int _screenAudioSendTick = 0;
+  static const int _kBufferPollEveryNSends = 12;
+
   /// Called when a STUN-only (Share) connection fails — peer unreachable without TURN.
   void Function(String peerId)? onShareConnectionFailed;
 
@@ -119,25 +140,113 @@ class WebRtcService {
   })  : iceServers = iceServers ?? _defaultIceServers(domain: relayDomain),
         resolveIdentity = resolveIdentity ?? ((p) => p);
 
-  /// Check if a peer has an active data channel.
+  /// Find the live, OPEN connection to the person identified by [peerId],
+  /// resolving device<->master. `_connections` is DEVICE-keyed (the routable
+  /// socket), but callers from the call/screen-share layer pass the MASTER id.
+  /// A direct `_connections[master]` therefore misses the call's real channel
+  /// (keyed under a device id) — so fall back to matching any open connection
+  /// whose identity resolves to the same master. This is the device->master
+  /// collapse the rest of the codebase already does; the screen-audio path
+  /// needs it too (otherwise sends to the master are silently dropped and a
+  /// doomed 2nd connect-to-bare-master times out). See
+  /// feedback_webrtc_datachannel_multidevice.
+  _PeerConn? _openConnForIdentity(String peerId) {
+    final direct = _connections[peerId];
+    if (direct?.dataChannel?.state == RTCDataChannelState.RTCDataChannelOpen) {
+      return direct;
+    }
+    final wantId = resolveIdentity(peerId);
+    for (final conn in _connections.values) {
+      if (conn.dataChannel?.state != RTCDataChannelState.RTCDataChannelOpen) {
+        continue;
+      }
+      if (resolveIdentity(conn.peerId) == wantId) return conn;
+    }
+    return null;
+  }
+
+  /// Check if a peer has an active data channel (device<->master aware).
   bool hasPeerChannel(String peerId) {
-    final conn = _connections[peerId];
-    return conn != null &&
-        conn.dataChannel != null &&
-        conn.dataChannel!.state == RTCDataChannelState.RTCDataChannelOpen;
+    return _openConnForIdentity(peerId) != null;
   }
 
   /// Send a screen audio packet to a peer over the existing data channel.
   /// Format: [0x03][payload...]. Payload is [seq:4][opus_data...].
   void sendScreenAudio(String peerId, Uint8List payload) {
-    final conn = _connections[peerId];
+    // Resolve to the call's actual (device-keyed) open channel — the caller
+    // passes the MASTER id, which isn't a key in _connections. Without this the
+    // lookup misses and every audio packet is silently dropped.
+    var conn = _openConnForIdentity(peerId);
+    // Last-resort fallback: if identity resolution didn't match (e.g. the local
+    // device-link map is cold and doesn't yet know this peer's device<->master
+    // association) BUT there's exactly ONE open data channel, it's the call peer
+    // — use it. Scoped to screen audio only; file transfers never take this path.
+    if (conn == null) {
+      final open = _connections.values
+          .where((c) =>
+              c.dataChannel?.state == RTCDataChannelState.RTCDataChannelOpen)
+          .toList();
+      if (open.length == 1) {
+        conn = open.first;
+        if (_screenAudioSent == 0 && _screenAudioDropped == 0) {
+          _log('[HOLLOW-WEBRTC-DART] screen-audio: id $peerId unresolved, '
+              'using the single open channel ${conn.peerId}');
+        }
+      }
+    }
     final dc = conn?.dataChannel;
-    if (dc == null || dc.state != RTCDataChannelState.RTCDataChannelOpen) return;
+    if (conn == null || dc == null ||
+        dc.state != RTCDataChannelState.RTCDataChannelOpen) {
+      return;
+    }
+    final connKey = conn.peerId; // device id — the real connection/cache key
+
+    // Backpressure: if the SCTP send buffer is backed up, DROP this packet
+    // rather than queue it. Queuing real-time audio just adds latency and, once
+    // the buffer hits libwebrtc's 16MB cap, the channel is force-closed. Dropping
+    // a stale packet is the correct real-time behavior.
+    _maybeRefreshScreenAudioBuffer(connKey, dc);
+    final buffered = _screenAudioBufferedCache[connKey] ?? 0;
+    if (buffered > _kScreenAudioMaxBufferedBytes) {
+      _screenAudioDropped++;
+      if (_screenAudioDropped <= 5 || _screenAudioDropped % 250 == 0) {
+        _log('[HOLLOW-WEBRTC-DART] screen-audio backpressure: dropped '
+            '$_screenAudioDropped (buffered=${buffered}B sent=$_screenAudioSent)');
+      }
+      return;
+    }
 
     final packet = Uint8List(1 + payload.length);
     packet[0] = _kTypeScreenAudio;
     packet.setRange(1, packet.length, payload);
-    dc.send(RTCDataChannelMessage.fromBinary(packet));
+    try {
+      dc.send(RTCDataChannelMessage.fromBinary(packet));
+      _screenAudioSent++;
+    } catch (e) {
+      // A failed send (e.g. transient buffer-full) must NOT kill the stream.
+      _screenAudioDropped++;
+      if (_screenAudioDropped <= 5) {
+        _log('[HOLLOW-WEBRTC-DART] screen-audio send failed (dropped): $e');
+      }
+    }
+  }
+
+  /// Refresh the cached SCTP buffered-bytes for [peerId] at most once every
+  /// _kBufferPollEveryNSends sends (desktop native has no push event, so we poll
+  /// the async getter). Fire-and-forget; the cache is read synchronously by the
+  /// next send. One poll in flight per peer at a time.
+  void _maybeRefreshScreenAudioBuffer(String peerId, RTCDataChannel dc) {
+    _screenAudioSendTick++;
+    if (_screenAudioSendTick % _kBufferPollEveryNSends != 0) return;
+    if (!_screenAudioBufferPolling.add(peerId)) return; // already polling
+    dc.getBufferedAmount().then((amount) {
+      _screenAudioBufferedCache[peerId] = amount;
+    }).catchError((_) {
+      // Getter failed (channel gone) — clear so we don't wedge on a stale value.
+      _screenAudioBufferedCache.remove(peerId);
+    }).whenComplete(() {
+      _screenAudioBufferPolling.remove(peerId);
+    });
   }
 
   /// Initiate a WebRTC connection to a peer (offerer side).
@@ -145,6 +254,25 @@ class WebRtcService {
   Future<void> connectToPeer(String peerId, {Map<String, dynamic>? iceConfigOverride}) async {
     // Already connected or connecting.
     if (_connections.containsKey(peerId)) return;
+    // Already have an OPEN channel to this person under a device id (the caller
+    // may pass the MASTER, which isn't a _connections key). Don't open a doomed
+    // 2nd connection to the bare master — it has no routable socket and times
+    // out. Reuse the existing channel. (Skip this short-circuit for STUN-only
+    // Share connections, which intentionally use a separate config.)
+    if (iceConfigOverride == null) {
+      if (_openConnForIdentity(peerId) != null) return;
+      // Cold device-link map: identity didn't resolve, but if there's already
+      // exactly one open channel it's this call peer — don't dial the master.
+      final openCount = _connections.values
+          .where((c) =>
+              c.dataChannel?.state == RTCDataChannelState.RTCDataChannelOpen)
+          .length;
+      if (openCount == 1) {
+        _log('[HOLLOW-WEBRTC-DART] connectToPeer($peerId): unresolved but one '
+            'open channel exists — reusing, not dialing master');
+        return;
+      }
+    }
     if (!_connecting.add(peerId)) return;
 
     final isStunOnly = iceConfigOverride != null;
@@ -684,6 +812,8 @@ class WebRtcService {
     _log('[HOLLOW-WEBRTC-DART] Data channel CLOSED with $peerId');
     final wasIntentional = _intentionalClose.remove(peerId);
     _pingSentAt.remove(peerId);
+    _screenAudioBufferedCache.remove(peerId);
+    _screenAudioBufferPolling.remove(peerId);
     _connections[peerId]?.idleTimer?.cancel();
     _connections.remove(peerId);
 

@@ -56,12 +56,13 @@ static void InstallSignalHandler() {
 
 // --- CLI args ---
 struct Options {
-  std::string mode = "system";   // system, process, packet, pipe, render
-  DWORD pid = 0;
+  std::string mode = "system";   // system, process, packet, pipe, render, encode
+  unsigned int pid = 0;          // DWORD on Windows; portable type for cross-platform parse
   int duration = 10;
   std::string format = "both";   // "wav", "opus", "both"
   std::string output = "captured_audio";
   int queue_cap = 50;            // packet queue capacity (matches plugin)
+  int bitrate = 0;               // Opus bitrate override for encode mode (0 = default 128k)
 };
 
 static void PrintUsage() {
@@ -75,8 +76,10 @@ static void PrintUsage() {
     "             -> Opus decode -> WAV file (mirrors plugin pipeline)\n"
     "  pipe     - WASAPI -> Opus encode -> framed binary on stdout\n"
     "             For out-of-process capture by the Flutter app\n"
-    "  render   - Read framed Opus from stdin -> decode -> waveOut playback\n"
+    "  render   - Read framed Opus from stdin -> decode -> platform playback\n"
     "             For out-of-process audio rendering by the Flutter app\n"
+    "  encode   - Read raw PCM from stdin -> Opus encode -> framed on stdout\n"
+    "             For out-of-process encoding (macOS/Linux SEND path)\n"
     "\n"
     "Options:\n"
     "  --mode system|process|packet|pipe|render  Capture mode (default: system)\n"
@@ -86,6 +89,7 @@ static void PrintUsage() {
     "  --format wav|opus|both  Output format (default: both)\n"
     "  --output <basename>     Output file basename (default: captured_audio)\n"
     "  --queue-cap <n>         Packet queue capacity (default: 50)\n"
+    "  --bitrate <bps>         Opus bitrate for encode mode (default: 128000)\n"
     "  --help                  Show this help\n"
     "\n"
     "Packet mode outputs:\n"
@@ -105,7 +109,7 @@ static Options ParseArgs(int argc, char* argv[]) {
     } else if (arg == "--mode" && i + 1 < argc) {
       opts.mode = argv[++i];
     } else if (arg == "--pid" && i + 1 < argc) {
-      opts.pid = static_cast<DWORD>(atoi(argv[++i]));
+      opts.pid = static_cast<unsigned int>(atoi(argv[++i]));
     } else if (arg == "--duration" && i + 1 < argc) {
       opts.duration = atoi(argv[++i]);
     } else if (arg == "--format" && i + 1 < argc) {
@@ -114,6 +118,8 @@ static Options ParseArgs(int argc, char* argv[]) {
       opts.output = argv[++i];
     } else if (arg == "--queue-cap" && i + 1 < argc) {
       opts.queue_cap = atoi(argv[++i]);
+    } else if (arg == "--bitrate" && i + 1 < argc) {
+      opts.bitrate = atoi(argv[++i]);
     } else {
       fprintf(stderr, "Unknown option: %s\n", arg.c_str());
       PrintUsage();
@@ -696,7 +702,9 @@ static int RunPipeMode(const Options& opts) {
 // AudioPlayer is defined in audio_player_{win,mac,linux}.cpp
 
 static int RunRenderMode(const Options&) {
+#ifdef _WIN32
   _setmode(_fileno(stdin), _O_BINARY);
+#endif
 
   fprintf(stderr, "[RENDER] Starting out-of-process audio renderer\n");
 
@@ -754,6 +762,107 @@ static int RunRenderMode(const Options&) {
 }
 
 // =============================================================================
+// Encode mode — out-of-process Opus encoder for Flutter integration.
+//
+// Reads raw interleaved 16-bit PCM (48kHz stereo) from stdin:
+//   [uint16_le: pcm_byte_len][...int16 samples...]
+//
+// Re-blocks into 10ms (480-sample/channel) frames, Opus-encodes each, and
+// writes framed packets to stdout in the SAME format the render path consumes:
+//   [uint16_le: payload_len][uint32_le: seq][...opus_bytes...]
+//
+// This is the macOS/Linux SEND path: a native capturer (ScreenCaptureKit audio
+// on macOS, PulseAudio monitor on Linux) delivers PCM, this mode encodes it,
+// and Dart forwards the Opus frames over the WebRTC data channel (0x03). It is
+// platform-agnostic (pure Opus, no capture) so it lives outside #ifdef _WIN32.
+// =============================================================================
+
+static int RunEncodeMode(const Options& opts) {
+#ifdef _WIN32
+  _setmode(_fileno(stdin), _O_BINARY);
+  _setmode(_fileno(stdout), _O_BINARY);
+#endif
+
+  fprintf(stderr, "[ENCODE] Starting out-of-process Opus encoder\n");
+
+  OpusEncoderWrapper encoder(48000, 2, OPUS_APPLICATION_AUDIO);
+  if (!encoder.valid()) {
+    fprintf(stderr, "[ENCODE] ERROR: Opus encoder creation failed\n");
+    return 1;
+  }
+  // --bitrate overrides the default (e.g. 256000/510000 for higher fidelity).
+  if (opts.bitrate > 0) {
+    encoder.SetBitrate(opts.bitrate);
+    fprintf(stderr, "[ENCODE] Bitrate set to %d bps\n", opts.bitrate);
+  }
+
+  const int kChannels = 2;
+  const int kFrameSamples = 480;                 // 10ms @ 48kHz, per channel
+  const int kFrameInterleaved = kFrameSamples * kChannels;
+
+  std::vector<uint8_t> encode_buffer(4000);
+  std::vector<int16_t> pcm_accum;                // leftover samples between reads
+  pcm_accum.reserve(kFrameInterleaved * 4);
+  std::vector<uint8_t> in_chunk;
+  uint32_t sequence_number = 0;
+  uint32_t packets_sent = 0;
+
+  auto emit_frame = [&](const int16_t* frame) {
+    int encoded = encoder.Encode(frame, kFrameSamples, encode_buffer);
+    if (encoded <= 0) return;
+
+    uint32_t seq = sequence_number++;
+    uint16_t payload_len = static_cast<uint16_t>(4 + encoded);
+    uint8_t header[6];
+    header[0] = static_cast<uint8_t>(payload_len);
+    header[1] = static_cast<uint8_t>(payload_len >> 8);
+    header[2] = static_cast<uint8_t>(seq);
+    header[3] = static_cast<uint8_t>(seq >> 8);
+    header[4] = static_cast<uint8_t>(seq >> 16);
+    header[5] = static_cast<uint8_t>(seq >> 24);
+
+    fwrite(header, 1, 6, stdout);
+    fwrite(encode_buffer.data(), 1, encoded, stdout);
+    fflush(stdout);
+
+    if (++packets_sent % 500 == 0)
+      fprintf(stderr, "[ENCODE] Sent %u packets\n", packets_sent);
+  };
+
+  // Read loop: [uint16_le pcm_byte_len][pcm bytes...]
+  while (g_running.load()) {
+    uint8_t len_hdr[2];
+    if (fread(len_hdr, 1, 2, stdin) != 2) break;  // EOF / closed stdin
+    uint16_t pcm_len = len_hdr[0] | (len_hdr[1] << 8);
+    if (pcm_len == 0) continue;
+    if (pcm_len % 2 != 0) {
+      fprintf(stderr, "[ENCODE] Odd PCM byte length %u, aborting\n", pcm_len);
+      break;
+    }
+
+    in_chunk.resize(pcm_len);
+    if (fread(in_chunk.data(), 1, pcm_len, stdin) != static_cast<size_t>(pcm_len))
+      break;
+
+    const int16_t* samples = reinterpret_cast<const int16_t*>(in_chunk.data());
+    size_t sample_count = pcm_len / sizeof(int16_t);
+    pcm_accum.insert(pcm_accum.end(), samples, samples + sample_count);
+
+    // Drain whole 10ms frames.
+    size_t off = 0;
+    while (pcm_accum.size() - off >= static_cast<size_t>(kFrameInterleaved)) {
+      emit_frame(pcm_accum.data() + off);
+      off += kFrameInterleaved;
+    }
+    if (off > 0)
+      pcm_accum.erase(pcm_accum.begin(), pcm_accum.begin() + off);
+  }
+
+  fprintf(stderr, "[ENCODE] Done. Sent %u packets\n", packets_sent);
+  return 0;
+}
+
+// =============================================================================
 
 int main(int argc, char* argv[]) {
   Options opts = ParseArgs(argc, argv);
@@ -774,6 +883,8 @@ int main(int argc, char* argv[]) {
 
   if (opts.mode == "render") {
     return RunRenderMode(opts);
+  } else if (opts.mode == "encode") {
+    return RunEncodeMode(opts);
 #ifdef _WIN32
   } else if (opts.mode == "pipe") {
     return RunPipeMode(opts);

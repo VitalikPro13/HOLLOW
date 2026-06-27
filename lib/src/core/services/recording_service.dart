@@ -6,7 +6,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
+import '../../rust/api/network.dart' as network_api;
 import 'video_thumbnail_service.dart';
+
+void _recLog(String msg) {
+  network_api.logFromDart(message: '[REC] $msg');
+}
 
 /// Outcome of a recording session.
 class RecordingResult {
@@ -159,8 +164,11 @@ class RecordingService {
           : 'hollowWinStopScreenRecord';
       try {
         await _channel.invokeMethod<bool>(method);
+        _recLog('native stop OK ($method)');
       } on PlatformException catch (e) {
-        debugPrint('[REC] native stop failed: ${e.message}');
+        // The native recorder embeds writer status + per-track sample counts +
+        // the AVAssetWriter error in the message (see MacScreenRecorder stop).
+        _recLog('native stop FAILED: ${e.code} ${e.message}');
       }
       final duration = DateTime.now().difference(startedAt);
       _nativeRecording = false;

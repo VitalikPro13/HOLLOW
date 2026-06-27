@@ -244,6 +244,7 @@
 				33CC110E2044A8840003C045 /* Bundle Framework */,
 				3399D490228B24CF009A79C7 /* ShellScript */,
 				F918632E3D5921EFA9919572 /* [CP] Embed Pods Frameworks */,
+				AD405CA9D100B0000000ACE1 /* Bundle screen audio capturer */,
 			);
 			buildRules = (
 			);
@@ -391,6 +392,21 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "\"$FLUTTER_ROOT\"/packages/flutter_tools/bin/macos_assemble.sh && touch Flutter/ephemeral/tripwire";
+		};
+		AD405CA9D100B0000000ACE1 /* Bundle screen audio capturer */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Bundle screen audio capturer";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Copy the out-of-process screen-share audio binary into the app bundle.\n# Built by scripts/build_screen_audio.sh BEFORE 'flutter build macos'.\nset -e\nSRC=\"$SRCROOT/../packages/flutter_webrtc/test_apps/screen_audio_test/build/screen_audio_test\"\nDEST_DIR=\"$BUILT_PRODUCTS_DIR/$PRODUCT_NAME.app/Contents/Resources\"\nDEST=\"$DEST_DIR/screen_audio_capturer\"\nif [ -f \"$SRC\" ]; then\n  mkdir -p \"$DEST_DIR\"\n  cp \"$SRC\" \"$DEST\"\n  chmod +x \"$DEST\"\n  # Ad-hoc sign so a debug/run build launches it; the release pipeline\n  # (scripts/macos_resign_and_dmg.sh) re-signs it with Developer ID.\n  codesign --force --sign - \"$DEST\" 2>/dev/null || true\n  echo \"Bundled screen_audio_capturer -> $DEST\"\nelse\n  echo \"warning: screen_audio_test not built; run scripts/build_screen_audio.sh before 'flutter build macos'. Screen-share audio receive will be unavailable.\"\nfi\n";
 		};
 		9339AC932DC61654B67C9ADD /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -569,7 +585,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.2;
+				MACOSX_DEPLOYMENT_TARGET = 10.15;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				SDKROOT = macosx;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -666,7 +682,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.2;
+				MACOSX_DEPLOYMENT_TARGET = 10.15;
 				MTL_ENABLE_DEBUG_INFO = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = macosx;
@@ -717,7 +733,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.2;
+				MACOSX_DEPLOYMENT_TARGET = 10.15;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				SDKROOT = macosx;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

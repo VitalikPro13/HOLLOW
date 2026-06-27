@@ -606,15 +606,19 @@ libwebrtc's desktop capturer ignores all resolution constraints (`scaleResolutio
 4. Dart reads stdout, parses `[uint16_le: len][uint32_le: seq][opus...]` frames
 5. Delivers packets via `onPacket` callback → `WebRtcService.sendScreenAudio()` → data channel type 0x03
 
-Receiver: `ScreenAudioRenderer` (`lib/src/core/services/screen_audio_renderer.dart`) spawns `screen_audio_capturer.exe --mode render`, pipes received packets via stdin → Opus decode → platform audio playback (waveOut/AudioQueue/PulseAudio).
+Receiver: `ScreenAudioRenderer` (`lib/src/core/services/screen_audio_renderer.dart`) spawns `screen_audio_capturer --mode render`, pipes received packets via stdin → Opus decode → platform audio playback (waveOut on Windows / AudioQueue on macOS / PulseAudio on Linux).
 
 `_stopScreenAudioCapture()`: Sends 'Q' to exe stdin, waits 2s, force-kills if needed.
 
-Per-process window audio: `DesktopCapturerSource.pid` extracted from HWND via `GetWindowThreadProcessId` in the C++ source enumeration. PID flows through `ScreenShareSelection` → provider → exe `--pid` arg. Uses AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK INCLUDE mode (Windows 10 2004+).
+Per-process window audio (Windows): `DesktopCapturerSource.pid` extracted from HWND via `GetWindowThreadProcessId` in the C++ source enumeration. PID flows through `ScreenShareSelection` → provider → exe `--pid` arg. Uses AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK INCLUDE mode (Windows 10 2004+).
 
-**macOS:** Uses Process Tap → WebRTC audio track (no data channel). `enableScreenShareSystemAudio` method channel activates the ScreenCaptureKit-based Process Tap.
+**macOS (13.0+) — ALSO the data channel** (the Process Tap is RETIRED; it injected into the system default input which the CoreAudio voice ADM doesn't follow → 0 tracks). `MacSckScreenAudioCapturer` (`lib/src/core/services/mac_sck_screen_audio_capturer.dart`) drives `MacScreenShareAudioCapturer.m` (audio-only `SCStream`) → PCM over `EventChannel("FlutterWebRTC/ScreenShareAudio")` → `screen_audio_capturer --mode encode` (PCM→Opus) → `onPacket` → `sendScreenAudio` (0x03). Native gotchas (confirmed 2026-06-27): the SCStream MUST also add a minimal ignored `.screen` output (an audio-only stream's audio callback never fires), and `excludesCurrentProcessAudio=YES` so Hollow's own output (remote peers' voices) isn't re-broadcast into the share (the "I hear myself" echo). macOS <13.0: no API, the dialog locks the audio toggle.
 
-**getDisplayMedia audio:** Always `false` on Windows (WASAPI→AudioSource path crashes). macOS controls audio via native Process Tap separately.
+**Multi-device send routing (CRITICAL, all platforms):** `sendScreenAudio`/`hasPeerChannel`/`connectToPeer` receive the call's MASTER peerId, but `_connections` is keyed by DEVICE id. `_openConnForIdentity()` resolves master→the call's open device channel (via the injected `resolveIdentity` = `deviceLinkProvider.identityOf`), with a single-open-channel fallback for a cold device-link map. Without it, `_connections[master]` missed → every Opus packet silently dropped (this was the macOS silent-audio cause).
+
+**Backpressure:** `sendScreenAudio` DROPS packets when the SCTP send buffer is backed up (>256KB) — the reliable+ordered `hollow-data` channel force-closes at the 16MB cap under audio load (esp. over TURN). Desktop emits no `bufferedAmount` change event, so it POLLS `getBufferedAmount()` every 12 sends and caches per device id.
+
+**getDisplayMedia audio:** Always `false` for data-channel-audio platforms (Windows + macOS 13.0+) — audio rides the data channel, never the WebRTC track (the WASAPI/AudioSource track path crashes on Windows and isn't used on macOS).
 
 ---
 

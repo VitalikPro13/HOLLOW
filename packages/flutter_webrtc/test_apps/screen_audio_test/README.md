@@ -3,6 +3,47 @@
 Standalone test app for WASAPI audio capture + Opus encoding on Windows.
 Validates the capture pipeline in isolation before wiring it to WebRTC data channels (Phase 2).
 
+In production this same binary (renamed `screen_audio_capturer` / `.exe`) is the
+out-of-process screen-share-audio helper Hollow spawns:
+
+| Mode | Platforms | Role |
+|------|-----------|------|
+| `--mode pipe` (WASAPI capture → Opus → stdout) | **Windows only** | SENDER (Windows) — feeds the `0x03` data-channel frames |
+| `--mode encode` (raw PCM stdin → Opus → stdout) | **Windows, macOS, Linux** | SENDER encode stage — paired with a native PCM capturer |
+| `--mode render` (stdin → Opus decode → playback) | **Windows, macOS, Linux** | RECEIVER — plays incoming `0x03` frames |
+
+macOS SEND by OS version (the native capturer differs; encoding is always this binary):
+- **macOS 14.2+**: system audio via the native Process Tap → WebRTC audio track (`MacScreenShareAudioTap.m`). Does not use `encode`.
+- **macOS 13.0–14.1**: ScreenCaptureKit audio-only (`MacScreenShareAudioCapturer.m`) → PCM to Dart → `--mode encode` → `0x03` data channel.
+- **macOS 10.15–12.x**: no system-audio capture API exists; the "Share audio" toggle is locked off in the UI.
+- **Linux SEND** (PulseAudio monitor → `--mode encode`) is unimplemented.
+
+### encode mode wire protocol
+
+```
+stdin  (PCM in):  [uint16_le pcm_byte_len][...int16 samples, 48kHz stereo interleaved...]
+stdout (Opus out):[uint16_le payload_len][uint32_le seq][...opus_bytes...]
+```
+The encoder re-blocks incoming PCM into 10ms (480-sample/channel) Opus frames.
+`--bitrate <bps>` overrides the 128k default (e.g. 256000 for higher fidelity).
+
+The **render** path is cross-platform today: `audio_player_{win,mac,linux}.cpp`
+provide waveOut / AudioQueue / PulseAudio-simple playback respectively, so a
+Windows sender → macOS/Linux receiver works once the binary is bundled.
+
+## macOS / Linux build & bundle
+
+```
+# from the project root — builds a universal (arm64+x86_64) binary on macOS,
+# down to deployment target 10.15, and bundles it if a Release build exists.
+bash scripts/build_screen_audio.sh
+```
+
+Run it **before** `flutter build macos` / `flutter build linux`. On macOS the
+Runner has a "Bundle screen audio capturer" run-script phase that copies the
+built binary into `Hollow.app/Contents/Resources/screen_audio_capturer`; the
+release pipeline (`scripts/macos_resign_and_dmg.sh`) re-signs it with Developer ID.
+
 ## What it does
 
 Captures system audio or a specific process's audio via WASAPI loopback, Opus-encodes it in real-time, and writes both a raw PCM `.wav` and an Opus-encoded `.ogg` file.

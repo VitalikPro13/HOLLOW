@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -290,22 +291,58 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                   ),
                   const SizedBox(height: HollowSpacing.md),
 
-                  Row(
-                    children: [
-                      HollowToggle(
-                        value: _shareAudio,
-                        onChanged: (v) => setState(() => _shareAudio = v),
-                      ),
-                      const SizedBox(width: HollowSpacing.sm),
-                      Text(
-                        'Share audio',
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 12,
+                  Builder(builder: (context) {
+                    // macOS 10.15–12.x cannot capture system audio (Apple
+                    // exposes no API before ScreenCaptureKit audio in 13.0).
+                    // Lock the toggle off and explain why, rather than letting
+                    // the user enable a feature that silently does nothing.
+                    final audioBlocked =
+                        MacOsScreenAudioSupport.audioSendBlockedByOldOs;
+                    if (audioBlocked && _shareAudio) {
+                      // Defensive: ensure we never send with a stale-true value.
+                      WidgetsBinding.instance.addPostFrameCallback(
+                          (_) => setState(() => _shareAudio = false));
+                    }
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            HollowToggle(
+                              value: audioBlocked ? false : _shareAudio,
+                              onChanged: audioBlocked
+                                  ? null
+                                  : (v) => setState(() => _shareAudio = v),
+                            ),
+                            const SizedBox(width: HollowSpacing.sm),
+                            Text(
+                              'Share audio',
+                              style: HollowTypography.caption.copyWith(
+                                color: audioBlocked
+                                    ? hollow.textTertiary
+                                    : hollow.textSecondary,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
                         ),
-                      ),
-                    ],
-                  ),
+                        if (audioBlocked) ...[
+                          const SizedBox(height: HollowSpacing.xs),
+                          Text(
+                            'Audio sharing needs macOS 13.0 or later. '
+                            'You\'re on ${MacOsScreenAudioSupport.versionLabel ?? 'an older version'} — '
+                            'Apple exposes no system-audio API before 13.0. '
+                            'Update to 13.0+ to share audio. '
+                            'Video sharing still works.',
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.textTertiary,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ],
+                    );
+                  }),
                   const SizedBox(height: HollowSpacing.lg),
 
                   // Actions

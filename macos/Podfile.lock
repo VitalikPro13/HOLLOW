@@ -1,9 +1,7 @@
 PODS:
-  - flutter_local_notifications (0.0.1):
-    - FlutterMacOS
   - flutter_webrtc (1.4.0):
     - FlutterMacOS
-    - WebRTC-SDK (= 144.7559.01)
+    - WebRTC-SDK (= 144.7559.09)
   - FlutterMacOS (1.0.0)
   - fvp (0.35.2):
     - Flutter
@@ -22,10 +20,9 @@ PODS:
     - FlutterMacOS
   - tray_manager (0.0.1):
     - FlutterMacOS
-  - WebRTC-SDK (144.7559.01)
+  - WebRTC-SDK (144.7559.09)
 
 DEPENDENCIES:
-  - flutter_local_notifications (from `Flutter/ephemeral/.symlinks/plugins/flutter_local_notifications/macos`)
   - flutter_webrtc (from `Flutter/ephemeral/.symlinks/plugins/flutter_webrtc/macos`)
   - FlutterMacOS (from `Flutter/ephemeral`)
   - fvp (from `Flutter/ephemeral/.symlinks/plugins/fvp/darwin`)
@@ -42,8 +39,6 @@ SPEC REPOS:
     - WebRTC-SDK
 
 EXTERNAL SOURCES:
-  flutter_local_notifications:
-    :path: Flutter/ephemeral/.symlinks/plugins/flutter_local_notifications/macos
   flutter_webrtc:
     :path: Flutter/ephemeral/.symlinks/plugins/flutter_webrtc/macos
   FlutterMacOS:
@@ -64,19 +59,18 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral/.symlinks/plugins/tray_manager/macos
 
 SPEC CHECKSUMS:
-  flutter_local_notifications: 13862b132e32eb858dea558a86d45d08daeacfe7
-  flutter_webrtc: 5b30a66b74f8bf29764cd62517e0598e903e279f
+  flutter_webrtc: fec3dc9284a1f6d21ec2caa91c90bb4c1824eb04
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
   fvp: 4fe77c2b30122233a57f425dafd219ed35565809
-  hollow_core: 3512029a5e809ae072289353ed5ec699dcc54d6a
+  hollow_core: e0b3856b50b8769ee432152cbb070c1076d37941
   irondash_engine_context: 893c7d96d20ce361d7e996f39d360c4c2f9869ba
   local_notifier: ebf072651e35ae5e47280ad52e2707375cb2ae4e
   mdk: 59bbe9e2ac2a052455ab1b076c245680d66cf6c0
   screen_retriever_macos: 452e51764a9e1cdb74b3c541238795849f21557f
   super_native_extensions: c2795d6d9aedf4a79fae25cb6160b71b50549189
   tray_manager: a104b5c81b578d83f3c3d0f40a997c8b10810166
-  WebRTC-SDK: ab9b5319e458c2bfebdc92b3600740da35d5630d
+  WebRTC-SDK: e6006119cd730d6315d875e4a421b6cc8bb88833
 
-PODFILE CHECKSUM: 1d593e10997511ead9744d7facbd4de87509a5f0
+PODFILE CHECKSUM: 7f6c70991a13ce653f4a716abda2cdb3c00893a3
 
 COCOAPODS: 1.16.2

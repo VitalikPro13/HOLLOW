@@ -14,6 +14,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
+import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/screen_audio_renderer.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/voice_channel_service.dart';
@@ -1133,10 +1134,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       payload: jsonEncode({'sdp': sdp}),
     );
 
-    // Start screen audio capture on Windows (data channel streaming).
+    // Start screen audio capture via the data channel on the data-channel-audio
+    // platforms: Windows (WASAPI) and macOS 13.0+ (ScreenCaptureKit).
     // Sends Opus packets via the existing WebRtcService data channel.
-    if (_screenShareAudio && Platform.isWindows &&
-        _screenCaptureStream != null) {
+    final dcAudio = Platform.isWindows ||
+        (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio);
+    if (_screenShareAudio && dcAudio && _screenCaptureStream != null) {
       final webrtc = ref.read(webRtcProvider.notifier).service;
       debugPrint('[HOLLOW-AU-SCREEN] Starting screen audio for peer $peerId '
           '(hasDC=${webrtc.hasPeerChannel(peerId)})');

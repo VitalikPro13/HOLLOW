@@ -44,6 +44,10 @@ PRIVACY & ENGINE
 - Removed debugging logs from the relay (were left during initial experimenting) that could fingerprint who talks to whom: every line printing a peer id, room, push target, channel, server or token was removed, leaving only aggregate counts
 - Server-group MLS recovery hardening: the server owner is now the preferred coordinator for member changes, and CRDT operations are mirrored in plaintext alongside MLS so an out-of-sync member can't permanently lose server metadata such as a newly created channel
 
+EDIT:
+
+- Fixed the Flatpak build crashing on launch by bundling the missing libsecret library into the sandbox.
+
 v0.6 - Multi-Device Sync, Code Signing & Push Notifications
 
 MULTI-DEVICE SYNC

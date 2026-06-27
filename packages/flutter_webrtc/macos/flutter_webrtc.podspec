@@ -17,5 +17,7 @@ A new flutter plugin project.
   s.dependency 'FlutterMacOS'
   s.weak_frameworks = 'ScreenCaptureKit'
   s.dependency 'WebRTC-SDK', '144.7559.09'
-  s.osx.deployment_target = '14.2'
+  # 10.15 floor (matches upstream flutter-webrtc on the same WebRTC-SDK build).
+  # ScreenCaptureKit / Process Tap / SCK-audio APIs are all @available-guarded.
+  s.osx.deployment_target = '10.15'
 end
