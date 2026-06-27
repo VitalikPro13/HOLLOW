@@ -24,6 +24,7 @@ import 'package:hollow/src/ui/mobile/tabs/mobile_chats_tab.dart'
 import 'package:hollow/src/ui/mobile/tabs/mobile_friends_tab.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
+import 'package:hollow/src/ui/shell/system_status_banner.dart';
 
 class MobileShell extends ConsumerStatefulWidget {
   const MobileShell({super.key});
@@ -161,18 +162,27 @@ class _MobileShellState extends ConsumerState<MobileShell> {
       backgroundColor: bg.hasBackground ? Colors.transparent : hollow.background,
       body: SafeArea(
         bottom: false,
-        child: Stack(
+        child: Column(
           children: [
-            for (int i = 0; i < _tabs.length; i++)
-              AnimatedOpacity(
-                opacity: i == currentTab ? 1.0 : 0.0,
-                duration: HollowDurations.fast,
-                curve: HollowCurves.subtle,
-                child: IgnorePointer(
-                  ignoring: i != currentTab,
-                  child: _tabs[i],
-                ),
+            Expanded(
+              child: Stack(
+                children: [
+                  for (int i = 0; i < _tabs.length; i++)
+                    AnimatedOpacity(
+                      opacity: i == currentTab ? 1.0 : 0.0,
+                      duration: HollowDurations.fast,
+                      curve: HollowCurves.subtle,
+                      child: IgnorePointer(
+                        ignoring: i != currentTab,
+                        child: _tabs[i],
+                      ),
+                    ),
+                ],
               ),
+            ),
+            // System-status notice pinned just above the bottom nav bar — the
+            // mobile "tab screens" surface. Self-hides when nothing to announce.
+            const SystemStatusBanner(anchor: StatusBannerAnchor.bottom),
           ],
         ),
       ),

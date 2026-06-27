@@ -1947,18 +1947,20 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] **Multi-device identity & sync (major epic).** The 24-word mnemonic is the *identity*, not the *data* — importing it on a new device gives an empty DB (no central server to re-hydrate from). Symptoms: mobile import is empty while desktop is full; a friend request from the empty mobile device renders on desktop as "your own friend sent you a friend request"; two installs of one identity corrupt each other's crypto state. **Decided model (Signal-style):** one master identity (shared, profile-attached signed device list) + per-device Olm/MLS sub-sessions so both devices can be online at once; QR linking (desktop shows, phone scans) with a one-time symmetric key streaming a standalone-encrypted DB snapshot through the relay; sender-side fan-out for new messages; backfill from your other device first, conversation peer (signature-verified) as fallback; master-signed revocation with monotonic version (replay protection); and a **Sync Health panel** in Settings (per-device DB health comparison, manual Sync button, device management/removal). **STEP 1 DONE + LIVE-VERIFIED:** per-device random key (distinct peer_id, migration keystone), master-signed device list publish/ingest, resolver wired into all attribution sites, device-key→WS-transport key routing (master stays for identity/MLS/signing/DB), Dart `device_link_provider`. Two installs of one mnemonic now connect simultaneously with distinct sockets, no collision, no self-friend-request; profile syncs live.
 
 - [X] Upgrade WebRTC
-- [ ] Ship VCRUNTIM140.dll (VS distributable) inside
-- [ ] Real-time device switching during active call
-- [ ] Breaking news message on left column Home shell tab, remove the Recovery Phrase card
-- [ ] Block/report ability
+- [X] Ship VCRUNTIME140.dll (VS distributable) inside
+- [X] System Status with message (left column Home shell tab + header), remove the Recovery Phrase card
 - [ ] Saved messages
-- [ ] Custom emojis/stickers + global access
-- [ ] Camera front/back switching + double-side at the same time on mobile
+- [ ] Block/report ability
 - [ ] Pill switching for mobile between screen and camera during calls
 - [ ] Image/file loading for the mobile (replicate the instant appearing; though, I feel like that it's a phone limitation)
+
+- [ ] Real-time device switching during active call
+- [ ] Custom emojis/stickers + global access
+- [ ] Camera front/back switching + double-side at the same time on mobile
 - [ ] Annotation on someone else's screen
-- [ ] Conference as in Zoom (join link, only need identity in app; web without identity like public channels - consider later and research pros/cons)
 - [ ] **Deep linking / URL protocol handler:** Register `hollow://` scheme on Windows (registry + MSIX manifest), macOS (Info.plist), Linux (.desktop file). Flutter `app_links` package to receive launch URLs. Opens app and navigates to Share download or server invite when clicking `hollow://` links from browser or other apps.
+- [ ] Conference as in Zoom (join link, only need identity in app; web without identity like public channels - consider later and research pros/cons)
+
 - [ ] "must-be-true-everywhere + mechanically-checkable" - add CI testing on such (e.g. #[serde(default)] guard)
 - [ ] DM push notification on iOS opens a different chat instead of the proper friend peer ID. ATTEMPTED 2026-06-20, still broken: the iOS tap arrives via FCM `data['sender']` (the friend's DEVICE id, not master), so the DM opens a device-keyed empty thread. Tried resolving device→master at the shared `_openChatFromPush` (mobile_shell.dart) via the Rust `identityFor` FFI (live resolver) with a `deviceLinkProvider` mirror fallback — did NOT fix it on iOS (Android unaffected — it taps the Dart-posted local banner whose payload is already the resolved master). Likely the resolver/mirror is still cold at cold-start tap time, OR the device→master link for the sender isn't present yet on the freshly-woken node. Channels are fine (key on server:channel). Next: confirm what id actually reaches the handler on iOS (log it) and whether the link is warm; may need to resolve inside `MobileChatRoute` after the node/links settle, or carry the master in the push payload itself.
 
@@ -1982,11 +1984,10 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] macOS DMG (signed + notarized)
 - [X] Linux (Flatpak; maybe AppImage + Snap soon)
 - [X] Android (direct APK; Play Store soon)
+- [X] Accessibility (screen reader support, high contrast)
 - [ ] iOS (TestFlight + App Store)
 - [ ] Documentation (user guide, FAQ)
-- [ ] Accessibility (screen reader support, high contrast)
-- [ ] Beta testing program
-- [ ] Security audit (third-party review of E2EE implementation - OTF Security Lab funding)
+- [ ] Security audit (third-party review of E2EE implementation - OTF Security Lab etc.)
 - [ ] **Theme system** — structured theme manifest (colors, fonts, spacing, radii, optional cosmetics like profile decorations/nickname accents), `.hollow-theme` bundle format (manifest + asset files, signed for integrity), in-app import/export UI with live preview, curated community gallery repo on GitHub. Per-user local only — themes never travel with messages. Data-only schema (no HTML/CSS/JS, no arbitrary code execution) so community-shared themes are provably safe to apply. Absorbs the old "hearts/sparkles on profiles + custom fonts" idea as one set of knobs among many. Build on existing `HollowTheme` ThemeExtension by making it loadable from a manifest instead of hardcoded.
 - [x] Landing page / website (updated for public alpha — download button pulls from manifest.json, license key gating removed, Patreon/Ko-Fi as optional support)
 - [X] **Strip / minimize bundled ffmpeg binary** — Initial bundled binary (BtbN LGPL static, `vendor/ffmpeg/ffmpeg-win-x64.exe`) is ~164 MB unstripped and includes a huge codec/library zoo we don't actually use (libdav1d, libvpx, libsvtav1, libplacebo, vulkan, opencl, AMF, NVENC/NVDEC, libjxl, libwhisper, librav1e, libopenh264, all the audio codecs, etc.). After the video preview pipeline is shipped and stable, profile what ffmpeg arguments / codecs our actual usage requires (just thumbnail extraction via libwebp encoder + a small set of video demuxers/decoders for whichever container formats users actually upload), then either (a) strip the existing binary with `strip` to drop debug symbols (~15-20% reduction), or (b) build a custom minimal ffmpeg with only the required components (`--disable-everything --enable-encoder=libwebp --enable-decoder=h264,hevc,vp9,av1 --enable-demuxer=mov,matroska,webm` etc.) — target ~10 MB per arch. Same for macOS/Linux when those builds happen. No code changes needed when swapping the binary — just replace `vendor/ffmpeg/ffmpeg-{platform}` and rebuild.
@@ -2016,7 +2017,7 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 
 **Credibility & launch:**
 - [X] Proper README with feature grid, architecture diagram, screenshots (visual repo presentation)
-- [ ] Apply for OTF Security Lab cryptographic audit (free, major credibility — no Discord alternative has this)
+- [ ] Apply for cryptographic audit
 - [X] Clean repo pre-launch (remove secrets, debug hacks, dead code paths)
 
 📋 INFRASTRUCTURE MASTER PLAN: "The Swarm"

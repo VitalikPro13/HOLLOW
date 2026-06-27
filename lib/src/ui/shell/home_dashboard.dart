@@ -29,7 +29,7 @@ import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
-import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
+import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -358,87 +358,11 @@ class _ProfileColumn extends ConsumerWidget {
         ] else
           const SizedBox(height: HollowSpacing.lg),
 
-        // Recovery phrase status
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.sm + 2,
-            vertical: HollowSpacing.sm,
-          ),
-          decoration: BoxDecoration(
-            color: hollow.surface,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(color: hollow.border),
-          ),
-          child: identity.mnemonic != null
-              ? HollowPressable(
-                  onTap: () => showMnemonicDialog(
-                      context, identity.mnemonic!),
-                  borderRadius:
-                      BorderRadius.circular(hollow.radiusSm),
-                  child: Row(
-                    children: [
-                      Icon(LucideIcons.shieldAlert, size: 14,
-                          color: hollow.warning),
-                      const SizedBox(width: HollowSpacing.sm),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment:
-                              CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Recovery Phrase',
-                              style:
-                                  HollowTypography.caption.copyWith(
-                                color: hollow.textPrimary,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                            Text(
-                              'Not backed up — tap to view',
-                              style:
-                                  HollowTypography.caption.copyWith(
-                                color: hollow.warning,
-                                fontSize: 10,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                )
-              : Row(
-                  children: [
-                    Icon(LucideIcons.shieldCheck, size: 14,
-                        color: hollow.success),
-                    const SizedBox(width: HollowSpacing.sm),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Recovery Phrase',
-                            style: HollowTypography.caption.copyWith(
-                              color: hollow.textPrimary,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                          Text(
-                            'Secured',
-                            style: HollowTypography.caption.copyWith(
-                              color: hollow.success,
-                              fontSize: 10,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-        ),
+        // System status — replaces the old Recovery Phrase card. Shows the calm
+        // "All systems operational" line when healthy, and the active notice
+        // (with countdown) otherwise. The recovery phrase stays reachable via
+        // the user bar + Settings → Security.
+        const HomeStatusCard(),
 
         const SizedBox(height: HollowSpacing.md),
 

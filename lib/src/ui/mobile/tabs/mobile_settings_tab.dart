@@ -54,6 +54,7 @@ import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
+import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileSettingsTab extends ConsumerWidget {
@@ -225,6 +226,14 @@ class MobileSettingsTab extends ConsumerWidget {
           height: 1,
         ),
         const SizedBox(height: HollowSpacing.lg),
+
+        // System status — same calm card as the desktop Home (green "All
+        // systems operational" when healthy; the active notice + countdown
+        // otherwise). Gives mobile a pull-surface for status, since the mobile
+        // banner is push-only-for-problems.
+        const HomeStatusCard(),
+
+        const SizedBox(height: HollowSpacing.md),
 
         // Sync stats — same numbers as the desktop Home stats card, so this
         // device can be eyeball-compared against another for sync. DM messages

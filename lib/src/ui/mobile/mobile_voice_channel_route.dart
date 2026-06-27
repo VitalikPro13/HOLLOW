@@ -11,6 +11,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_avatars.dart';
+import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
@@ -137,6 +138,9 @@ class _MobileVoiceChannelRouteState
         child: Column(
           children: [
             _buildTopBar(hollow),
+            // System-status notice, at the top under the channel name (divider
+            // below) — surfaces maintenance/outage while you're in a call.
+            const SystemStatusBanner(),
             Expanded(
               child: hasVideo
                   ? _buildVideoView(hollow, vcState, localPeerId)

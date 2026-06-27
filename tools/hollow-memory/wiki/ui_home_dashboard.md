@@ -60,11 +60,7 @@ When `StartupRevealScope.interval()` returns non-null, each column is wrapped in
    - Text wrapped in curly quotes: `"“$aboutMe”"`, italic, 12px, center-aligned, max 4 lines with ellipsis
    - If aboutMe is empty, renders `SizedBox(height: HollowSpacing.lg)` instead
 
-7. **Recovery phrase status card:** Full-width container with `hollow.surface` background, `radiusMd` corners, `hollow.border` border. Two states based on `identity.mnemonic`:
-
-   - **Not backed up (`identity.mnemonic != null`):** Wrapped in `HollowPressable` that calls `showMnemonicDialog(context, identity.mnemonic!)` on tap. Shows `LucideIcons.shieldAlert` (14px, `hollow.warning`), title "Recovery Phrase" (12px, w500), subtitle "Not backed up -- tap to view" (10px, `hollow.warning`).
-
-   - **Secured (`identity.mnemonic == null`):** Static row (not tappable). Shows `LucideIcons.shieldCheck` (14px, `hollow.success`), title "Recovery Phrase" (12px, w500), subtitle "Secured" (10px, `hollow.success`).
+7. **System status card (`HomeStatusCard`):** REPLACED the old Recovery Phrase card (2026-06-27). From `lib/src/ui/shell/system_status_banner.dart`, a `ConsumerWidget` reading `statusProvider`. Shows the calm "✓ All systems operational" green line when healthy (operational level), or the active notice (icon + colored headline + optional message + live countdown) for info/maintenance/warning/critical. The recovery phrase itself was NOT removed from the app — it's still reachable via the user bar, Settings → Security, and the first-launch prompt; it was only removed from the Home dashboard. See the "System Status Banner" section below for the full widget family.
 
 8. **`_SyncStatsCard` (Your Stats):** Full-width `hollow.surface` card directly below the recovery card (fills the former gap). A `ConsumerWidget` that reads `friendsProvider` (accepted count), `serverListProvider` (`.length`), `myDevicesProvider`, and `_dmMessageCountProvider`. Four `_StatRow`s: **Friends**, **Servers**, **DM messages** (from FFI `count_all_dm_messages` = `COUNT(*) FROM messages WHERE hidden_at IS NULL`), **Devices** (`N / M online`, value colored `success` when all siblings online else `warning`; plain "1" on a single-device install). Purpose: multi-device sync eyeball-comparison — open on both devices and compare. **Channel message counts are deliberately NOT shown** (lazy-paging makes them diverge per device even when synced). `_dmMessageCountProvider` is a `FutureProvider.autoDispose` that `ref.watch(lastDmMessageProvider)` to recompute on DM changes. Mobile twin: `mobile_settings_tab.dart:_MobileStatsCard` (after the About tile).
 
@@ -248,6 +244,34 @@ Contains three elements:
 - Links: 11px, `hollow.accent`, underlined
 - Block spacing: 8px
 - Horizontal rule: top border at 50% border alpha
+
+---
+
+## System Status Banner — Website-Driven Status Notice
+
+`lib/src/ui/shell/system_status_banner.dart` + `lib/src/core/providers/status_provider.dart`. A global status notice (maintenance / outage / announcement) pushed from a website JSON file, with a live countdown, severity levels, and per-incident dismissal. **Independent of the relay** — it's an HTTPS GET to the website, so it loads even when the relay WS is down (exactly when "relay back at 02:00" matters most).
+
+**Data:** `https://anonlisten.com/hollow/releases/status.json` — a single JSON object (not an array like news.json), fetched via the SAME `updater_api.fetchVersionManifest(manifestUrl: '...?t=<bust>')` helper news/manifest use. Fields (all defensively defaulted): `id` (stable per-incident key for dismissal), `level`, `title`, `message`, `until` (ISO-8601 UTC instant for the countdown), `until_label`, `link`, `link_label`, `dismissible` (default true). No local source copy is committed — the live file lives on the website. Empty `{}` or `level:operational` with no message = silent (no banner; the Home/Settings card shows green "All systems operational").
+
+**`statusProvider` (`StatusNotifier`):**
+- `StatusLevel` enum: `operational | info | maintenance | warning | critical`. `fromString` defaults unknown → operational (fail-safe — a bad feed never shows a scary banner). `showsInBanner` = `!= operational`.
+- `_fetch()` runs eagerly in `build()` (network, no DB dependency) so the banner appears instantly. An **own `Timer.periodic(60s)`** re-fetches (disposed via `ref.onDispose`) — deliberately NOT piggybacking the relay-stats 7s poll (that would force `relayStatsProvider` always-on = more load; a 60s HTTP request is trivially cheap, and the file changes a few times a month).
+- **Dismissal:** `dismissCurrent()` persists the current `id` under SQLCipher key `dismissed_status_id`. `loadDismissed()` reads it back — **called from `hollow_shell.dart` `_bootstrap()` AFTER the DB is open**, NOT eagerly in `build()` (the DB isn't open when the banner first watches the provider during local-first render → `loadSetting` throws → swallowed → dismissal lost every restart; bootstrap ordering is the race-free fix, same pattern as `themeModeProvider.load()`).
+- `StatusState.showBanner` getter: banner-worthy level + has content + not-dismissed-for-this-id.
+
+**`statusVisual(level, hollow)`** — single source of truth for color+icon, shared by banner and card: operational→`success`+circleCheck, info→`accentText`+info (teal — the neutral/playful "info" channel, distinct from the amber/red alarms; no blue token exists so accentText is the contrast-safe accent), maintenance→`warning`+wrench, warning→`warning`+triangleAlert, critical→`error`+octagonAlert.
+
+**`StatusCountdown`** — self-ticking 1s `Timer.periodic` counting down to `until` (UTC). Format: `2h 14m` (>1h) / `14:23` (<1h) / `45s` (<1m). At/after zero it flips to "In progress now" and stops. Tabular figures so digits don't jitter. The `until` parser forces UTC interpretation even if the author omits the `Z`, so the countdown is identical in every timezone.
+
+**`SystemStatusBanner`** (`ConsumerStatefulWidget`) — the dismissible strip. Renders only when `showBanner`. **Tap-to-expand:** collapsed = compact one-liner (icon + headline·message ellipsised + countdown + chevron-down hint + X); tapping the bar expands to full untruncated title + wrapped message + countdown + Details (chevron flips up). Starts collapsed (auto-appearing content announces quietly, user opts into detail); a new notice `id` resets to collapsed; the X dismisses without toggling (HitTestBehavior.opaque). `AnimatedSize` grow/shrink uses `HollowDurations.fast` (auto-zero under reduce-motion). `StatusBannerAnchor` enum (top/bottom) picks which edge carries the divider — top-strip (divider below, desktop) vs bottom-anchored (divider above, so it doesn't merge into the bar beneath, mobile).
+
+**Mount points (responsive — desktop top, mobile bottom-anchored):**
+- Desktop: under the FriendsBar in BOTH `hollow_shell.dart` `_buildDockLayout` AND `_buildClassicLayout` (`anchor: top`).
+- Mobile tab screens: above the bottom nav bar (`mobile_shell.dart`, `anchor: bottom`).
+- Mobile chat: above the input cluster (`mobile_chat_route.dart`, `anchor: bottom`).
+- Mobile calls: top under the participant/channel name in BOTH `mobile_call_video_view.dart` (1:1) and `mobile_voice_channel_route.dart` (`anchor: top`).
+
+**`HomeStatusCard`** (`ConsumerWidget`) — the calm card variant. Unlike the banner it renders the green "All systems operational" healthy state too (Home/Settings are deliberate pull-surfaces, so a reassuring steady-state is welcome). Used on the desktop Home `_ProfileColumn` (replacing the Recovery Phrase card) and on the mobile Settings tab before `_MobileStatsCard` ("Your Stats").
 
 ---
 

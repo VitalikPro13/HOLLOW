@@ -54,6 +54,7 @@ import 'package:hollow/src/core/providers/pinned_provider.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
+import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -1005,6 +1006,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                 ],
               ),
             ),
+            // System-status notice, just above the input cluster (typing bar /
+            // reply preview / composer) — the spot the user's thumb already
+            // rests on. Self-hides when there's nothing to announce.
+            const SystemStatusBanner(anchor: StatusBannerAnchor.bottom),
             _TypingBar(
               contextKey: widget.isDm
                   ? widget.peerId!

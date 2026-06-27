@@ -145,3 +145,33 @@ else()
     "Build packages/flutter_webrtc/test_apps/screen_audio_test/ first. "
     "Screen share audio will be unavailable.")
 endif()
+
+# === Visual C++ runtime (VCRUNTIME140 / VCRUNTIME140_1 / MSVCP140) ===
+# hollow.exe, hollow_core.dll, flutter_webrtc_plugin.dll and mdk.dll all import
+# the MSVC C++ runtime. A fresh Windows install does NOT have these unless the
+# user separately installed the "VC++ 2015-2022 Redistributable", so without
+# bundling them the app fails to launch with "VCRUNTIME140.dll was not found".
+# (The api-ms-win-crt-*.dll the binaries also import are the Universal CRT,
+# which IS part of Windows 10+ itself — those we deliberately do NOT ship.)
+#
+# InstallRequiredSystemLibraries locates the version-correct redistributable
+# DLLs that match the active MSVC toolset (auto-tracks Visual Studio upgrades,
+# so this never silently ships a stale runtime), sourced from the licensed
+# VC\Redist\MSVC\<ver>\x64\Microsoft.VC14x.CRT\ folder — NOT from System32.
+# We drive the install() ourselves (SKIP=TRUE) so the DLLs land flat next to
+# hollow.exe (the module's default puts them in a bin/ subfolder) and only in
+# Release/Profile (Debug uses the non-redistributable debug runtime).
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+set(CMAKE_INSTALL_UCRT_LIBRARIES FALSE)
+include(InstallRequiredSystemLibraries)
+if(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+  install(PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    CONFIGURATIONS Profile;Release
+    COMPONENT Runtime)
+else()
+  message(WARNING
+    "InstallRequiredSystemLibraries found no VC++ runtime DLLs to bundle. "
+    "Users without the VC++ Redistributable may fail to launch hollow.exe. "
+    "Ensure the Visual Studio C++ workload (with the redistributable) is installed.")
+endif()

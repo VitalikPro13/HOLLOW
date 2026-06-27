@@ -16,6 +16,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_avatars.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
+import 'package:hollow/src/ui/shell/system_status_banner.dart';
 
 
 /// Full-screen call overlay that slides up from the bottom inside a DM chat.
@@ -144,6 +145,10 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
         child: Column(
           children: [
             _buildTopBar(hollow, call),
+            // System-status notice, at the top under the participant name — a
+            // call is exactly when "relay restarting in 2 min" matters most.
+            // Top-anchored here (divider below) since it follows the name row.
+            const SystemStatusBanner(),
             Expanded(
               child: showVideo
                   ? _buildVideoView(hollow, call)

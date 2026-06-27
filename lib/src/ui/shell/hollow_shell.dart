@@ -24,6 +24,7 @@ import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/verified_peers_provider.dart';
+import 'package:hollow/src/core/providers/status_provider.dart';
 import 'package:hollow/src/core/providers/annotation_mode_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
@@ -80,6 +81,7 @@ import 'package:hollow/src/ui/guides/help_panel.dart';
 import 'package:hollow/src/ui/shell/bottom_bar.dart';
 import 'package:hollow/src/ui/shell/channel_sidebar.dart';
 import 'package:hollow/src/ui/shell/friends_bar.dart';
+import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
@@ -918,6 +920,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Load verified peers from local DB.
     await ref.read(verifiedPeersProvider.notifier).load();
 
+    // Load the persisted system-status dismissal (must run after the DB is open
+    // — see StatusNotifier.loadDismissed). Without this the dismissed banner
+    // re-appeared on every restart.
+    await ref.read(statusProvider.notifier).loadDismissed();
+
     // Initialize native notifications (tray + unfocused-background toasts).
     await ref.read(systemNotificationProvider.notifier).init();
     _registerDesktopNotificationHandlers();
@@ -1568,6 +1575,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
       isComplete: _revealComplete,
       child: Column(
         children: [
+          // Global system-status banner (Classic layout) — full-width strip at
+          // the very top. Self-hides when there's nothing to announce.
+          const SystemStatusBanner(),
           Expanded(
             child: Row(
               children: [
@@ -1722,6 +1732,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
               ),
             ),
           ),
+
+          // Global system-status banner — directly under the Friends bar. Self-
+          // hides unless there's a banner-worthy (warning/maintenance/critical/
+          // info) notice; reaches users no matter what they're viewing.
+          const SystemStatusBanner(),
 
           // Main content area
           Expanded(
