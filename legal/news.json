@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-06-27-v071",
+    "date": "Jun 27, 2026",
+    "title": "v0.7.1 - Screen Share Audio on Mac, Accessibility & Data Channel Fixes",
+    "body": "I realized that multi-device literally broke almost everything in terms of device ID mismatches, so that's why some stuff weren't working. Screen share audio should now work on both Windows and macOS! Other improvements include adding full Accessibility support (per [App Store Accessibility labels](https://developer.apple.com/help/app-store-connect/manage-app-accessibility/overview-of-accessibility-nutrition-labels/)) and WebRTC version upgrade for security with stability. You can read full details in the [changelog.] Thanks!"
+  },
+  {
     "id": "2026-06-24-v070",
     "date": "Jun 24, 2026",
     "title": "v0.7 - Multi-Device Fixes, Channel Encryption Hardening & Storage Manager",

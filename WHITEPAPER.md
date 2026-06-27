@@ -1,6 +1,6 @@
 # Hollow Protocol Whitepaper
 
-**Version 0.7.0**\
+**Version 0.7.1**\
 **Author: Vitalii Rovinskyi**\
 *This document was generated with the assistance of Claude (AI). All technical content reflects the author's architecture and design decisions.*
 
@@ -452,23 +452,18 @@ SFrame keys are zeroed in memory after use. Key bytes are cleared via `fillRange
 
 ### 6.8 Screen Share Audio Transport
 
-Screen share audio uses a **platform-dependent transport** due to operating system audio subsystem constraints:
+Screen share audio uses an **out-of-process data channel transport** on both Windows and macOS. Capturing system audio inside the libwebrtc process is not viable: libwebrtc's AudioDeviceModule (ADM) is a singleton that contaminates both the capture and render endpoints, producing feedback loops and AGC/AEC artifacts when system audio is routed through a WebRTC audio track. The audio is therefore captured by a separate helper process, encoded with **Opus** (48 kHz stereo), and streamed to the main application, which forwards the framed packets over the **WebRTC data channel** (type `0x03` prefix) rather than as an RTP audio track.
 
-**Windows — Out-of-process data channel transport:**
+**Capture path (sender):**
 
-A separate `screen_audio_capturer.exe` process captures system audio via WASAPI loopback, encodes with **Opus** (48 kHz stereo, 128 kbps), and streams framed packets to the main application via stdout. The application sends these packets over the **WebRTC data channel** (type `0x03` prefix), not as RTP audio tracks.
+- **Windows:** the `screen_audio_capturer` helper captures system audio via WASAPI loopback (`--mode pipe`). Per-process window audio capture is supported on Windows 10 2004+ via process loopback INCLUDE mode, allowing capture of a single application's audio output.
+- **macOS 13.0+:** an audio-only **ScreenCaptureKit** stream captures system audio; the application excludes its own process output from the capture so the remote participants' voices are not re-broadcast into the share. The captured PCM is piped to the helper in `--mode encode`. macOS versions **below 13.0** expose no public system-audio capture API, so the audio toggle is locked off in the screen-share dialog with an explanatory notice.
 
-On the receiving side, a separate renderer process reads Opus packets from stdin, decodes, and outputs to platform audio (waveOut on Windows, AudioQueue on macOS, PulseAudio on Linux).
+**Render path (receiver):** a separate renderer process reads Opus packets from stdin, decodes, and outputs to platform audio (waveOut on Windows, AudioQueue on macOS, PulseAudio on Linux).
 
-The out-of-process architecture is necessary because libwebrtc's AudioDeviceModule (ADM) interferes with WASAPI loopback capture when running in the same process, causing audio feedback loops.
-
-Per-process window audio capture is supported on Windows 10 2004+ via process loopback INCLUDE mode, allowing capture of a single application's audio output.
+Because the reliable, ordered data channel force-closes if its SCTP send buffer reaches the 16 MB cap under sustained audio load (most likely over a TURN relay), the sender applies backpressure: it drops screen-audio packets while the buffered amount is backed up, trading a momentary gap for a live channel.
 
 **Encryption:** Screen share audio over data channels is encrypted at the transport layer (DTLS) but does not use SFrame. The data channel's DTLS encryption provides confidentiality equivalent to DTLS-SRTP.
-
-**macOS — Native WebRTC audio track:**
-
-macOS uses Process Tap to inject system audio directly as a WebRTC audio track. This path uses standard DTLS-SRTP + SFrame encryption, identical to voice/video.
 
 ---
 
@@ -1087,8 +1082,7 @@ The WebSocket relay handles signaling (SDP offers/answers, ICE candidates). WebR
 | Voice calls | RTCPeerConnection audio tracks | DTLS-SRTP + SFrame |
 | Video calls | RTCPeerConnection video tracks | DTLS-SRTP + SFrame |
 | Screen share video | Separate RTCPeerConnection | DTLS-SRTP + SFrame |
-| Screen share audio (Windows) | RTCDataChannel (type 0x03) | DTLS (out-of-process Opus) |
-| Screen share audio (macOS) | RTCPeerConnection audio track | DTLS-SRTP + SFrame |
+| Screen share audio (Windows + macOS 13.0+) | RTCDataChannel (type 0x03) | DTLS (out-of-process Opus) |
 
 ### 14.5 Glare Resolution
 
@@ -1367,7 +1361,7 @@ The relay operator is **not trusted** with: message contents, encryption keys, f
 - **Single relay dependency.** Multi-relay support with cross-relay room gossip is designed but not yet deployed. Horizontal scaling to millions of users via a swarm of relay nodes is the planned architecture.
 - **No social recovery.** Shamir's Secret Sharing for key recovery via trusted contacts is designed but not implemented.
 - **No web client.** Windows, macOS, Linux, Android, and iOS are supported. A Flutter Web build is a future target with no working build today.
-- **Mobile media constraints.** Voice and video calls (with SFrame E2EE), file transfer, DMs, MLS servers, vault, and archive all work on mobile. However, mobile clients cannot *originate* screen sharing or capture system audio (no platform equivalent of WASAPI loopback / Process Tap), and the large-file Share transport (>34 MB, STUN-only) is excluded on mobile because it does not survive carrier-grade NAT. Screen-share audio on desktop still uses different transport paths per platform (out-of-process Opus over a data channel on Windows, a WebRTC audio track on macOS).
+- **Mobile media constraints.** Voice and video calls (with SFrame E2EE), file transfer, DMs, MLS servers, vault, and archive all work on mobile. However, mobile clients cannot *originate* screen sharing or capture system audio (no platform equivalent of WASAPI loopback / ScreenCaptureKit audio), and the large-file Share transport (>34 MB, STUN-only) is excluded on mobile because it does not survive carrier-grade NAT. On desktop, screen-share audio uses the same out-of-process Opus over a data channel on both Windows (WASAPI loopback) and macOS 13.0+ (ScreenCaptureKit); macOS below 13.0 cannot send screen-share audio.
 - **Files are not encrypted at rest.** SQLCipher encrypts messages and metadata, but downloaded file attachments (`~/.hollow/files/`), vault shards, and vault cache are stored as plaintext on disk. AES-256-GCM at-rest file encryption keyed from the identity is planned.
 
 ---

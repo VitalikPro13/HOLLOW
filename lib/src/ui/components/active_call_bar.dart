@@ -7,6 +7,7 @@ import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
+import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -265,18 +266,23 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                         ),
                       ),
                     ],
-                    // Record button (desktop only — ffmpeg-driven). Always
-                    // shown; if ffmpeg isn't found the start call surfaces
-                    // a clear error toast instead of silently hiding it.
+                    // Record button (desktop only). Shown; if the backend isn't
+                    // available the start call surfaces a clear error toast
+                    // instead of silently hiding it. On macOS < 13.0 the native
+                    // recorder doesn't exist, so the button is disabled with an
+                    // explanatory tooltip (mirrors the audio-share toggle).
                     if (Platform.isWindows ||
                         Platform.isLinux ||
                         Platform.isMacOS) ...[
                       const SizedBox(width: HollowSpacing.xs),
                       HollowTooltip(
-                        message: rec.isMyRecording
-                            ? 'Stop recording'
-                            : 'Record this call',
+                        message: MacOsScreenAudioSupport.recordBlockedByOldOs
+                            ? 'Recording needs macOS 13.0 or later'
+                            : (rec.isMyRecording
+                                ? 'Stop recording'
+                                : 'Record this call'),
                         child: HollowPressable(
+                          disabled: MacOsScreenAudioSupport.recordBlockedByOldOs,
                           semanticLabel: rec.isMyRecording
                               ? 'Stop recording'
                               : 'Record this call',

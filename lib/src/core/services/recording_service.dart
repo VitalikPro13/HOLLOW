@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import '../../rust/api/network.dart' as network_api;
+import 'macos_version.dart';
 import 'video_thumbnail_service.dart';
 
 void _recLog(String msg) {
@@ -281,8 +282,12 @@ class RecordingService {
   }
 
   /// Whether recording is supported on this platform.
+  ///
+  /// macOS needs 13.0+ (the native ScreenCaptureKit recorder errors out below
+  /// that — see [MacOsScreenAudioSupport.canRecord]).
   static bool get isAvailable {
-    if (Platform.isMacOS || Platform.isWindows) return true;
+    if (Platform.isMacOS) return MacOsScreenAudioSupport.canRecord;
+    if (Platform.isWindows) return true;
     return VideoThumbnailService.isAvailable;
   }
 

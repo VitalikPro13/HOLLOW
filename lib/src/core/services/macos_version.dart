@@ -7,11 +7,18 @@ import 'dart:io';
 /// We parse the leading major.minor to decide which system-audio CAPTURE path
 /// (for SENDING shared audio) is available:
 ///
-///   >= 14.2  : CoreAudio Process Tap (MacScreenShareAudioTap) -> WebRTC track
 ///   >= 13.0  : ScreenCaptureKit audio-only -> data channel (MacSckScreenAudioCapturer)
 ///   <  13.0  : no public system-audio capture API exists -> SEND unavailable
 ///
-/// RECEIVE works on every supported version (10.15+) via the bundled renderer.
+/// (The 14.2+ CoreAudio Process Tap path is retired — 13.0+ uses the SCK
+/// data-channel path on all versions.)
+///
+/// Screen RECORDING (MacScreenRecorder, ScreenCaptureKit + AVAssetWriter) also
+/// requires 13.0+; below that the native recorder returns "Recording requires
+/// macOS 13+", so the record button is gated by [canRecord].
+///
+/// RECEIVE of shared audio works on every supported version (10.15+) via the
+/// bundled renderer.
 class MacOsScreenAudioSupport {
   /// (major, minor) parsed from the OS version string, or null off macOS / on
   /// parse failure (treated as "unknown" -> most capable, fail open at runtime).
@@ -37,11 +44,21 @@ class MacOsScreenAudioSupport {
     return v.$2 >= minor;
   }
 
-  /// macOS 14.2+ — Process Tap path.
-  static bool get hasProcessTap => _atLeast(14, 2);
-
   /// macOS 13.0+ — ScreenCaptureKit audio-only capture path.
   static bool get hasSckAudio => _atLeast(13, 0);
+
+  /// macOS 13.0+ — native ScreenCaptureKit screen recorder.
+  static bool get hasNativeRecorder => _atLeast(13, 0);
+
+  /// Whether this Mac can RECORD a call at all (needs 13.0+; the native
+  /// recorder errors out below that). True off macOS (other platforms gate
+  /// recording elsewhere).
+  static bool get canRecord => !Platform.isMacOS || hasNativeRecorder;
+
+  /// True when the user is on a macOS that can join a call but CANNOT record
+  /// (10.15–12.x) — used to disable the record button + show a tooltip.
+  static bool get recordBlockedByOldOs =>
+      Platform.isMacOS && !hasNativeRecorder;
 
   /// Whether this Mac can SEND screen-share audio at all (13.0+).
   static bool get canSendScreenAudio => Platform.isMacOS && hasSckAudio;

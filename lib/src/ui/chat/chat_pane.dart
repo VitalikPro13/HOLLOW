@@ -48,6 +48,7 @@ import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
 import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
+import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -2971,12 +2972,16 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
             ),
           ),
         ],
-        // Record (desktop only).
+        // Record (desktop only). On macOS < 13.0 the native recorder doesn't
+        // exist, so the button is disabled with an explanatory tooltip.
         if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) ...[
           const SizedBox(width: HollowSpacing.xs),
           HollowTooltip(
-            message: rec.isMyRecording ? 'Stop recording' : 'Record this call',
+            message: MacOsScreenAudioSupport.recordBlockedByOldOs
+                ? 'Recording needs macOS 13.0 or later'
+                : (rec.isMyRecording ? 'Stop recording' : 'Record this call'),
             child: HollowPressable(
+              disabled: MacOsScreenAudioSupport.recordBlockedByOldOs,
               semanticLabel:
                   rec.isMyRecording ? 'Stop recording' : 'Record this call',
               onTap: () {

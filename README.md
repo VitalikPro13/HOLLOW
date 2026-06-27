@@ -23,6 +23,11 @@
   <img src="assets/Home_Screenshot_v031.png" width="800" alt="Hollow — Home">
 </p>
 
+<details>
+<summary><strong>A note from the creator</strong></summary>
+
+<br>
+
 > When I started working on Hollow back in February, I didn't think how large this project would become. It all began with a random thought during school about having a fully peer-to-peer messenger where you're in control of all your data. Then I started planning, researching, locking in the tech stack, and grinding more than full-time to build it.
 >
 > You can look at the old commits. I tried libp2p that kept failing and then the layout has been rebuilt too. Claude was basically my development tool that always helped me. I might not be the best programmer, but I have engineering thinking and creativity to know what needs to be built and how. Every architecture decision was mine, I traced every bug/performance issue and then we fixed it together, but I'm the one who's in control of what I release. And I'm not planning to publish unusable software that works like total garbage.
@@ -35,6 +40,8 @@
 >
 > -- Vitalii Rovinskyi (AnonListen / VitalikPro13)
 
+</details>
+
 ## Overview
 
 Hollow is a fully distributed, end-to-end encrypted communication platform. There are no central servers that store your messages or files. Members of a server collectively host it. The relay is a zero-knowledge signaling pipe that forwards encrypted blobs between peers without any ability to read, modify, or store them.
@@ -46,7 +53,7 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 - **End-to-end encrypted messaging** -- Olm (Double Ratchet) for DMs, OpenMLS for servers. Forward secrecy by default
 - **Encrypted voice and video calls** -- peer-to-peer WebRTC with SFrame (AES-128-GCM)
 - **Screen sharing** -- with system audio capture (Windows & macOS), encrypted with the same SFrame pipeline
-- **File sharing** -- encrypted peer-to-peer transfers. Files up to 34 MB transfer directly. Larger files automatically use Hollow Share (BitTorrent-like swarmed distribution)
+- **File sharing** -- encrypted peer-to-peer transfers. Files up to 34 MB transfer directly. Larger files use Hollow Share (BitTorrent-like swarmed distribution)
 - **Distributed storage (Vault)** -- erasure-coded encrypted shards distributed across server members. Files survive even when individual peers go offline
 - **Servers and channels** -- create communities with text channels, voice channels, roles, and permissions. All state synchronized via CRDTs with no authoritative server. Optional: secure Twitch verification to limit members only to your followers/subs
 - **Public channels** -- you can make your server channel public, so users can easily read it just from knowing the server ID/join link and without the need to even join it. You can use a viewer inside the app or on the [website](https://hollow.anonlisten.com/)
@@ -60,14 +67,14 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 | Platform | Download |
 |----------|------|
-| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.7.0-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.7.0-win64.zip) |
-| macOS (14.2+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.7.0.dmg) |
-| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.7.0-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.7.0-linux.tar.gz) (Experimental)|
-| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.7.0-android.apk) |
+| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.7.1-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.7.1-win64.zip) |
+| macOS (10.15+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.7.1.dmg) |
+| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.7.1-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.7.1-linux.tar.gz) (Experimental)|
+| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.7.1-android.apk) |
 | iOS | Coming soon |
 | Web | Not planned |
 
-Current Progress: Push notifications and a critical bug with Friends being unstable after multi-device implementation are fixed. iOS is still in progress (public TestFlight soon) Though, the push notifications on iOS seem to be a bit broken, but Android works perfectly. Will be fixed and hopefully the release would happen soon.
+Current Progress: macOS version requirement is now 10.15 instead of 14.2! Only limitations are the screen-share audio and recorder (13.0+). Flatpak is fixed on Linux. Full changelog is always [here.](changelog.txt) If you find any issues, make sure to report them. Thanks!
 
 ## Tech Stack
 
@@ -114,7 +121,23 @@ In the Hollow app, enter your relay domain during setup or in Settings. See [rel
 - Rust toolchain (stable)
 - flutter_rust_bridge_codegen v2.11.1
 
-### Build
+### Build (Windows)
+
+Two native binaries are bundled with the Windows build. If they're missing,
+CMake prints a warning (`vendor/ffmpeg/ffmpeg-win-x64.exe not found...` /
+`screen_audio_test.exe not found...`) and the build still succeeds, but video
+thumbnails and screen-share audio are disabled at runtime. Fetch/build them
+once before your first release build:
+
+```powershell
+# 1. Fetch the vendored ffmpeg (video thumbnails)
+pwsh scripts\fetch_ffmpeg.ps1
+
+# 2. Build the screen audio capturer (screen-share system audio)
+pwsh scripts\build_screen_audio.ps1
+```
+
+Then build the app:
 
 ```bash
 # Generate FFI bindings (only needed after changing Rust API signatures)
@@ -126,6 +149,48 @@ flutter run -d windows
 # Build release
 flutter build windows
 ```
+
+<details>
+<summary><strong>macOS build instructions</strong></summary>
+
+Install Rust (if not already installed):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source $HOME/.cargo/env
+```
+
+Install the build tools (Xcode from the App Store, plus CocoaPods):
+
+```bash
+xcode-select --install        # if not already present
+sudo gem install cocoapods     # or: brew install cocoapods
+```
+
+Build the screen audio capturer **before** building the app (it's bundled into
+the `.app` during the Xcode build phase). Screen-share audio is unavailable
+without it:
+
+```bash
+bash scripts/build_screen_audio.sh
+```
+
+Then build:
+
+```bash
+flutter pub get
+cd macos
+flutter build macos --release
+```
+
+The output is at `build/macos/Build/Products/Release/Hollow.app` (a universal
+x86_64 + arm64 bundle).
+
+> **Note:** Hollow runs on macOS 10.15 and later. Screen-share audio capture and
+> call recording require macOS 13.0+ (Apple exposes no system-audio API below
+> that); everything else, including screen-share video, works on 10.15.
+
+</details>
 
 <details>
 <summary><strong>Linux build instructions</strong></summary>

@@ -1,3 +1,29 @@
+v0.7.1 - Screen Share Audio on Mac, Accessibility & Data Channel Fixes
+
+SCREEN SHARE & RECORDING
+
+- Screen-share audio now works on macOS (13.0 or later), sending crystal-clear system audio to everyone in the call over the same data channel Windows uses. Below macOS 13.0 the audio toggle stays locked with a note, since Apple exposes no system-audio capture API there
+- The sender no longer hears the call echoed back into their own share: Hollow now excludes its own output (the other people's voices) from the captured audio
+- Call recording on macOS now produces valid, playable MP4s. A bad audio frame used to cascade into a broken file with no recoverable video; the recorder now guards every track so one rejected frame can't corrupt the whole recording
+- The record button is now correctly disabled on macOS below 13.0 (where the native recorder doesn't exist) with a tooltip, instead of looking clickable and failing
+
+MULTI-DEVICE
+
+- Fixed data channels (screen-share audio, file transfers, vault shards, Hollow Share) never opening between two people who each use more than one device. The connection now agrees on a single identity to break the call-setup tie, and matches replies by connection instead of by device id, so the channel opens reliably
+
+ACCESSIBILITY
+
+- Screen reader support (VoiceOver, TalkBack): every interactive control now announces its purpose, so the app is fully navigable by voice. A built-in check keeps it that way as the app grows
+- Full keyboard navigation: every button, toggle and control is reachable by Tab and arrow keys and activates with Enter or Space, with a clear focus ring that stays visible on any background
+- Larger Text: the interface now holds up at the full range of the operating system's text-size setting, up to 2x, without clipping or overflowing
+- Reduce Motion: a new Auto / On / Off control that combines with your OS setting, plus a Reduce Transparency option that drops dialog blur and makes panels opaque
+- Improved contrast on timestamps, links, mentions, counters and status text to meet accessibility standards, with dedicated darker variants for the light theme
+- Differentiate Without Color: presence is now shown by shape (filled dot for online, hollow ring for offline) as well as color
+
+PLATFORM & ENGINE
+
+- Upgraded the underlying WebRTC engine to a current stock build for better stability across all platforms, with no change to how anything behaves
+
 v0.7 - Multi-Device Fixes, Channel Encryption Hardening & Storage Manager
 
 CHANNEL ENCRYPTION
