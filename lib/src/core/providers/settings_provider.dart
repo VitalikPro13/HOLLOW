@@ -247,23 +247,37 @@ class AudioQualityNotifier extends AsyncNotifier<AudioQualityPreset> {
   }
 }
 
-/// Microphone input gain (0.0 to 2.0). Default: 1.3 (slight boost).
-/// Values >1.0 boost, <1.0 reduce. Applied to the local audio track.
+/// Microphone input gain — the LINEAR makeup multiplier applied post-APM by the
+/// native capture-gain processor (then a -3 dBFS soft limiter caps peaks).
+///
+/// WebRTC's own AGC leaves the mic quiet (~-18 dBFS), so the DEFAULT is a 2.0x
+/// boost: that's what makes calls land at a normal, audible loudness with no
+/// user setup. The UI calls 2.0x "100%" (the standard/normalized level), with
+/// room to go quieter (down to 1.0x = 50%) or louder (up to 3.0x = 150%). See
+/// [kMicGainDisplayUnit] for the % mapping.
 final micGainProvider =
     AsyncNotifierProvider<MicGainNotifier, double>(MicGainNotifier.new);
 
-/// Mic gain bounds. Floor is 0.34 (not 0): the gain feeds a real native
-/// makeup-gain stage, so 0 would mute the user. 34% keeps things audible even
-/// at the bottom (and is a little wink). A -3 dB limiter caps the top.
-const double kMicGainMin = 0.34;
-const double kMicGainMax = 2.0;
+/// Mic gain bounds (actual linear multiplier). 1.0x is WebRTC's quiet baseline
+/// (no boost); 3.0x is extra-hot (the -3 dB limiter still prevents clipping).
+const double kMicGainMin = 1.0;
+const double kMicGainMax = 3.0;
+
+/// The actual gain that the UI shows as "100%" — the standard/normalized loud
+/// level and the default. Display % = round(gain / kMicGainDisplayUnit * 100),
+/// so 1.0x→50%, 2.0x→100%, 3.0x→150%.
+const double kMicGainDisplayUnit = 2.0;
+
+/// Default gain (== the "100%" / normalized level).
+const double kMicGainDefault = kMicGainDisplayUnit;
 
 class MicGainNotifier extends AsyncNotifier<double> {
   @override
   Future<double> build() async {
     final val = await storage_api.loadSetting(key: 'mic_gain');
-    if (val == null || val.isEmpty) return 1.0;
-    return (double.tryParse(val) ?? 1.0).clamp(kMicGainMin, kMicGainMax);
+    if (val == null || val.isEmpty) return kMicGainDefault;
+    return (double.tryParse(val) ?? kMicGainDefault)
+        .clamp(kMicGainMin, kMicGainMax);
   }
 
   Future<void> setGain(double gain) async {

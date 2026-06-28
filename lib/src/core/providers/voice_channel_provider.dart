@@ -500,7 +500,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     // Update mic gain mid-session when user adjusts the slider.
     ref.listen(micGainProvider, (_, next) {
-      final gain = next.valueOrNull ?? 1.0;
+      final gain = next.valueOrNull ?? kMicGainDefault;
       _service?.updateMicGain(gain);
     });
 

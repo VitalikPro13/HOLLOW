@@ -29,7 +29,7 @@ Manages WebRTC mesh connections for server voice channels. Each remote participa
 - `_isMuted`, `_isCameraOn`: local media state
 - `_serverId`, `_channelId`: current voice channel context (null when inactive)
 
-Audio quality settings: `opusBitrate` (default 32000), `opusStereo` (default false). Device preferences: `preferredAudioInputDeviceId`, `preferredAudioOutputDeviceId`, `preferredCameraDeviceId`. Mic gain: `micGain` (default 1.3, range 0.0-2.0) — applied via `Helper.setVolume()` on local audio track after capture. `updateMicGain(gain)` applies mid-session.
+Audio quality settings: `opusBitrate` (default 32000), `opusStereo` (default false). Device preferences: `preferredAudioInputDeviceId`, `preferredAudioOutputDeviceId`, `preferredCameraDeviceId`. Mic gain: `micGain` (default 2.0 = `kMicGainDefault`, range 1.0-3.0) — applied via `Helper.setCaptureGain()` (native post-APM flat makeup gain + -3 dBFS soft limiter; NOT `setVolume`, which is a no-op on local/outgoing tracks). `updateMicGain(gain)` applies mid-session.
 
 ### Lifecycle
 
@@ -214,7 +214,7 @@ Key state:
 - `_remoteStream`, `_remoteStreamIsSynthetic`: remote video stream ownership tracking
 - `_frameCryptor`: FrameCryptorService instance for SFrame E2EE
 
-Audio quality: `opusBitrate` (default 32000), `opusStereo` (default false). Set by CallNotifier before offer/answer creation. Mic gain: `micGain` (default 1.3, range 0.0-2.0) — applied via `Helper.setVolume()` on local audio track in `_captureLocalAudio()`. `updateMicGain(gain)` applies mid-call.
+Audio quality: `opusBitrate` (default 32000), `opusStereo` (default false). Set by CallNotifier before offer/answer creation. Mic gain: `micGain` (default 2.0 = `kMicGainDefault`, range 1.0-3.0) — applied via `Helper.setCaptureGain()` (native post-APM flat makeup gain + -3 dBFS soft limiter) in `_captureLocalAudio()`. `updateMicGain(gain)` applies mid-call.
 
 ### SDP Offer/Answer Flow
 

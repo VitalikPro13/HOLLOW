@@ -2192,7 +2192,7 @@ class _MicGainSlider extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final asyncGain = ref.watch(micGainProvider);
-    final gain = asyncGain.valueOrNull ?? 1.0;
+    final gain = asyncGain.valueOrNull ?? kMicGainDefault;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2203,7 +2203,7 @@ class _MicGainSlider extends ConsumerWidget {
             Text('Microphone Gain',
                 style: HollowTypography.bodySmall
                     .copyWith(color: hollow.textSecondary)),
-            Text('${(gain * 100).round()}%',
+            Text('${(gain / kMicGainDisplayUnit * 100).round()}%',
                 style: HollowTypography.caption.copyWith(
                   color: hollow.accent,
                   fontWeight: FontWeight.w600,

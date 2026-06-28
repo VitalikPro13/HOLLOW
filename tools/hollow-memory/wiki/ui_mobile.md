@@ -578,7 +578,7 @@ Added to `_SystemTab` in `mobile_settings_tab.dart`:
 
 ### Voice & Audio Section
 - **Audio quality picker**: 3 pills (Voice/Music/Hi-Fi) with description label underneath. Reads/writes `audioQualityProvider`
-- **Mic gain slider** (`_MicGainSlider`): 34%–200%, 83 divisions, default 100%, with a caption line. Reads/writes `micGainProvider` (clamped 0.34–2.0). Drives the native **post-APM capture makeup gain + -3 dB soft limiter** via `Helper.setCaptureGain()` (the old `setVolume` on the local track was a no-op for outgoing audio). Floor 34% (not 0) so it can't mute. Applies live mid-call
+- **Mic gain slider** (`_MicGainSlider`): 83 divisions, with a caption line. Reads/writes `micGainProvider` (the actual linear multiplier, clamped 1.0–3.0; `kMicGainMin`/`kMicGainMax`). **Default 2.0** (`kMicGainDefault`) = a 2× boost over WebRTC's quiet AGC output. Display RESCALES via `(gain / kMicGainDisplayUnit * 100)%` (`kMicGainDisplayUnit`=2.0), so **2.0x reads "100%"** (1.0x→50%, 3.0x→150%). Drives the native **post-APM flat makeup gain + -3 dB soft limiter** via `Helper.setCaptureGain()`. Applies live mid-call
 - **Audio processing info**: Echo cancellation, noise suppression, AGC shown as "Auto" (always on)
 
 ### Ringtone Section

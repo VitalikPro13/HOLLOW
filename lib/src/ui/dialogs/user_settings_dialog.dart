@@ -3978,7 +3978,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
 
         // Mic gain slider
         Builder(builder: (context) {
-          final gain = ref.watch(micGainProvider).valueOrNull ?? 1.0;
+          final gain = ref.watch(micGainProvider).valueOrNull ?? kMicGainDefault;
           return Padding(
             padding: const EdgeInsets.only(left: 30),
             child: Row(
@@ -4015,7 +4015,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
                 SizedBox(
                   width: 40,
                   child: Text(
-                    '${(gain * 100).round()}%',
+                    '${(gain / kMicGainDisplayUnit * 100).round()}%',
                     style: HollowTypography.caption.copyWith(
                       color: hollow.accent,
                       fontWeight: FontWeight.w600,

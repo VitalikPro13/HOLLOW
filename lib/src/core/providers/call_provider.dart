@@ -210,7 +210,7 @@ class CallNotifier extends Notifier<CallState> {
     _voiceService!.preferredCameraDeviceId =
         ref.read(cameraDeviceProvider).valueOrNull;
     _voiceService!.micGain =
-        ref.read(micGainProvider).valueOrNull ?? 1.0;
+        ref.read(micGainProvider).valueOrNull ?? kMicGainDefault;
     return _voiceService!;
   }
 
@@ -326,7 +326,7 @@ class CallNotifier extends Notifier<CallState> {
 
     // Update mic gain mid-call when user adjusts the slider.
     ref.listen(micGainProvider, (_, next) {
-      final gain = next.valueOrNull ?? 1.0;
+      final gain = next.valueOrNull ?? kMicGainDefault;
       _voiceService?.updateMicGain(gain);
     });
   }
