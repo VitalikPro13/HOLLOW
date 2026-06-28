@@ -452,7 +452,27 @@ pub(crate) fn get_node() -> &'static Mutex<Option<NodeState>> {
 
 pub(crate) fn get_runtime() -> &'static tokio::runtime::Runtime {
     TOKIO_RUNTIME.get_or_init(|| {
+        // A P2P messenger is overwhelmingly I/O-bound (sockets + SQLCipher actors),
+        // NOT CPU-bound. The default `new_multi_thread()` spins one async worker per
+        // logical core PLUS an on-demand blocking pool (default max 512) that the
+        // heavy `spawn_blocking` SQLCipher usage (CrdtStore/CryptoStore/MessageStore)
+        // happily fills. On a many-core machine that alone was ~50 live
+        // "tokio-runtime-w" threads. Cap both: 4 async workers is plenty for our
+        // socket/event-loop work, and the blocking actors are few + serialized so a
+        // small blocking pool suffices. Reap idle blocking threads quickly so a burst
+        // (e.g. a sync flood) doesn't leave a high-water-mark of parked threads.
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get().clamp(2, 4))
+            .unwrap_or(4);
         tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .max_blocking_threads(8)
+            .thread_keep_alive(std::time::Duration::from_secs(5))
+            // Name our threads distinctly so a gdb dump can tell OUR runtime's
+            // threads (hollow-rt-*) apart from any other tokio runtime / library
+            // thread pool — diagnostic for the "31 tokio-runtime-w when capped at
+            // 4+8" anomaly.
+            .thread_name("hollow-rt")
             .enable_all()
             .build()
             .expect("Failed to create tokio runtime")

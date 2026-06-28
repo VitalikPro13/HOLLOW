@@ -11,7 +11,19 @@ class TypingNotifier extends Notifier<Map<String, Set<String>>> {
   final Map<String, Map<String, Timer>> _timers = {};
 
   @override
-  Map<String, Set<String>> build() => {};
+  Map<String, Set<String>> build() {
+    // Cancel any pending 5s expiry timers if this provider is disposed, so they
+    // don't fire clearTyping() into a disposed notifier.
+    ref.onDispose(() {
+      for (final inner in _timers.values) {
+        for (final t in inner.values) {
+          t.cancel();
+        }
+      }
+      _timers.clear();
+    });
+    return {};
+  }
 
   /// Mark a peer as typing in a context (DM peer ID or "serverId:channelId").
   /// Auto-expires after 5 seconds.

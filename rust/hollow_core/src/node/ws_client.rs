@@ -228,7 +228,7 @@ async fn ws_client_loop(
     let mut backoff_secs = 1u64;
     let mut pending_commands: Vec<WsCommand> = Vec::new();
 
-    loop {
+    'reconnect: loop {
         hollow_log!("[HOLLOW-WS] Connecting to {relay_url}...");
         // backoff_secs > 1 means a prior connection dropped (it resets to 1 on
         // success), so this attempt is a reconnect rather than the first connect.
@@ -372,7 +372,18 @@ async fn ws_client_loop(
                             }
                         }
                         // Commands from the swarm.
-                        Some(cmd) = cmd_rx.recv() => {
+                        maybe_cmd = cmd_rx.recv() => {
+                            // None = the swarm dropped the command sender, i.e.
+                            // the node is shutting down. Exit BOTH loops so this
+                            // task ends and its WS socket closes — otherwise the
+                            // `select!` would just disable this arm and keep the
+                            // socket alive, pinging + reconnecting forever (a
+                            // per-restart task + socket leak: stop_node only
+                            // aborted the event loop, not this task).
+                            let Some(cmd) = maybe_cmd else {
+                                hollow_log!("[HOLLOW-WS] Command channel closed — shutting down WS client task");
+                                break 'reconnect;
+                            };
                             if !send_command(&mut ws_write, &cmd).await {
                                 hollow_log!("[HOLLOW-WS] Send failed — connection dead, reconnecting");
                                 pending_commands.push(cmd);
@@ -397,9 +408,20 @@ async fn ws_client_loop(
         let _ = event_tx.send(WsEvent::Disconnected);
 
         // Drain any commands that arrived during the failed connection attempt.
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            track_room_change(&state, &cmd, &event_tx).await;
-            pending_commands.push(cmd);
+        // If the channel is CLOSED (sender dropped → node shutting down), stop
+        // reconnecting and end the task instead of looping forever.
+        loop {
+            match cmd_rx.try_recv() {
+                Ok(cmd) => {
+                    track_room_change(&state, &cmd, &event_tx).await;
+                    pending_commands.push(cmd);
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    hollow_log!("[HOLLOW-WS] Command channel closed during reconnect — shutting down WS client task");
+                    break 'reconnect;
+                }
+            }
         }
 
         // Exponential backoff.

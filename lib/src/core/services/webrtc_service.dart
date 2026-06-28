@@ -345,6 +345,14 @@ class WebRtcService {
     } catch (e) {
       _connecting.remove(peerId);
       _log('[HOLLOW-WEBRTC-DART] connectToPeer failed for $peerId: $e');
+      // A throw after the PC was created+stored (createDataChannel/createOffer/
+      // setLocalDescription all throw) leaves a live PC + thread-set in the map.
+      // Dispose it — but only if it's still OUR connId (a glare supersede may
+      // already have replaced the entry with a newer connection).
+      final partial = _connections[peerId];
+      if (partial != null && partial.connId == connId) {
+        await _cleanupConnection(peerId);
+      }
     }
   }
 
@@ -536,8 +544,13 @@ class WebRtcService {
     try {
       await conn.dataChannel?.close();
     } catch (_) {}
+    // close() and dispose() get SEPARATE guards: if close() throws on an
+    // already-failing native PC, dispose() (which frees the thread-set) must
+    // still run, or the libwebrtc threads leak.
     try {
       await conn.pc.close();
+    } catch (_) {}
+    try {
       await conn.pc.dispose();
     } catch (_) {}
   }
@@ -548,9 +561,24 @@ class WebRtcService {
     for (final peerId in peers) {
       await disconnectPeer(peerId);
     }
+    // Close any in-flight incoming transfers' IOSinks + delete their temp files
+    // before dropping them — clearing the map alone leaks open file handles.
+    for (final transfer in _transfers.values) {
+      try {
+        await transfer.sink.close();
+      } catch (_) {}
+      try {
+        File(transfer.tempPath).deleteSync();
+      } catch (_) {}
+    }
     _transfers.clear();
     _pendingIceCandidates.clear(); // Phase 6.25 leak fix
     _connecting.clear();
+    _intentionalClose.clear();
+    _stunOnlyPeers.clear();
+    _pingSentAt.clear();
+    _screenAudioBufferedCache.clear();
+    _screenAudioBufferPolling.clear();
   }
 
   // --- Private ---
@@ -627,7 +655,10 @@ class WebRtcService {
     final prior = _connections[peerId];
     if (prior != null) {
       _log('[HOLLOW-WEBRTC-DART] Replacing prior connection to $peerId (closing orphan)');
-      _closeConn(prior);
+      // AWAIT — otherwise the orphan's close()/dispose() races the new PC's
+      // construction below, leaking the old PC's thread-set (and risking a
+      // native teardown overlapping new-PC setup → heap corruption on Linux).
+      await _closeConn(prior);
     }
 
     final pc = await createPeerConnection(iceServers);
@@ -808,14 +839,26 @@ class WebRtcService {
     network_api.webrtcPeerConnected(peerId: peerId);
   }
 
-  void _onDataChannelClosed(String peerId) {
+  Future<void> _onDataChannelClosed(String peerId) async {
     _log('[HOLLOW-WEBRTC-DART] Data channel CLOSED with $peerId');
     final wasIntentional = _intentionalClose.remove(peerId);
     _pingSentAt.remove(peerId);
     _screenAudioBufferedCache.remove(peerId);
     _screenAudioBufferPolling.remove(peerId);
-    _connections[peerId]?.idleTimer?.cancel();
-    _connections.remove(peerId);
+    _connecting.remove(peerId);
+    _stunOnlyPeers.remove(peerId);
+    // Route through _closeConn so the PC is actually close()+dispose()'d and
+    // BOTH timers (idle + keepalive) are cancelled. Previously this only
+    // cancelled idleTimer and dropped the map entry — the RTCPeerConnection
+    // (and its libwebrtc thread-set) was orphaned and the keepalive Timer kept
+    // firing forever. This is the highest-frequency leak path (every normal
+    // disconnect routes here). The map entry is removed first, so the
+    // dataChannel.close() inside _closeConn re-entering this callback finds no
+    // entry and short-circuits.
+    final conn = _connections.remove(peerId);
+    if (conn != null) {
+      await _closeConn(conn);
+    }
 
     // Fail any in-progress incoming transfers from this peer.
     final incompleteIds = _transfers.entries

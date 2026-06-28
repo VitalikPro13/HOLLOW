@@ -81,7 +81,22 @@ class EventStreamNotifier extends Notifier<bool> {
 
 
   @override
-  bool build() => false; // streaming?
+  bool build() {
+    // Safety net: if this provider is ever disposed, release the Rust→Dart event
+    // subscription and any pending sync-timeout timers so they can't fire into a
+    // disposed notifier or keep the stream alive. (Normal teardown still goes
+    // through stop() via NodeNotifier.stop(); this guards the invalidate path.)
+    // Does NOT touch `state` — that throws post-dispose.
+    ref.onDispose(() {
+      _subscription?.cancel();
+      _subscription = null;
+      for (final t in _syncTimeouts.values) {
+        t.cancel();
+      }
+      _syncTimeouts.clear();
+    });
+    return false; // streaming?
+  }
 
   /// Refresh the iOS push-hints cache (friend name + avatar) read by the
   /// Notification Service Extension. Debounced + iOS-gated inside the cache, so
@@ -193,6 +208,12 @@ class EventStreamNotifier extends Notifier<bool> {
   void stop() {
     _subscription?.cancel();
     _subscription = null;
+    // Drain pending sync-timeout timers so they don't fire after the stream
+    // stops (each fires a ref.read into a now-idle notifier).
+    for (final t in _syncTimeouts.values) {
+      t.cancel();
+    }
+    _syncTimeouts.clear();
     state = false;
   }
 

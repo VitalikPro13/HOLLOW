@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -84,6 +85,10 @@ class VoiceChannelService {
   /// Shared local camera stream (captured once, added to all PCs).
   MediaStream? _localVideoStream;
   bool _isCameraOn = false;
+  /// Serializes startCamera/stopCamera so a rapid stop→start can't open a new
+  /// V4L2 capturer while the old one is still tearing down (libwebrtc
+  /// RaceChecker aborts on /dev/video0 — see the Linux settle in stopCamera).
+  Future<void> _cameraLock = Future<void>.value();
   bool _useFrontCamera = true;
 
   /// Per-peer RTCVideoRenderer for incoming video tracks.
@@ -193,24 +198,32 @@ class VoiceChannelService {
 
     _vcLog('[HOLLOW-VC] Creating offer for peer $peerId');
     final pc = await _createPeerConnection(peerId);
-    _addLocalAudioTracks(pc);
+    try {
+      _addLocalAudioTracks(pc);
 
-    // Enable SFrame sender encryption on outgoing audio.
-    await _enableSframeSender(peerId, pc);
+      // Enable SFrame sender encryption on outgoing audio.
+      await _enableSframeSender(peerId, pc);
 
-    final offer = await pc.createOffer();
-    final mungedSdp = _mungeOpusParams(offer.sdp!);
-    await pc.setLocalDescription(
-        RTCSessionDescription(mungedSdp, offer.type));
+      final offer = await pc.createOffer();
+      final mungedSdp = _mungeOpusParams(offer.sdp!);
+      await pc.setLocalDescription(
+          RTCSessionDescription(mungedSdp, offer.type));
 
-    final payload = jsonEncode({'sdp': mungedSdp});
-    await network_api.voiceChannelSendSignal(
-      serverId: _serverId!,
-      channelId: _channelId!,
-      peerId: peerId,
-      signalType: 'sdp_offer',
-      payload: payload,
-    );
+      final payload = jsonEncode({'sdp': mungedSdp});
+      await network_api.voiceChannelSendSignal(
+        serverId: _serverId!,
+        channelId: _channelId!,
+        peerId: peerId,
+        signalType: 'sdp_offer',
+        payload: payload,
+      );
+    } catch (e) {
+      // A throw here leaves a live PC (already in _peerConnections) stranded —
+      // dispose it so its libwebrtc thread-set can't leak.
+      _vcLog('[HOLLOW-VC] connectToPeer($peerId) failed, closing PC: $e');
+      await closePeer(peerId);
+      rethrow;
+    }
   }
 
   // ---------------------------------------------------------------
@@ -256,37 +269,45 @@ class VoiceChannelService {
 
     _vcLog('[HOLLOW-VC] Received SDP offer from $peerId');
     final pc = await _createPeerConnection(peerId);
-    _addLocalAudioTracks(pc);
+    try {
+      _addLocalAudioTracks(pc);
 
-    // Enable SFrame sender encryption on outgoing audio.
-    await _enableSframeSender(peerId, pc);
+      // Enable SFrame sender encryption on outgoing audio.
+      await _enableSframeSender(peerId, pc);
 
-    await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
-    _remoteDescSet[peerId] = true;
-    await _flushPendingCandidates(peerId);
+      await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+      _remoteDescSet[peerId] = true;
+      await _flushPendingCandidates(peerId);
 
-    final answer = await pc.createAnswer();
-    final mungedSdp = _mungeOpusParams(answer.sdp!);
-    await pc.setLocalDescription(
-        RTCSessionDescription(mungedSdp, answer.type));
+      final answer = await pc.createAnswer();
+      final mungedSdp = _mungeOpusParams(answer.sdp!);
+      await pc.setLocalDescription(
+          RTCSessionDescription(mungedSdp, answer.type));
 
-    final answerPayload = jsonEncode({'sdp': mungedSdp});
-    await network_api.voiceChannelSendSignal(
-      serverId: serverId,
-      channelId: channelId,
-      peerId: peerId,
-      signalType: 'sdp_answer',
-      payload: answerPayload,
-    );
+      final answerPayload = jsonEncode({'sdp': mungedSdp});
+      await network_api.voiceChannelSendSignal(
+        serverId: serverId,
+        channelId: channelId,
+        peerId: peerId,
+        signalType: 'sdp_answer',
+        payload: answerPayload,
+      );
 
-    // If camera is on, send renegotiation to add video track now that
-    // the initial audio connection is established.
-    _pendingCameraReneg.remove(peerId);
-    if (_isCameraOn && _localVideoStream != null) {
-      _vcLog('[HOLLOW-VC] Camera on — sending renegotiation to add video for $peerId (answerer)');
-      _addLocalVideoTracks(pc);
-      await _enableSframeSenderVideo(peerId, pc);
-      await _sendRenegotiationOffer(peerId);
+      // If camera is on, send renegotiation to add video track now that
+      // the initial audio connection is established.
+      _pendingCameraReneg.remove(peerId);
+      if (_isCameraOn && _localVideoStream != null) {
+        _vcLog('[HOLLOW-VC] Camera on — sending renegotiation to add video for $peerId (answerer)');
+        _addLocalVideoTracks(pc);
+        await _enableSframeSenderVideo(peerId, pc);
+        await _sendRenegotiationOffer(peerId);
+      }
+    } catch (e) {
+      // setRemoteDescription on an unsupported-codec SDP is a classic throw
+      // point — dispose the stranded PC before propagating.
+      _vcLog('[HOLLOW-VC] _handleSdpOffer($peerId) failed, closing PC: $e');
+      await closePeer(peerId);
+      rethrow;
     }
   }
 
@@ -517,6 +538,24 @@ class VoiceChannelService {
     // Create new renderer.
     final renderer = RTCVideoRenderer();
     await renderer.initialize();
+
+    // The peer may have LEFT while we were awaiting initialize() above —
+    // closePeer would already have run and cleared this peer's maps. Storing a
+    // renderer/stream now would orphan them (no later closePeer removes them).
+    // Dispose what we just built and bail.
+    if (!_peerConnections.containsKey(peerId)) {
+      _vcLog('[HOLLOW-VC] $peerId left during video track setup — discarding orphan renderer/stream');
+      try {
+        await renderer.dispose();
+      } catch (_) {}
+      if (isSynthetic) {
+        try {
+          await stream.dispose();
+        } catch (_) {}
+      }
+      return;
+    }
+
     renderer.srcObject = stream;
     _remoteVideoRenderers[peerId] = renderer;
     _remoteVideoStreams[peerId] = stream;
@@ -607,7 +646,7 @@ class VoiceChannelService {
     gossipNeighbors = {};
     await frameCryptor?.dispose();
     frameCryptor = null;
-    _stopLocalVad();
+    await _stopLocalVad();
   }
 
   // ---------------------------------------------------------------
@@ -661,31 +700,65 @@ class VoiceChannelService {
 
   /// Start capturing camera and add video track to all existing PCs.
   /// Returns the local video stream for the provider to create a renderer.
+  /// Public entry — serialized against stopCamera (shared [_cameraLock]) so a
+  /// stop→start can't race two V4L2 capturers on the same device.
   Future<MediaStream?> startCamera() async {
+    final prev = _cameraLock;
+    final completer = Completer<void>();
+    _cameraLock = completer.future;
+    try {
+      try {
+        await prev;
+      } catch (_) {}
+      return await _startCameraInner();
+    } finally {
+      completer.complete();
+    }
+  }
+
+  Future<MediaStream?> _startCameraInner() async {
     if (_isCameraOn) return _localVideoStream;
 
-    try {
-      final videoConstraints = <String, dynamic>{
-        'width': {'ideal': 640},
-        'height': {'ideal': 480},
-        'frameRate': {'ideal': 30},
-      };
-      // flutter_webrtc native (Windows/macOS/Linux) uses 'sourceId' in
-      // optional array — 'deviceId' is ignored by GetUserVideo().
-      if (preferredCameraDeviceId != null) {
-        videoConstraints['optional'] = [
-          {'sourceId': preferredCameraDeviceId}
-        ];
+    // LINUX: if the device is still open from an earlier startCamera this
+    // session (stopCamera kept it open to avoid the V4L2 reopen race), just
+    // resume the existing track instead of reopening /dev/video*.
+    if (Platform.isLinux && _localVideoStream != null) {
+      final existing = _localVideoStream!.getVideoTracks().firstOrNull;
+      if (existing != null) {
+        existing.enabled = true;
+        _isCameraOn = true;
+        _vcLog('[HOLLOW-VC] Camera resumed (Linux: reused open device)');
+        // Fall through to the add-track-to-PCs + reneg loop below.
+      } else {
+        await _localVideoStream!.dispose();
+        _localVideoStream = null;
       }
-      _localVideoStream = await navigator.mediaDevices.getUserMedia({
-        'audio': false,
-        'video': videoConstraints,
-      });
-      _isCameraOn = true;
-      _vcLog('[HOLLOW-VC] Camera started, tracks=${_localVideoStream!.getVideoTracks().length}');
-    } catch (e) {
-      _vcLog('[HOLLOW-VC] Failed to capture camera: $e');
-      return null;
+    }
+
+    if (_localVideoStream == null) {
+      try {
+        final videoConstraints = <String, dynamic>{
+          'width': {'ideal': 640},
+          'height': {'ideal': 480},
+          'frameRate': {'ideal': 30},
+        };
+        // flutter_webrtc native (Windows/macOS/Linux) uses 'sourceId' in
+        // optional array — 'deviceId' is ignored by GetUserVideo().
+        if (preferredCameraDeviceId != null) {
+          videoConstraints['optional'] = [
+            {'sourceId': preferredCameraDeviceId}
+          ];
+        }
+        _localVideoStream = await navigator.mediaDevices.getUserMedia({
+          'audio': false,
+          'video': videoConstraints,
+        });
+        _isCameraOn = true;
+        _vcLog('[HOLLOW-VC] Camera started, tracks=${_localVideoStream!.getVideoTracks().length}');
+      } catch (e) {
+        _vcLog('[HOLLOW-VC] Failed to capture camera: $e');
+        return null;
+      }
     }
 
     final videoTrack = _localVideoStream!.getVideoTracks().first;
@@ -723,8 +796,23 @@ class VoiceChannelService {
     return _localVideoStream;
   }
 
-  /// Stop camera and remove video track from all PCs.
+  /// Stop camera and remove video track from all PCs. Serialized against
+  /// startCamera via [_cameraLock].
   Future<void> stopCamera() async {
+    final prev = _cameraLock;
+    final completer = Completer<void>();
+    _cameraLock = completer.future;
+    try {
+      try {
+        await prev;
+      } catch (_) {}
+      await _stopCameraInner();
+    } finally {
+      completer.complete();
+    }
+  }
+
+  Future<void> _stopCameraInner() async {
     if (!_isCameraOn) return;
     _isCameraOn = false;
 
@@ -749,15 +837,36 @@ class VoiceChannelService {
       }
     }
 
-    // Stop and dispose camera stream.
+    // Stop and dispose camera stream — EXCEPT on Linux, where closing the V4L2
+    // device and reopening it on the next startCamera races the libwebrtc
+    // CaptureThread and ABORTS the process (video_capture_v4l2.cc:417). On Linux
+    // we KEEP the device open (just pause the track via enabled=false) for the
+    // whole channel session; it's released once in closeAll(), where nothing
+    // reopens after. The track was already removed from all PCs above. Same
+    // reasoning as VoiceService._toggleVideoLinux.
     if (_localVideoStream != null) {
-      for (final track in _localVideoStream!.getTracks()) {
-        await track.stop();
+      if (Platform.isLinux) {
+        final track = _localVideoStream!.getVideoTracks().firstOrNull;
+        if (track != null) track.enabled = false;
+        _vcLog('[HOLLOW-VC] Camera paused (Linux: device kept open)');
+      } else {
+        for (final track in _localVideoStream!.getTracks()) {
+          await track.stop();
+        }
+        await _localVideoStream!.dispose();
+        _localVideoStream = null;
+        _vcLog('[HOLLOW-VC] Camera stopped');
       }
-      await _localVideoStream!.dispose();
-      _localVideoStream = null;
     }
-    _vcLog('[HOLLOW-VC] Camera stopped');
+
+    // LINUX V4L2 RACE: libwebrtc's StopCapture() doesn't join its CaptureThread,
+    // so dispose() returns while the OS thread still holds /dev/video0. Settle
+    // here (held inside the _cameraLock critical section) so the next
+    // startCamera's getUserMedia can't reopen the device mid-teardown and trip
+    // the RaceChecker abort. See the matching settle in VoiceService.toggleVideo.
+    if (Platform.isLinux) {
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    }
   }
 
   /// Switch front/back camera (mobile).
@@ -986,13 +1095,20 @@ class VoiceChannelService {
     }
   }
 
-  void _stopLocalVad() {
-    _localVadAmpSub?.cancel();
+  Future<void> _stopLocalVad() async {
+    await _localVadAmpSub?.cancel();
     _localVadAmpSub = null;
-    if (_localVadRecorder != null) {
-      _localVadRecorder!.stop();
-      _localVadRecorder!.dispose();
-      _localVadRecorder = null;
+    final recorder = _localVadRecorder;
+    _localVadRecorder = null;
+    if (recorder != null) {
+      // Await stop+dispose — the `record` plugin holds a native capture
+      // stream/thread; fire-and-forget leaks it across rapid leave/rejoin.
+      try {
+        await recorder.stop();
+      } catch (_) {}
+      try {
+        await recorder.dispose();
+      } catch (_) {}
     }
     _localSpeaking = false;
   }

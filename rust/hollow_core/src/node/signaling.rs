@@ -115,7 +115,16 @@ async fn signaling_loop(
 
     loop {
         tokio::select! {
-            Some(cmd) = cmd_rx.recv() => {
+            maybe_cmd = cmd_rx.recv() => {
+                // None = the command sender (held by run_event_loop) was dropped,
+                // i.e. the node is shutting down. Exit the loop so this task ends
+                // instead of spinning the heartbeat forever (was a per-restart
+                // task leak — stop_node only aborted the event loop, leaving this
+                // signaling task alive).
+                let Some(cmd) = maybe_cmd else {
+                    hollow_log!("[HOLLOW-SIGNALING] Command channel closed — shutting down signaling task");
+                    break;
+                };
                 match cmd {
                     SignalingCmd::Bootstrap { room_code } => {
                         match do_bootstrap(&client, signaling_url, &room_code).await {

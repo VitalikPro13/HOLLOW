@@ -98,19 +98,19 @@ NEVER use `replaceTrack` on Windows. The service exclusively uses `pc.addTrack(t
 
 ### Camera (Video) Management
 
-`VoiceChannelService.startCamera()`:
-1. Returns early if camera already on
-2. Captures camera at 640x480@30fps via `getUserMedia`. Uses `sourceId` in optional array for device selection
-3. For each existing PC in stable state:
-   - Calls `pc.addTrack(videoTrack, _localVideoStream!)`
-   - Enables SFrame sender encryption for video
-   - Sends renegotiation offer
-4. PCs not in stable state get added to `_pendingCameraReneg` set (renegotiated later when stable)
-5. Returns the local video stream for provider to create renderer
+`startCamera`/`stopCamera` are SERIALIZED against each other via a shared `_cameraLock` (chained-future) so a rapid stop->start can't open two V4L2 capturers at once. The public methods delegate to `_startCameraInner`/`_stopCameraInner`.
 
-`VoiceChannelService.stopCamera()`:
+`startCamera()` -> `_startCameraInner()`:
+1. Returns early if camera already on
+2. **LINUX:** if `_localVideoStream` is still open from an earlier enable this session (stopCamera kept it open — see below), just resumes the existing track via `track.enabled = true` instead of reopening `/dev/video*`. Otherwise captures fresh.
+3. Captures camera at 640x480@30fps via `getUserMedia` (only if no open stream). Uses `sourceId` in optional array for device selection
+4. For each existing PC in stable state: `pc.addTrack(videoTrack, _localVideoStream!)`, enables SFrame sender encryption for video, sends renegotiation offer
+5. PCs not in stable state get added to `_pendingCameraReneg` set (renegotiated later when stable)
+6. Returns the local video stream for provider to create renderer
+
+`stopCamera()` -> `_stopCameraInner()`:
 1. For each PC: gets senders, removes video senders via `pc.removeTrack(sender)`, sends renegotiation if stable
-2. Stops all tracks and disposes `_localVideoStream`
+2. **LINUX:** does NOT stop/dispose `_localVideoStream` — only pauses it via `track.enabled = false`, keeping the V4L2 device OPEN for the whole channel session. libwebrtc's V4L2 `StopCapture()` does not join its CaptureThread, so closing + reopening `/dev/video*` races the RaceChecker and aborts the process (`video_capture_v4l2.cc:417`). The device is released exactly once in `closeAll()`, where nothing reopens after. Windows/macOS stop+dispose the stream normally (no V4L2, no race).
 
 ### Renegotiation
 
@@ -277,10 +277,13 @@ Audio quality: `opusBitrate` (default 32000), `opusStereo` (default false). Set 
 
 `setRemoteAudioVolume(volume)`: Sets volume on remote audio receiver track via `Helper.setVolume()`. Range: 0.0 (silent) to 2.0 (2x).
 
-`toggleVideo()`: Uses addTrack/removeTrack pattern (NEVER replaceTrack):
-- **Disable**: Gets senders, finds video sender, calls `pc.removeTrack(sender)`. Stops tracks, disposes `_localVideoStream`. Disposes `_localRenderer`. Sets `_isVideoEnabled = false`.
-- **Enable**: Cleans up any leaked stream from previous failed enable. Captures camera (640x480@30fps, `sourceId` for device selection). Calls `pc.addTrack(videoTrack, _localVideoStream!)` to create fresh transceiver. Initializes local renderer. Sets `_isVideoEnabled = true`.
-- Caller (CallNotifier) must trigger SDP renegotiation after toggleVideo returns.
+`toggleVideo()`: SERIALIZED via a chained-future `_videoToggleLock` (each toggle awaits the prior one's full completion) so rapid on/off can't overlap. Delegates to `_toggleVideoInner()`. On **non-Linux** (Windows/macOS) uses the addTrack/removeTrack pattern (NEVER replaceTrack):
+- **Disable**: Gets senders, finds video sender, `pc.removeTrack(sender)`. Stops tracks, disposes `_localVideoStream`. Disposes `_localRenderer`. Sets `_isVideoEnabled = false`.
+- **Enable**: Cleans up any leaked stream from a previous failed enable. Captures camera (640x480@30fps, `sourceId` for device selection). `pc.addTrack(videoTrack, _localVideoStream!)` (fresh transceiver). Initializes local renderer. Sets `_isVideoEnabled = true`.
+
+On **Linux**, `_toggleVideoInner` returns early into `_toggleVideoLinux()`, which NEVER closes/reopens the V4L2 device (that races libwebrtc's CaptureThread and aborts — `video_capture_v4l2.cc:417`). Instead the camera is opened ONCE on the first enable (`getUserMedia` + `addTrack`) and subsequent toggles flip `track.enabled` (pause/resume frames); the local preview renderer is disposed on pause and recreated on resume so the UI doesn't show a frozen frame. The device is released only in `endCall` (`_teardownMedia`), where nothing reopens after. Tradeoff: the camera LED may stay lit on Linux while video is "off" (frames suppressed, nothing transmitted; the remote gets `video_state:enabled=false` to hide the tile).
+
+Caller (CallNotifier) triggers SDP renegotiation after toggleVideo returns (a no-op SDP for the Linux pause/resume case — harmless).
 
 `switchCamera()`: Mobile only. Calls `Helper.switchCamera()` on the video track, toggles `_useFrontCamera`.
 
@@ -308,13 +311,15 @@ Audio quality: `opusBitrate` (default 32000), `opusStereo` (default false). Set 
 
 ### Call End Cleanup
 
-`VoiceService.endCall()`:
+`VoiceService.endCall()` calls `_teardownMedia()` (a reusable full-teardown helper) then clears call identity. `_teardownMedia()` is ALSO run at the START of `createOffer`/`handleOffer` (before media capture) so a re-entrant call — e.g. a second inbound offer during the getUserMedia window — can't orphan the prior session's streams. It:
 1. Stops and disposes local audio stream (all tracks stopped individually)
-2. Stops and disposes local video stream
-3. Disposes local and remote renderers (srcObject=null first, then dispose)
-4. Closes and disposes PC
+2. Stops and disposes local video stream (on Linux this is the single V4L2 device close per call)
+3. Disposes local and remote renderers (srcObject=null FIRST so a Linux "texture not found" throw can't strand a half-disposed renderer; only synthetic remote streams are disposed)
+4. Closes and disposes PC — `close()` and `dispose()` get SEPARATE try/catch so a `close()` throw can't skip the thread-set-freeing `dispose()`
 5. Disposes `_frameCryptor`
-6. Clears all state
+6. Clears media state
+
+`createOffer`/`handleOffer` also wrap their body in try/catch -> `await endCall(); rethrow` so a throw mid-setup (e.g. unsupported-codec SDP) disposes the partial PC + capturers instead of leaking them.
 
 ### SDP Opus Munging
 
@@ -463,9 +468,16 @@ Transfer IDs are padded to exactly 64 bytes (null-padded UTF-8).
 
 `disconnectPeer(peerId)`: Adds to `_intentionalClose`, calls `_cleanupConnection()`.
 
-`_cleanupConnection(peerId)`: Removes from `_connecting` and `_stunOnlyPeers`, cancels timers, closes data channel, closes/disposes PC.
+`_cleanupConnection(peerId)`: Removes from `_connecting`/`_stunOnlyPeers`, removes the `_PeerConn` from the map, delegates to `_closeConn()`.
 
-`dispose()`: Disconnects all peers, clears transfers and pending ICE candidates.
+`_closeConn(conn)`: Cancels BOTH timers (idle + keepalive), closes the data channel, then `pc.close()` and `pc.dispose()` in SEPARATE try/catch blocks (a `close()` throw must not skip the thread-set-freeing `dispose()`).
+
+EVERY path that drops a PC from the connections map routes through `_closeConn` and awaits it before any recreate:
+- `_onDataChannelClosed` (every normal disconnect — the highest-frequency path) now captures the conn and runs `_closeConn` (previously it only removed the map entry + cancelled idleTimer, leaking the PC's thread-set AND the keepalive Timer).
+- The `_handleOffer` supersede AWAITS `_closeConn(prior)` before creating the new PC (was fire-and-forget, racing the new PC's construction).
+- The `connectToPeer` catch disposes a partially-built PC (guarded by connId so a glare supersede isn't clobbered).
+
+`dispose()`: Disconnects all peers (awaited per-peer), closes every in-flight transfer's `IOSink` + deletes its temp file before clearing `_transfers`, then clears all collateral sets/maps.
 
 ---
 
@@ -541,7 +553,7 @@ libwebrtc's desktop capturer ignores all resolution constraints (`scaleResolutio
 10. Starts track poller (2s interval checks if screen track is still enabled)
 11. Returns SDP offer string
 
-`createOfferFromStream(stream, {maxWidth, maxHeight, fps})`: Alternative for voice channels where one capture is shared across multiple peer connections. Takes pre-captured `MediaStream` instead of capturing new one. Caller manages track poller centrally. Otherwise same flow.
+`createOfferFromStream(stream, {maxWidth, maxHeight, fps})`: Alternative for voice channels where ONE capture is shared across multiple per-peer services. Takes a pre-captured `MediaStream` instead of capturing a new one. Sets `_ownsScreenStream = false` so `close()` does NOT stop/dispose the shared stream — disposing it would kill the share for every other peer AND double-free it (the provider disposes it once itself), which was the `corrupted size vs prev_size` heap abort on screen-share stop. `createOffer` keeps `_ownsScreenStream = true` (it captured its own stream). All three PC-creating methods (`createOffer`/`createOfferFromStream`/`handleOffer`) begin with an idempotent `close()` if a PC already exists, and wrap their body in try/catch -> `close(); rethrow`. `close()` resets the ownership flags to defaults at the end so the next reuse starts clean.
 
 `handleAnswer(sdp)`: Sets remote description, flushes pending ICE candidates.
 

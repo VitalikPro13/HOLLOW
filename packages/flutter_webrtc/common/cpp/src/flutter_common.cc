@@ -68,6 +68,37 @@ std::unique_ptr<MethodResultProxy> MethodResultProxy::Create(
   return std::make_unique<MethodResultProxyImpl>(std::move(method_result));
 }
 
+// Shared state for the EventChannel stream handler. The on_listen/on_cancel
+// lambdas registered with Flutter's EventChannel can be invoked ASYNCHRONOUSLY
+// by the BinaryMessenger AFTER the owning EventChannelProxyImpl has been
+// destroyed (rapid PeerConnection create/destroy churn — valgrind caught a
+// 1-byte "Invalid write" in OnCancelInternal writing on_listen_called_ into a
+// freed proxy, which smashed an adjacent heap chunk -> "corrupted size vs
+// prev_size"). Holding the state in a shared_ptr that the lambdas capture by
+// value means a late callback writes into still-live state instead of freed
+// memory. The proxy resets the handler in its destructor so callbacks stop
+// promptly, but this is the load-bearing safety net.
+struct EventChannelState {
+  std::shared_ptr<flutter::EventSink<flutter::EncodableValue>> sink;
+  std::list<EncodableValue> event_queue;
+  bool on_listen_called = false;
+  TaskRunner* task_runner = nullptr;
+
+  void PostEvent(const EncodableValue& event) {
+    if (task_runner) {
+      std::weak_ptr<EventSink> weak_sink = sink;
+      task_runner->EnqueueTask([weak_sink, event]() {
+        auto s = weak_sink.lock();
+        if (s) {
+          s->Success(event);
+        }
+      });
+    } else if (sink) {
+      sink->Success(event);
+    }
+  }
+};
+
 class EventChannelProxyImpl : public EventChannelProxy {
   public:
    EventChannelProxyImpl(BinaryMessenger* messenger,
@@ -77,62 +108,60 @@ class EventChannelProxyImpl : public EventChannelProxy {
              messenger,
              channelName,
              &flutter::StandardMethodCodec::GetInstance())),
-             task_runner_(task_runner) {
+         state_(std::make_shared<EventChannelState>()) {
+     state_->task_runner = task_runner;
+     std::shared_ptr<EventChannelState> state = state_;
      auto handler = std::make_unique<
          flutter::StreamHandlerFunctions<EncodableValue>>(
-         [&](const EncodableValue* arguments,
+         [state](const EncodableValue* arguments,
              std::unique_ptr<flutter::EventSink<EncodableValue>>&& events)
              -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
-           sink_ = std::move(events);
-           std::weak_ptr<EventSink> weak_sink = sink_;
-           for (auto& event : event_queue_) {
-            PostEvent(event);
+           state->sink = std::move(events);
+           for (auto& event : state->event_queue) {
+            state->PostEvent(event);
            }
-           event_queue_.clear();
-           on_listen_called_ = true;
+           state->event_queue.clear();
+           state->on_listen_called = true;
            return nullptr;
          },
-         [&](const EncodableValue* arguments)
+         [state](const EncodableValue* arguments)
              -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
-           on_listen_called_ = false;
+           state->on_listen_called = false;
+           state->sink = nullptr;
            return nullptr;
          });
- 
+
      channel_->SetStreamHandler(std::move(handler));
    }
- 
-   virtual ~EventChannelProxyImpl() {}
- 
+
+   virtual ~EventChannelProxyImpl() {
+     // Explicitly unregister the stream handler WHILE the channel is still alive
+     // so Flutter's EventChannel detaches its BinaryMessenger message handler in
+     // an orderly way — then destroy the channel. Relying on channel_.reset()
+     // alone left a window where the messenger could invoke a handler bound to a
+     // half-destroyed EventChannel (valgrind: a residual 1-byte "Invalid write"
+     // at shutdown in EventChannel::SetStreamHandler's lambda, after the engine
+     // view was removed -> "set message handler on FlBinaryMessenger without an
+     // engine"). The shared_ptr state outlives any in-flight callback regardless.
+     if (channel_) {
+       channel_->SetStreamHandler(nullptr);
+     }
+     channel_.reset();
+   }
+
    void Success(const EncodableValue& event, bool cache_event = true) override {
-     if (on_listen_called_) {
-       PostEvent(event);
+     if (state_->on_listen_called) {
+       state_->PostEvent(event);
      } else {
        if (cache_event) {
-         event_queue_.push_back(event);
+         state_->event_queue.push_back(event);
        }
      }
    }
 
-   void PostEvent(const EncodableValue& event) {
-     if(task_runner_) {
-      std::weak_ptr<EventSink> weak_sink = sink_;
-       task_runner_->EnqueueTask([weak_sink, event]() {
-        auto sink = weak_sink.lock();
-        if (sink) {
-          sink->Success(event);
-        }
-      });
-     } else {
-      sink_->Success(event);
-     }
-   }
- 
   private:
    std::unique_ptr<EventChannel> channel_;
-   std::shared_ptr<flutter::EventSink<flutter::EncodableValue>> sink_;
-   std::list<EncodableValue> event_queue_;
-   bool on_listen_called_ = false;
-   TaskRunner* task_runner_;
+   std::shared_ptr<EventChannelState> state_;
  };
 
 std::unique_ptr<EventChannelProxy> EventChannelProxy::Create(

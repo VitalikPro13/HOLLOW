@@ -595,6 +595,10 @@ class CallNotifier extends Notifier<CallState> {
     final callId = state.callId!;
     final iceConfig = ref.read(iceConfigProvider);
 
+    // Close any prior outgoing share before overwriting the field, so its PC +
+    // thread-set can't be orphaned (e.g. re-share without an intervening stop).
+    await _outgoingScreenShare?.close();
+
     // Create outgoing screen share service (separate PC).
     _outgoingScreenShare = ScreenShareService(
       localPeerId: localPeerId,
@@ -708,7 +712,7 @@ class CallNotifier extends Notifier<CallState> {
         case 'audio_state':
           _handleAudioState(peerId, payload);
         case 'screen_state':
-          _handleScreenState(peerId, payload);
+          await _handleScreenState(peerId, payload);
         case 'screen_offer':
           await _handleScreenOffer(peerId, payload);
         case 'screen_answer':
@@ -1151,7 +1155,7 @@ class CallNotifier extends Notifier<CallState> {
     );
   }
 
-  void _handleScreenState(String peerId, String payload) {
+  Future<void> _handleScreenState(String peerId, String payload) async {
     final json = jsonDecode(payload) as Map<String, dynamic>;
     final callId = json['call_id'] as String;
     final enabled = json['enabled'] as bool;
@@ -1164,8 +1168,13 @@ class CallNotifier extends Notifier<CallState> {
 
     if (!enabled) {
       // Remote stopped sharing — tear down the incoming screen share PC.
-      _incomingScreenShare?.close();
+      // Capture + null synchronously so a concurrent screen_offer doesn't
+      // double-tear-down the same PC, then AWAIT the close so the native
+      // thread-set is fully gone before we move on (an unawaited close that
+      // races a new offer's close() corrupts the PC's threads).
+      final incoming = _incomingScreenShare;
       _incomingScreenShare = null;
+      await incoming?.close();
     }
 
     state = state.copyWith(

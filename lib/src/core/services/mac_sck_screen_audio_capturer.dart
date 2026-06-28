@@ -116,6 +116,13 @@ class MacSckScreenAudioCapturer {
       _log('[SCK-AUDIO] Native capture failed: ${e.code} ${e.message}');
       await _teardown();
       return false;
+    } catch (e) {
+      // Any other throw (MissingPluginException, TimeoutException, …) must also
+      // tear down the already-spawned encoder process + its stdout subscription,
+      // or they leak (the encoder OS process keeps running).
+      _log('[SCK-AUDIO] Native capture failed (non-platform): $e');
+      await _teardown();
+      return false;
     }
 
     _active = true;

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -39,6 +40,14 @@ class VoiceService {
   MediaStream? _localVideoStream;
   bool _isVideoEnabled = false;
   bool _useFrontCamera = true;
+  /// Serializes [toggleVideo] so rapid on/off (or two concurrent toggles)
+  /// can't overlap two `getUserMedia` calls on the same V4L2 device — that
+  /// races the old capturer's teardown against the new one's start, which
+  /// libwebrtc's RaceChecker aborts on Linux ("video_capture_v4l2.cc:417
+  /// RaceDetected") and leaks the orphaned capture thread elsewhere. Each
+  /// toggle awaits the previous one's full completion before touching the
+  /// camera.
+  Future<void> _videoToggleLock = Future<void>.value();
   RTCVideoRenderer? _localRenderer;
   RTCVideoRenderer? _remoteRenderer;
   MediaStream? _remoteStream;
@@ -110,32 +119,48 @@ class VoiceService {
     bool withVideo = false,
   }) async {
     _log('[HOLLOW-VOICE] Creating offer for $peerId call=$callId withVideo=$withVideo');
+
+    // Tear down any prior session's media BEFORE capturing new media — capture
+    // overwrites _localStream/_localVideoStream, so without this a re-entrant
+    // call (or a leftover session) would orphan the previous streams + their
+    // mic/V4L2 capturers. _initPeerConnection's PC guard alone is not enough.
+    await _teardownMedia();
+
     _activePeerId = peerId;
     _activeCallId = callId;
 
-    // Pre-capture media BEFORE creating the PC.
-    await _captureLocalAudio();
-    if (withVideo) {
-      await _captureLocalVideo();
+    try {
+      // Pre-capture media BEFORE creating the PC.
+      await _captureLocalAudio();
+      if (withVideo) {
+        await _captureLocalVideo();
+      }
+
+      await _initPeerConnection(peerId, callId);
+      _addLocalAudioTracks();
+
+      if (withVideo && _localVideoStream != null) {
+        await _addLocalVideoTracks();
+        _isVideoEnabled = true;
+        await _initLocalRenderer();
+      }
+
+      final offer = await _pc!.createOffer();
+      final mungedOffer = _mungeOpusParams(offer.sdp!);
+      await _pc!.setLocalDescription(
+          RTCSessionDescription(mungedOffer, offer.type));
+
+      _log('[HOLLOW-VOICE] Offer created, SDP length=${mungedOffer.length}');
+      _dumpSdp('OFFER-OUT', mungedOffer);
+      return mungedOffer;
+    } catch (e) {
+      // A throw mid-setup (bad SDP, getUserMedia/createOffer failure) leaves a
+      // partially-built PC + capturers stranded. Tear them down before
+      // propagating so their thread-sets can't leak.
+      _log('[HOLLOW-VOICE] createOffer failed, tearing down: $e');
+      await endCall();
+      rethrow;
     }
-
-    await _initPeerConnection(peerId, callId);
-    _addLocalAudioTracks();
-
-    if (withVideo && _localVideoStream != null) {
-      await _addLocalVideoTracks();
-      _isVideoEnabled = true;
-      await _initLocalRenderer();
-    }
-
-    final offer = await _pc!.createOffer();
-    final mungedOffer = _mungeOpusParams(offer.sdp!);
-    await _pc!.setLocalDescription(
-        RTCSessionDescription(mungedOffer, offer.type));
-
-    _log('[HOLLOW-VOICE] Offer created, SDP length=${mungedOffer.length}');
-    _dumpSdp('OFFER-OUT', mungedOffer);
-    return mungedOffer;
   }
 
   /// Handle an incoming SDP offer (answerer side). Creates PC, starts mic,
@@ -153,38 +178,52 @@ class VoiceService {
     bool withVideo = false,
   }) async {
     _log('[HOLLOW-VOICE] Handling offer from $peerId call=$callId');
+
+    // Tear down any prior session's media BEFORE capturing new media (see
+    // createOffer) so a second inbound offer during the capture window can't
+    // orphan the first session's streams/PC.
+    await _teardownMedia();
+
     _activePeerId = peerId;
     _activeCallId = callId;
 
     _dumpSdp('OFFER-IN', sdp);
 
-    // Pre-capture media BEFORE creating the PC.
-    await _captureLocalAudio();
-    if (withVideo) {
-      await _captureLocalVideo();
+    try {
+      // Pre-capture media BEFORE creating the PC.
+      await _captureLocalAudio();
+      if (withVideo) {
+        await _captureLocalVideo();
+      }
+
+      await _initPeerConnection(peerId, callId);
+      _addLocalAudioTracks();
+
+      if (withVideo && _localVideoStream != null) {
+        await _addLocalVideoTracks();
+        _isVideoEnabled = true;
+        await _initLocalRenderer();
+      }
+
+      await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+      _remoteDescriptionSet = true;
+      await _flushPendingCandidates();
+
+      final answer = await _pc!.createAnswer();
+      final mungedAnswer = _mungeOpusParams(answer.sdp!);
+      await _pc!.setLocalDescription(
+          RTCSessionDescription(mungedAnswer, answer.type));
+
+      _log('[HOLLOW-VOICE] Answer created, SDP length=${mungedAnswer.length}');
+      _dumpSdp('ANSWER-OUT', mungedAnswer);
+      return mungedAnswer;
+    } catch (e) {
+      // setRemoteDescription on an unsupported-codec SDP is a classic throw
+      // point — dispose the partial PC + capturers before propagating.
+      _log('[HOLLOW-VOICE] handleOffer failed, tearing down: $e');
+      await endCall();
+      rethrow;
     }
-
-    await _initPeerConnection(peerId, callId);
-    _addLocalAudioTracks();
-
-    if (withVideo && _localVideoStream != null) {
-      await _addLocalVideoTracks();
-      _isVideoEnabled = true;
-      await _initLocalRenderer();
-    }
-
-    await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
-    _remoteDescriptionSet = true;
-    await _flushPendingCandidates();
-
-    final answer = await _pc!.createAnswer();
-    final mungedAnswer = _mungeOpusParams(answer.sdp!);
-    await _pc!.setLocalDescription(
-        RTCSessionDescription(mungedAnswer, answer.type));
-
-    _log('[HOLLOW-VOICE] Answer created, SDP length=${mungedAnswer.length}');
-    _dumpSdp('ANSWER-OUT', mungedAnswer);
-    return mungedAnswer;
   }
 
   /// Create a renegotiation offer on an existing voice PC (e.g., adding/removing video).
@@ -449,8 +488,41 @@ class VoiceService {
   ///
   /// The caller must trigger an SDP renegotiation after toggleVideo
   /// returns successfully — see `CallNotifier.toggleVideo`.
+  /// Public entry point — serialized so concurrent/rapid toggles can't open two
+  /// V4L2 capturers at once (see [_videoToggleLock]). Each call awaits the
+  /// previous toggle's full completion (old capturer fully stopped+disposed)
+  /// before its own getUserMedia runs.
   Future<bool> toggleVideo() async {
+    final prev = _videoToggleLock;
+    final completer = Completer<void>();
+    _videoToggleLock = completer.future;
+    try {
+      // Wait for any in-flight toggle to finish before we touch the camera.
+      try {
+        await prev;
+      } catch (_) {}
+      return await _toggleVideoInner();
+    } finally {
+      completer.complete();
+    }
+  }
+
+  Future<bool> _toggleVideoInner() async {
     if (_pc == null) return false;
+
+    // LINUX: the prebuilt libwebrtc V4L2 capturer's StopCapture() does NOT join
+    // its CaptureThread, so any close-then-reopen of /dev/video* races the
+    // RaceChecker and ABORTS the process (video_capture_v4l2.cc:417). A timed
+    // settle proved insufficient on real hardware. The robust fix: NEVER close
+    // the camera device mid-call — open it ONCE on the first enable, then toggle
+    // purely via `track.enabled` (pauses/resumes frames; the device + its single
+    // CaptureThread stay alive for the whole call and are torn down once at
+    // endCall, where nothing reopens after). Tradeoff: on Linux the camera LED
+    // may stay lit while "off" (frames are suppressed, nothing is transmitted).
+    // Windows/macOS keep the addTrack/removeTrack behavior (no V4L2, no race).
+    if (Platform.isLinux) {
+      return await _toggleVideoLinux();
+    }
 
     if (_isVideoEnabled) {
       // Turn off: remove video sender from the PC entirely (not just
@@ -556,6 +628,86 @@ class VoiceService {
     return _isVideoEnabled;
   }
 
+  /// Linux video toggle that NEVER closes/reopens the V4L2 device (which would
+  /// race the libwebrtc CaptureThread → abort). The camera is opened ONCE on the
+  /// first enable and the same track is paused/resumed via `enabled` thereafter;
+  /// the device is released only at endCall.
+  Future<bool> _toggleVideoLinux() async {
+    if (_isVideoEnabled) {
+      // Pause: stop frames flowing WITHOUT stopping the track / closing the
+      // device. The remote sees frames cease. Keep the sender + m-line in place.
+      final track = _localVideoStream?.getVideoTracks().firstOrNull;
+      if (track != null) track.enabled = false;
+      _isVideoEnabled = false;
+      // Drop the local self-preview so the UI doesn't show a frozen last frame.
+      // (The capture stream stays alive — only the renderer is torn down.)
+      if (_localRenderer != null) {
+        _localRenderer!.srcObject = null;
+        await _localRenderer!.dispose();
+        _localRenderer = null;
+      }
+      _log('[HOLLOW-VOICE] Video paused (Linux: device kept open)');
+      return false;
+    }
+
+    // Enable.
+    try {
+      if (_localVideoStream != null) {
+        // Camera already open from a prior enable this call — just resume frames.
+        final track = _localVideoStream!.getVideoTracks().firstOrNull;
+        if (track != null) {
+          track.enabled = true;
+          _isVideoEnabled = true;
+          // Ensure the sender still exists (it does — we never removed it); make
+          // sure the local preview is showing again.
+          await _initLocalRenderer();
+          _log('[HOLLOW-VOICE] Video resumed (Linux: reused open device)');
+          _scheduleVideoStatsProbes('send');
+          return true;
+        }
+        // Track somehow gone — fall through to a fresh capture.
+        await _localVideoStream!.dispose();
+        _localVideoStream = null;
+      }
+
+      // First enable of the call: open the device ONCE.
+      final videoConstraints = <String, dynamic>{
+        'width': {'ideal': 640},
+        'height': {'ideal': 480},
+        'frameRate': {'ideal': 30},
+      };
+      if (preferredCameraDeviceId != null) {
+        videoConstraints['optional'] = [
+          {'sourceId': preferredCameraDeviceId}
+        ];
+      }
+      final constraints = {'audio': false, 'video': videoConstraints};
+      _localVideoStream =
+          await navigator.mediaDevices.getUserMedia(constraints);
+      final videoTracks = _localVideoStream!.getVideoTracks();
+      if (videoTracks.isEmpty) {
+        _log('[HOLLOW-VOICE] No camera available');
+        await _localVideoStream!.dispose();
+        _localVideoStream = null;
+        return false;
+      }
+      final videoTrack = videoTracks.first;
+      await _pc!.addTrack(videoTrack, _localVideoStream!);
+      _log('[HOLLOW-VOICE] toggleVideo: opened camera + added track (Linux)');
+      if (videoTrack.id != null) {
+        await _constrainCameraCodecs(videoTrack.id!);
+      }
+      _isVideoEnabled = true;
+      await _initLocalRenderer();
+      _log('[HOLLOW-VOICE] Video enabled, camera active');
+      _scheduleVideoStatsProbes('send');
+      return true;
+    } catch (e) {
+      _log('[HOLLOW-VOICE] Failed to capture camera (Linux): $e');
+      return false;
+    }
+  }
+
   /// Switch front/back camera (mobile).
   Future<void> switchCamera() async {
     if (!_isVideoEnabled || _localVideoStream == null) return;
@@ -637,59 +789,116 @@ class VoiceService {
     return delta > 0.0001;
   }
 
-  Future<void> endCall() async {
-    _log('[HOLLOW-VOICE] Ending call with $_activePeerId');
-    stopVad();
-
+  /// Tear down ALL media resources of the current session: local mic/camera
+  /// streams, renderers, the remote stream, the PeerConnection (close+dispose),
+  /// and the SFrame cryptor. Every disposal is awaited and individually guarded
+  /// so one failure can't strand the rest (a stranded PC leaks its whole
+  /// libwebrtc thread-set). Used by [endCall] AND at the start of
+  /// [createOffer]/[handleOffer] so a re-entrant call (e.g. a second inbound
+  /// offer during the capture window) can't orphan the prior session's streams.
+  Future<void> _teardownMedia() async {
     // Stop local audio.
     if (_localStream != null) {
-      for (final track in _localStream!.getTracks()) {
-        await track.stop();
+      try {
+        for (final track in _localStream!.getTracks()) {
+          await track.stop();
+        }
+        await _localStream!.dispose();
+      } catch (e) {
+        _log('[HOLLOW-VOICE] local audio dispose failed (ignored): $e');
       }
-      await _localStream!.dispose();
       _localStream = null;
     }
 
     // Stop local video.
     if (_localVideoStream != null) {
-      for (final track in _localVideoStream!.getTracks()) {
-        await track.stop();
+      try {
+        for (final track in _localVideoStream!.getTracks()) {
+          await track.stop();
+        }
+        await _localVideoStream!.dispose();
+      } catch (e) {
+        _log('[HOLLOW-VOICE] local video dispose failed (ignored): $e');
       }
-      await _localVideoStream!.dispose();
       _localVideoStream = null;
     }
 
-    // Dispose renderers.
-    if (_localRenderer != null) {
-      _localRenderer!.srcObject = null;
-      await _localRenderer!.dispose();
-      _localRenderer = null;
+    // Dispose renderers (null BEFORE awaiting so a Linux "texture not found!"
+    // throw can't leave a stale half-disposed renderer).
+    final localRenderer = _localRenderer;
+    _localRenderer = null;
+    if (localRenderer != null) {
+      try {
+        localRenderer.srcObject = null;
+        await localRenderer.dispose();
+      } catch (e) {
+        _log('[HOLLOW-VOICE] local renderer dispose failed (ignored): $e');
+      }
     }
-    if (_remoteRenderer != null) {
-      _remoteRenderer!.srcObject = null;
-      await _remoteRenderer!.dispose();
-      _remoteRenderer = null;
+    final remoteRenderer = _remoteRenderer;
+    _remoteRenderer = null;
+    if (remoteRenderer != null) {
+      try {
+        remoteRenderer.srcObject = null;
+        await remoteRenderer.dispose();
+      } catch (e) {
+        _log('[HOLLOW-VOICE] remote renderer dispose failed (ignored): $e');
+      }
     }
+    // Dispose the remote stream only if we synthesized it (libwebrtc owns the
+    // event-provided ones).
+    final remoteStream = _remoteStream;
+    final remoteSynthetic = _remoteStreamIsSynthetic;
     _remoteStream = null;
     _remoteStreamIsSynthetic = false;
+    if (remoteStream != null && remoteSynthetic) {
+      try {
+        await remoteStream.dispose();
+      } catch (e) {
+        _log('[HOLLOW-VOICE] remote stream dispose failed (ignored): $e');
+      }
+    }
 
-    // Close the dedicated voice peer connection.
-    if (_pc != null) {
-      await _pc!.close();
-      await _pc!.dispose();
-      _pc = null;
+    // Close the dedicated voice peer connection. close() and dispose() get
+    // SEPARATE guards so a close() throw can't skip the thread-set-freeing
+    // dispose().
+    final pc = _pc;
+    _pc = null;
+    if (pc != null) {
+      try {
+        await pc.close();
+      } catch (e) {
+        _log('[HOLLOW-VOICE] pc close failed (ignored): $e');
+      }
+      try {
+        await pc.dispose();
+      } catch (e) {
+        _log('[HOLLOW-VOICE] pc dispose failed (ignored): $e');
+      }
     }
 
     // Dispose SFrame encryption.
-    await _frameCryptor?.dispose();
+    try {
+      await _frameCryptor?.dispose();
+    } catch (e) {
+      _log('[HOLLOW-VOICE] frame cryptor dispose failed (ignored): $e');
+    }
     _frameCryptor = null;
 
     _pendingCandidates.clear();
+    _isVideoEnabled = false;
+    _remoteDescriptionSet = false;
+  }
+
+  Future<void> endCall() async {
+    _log('[HOLLOW-VOICE] Ending call with $_activePeerId');
+    stopVad();
+
+    await _teardownMedia();
+
     _activePeerId = null;
     _activeCallId = null;
     _isMuted = false;
-    _isVideoEnabled = false;
-    _remoteDescriptionSet = false;
     _useFrontCamera = true;
   }
 

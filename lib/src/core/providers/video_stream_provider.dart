@@ -35,7 +35,15 @@ class VideoStreamNotifier extends Notifier<VideoStreamState?> {
   final VideoStreamServer _server = VideoStreamServer();
 
   @override
-  VideoStreamState? build() => null;
+  VideoStreamState? build() {
+    // Ensure the HTTP server (bound loopback socket) + its open RandomAccessFile
+    // are released if this provider is ever disposed — otherwise a started
+    // server would linger a bound socket + file handle until process exit.
+    ref.onDispose(() {
+      _server.stop();
+    });
+    return null;
+  }
 
   Future<Uri?> startStream(
     String partialFilePath,

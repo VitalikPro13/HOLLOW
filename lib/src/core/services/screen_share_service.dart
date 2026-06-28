@@ -34,6 +34,17 @@ class ScreenShareService {
 
   RTCPeerConnection? _pc;
   MediaStream? _screenStream; // Local screen capture (outgoing only)
+  // Whether THIS service owns _screenStream and must stop+dispose it on close().
+  // True for createOffer (we captured it). FALSE for createOfferFromStream:
+  // there one capture is SHARED across many per-peer services (voice channels),
+  // so the provider owns it — disposing it here would (a) kill the share for
+  // every other peer and (b) double-free it (the provider disposes it too),
+  // which is the `corrupted size vs prev_size` heap abort on screen-share stop.
+  bool _ownsScreenStream = true;
+  // Whether _remoteStream was SYNTHESIZED by us (createLocalMediaStream in the
+  // onTrack fallback) vs. handed to us by libwebrtc. We may only dispose the
+  // ones we synthesized; libwebrtc owns the event-provided streams.
+  bool _remoteStreamIsSynthetic = false;
   RTCVideoRenderer? _localRenderer; // Self-preview of outgoing screen
   RTCVideoRenderer? _remoteRenderer; // Renderer for incoming screen
   MediaStream? _remoteStream;
@@ -159,6 +170,13 @@ class ScreenShareService {
   }) async {
     _log('[HOLLOW-SCREEN] Creating offer: source=$sourceId '
         '${width}x$height @ ${fps}fps audio=$shareAudio');
+
+    // Idempotent: tear down any prior PC/stream on this service before
+    // capturing a new one, so a re-share on the same instance can't strand the
+    // old PeerConnection's thread-set.
+    if (_pc != null || _screenStream != null || _localRenderer != null) {
+      await close();
+    }
 
     // macOS / Android need explicit screen-capture permission before any
     // source enumeration. On macOS this triggers the System Settings →
@@ -305,44 +323,62 @@ class ScreenShareService {
   Future<String> createOfferFromStream(MediaStream stream, {int maxWidth = 1920, int maxHeight = 1080, int fps = 60}) async {
     _log('[HOLLOW-SCREEN] Creating offer from shared stream');
 
-    _screenStream = stream;
-    final screenTrack = _screenStream!.getVideoTracks().first;
-    _log('[HOLLOW-SCREEN] Using shared screen track: ${screenTrack.id}');
-
-    // Build a local self-preview renderer so the UI can show what we're
-    // sharing in the screen share view.
-    _localRenderer = RTCVideoRenderer();
-    await _localRenderer!.initialize();
-    _localRenderer!.srcObject = _screenStream;
-
-    // Create PC.
-    _pc = await createPeerConnection(iceServers);
-    _setupCallbacks();
-
-    // Add screen video track.
-    await _pc!.addTrack(screenTrack, _screenStream!);
-    _log('[HOLLOW-SCREEN] Added screen video track to PC');
-
-    // Apply resolution cap on the encoder.
-    await _applyResolutionCap(maxWidth, maxHeight, fps);
-
-    // Add audio tracks if available (macOS Process Tap audio goes via tracks).
-    final audioTracks = _screenStream!.getAudioTracks();
-    if (audioTracks.isNotEmpty) {
-      for (final track in audioTracks) {
-        await _pc!.addTrack(track, _screenStream!);
-      }
-      _log('[HOLLOW-SCREEN] Added ${audioTracks.length} audio track(s)');
+    // Idempotent: if this service already holds a PC (re-fired offer on
+    // reconnect), tear the old one down before building a new one so its
+    // libwebrtc thread-set can't leak.
+    if (_pc != null || _localRenderer != null || _remoteRenderer != null) {
+      await close();
     }
 
-    // Generate offer.
-    final offer = await _pc!.createOffer();
-    await _pc!.setLocalDescription(offer);
+    // The caller owns this shared capture stream — do NOT dispose it on close().
+    _ownsScreenStream = false;
+    _screenStream = stream;
 
-    _log('[HOLLOW-SCREEN] Offer created, SDP length=${offer.sdp?.length}');
+    try {
+      final screenTrack = _screenStream!.getVideoTracks().first;
+      _log('[HOLLOW-SCREEN] Using shared screen track: ${screenTrack.id}');
 
-    // Note: no track poller here — caller manages centrally for shared stream.
-    return offer.sdp!;
+      // Build a local self-preview renderer so the UI can show what we're
+      // sharing in the screen share view.
+      _localRenderer = RTCVideoRenderer();
+      await _localRenderer!.initialize();
+      _localRenderer!.srcObject = _screenStream;
+
+      // Create PC.
+      _pc = await createPeerConnection(iceServers);
+      _setupCallbacks();
+
+      // Add screen video track.
+      await _pc!.addTrack(screenTrack, _screenStream!);
+      _log('[HOLLOW-SCREEN] Added screen video track to PC');
+
+      // Apply resolution cap on the encoder.
+      await _applyResolutionCap(maxWidth, maxHeight, fps);
+
+      // Add audio tracks if available (macOS Process Tap audio goes via tracks).
+      final audioTracks = _screenStream!.getAudioTracks();
+      if (audioTracks.isNotEmpty) {
+        for (final track in audioTracks) {
+          await _pc!.addTrack(track, _screenStream!);
+        }
+        _log('[HOLLOW-SCREEN] Added ${audioTracks.length} audio track(s)');
+      }
+
+      // Generate offer.
+      final offer = await _pc!.createOffer();
+      await _pc!.setLocalDescription(offer);
+
+      _log('[HOLLOW-SCREEN] Offer created, SDP length=${offer.sdp?.length}');
+
+      // Note: no track poller here — caller manages centrally for shared stream.
+      return offer.sdp!;
+    } catch (e) {
+      // Dispose the partially-built PC/renderer (NOT the shared stream — we
+      // don't own it) before propagating.
+      _log('[HOLLOW-SCREEN] createOfferFromStream failed, tearing down: $e');
+      await close();
+      rethrow;
+    }
   }
 
   /// Handle the remote peer's SDP answer on our outgoing PC.
@@ -367,42 +403,56 @@ class ScreenShareService {
   Future<String> handleOffer(String sdp) async {
     _log('[HOLLOW-SCREEN] Handling incoming screen offer');
 
-    // Create PC.
-    _pc = await createPeerConnection(iceServers);
-    _setupCallbacks();
-
-    // Wire remote track handler — this is where we get the screen video.
-    _pc!.onTrack = (event) {
-      _log('[HOLLOW-SCREEN] Remote track: ${event.track.kind} '
-          'id=${event.track.id} streams=${event.streams.length}');
-
-      if (event.track.kind == 'video') {
-        _handleRemoteVideoTrack(event);
-      }
-    };
-
-    // Set remote description (the offer).
-    await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
-    _remoteDescriptionSet = true;
-    await _flushPendingCandidates();
-
-    // Create answer.
-    final answer = await _pc!.createAnswer();
-    await _pc!.setLocalDescription(answer);
-
-    // Route audio to the preferred output device (same as voice call).
-    if (preferredAudioOutputDeviceId != null) {
-      try {
-        await Helper.selectAudioOutput(preferredAudioOutputDeviceId!);
-        _log('[HOLLOW-SCREEN] Audio output set to '
-            '$preferredAudioOutputDeviceId');
-      } catch (e) {
-        _log('[HOLLOW-SCREEN] Failed to set audio output: $e');
-      }
+    // Idempotent: a re-fired offer for the same peer must not strand the prior
+    // PC on this instance.
+    if (_pc != null) {
+      await close();
     }
 
-    _log('[HOLLOW-SCREEN] Answer created, SDP length=${answer.sdp?.length}');
-    return answer.sdp!;
+    try {
+      // Create PC.
+      _pc = await createPeerConnection(iceServers);
+      _setupCallbacks();
+
+      // Wire remote track handler — this is where we get the screen video.
+      _pc!.onTrack = (event) {
+        _log('[HOLLOW-SCREEN] Remote track: ${event.track.kind} '
+            'id=${event.track.id} streams=${event.streams.length}');
+
+        if (event.track.kind == 'video') {
+          _handleRemoteVideoTrack(event);
+        }
+      };
+
+      // Set remote description (the offer).
+      await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+      _remoteDescriptionSet = true;
+      await _flushPendingCandidates();
+
+      // Create answer.
+      final answer = await _pc!.createAnswer();
+      await _pc!.setLocalDescription(answer);
+
+      // Route audio to the preferred output device (same as voice call).
+      if (preferredAudioOutputDeviceId != null) {
+        try {
+          await Helper.selectAudioOutput(preferredAudioOutputDeviceId!);
+          _log('[HOLLOW-SCREEN] Audio output set to '
+              '$preferredAudioOutputDeviceId');
+        } catch (e) {
+          _log('[HOLLOW-SCREEN] Failed to set audio output: $e');
+        }
+      }
+
+      _log('[HOLLOW-SCREEN] Answer created, SDP length=${answer.sdp?.length}');
+      return answer.sdp!;
+    } catch (e) {
+      // A throw here (e.g. unsupported remote SDP codec) leaves a live PC +
+      // its thread-set stranded. Dispose before propagating.
+      _log('[HOLLOW-SCREEN] handleOffer failed, tearing down: $e');
+      await close();
+      rethrow;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -526,10 +576,14 @@ class ScreenShareService {
       }
     }
 
-    // Stop local screen capture.
+    // Stop local screen capture — ONLY if we own it. For createOfferFromStream
+    // the capture is shared across many per-peer services and owned by the
+    // provider; disposing it here kills every other peer's share AND double-frees
+    // it (the provider disposes it too) → `corrupted size vs prev_size` abort.
     final screenStream = _screenStream;
+    final ownsScreenStream = _ownsScreenStream;
     _screenStream = null;
-    if (screenStream != null) {
+    if (screenStream != null && ownsScreenStream) {
       try {
         for (final track in screenStream.getTracks()) {
           await track.stop();
@@ -551,19 +605,42 @@ class ScreenShareService {
         _log('[HOLLOW-SCREEN] remote renderer dispose failed (ignored): $e');
       }
     }
+    // Dispose the remote stream ONLY if we synthesized it (createLocalMediaStream
+    // fallback). libwebrtc owns the event-provided streams — disposing those
+    // double-frees. We null the reference either way.
+    final remoteStream = _remoteStream;
+    final remoteSynthetic = _remoteStreamIsSynthetic;
     _remoteStream = null;
+    if (remoteStream != null && remoteSynthetic) {
+      try {
+        await remoteStream.dispose();
+      } catch (e) {
+        _log('[HOLLOW-SCREEN] remote stream dispose failed (ignored): $e');
+      }
+    }
 
-    // Close PC.
+    // Close PC. close() and dispose() get SEPARATE guards — if close() throws on
+    // an already-failing native PC, dispose() (which frees the thread-set) must
+    // still run, or the libwebrtc threads leak.
     final pc = _pc;
     _pc = null;
     if (pc != null) {
       try {
         await pc.close();
+      } catch (e) {
+        _log('[HOLLOW-SCREEN] pc close failed (ignored): $e');
+      }
+      try {
         await pc.dispose();
       } catch (e) {
         _log('[HOLLOW-SCREEN] pc dispose failed (ignored): $e');
       }
     }
+
+    // Restore ownership defaults so the next use of this instance starts clean
+    // (createOffer captures+owns; createOfferFromStream re-sets false).
+    _ownsScreenStream = true;
+    _remoteStreamIsSynthetic = false;
 
     _pendingCandidates.clear();
     _remoteDescriptionSet = false;
@@ -638,6 +715,13 @@ class ScreenShareService {
   }
 
   Future<void> _handleRemoteVideoTrack(RTCTrackEvent event) async {
+    // Dispose any previously-synthesized remote stream before replacing it
+    // (a track-replace on renegotiation re-enters here). libwebrtc-owned
+    // streams must NOT be disposed.
+    final priorStream = _remoteStream;
+    final priorSynthetic = _remoteStreamIsSynthetic;
+    _remoteStreamIsSynthetic = false;
+
     if (event.streams.isNotEmpty) {
       _remoteStream = event.streams.first;
       _log('[HOLLOW-SCREEN] Using stream from onTrack '
@@ -661,19 +745,37 @@ class ScreenShareService {
       if (found != null) {
         _remoteStream = found;
       } else {
-        // Last resort: create synthetic stream.
+        // Last resort: create synthetic stream (we own this one).
         _remoteStream = await createLocalMediaStream(
           'screen-remote-${event.track.id}',
         );
         _remoteStream!.addTrack(event.track);
+        _remoteStreamIsSynthetic = true;
         _log('[HOLLOW-SCREEN] Created synthetic stream (last resort)');
       }
     }
 
-    // Create renderer.
-    if (_remoteRenderer != null) {
-      _remoteRenderer!.srcObject = null;
-      await _remoteRenderer!.dispose();
+    // Dispose the prior synthetic stream now that it's been replaced.
+    if (priorStream != null && priorSynthetic && !identical(priorStream, _remoteStream)) {
+      try {
+        await priorStream.dispose();
+      } catch (e) {
+        _log('[HOLLOW-SCREEN] prior synthetic remote stream dispose failed (ignored): $e');
+      }
+    }
+
+    // Create renderer. Null the field BEFORE awaiting dispose so a Linux
+    // "texture not found!" throw can't leave a stale half-disposed renderer
+    // that close() would then double-dispose.
+    final oldRenderer = _remoteRenderer;
+    _remoteRenderer = null;
+    if (oldRenderer != null) {
+      oldRenderer.srcObject = null;
+      try {
+        await oldRenderer.dispose();
+      } catch (e) {
+        _log('[HOLLOW-SCREEN] old remote renderer dispose failed (ignored): $e');
+      }
     }
 
     _remoteRenderer = RTCVideoRenderer();

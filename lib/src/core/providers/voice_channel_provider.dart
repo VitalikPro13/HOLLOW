@@ -286,6 +286,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Guard to prevent concurrent leaveChannel calls and actions during leave.
   bool _leaving = false;
 
+  /// In-flight teardown (set by the server-forced `onLocalLeft` path, which
+  /// can't be awaited by its synchronous caller). A subsequent `joinChannel`
+  /// awaits this so a new call's PCs can't start while the old call's mesh is
+  /// still tearing down its libwebrtc thread-sets (which would race the native
+  /// teardown → heap corruption on Linux).
+  Future<void>? _teardownInFlight;
+
   /// Channel that was selected before joining the VC (restored on leave).
   String? preVcChannelId;
 
@@ -353,6 +360,16 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (callState.status != CallStatus.idle) {
       debugPrint('[HOLLOW-VC] Cannot join voice channel — in a call');
       return;
+    }
+
+    // Wait for any server-forced teardown still in flight to finish, so we
+    // don't build new PCs while the old mesh is mid-dispose.
+    final pending = _teardownInFlight;
+    if (pending != null) {
+      debugPrint('[HOLLOW-VC] joinChannel waiting for in-flight teardown');
+      try {
+        await pending;
+      } catch (_) {}
     }
 
     // Leave current voice channel if in one.
@@ -701,8 +718,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _leaving = false;
     if (_service != null) {
       // Server-forced leave — the user-initiated path never ran. Hang up for real.
+      // This callback is synchronous (a Rust event), so we can't await the
+      // teardown here — record it as in-flight so a racing joinChannel waits for
+      // it before spinning up a new call's PCs.
       debugPrint('[HOLLOW-VC] Forced leave — tearing down live call');
-      unawaited(_teardownCall());
+      final teardown = _teardownCall();
+      _teardownInFlight = teardown;
+      teardown.whenComplete(() {
+        if (identical(_teardownInFlight, teardown)) _teardownInFlight = null;
+      });
     }
     // Restore the default audio route (mobile) so the next call doesn't
     // inherit a stale speakerphone state.
@@ -772,8 +796,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     state = state.copyWith(
         participants: updated, peerAudioStates: audioStates);
 
-    // Tear down WebRTC connection if they were in our channel.
-    _service?.closePeer(peerId);
+    // Tear down WebRTC connection if they were in our channel (awaited so the
+    // peer's PC + thread-set is fully gone, not racing the next event).
+    await _service?.closePeer(peerId);
     // Clean up screen sharing for this peer.
     await _cleanupPeerScreenShare(peerId);
     // Clean up camera state for this peer.
@@ -1095,61 +1120,73 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       );
     };
 
+    // Close+remove any prior outgoing service for this peer before overwriting
+    // the map entry — otherwise the old ScreenShareService (with its live PC +
+    // thread-set) is orphaned and can never be closed (leak).
+    await _outgoingScreenShares.remove(peerId)?.close();
     _outgoingScreenShares[peerId] = service;
 
-    final sdp = await service.createOfferFromStream(
-      _screenCaptureStream!,
-      maxWidth: _screenShareMaxWidth,
-      maxHeight: _screenShareMaxHeight,
-      fps: _screenShareFps,
-    );
+    try {
+      final sdp = await service.createOfferFromStream(
+        _screenCaptureStream!,
+        maxWidth: _screenShareMaxWidth,
+        maxHeight: _screenShareMaxHeight,
+        fps: _screenShareFps,
+      );
 
-    // Enable SFrame E2EE on the outgoing screen share PC.
-    if (service.pc != null && _service?.frameCryptor != null) {
-      await _enableSframeOnScreenSharePc(
-          service.pc!, _service!.frameCryptor!, peerId, isSender: true);
-    }
+      // Enable SFrame E2EE on the outgoing screen share PC.
+      if (service.pc != null && _service?.frameCryptor != null) {
+        await _enableSframeOnScreenSharePc(
+            service.pc!, _service!.frameCryptor!, peerId, isSender: true);
+      }
 
-    // Flush any ICE candidates that arrived before this service was created.
-    final earlyKey = 'outgoing:$peerId';
-    final early = _earlyScreenIce.remove(earlyKey);
-    if (early != null && early.isNotEmpty) {
-      debugPrint('[HOLLOW-VC] Flushing ${early.length} early screen ICE for outgoing:$peerId');
-      for (final ice in early) {
-        await service.handleIceCandidate(
-          ice['candidate'] as String,
-          ice['sdpMid'] as String?,
-          ice['sdpMLineIndex'] as int?,
+      // Flush any ICE candidates that arrived before this service was created.
+      final earlyKey = 'outgoing:$peerId';
+      final early = _earlyScreenIce.remove(earlyKey);
+      if (early != null && early.isNotEmpty) {
+        debugPrint('[HOLLOW-VC] Flushing ${early.length} early screen ICE for outgoing:$peerId');
+        for (final ice in early) {
+          await service.handleIceCandidate(
+            ice['candidate'] as String,
+            ice['sdpMid'] as String?,
+            ice['sdpMLineIndex'] as int?,
+          );
+        }
+      }
+
+      if (!state.isInVoiceChannel) return;
+
+      network_api.voiceChannelSendSignal(
+        serverId: state.currentServerId!,
+        channelId: state.currentChannelId!,
+        peerId: peerId,
+        signalType: 'screen_offer',
+        payload: jsonEncode({'sdp': sdp}),
+      );
+
+      // Start screen audio capture via the data channel on the data-channel-audio
+      // platforms: Windows (WASAPI) and macOS 13.0+ (ScreenCaptureKit).
+      // Sends Opus packets via the existing WebRtcService data channel.
+      final dcAudio = Platform.isWindows ||
+          (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio);
+      if (_screenShareAudio && dcAudio && _screenCaptureStream != null) {
+        final webrtc = ref.read(webRtcProvider.notifier).service;
+        debugPrint('[HOLLOW-AU-SCREEN] Starting screen audio for peer $peerId '
+            '(hasDC=${webrtc.hasPeerChannel(peerId)})');
+        await service.startScreenAudioCapture(
+          _screenCaptureStream!.id,
+          pid: _screenSharePid,
+          onPacket: (packet) {
+            webrtc.sendScreenAudio(peerId, packet);
+          },
         );
       }
-    }
-
-    if (!state.isInVoiceChannel) return;
-
-    network_api.voiceChannelSendSignal(
-      serverId: state.currentServerId!,
-      channelId: state.currentChannelId!,
-      peerId: peerId,
-      signalType: 'screen_offer',
-      payload: jsonEncode({'sdp': sdp}),
-    );
-
-    // Start screen audio capture via the data channel on the data-channel-audio
-    // platforms: Windows (WASAPI) and macOS 13.0+ (ScreenCaptureKit).
-    // Sends Opus packets via the existing WebRtcService data channel.
-    final dcAudio = Platform.isWindows ||
-        (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio);
-    if (_screenShareAudio && dcAudio && _screenCaptureStream != null) {
-      final webrtc = ref.read(webRtcProvider.notifier).service;
-      debugPrint('[HOLLOW-AU-SCREEN] Starting screen audio for peer $peerId '
-          '(hasDC=${webrtc.hasPeerChannel(peerId)})');
-      await service.startScreenAudioCapture(
-        _screenCaptureStream!.id,
-        pid: _screenSharePid,
-        onPacket: (packet) {
-          webrtc.sendScreenAudio(peerId, packet);
-        },
-      );
+    } catch (e) {
+      // A throw mid-setup leaves a half-built service (live PC) in the map.
+      // Tear it down so its thread-set can't leak.
+      debugPrint('[HOLLOW-VC] _sendScreenShareToPeer($peerId) failed: $e');
+      await _outgoingScreenShares.remove(peerId)?.close();
+      rethrow;
     }
   }
 
