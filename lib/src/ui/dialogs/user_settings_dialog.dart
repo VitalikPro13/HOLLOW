@@ -3771,34 +3771,54 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         }
       }
 
-      // Camera + Linux audio fall through to flutter_webrtc's
-      // `enumerateDevices()`. Windows audio uses `win32audio` (block below).
+      // Camera always comes from flutter_webrtc's `enumerateDevices()` (the
+      // V4L2 video path works on Linux). Windows audio uses `win32audio`
+      // (block below); Linux audio uses a native libpulse enumeration below.
       try {
         final devices = await webrtc.navigator.mediaDevices.enumerateDevices();
         cameras = devices.where((d) => d.kind == 'videoinput').toList();
-
-        if (Platform.isLinux) {
-          inputs = devices
-              .where((d) => d.kind == 'audioinput')
-              .map((d) => (
-                    id: d.deviceId,
-                    name: d.label.isNotEmpty ? d.label : 'Microphone',
-                    isActive: d.deviceId == 'default' ||
-                        d.deviceId.toLowerCase().contains('default'),
-                  ))
-              .toList();
-          outputs = devices
-              .where((d) => d.kind == 'audiooutput')
-              .map((d) => (
-                    id: d.deviceId,
-                    name: d.label.isNotEmpty ? d.label : 'Speaker',
-                    isActive: d.deviceId == 'default' ||
-                        d.deviceId.toLowerCase().contains('default'),
-                  ))
-              .toList();
-        }
       } catch (e) {
         debugPrint('[HOLLOW] Device enumeration (webrtc) failed: $e');
+      }
+
+      // On Linux the prebuilt libwebrtc AudioDeviceModule reports 0 mic/speaker
+      // devices on pipewire-pulse systems (falls back to AudioDeviceDummy), so
+      // `enumerateDevices()` returns no audioinput/audiooutput entries even
+      // though the camera enumerates fine. Enumerate audio directly via libpulse
+      // through our fork's native handler — same pattern + result shape as the
+      // macOS CoreAudio path (`hollowMacAudioDevices`) above.
+      if (Platform.isLinux) {
+        try {
+          const channel = MethodChannel('FlutterWebRTC.Method');
+          final res = await channel
+              .invokeMethod<Map<dynamic, dynamic>>('hollowLinuxAudioDevices');
+          if (res != null) {
+            final ins = (res['input'] as List?) ?? const [];
+            final outs = (res['output'] as List?) ?? const [];
+            inputs = ins
+                .whereType<Map>()
+                .map((m) => (
+                      id: (m['id'] as String?) ?? '',
+                      name: (m['name'] as String?) ?? '',
+                      isActive: m['isDefault'] == true || m['isDefault'] == 1,
+                    ))
+                .where((d) => d.id.isNotEmpty)
+                .toList();
+            outputs = outs
+                .whereType<Map>()
+                .map((m) => (
+                      id: (m['id'] as String?) ?? '',
+                      name: (m['name'] as String?) ?? '',
+                      isActive: m['isDefault'] == true || m['isDefault'] == 1,
+                    ))
+                .where((d) => d.id.isNotEmpty)
+                .toList();
+          }
+          debugPrint('[HOLLOW] libpulse enum: ${inputs.length} inputs, '
+              '${outputs.length} outputs');
+        } catch (e) {
+          debugPrint('[HOLLOW] libpulse enumeration failed: $e');
+        }
       }
 
       if (Platform.isWindows) {

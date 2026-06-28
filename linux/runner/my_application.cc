@@ -35,6 +35,27 @@ static void my_application_activate(GApplication* application) {
   gtk_window_set_title(window, "hollow");
   gtk_window_set_default_size(window, 1280, 720);
 
+  // Give the window an RGBA (alpha-capable) visual so it can render with real
+  // transparency. Required for the screen-annotation overlay: in that mode
+  // Flutter paints a transparent scaffold and we want the apps BEHIND Hollow
+  // (slides, browser, PDF) to show through. Without an RGBA visual GTK
+  // composites Flutter's transparent pixels onto an opaque (black) window, so
+  // annotation mode renders solid black instead of see-through.
+  //
+  // The visual must be assigned BEFORE the window is realized — an X11 window's
+  // visual cannot be swapped after the fact, which is why this is set here at
+  // creation rather than toggled at runtime (Windows/macOS toggle transparency
+  // live; on Linux the window is always RGBA and transparency is controlled
+  // purely by what Flutter paints — opaque in normal use, transparent in
+  // annotation mode). Guarded on a compositor being present; falls back to the
+  // default visual otherwise (the window just stays opaque, as before).
+  GdkScreen* screen = gtk_window_get_screen(window);
+  GdkVisual* rgba_visual = gdk_screen_get_rgba_visual(screen);
+  if (rgba_visual != nullptr && gdk_screen_is_composited(screen)) {
+    gtk_widget_set_visual(GTK_WIDGET(window), rgba_visual);
+    gtk_widget_set_app_paintable(GTK_WIDGET(window), TRUE);
+  }
+
   // Set window icon from bundled asset.
   g_autoptr(GError) icon_error = nullptr;
   g_autofree gchar* exe_path = g_file_read_link("/proc/self/exe", nullptr);
@@ -54,9 +75,12 @@ static void my_application_activate(GApplication* application) {
 
   FlView* view = fl_view_new(project);
   GdkRGBA background_color;
-  // Background defaults to black, override it here if necessary, e.g. #00000000
-  // for transparent.
-  gdk_rgba_parse(&background_color, "#000000");
+  // Fully transparent FlView background (#00000000). With the RGBA window visual
+  // set above, this lets Flutter control opacity per-pixel: the opaque Hollow
+  // theme paints solid pixels in normal use, and the annotation overlay's
+  // transparent scaffold lets the desktop behind show through. (Was opaque
+  // "#000000", which forced a black backdrop and broke annotation transparency.)
+  gdk_rgba_parse(&background_color, "#00000000");
   fl_view_set_background_color(view, &background_color);
   gtk_widget_show(GTK_WIDGET(view));
   gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));

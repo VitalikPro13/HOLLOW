@@ -8,6 +8,10 @@
 #include "../../../windows/win_screen_recorder.h"
 #endif
 
+#ifdef __linux__
+#include "../../../linux/hollow_pulse_devices.h"
+#endif
+
 namespace flutter_webrtc_plugin {
 
 static EventChannelProxy* eventChannelProxy = nullptr;
@@ -122,6 +126,41 @@ void FlutterWebRTC::HandleMethodCall(
     }
   } else if (method_call.method_name().compare("getSources") == 0) {
     GetSources(std::move(result));
+  } else if (method_call.method_name().compare("hollowLinuxAudioDevices") == 0) {
+    // Linux mic/speaker enumeration via libpulse. The prebuilt libwebrtc ADM
+    // reports 0 audio devices on pipewire-pulse systems (falls back to
+    // AudioDeviceDummy), so the Dart side calls this instead on Linux — same
+    // {"input":[{id,name,isDefault}],"output":[...]} shape as macOS's
+    // hollowMacAudioDevices. See linux/hollow_pulse_devices.cc.
+#ifdef __linux__
+    std::vector<hollow_pulse::AudioDevice> inputs, outputs;
+    if (hollow_pulse::EnumerateDevices(&inputs, &outputs)) {
+      EncodableList in_list, out_list;
+      for (const auto& d : inputs) {
+        EncodableMap m;
+        m[EncodableValue("id")] = EncodableValue(d.id);
+        m[EncodableValue("name")] = EncodableValue(d.name);
+        m[EncodableValue("isDefault")] = EncodableValue(d.is_default);
+        in_list.push_back(EncodableValue(m));
+      }
+      for (const auto& d : outputs) {
+        EncodableMap m;
+        m[EncodableValue("id")] = EncodableValue(d.id);
+        m[EncodableValue("name")] = EncodableValue(d.name);
+        m[EncodableValue("isDefault")] = EncodableValue(d.is_default);
+        out_list.push_back(EncodableValue(m));
+      }
+      EncodableMap res;
+      res[EncodableValue("input")] = EncodableValue(in_list);
+      res[EncodableValue("output")] = EncodableValue(out_list);
+      result->Success(EncodableValue(res));
+    } else {
+      result->Error("PULSE_UNAVAILABLE",
+                    "Could not connect to the PulseAudio server");
+    }
+#else
+    result->Error("ERROR", "Linux only");
+#endif
   } else if (method_call.method_name().compare("selectAudioInput") == 0) {
     const EncodableMap params =
         GetValue<EncodableMap>(*method_call.arguments());

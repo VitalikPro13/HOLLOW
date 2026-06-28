@@ -76,9 +76,14 @@ class HollowAvatar extends ConsumerWidget {
     if (bytes == null && peerId.isNotEmpty) {
       bytes = ref.watch(avatarProvider.select((c) => c[peerId]));
       if (bytes == null) {
-        Future.microtask(
-          () => ref.read(avatarProvider.notifier).loadAvatar(peerId),
-        );
+        // Capture the notifier NOW (valid during build) so the deferred load
+        // doesn't touch `ref` after this widget is disposed — that threw
+        // "Cannot use ref after the widget was disposed" when an avatar tile
+        // (e.g. a screen-share participant) was torn down mid-frame. The
+        // notifier outlives the widget; the `ref` does not.
+        final avatars = ref.read(avatarProvider.notifier);
+        final id = peerId;
+        Future.microtask(() => avatars.loadAvatar(id));
       }
     }
 

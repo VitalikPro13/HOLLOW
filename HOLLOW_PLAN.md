@@ -1949,6 +1949,9 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] Upgrade WebRTC
 - [X] Ship VCRUNTIME140.dll (VS distributable) inside
 - [X] System Status with message (left column Home shell tab + header), remove the Recovery Phrase card
+
+- [ ] Get Linux out of Experimental phase, please
+
 - [ ] Saved messages
 - [ ] Block/report ability
 - [ ] Pill switching for mobile between screen and camera during calls

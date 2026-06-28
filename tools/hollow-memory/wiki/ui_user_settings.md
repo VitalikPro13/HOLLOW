@@ -273,11 +273,14 @@ Below the pills: explanatory text "Images and GIFs are converted to WebP to save
 - `_cameras` — `List<webrtc.MediaDeviceInfo>` (cameras via flutter_webrtc)
 - `_loading` (bool), `_recorder` (rec.AudioRecorder?), `_ampSub` (StreamSubscription?), `_micTesting` (bool), `_micLevel` (double 0.0-1.0), `_ringtonePreview` (AudioPlayer?)
 
-### Device Enumeration (`_loadDevices()`)
-1. Enumerates audio inputs via `win32audio.Audio.enumDevices(AudioDeviceType.input)`.
-2. Enumerates audio outputs via `win32audio.Audio.enumDevices(AudioDeviceType.output)`.
-3. Enumerates cameras via `webrtc.navigator.mediaDevices.enumerateDevices()`, filtered to `videoinput`.
-4. Auto-selects system active device (the one with `isActive == true`) if user hasn't chosen one yet for each category.
+### Device Enumeration (`_loadDevices()`) — per-platform audio backend
+1. **Windows** audio inputs/outputs via `win32audio.Audio.enumDevices(AudioDeviceType.input/output)`.
+2. **macOS** audio via a native CoreAudio method channel `hollowMacAudioDevices` (the pinned WebRTC-SDK returns empty `audioDeviceModule` lists on macOS).
+3. **Linux** audio via a native **libpulse** method channel `hollowLinuxAudioDevices` (fork: `packages/flutter_webrtc/linux/hollow_pulse_devices.{cc,h}`, dispatched in `common/cpp/src/flutter_webrtc.cc` behind `#ifdef __linux__`). Needed because the prebuilt libwebrtc Linux AudioDeviceModule reports **0 devices** on pipewire-pulse systems (falls back to `AudioDeviceDummy`), so `enumerateDevices()` returns no `audioinput`/`audiooutput` entries even though the V4L2 camera path works. Returns `{"input":[{id,name,isDefault}],"output":[...]}` (same shape as macOS). Build dep: `libpulse-dev`.
+4. **Cameras (all platforms)** via `webrtc.navigator.mediaDevices.enumerateDevices()`, filtered to `videoinput`.
+5. Auto-selects system active device (`isActive == true`) if user hasn't chosen one yet for each category.
+
+> Note: on Linux, device SELECTION (`sourceId`) is currently a no-op in the prebuilt ADM (its `RecordingDevices()` returns 0, so the C++ selection loop never runs) — the enum shim fixes the picker UI, but capture uses libwebrtc's default device. A distorted Linux mic is usually a HARDWARE issue first (check `amixer -c N sget Capture` for a maxed/+30dB analog gain clipping the ADC) — not code.
 
 ### Resolve functions
 - `_resolveInputValue(String? savedId)` — validates saved ID exists in device list, falls back to active device, then first device.

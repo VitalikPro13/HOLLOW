@@ -205,7 +205,7 @@ source $HOME/.cargo/env
 Install system dependencies (Ubuntu/Debian):
 
 ```bash
-sudo apt install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libssl-dev libnotify-dev libayatana-appindicator3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly lld curl build-essential
+sudo apt install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libssl-dev libnotify-dev libayatana-appindicator3-dev libpulse-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly lld curl build-essential
 ```
 
 Then build:

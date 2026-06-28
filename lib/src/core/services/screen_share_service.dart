@@ -507,35 +507,62 @@ class ScreenShareService {
     _screenTrackPoller?.cancel();
     _screenTrackPoller = null;
 
+    // Teardown must be DEFENSIVE: each native disposal is wrapped so one
+    // failure can't abort the rest, leaking the PC/streams. On Linux
+    // `RTCVideoRenderer.dispose()` throws "VideoRendererDispose() texture not
+    // found!" when the texture is already gone — that uncaught throw used to
+    // crash the app on screen-share stop (it skipped the PC/stream cleanup).
+    // Null the field BEFORE awaiting so a re-entrant close() can't double-free.
+
     // Dispose local self-preview renderer first (before stream goes away).
-    if (_localRenderer != null) {
-      _localRenderer!.srcObject = null;
-      await _localRenderer!.dispose();
-      _localRenderer = null;
+    final localRenderer = _localRenderer;
+    _localRenderer = null;
+    if (localRenderer != null) {
+      try {
+        localRenderer.srcObject = null;
+        await localRenderer.dispose();
+      } catch (e) {
+        _log('[HOLLOW-SCREEN] local renderer dispose failed (ignored): $e');
+      }
     }
 
     // Stop local screen capture.
-    if (_screenStream != null) {
-      for (final track in _screenStream!.getTracks()) {
-        await track.stop();
+    final screenStream = _screenStream;
+    _screenStream = null;
+    if (screenStream != null) {
+      try {
+        for (final track in screenStream.getTracks()) {
+          await track.stop();
+        }
+        await screenStream.dispose();
+      } catch (e) {
+        _log('[HOLLOW-SCREEN] screen stream dispose failed (ignored): $e');
       }
-      await _screenStream!.dispose();
-      _screenStream = null;
     }
 
     // Dispose remote renderer.
-    if (_remoteRenderer != null) {
-      _remoteRenderer!.srcObject = null;
-      await _remoteRenderer!.dispose();
-      _remoteRenderer = null;
+    final remoteRenderer = _remoteRenderer;
+    _remoteRenderer = null;
+    if (remoteRenderer != null) {
+      try {
+        remoteRenderer.srcObject = null;
+        await remoteRenderer.dispose();
+      } catch (e) {
+        _log('[HOLLOW-SCREEN] remote renderer dispose failed (ignored): $e');
+      }
     }
     _remoteStream = null;
 
     // Close PC.
-    if (_pc != null) {
-      await _pc!.close();
-      await _pc!.dispose();
-      _pc = null;
+    final pc = _pc;
+    _pc = null;
+    if (pc != null) {
+      try {
+        await pc.close();
+        await pc.dispose();
+      } catch (e) {
+        _log('[HOLLOW-SCREEN] pc dispose failed (ignored): $e');
+      }
     }
 
     _pendingCandidates.clear();

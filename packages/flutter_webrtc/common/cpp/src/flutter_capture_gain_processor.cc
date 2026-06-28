@@ -31,15 +31,40 @@ inline float SoftLimit(float x) {
 void FlutterCaptureGainProcessor::Initialize(int /*sample_rate_hz*/,
                                              int /*num_channels*/) {}
 
-void FlutterCaptureGainProcessor::Process(int /*num_bands*/, int /*num_frames*/,
+void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
                                           int buffer_size, float* buffer) {
   const float gain = gain_.load(std::memory_order_relaxed);
   // At unity with no peaks above the knee, this is a no-op.
   if (buffer == nullptr || buffer_size <= 0) {
     return;
   }
-  for (int i = 0; i < buffer_size; ++i) {
-    buffer[i] = SoftLimit(buffer[i] * gain);
+
+  // CRITICAL — band-split awareness. WebRTC's APM hands the capture
+  // post-processor its buffer in the SPLIT-BAND domain when num_bands > 1
+  // (e.g. at 48 kHz the fullband 480-sample frame is split into 3 contiguous
+  // sub-bands of 160 samples). The SoftLimit() is a per-sample NONLINEARITY;
+  // running it independently across the concatenated bands distorts each
+  // frequency band on its own and wrecks the spectral balance on recombination
+  // — the low band (most speech energy) gets limited hard while the highs pass,
+  // producing the bass-boosted, distorted Linux mic. (macOS/iOS escape this
+  // because their wrapper hands fullband per-channel data; Windows/Android
+  // typically run the mic at num_bands == 1, so the bug never triggered there.)
+  //
+  // A LINEAR gain commutes with the filterbank, so it is always safe to apply
+  // across all bands. The limiter is only valid on a recombined FULLBAND
+  // signal, so we restrict it to num_bands <= 1 (matching the working darwin
+  // path). In the split-band case we apply makeup gain only; WebRTC's own APM
+  // limiter downstream still prevents hard clipping.
+  if (num_bands > 1) {
+    if (gain != 1.0f) {
+      for (int i = 0; i < buffer_size; ++i) {
+        buffer[i] *= gain;
+      }
+    }
+  } else {
+    for (int i = 0; i < buffer_size; ++i) {
+      buffer[i] = SoftLimit(buffer[i] * gain);
+    }
   }
 }
 

@@ -39,8 +39,16 @@ class DesktopNotificationService {
       DesktopNotificationService._();
 
   /// Windows rich-toast plugin (direct, not via the unified facade).
-  final FlutterLocalNotificationsWindows _win =
-      FlutterLocalNotificationsWindows();
+  ///
+  /// Constructed LAZILY and only on Windows — the constructor dlopen's
+  /// `flutter_local_notifications_windows.dll`, which throws on Linux/macOS
+  /// ("cannot open shared object file"). An eager field initializer ran that on
+  /// every platform and broke DM notifications on Linux. Every use site is
+  /// already inside an `if (Platform.isWindows)` guard, so this is only ever
+  /// touched on Windows.
+  FlutterLocalNotificationsWindows? _winPlugin;
+  FlutterLocalNotificationsWindows get _win =>
+      _winPlugin ??= FlutterLocalNotificationsWindows();
 
   bool _initialized = false;
 

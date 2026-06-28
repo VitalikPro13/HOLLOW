@@ -30,6 +30,7 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_capture_gain_processor.cc"
   "../common/cpp/src/flutter_common.cc"
   "loopback_capturer_factory.cc"
+  "hollow_pulse_devices.cc"
   "flutter_webrtc_plugin.cc"
   "flutter/core_implementations.cc"
   "flutter/standard_codec.cc"
@@ -56,6 +57,12 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
 )
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter)
 target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::GTK)
+
+# libpulse for Linux audio device enumeration (hollow_pulse_devices.cc) — the
+# prebuilt libwebrtc ADM can't enumerate on pipewire-pulse systems.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PULSE REQUIRED IMPORTED_TARGET libpulse)
+target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::PULSE)
 
 
 target_link_libraries(${PLUGIN_NAME} PRIVATE

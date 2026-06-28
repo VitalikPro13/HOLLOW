@@ -17,6 +17,19 @@ use base64::Engine;
 
 use crate::hollow_log;
 
+/// Max time with NO inbound traffic from the relay (any frame: text, binary,
+/// ping, or pong) before we declare the socket a zombie and force a reconnect.
+///
+/// A silently-dropped network path (NAT/router/WiFi/ISP blip) lets local
+/// `ws_write.send()` succeed into the OS buffer with no error, so a
+/// write-failure check alone never fires — the connection looks "alive" while
+/// nothing reaches the relay and nothing comes back. The relay sends WS pings
+/// automatically (`sendPingsAutomatically=true`, see relay-uws ws_handler.cpp)
+/// and drops us at its own 120s idleTimeout, so a HEALTHY connection always
+/// refreshes `last_recv` well within this window; only a truly dead path lets
+/// it lapse. 70s = tolerate one lost 30s keepalive cycle, react on the next.
+const LIVENESS_TIMEOUT: Duration = Duration::from_secs(70);
+
 // -- Public types --
 
 /// Commands sent from the swarm to the WebSocket client.
@@ -255,10 +268,25 @@ async fn ws_client_loop(
                 // Main message loop with periodic keepalive ping.
                 let mut ping_timer = tokio::time::interval(Duration::from_secs(30));
                 ping_timer.tick().await; // consume immediate first tick
+                // Liveness: last time ANY inbound relay frame arrived. A healthy
+                // socket is refreshed by the relay's automatic pings + our own
+                // pong replies + real traffic; a zombie path stops refreshing it.
+                let mut last_recv = tokio::time::Instant::now();
                 loop {
                     tokio::select! {
                         // Keepalive ping — prevents Nginx/proxy/relay from closing idle connections.
                         _ = ping_timer.tick() => {
+                            // Zombie-socket detection: if the relay has gone
+                            // completely silent past the deadline, the write
+                            // below would still "succeed" into a dead OS buffer,
+                            // so check liveness FIRST and force a reconnect.
+                            if last_recv.elapsed() > LIVENESS_TIMEOUT {
+                                hollow_log!(
+                                    "[HOLLOW-WS] Liveness timeout — no relay traffic in {}s, reconnecting",
+                                    last_recv.elapsed().as_secs()
+                                );
+                                break;
+                            }
                             if let Err(e) = ws_write.send(Message::Ping(vec![0x01].into())).await {
                                 hollow_log!("[HOLLOW-WS] Ping failed: {e}");
                                 break; // Connection dead, trigger reconnect.
@@ -266,6 +294,13 @@ async fn ws_client_loop(
                         }
                         // Incoming from relay.
                         msg = ws_read.next() => {
+                            // Any successfully-read frame (text, binary, ping, or
+                            // pong) proves the socket is alive in BOTH directions
+                            // — refresh the liveness deadline. The relay's own
+                            // automatic pings keep this fresh even when idle.
+                            if matches!(msg, Some(Ok(_))) {
+                                last_recv = tokio::time::Instant::now();
+                            }
                             match msg {
                                 Some(Ok(Message::Text(text))) => {
                                     if let Ok(server_msg) = serde_json::from_str::<ServerMsg>(&text) {
@@ -320,6 +355,10 @@ async fn ws_client_loop(
                                 }
                                 Some(Ok(Message::Ping(data))) => {
                                     let _ = ws_write.send(Message::Pong(data)).await;
+                                }
+                                Some(Ok(Message::Pong(_))) => {
+                                    // Reply to our keepalive ping. Liveness is
+                                    // already refreshed above; nothing else to do.
                                 }
                                 Some(Ok(Message::Close(_))) | None => {
                                     hollow_log!("[HOLLOW-WS] Connection closed by server");
