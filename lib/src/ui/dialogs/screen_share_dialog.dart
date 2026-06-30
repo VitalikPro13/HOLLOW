@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -48,6 +49,13 @@ class ScreenShareSelection {
   final bool shareAudio;
   final int pid;
 
+  /// For a WINDOW share on Windows: the window's HWND (the desktop source `id`
+  /// IS the decimal HWND). 0 for screen shares. The screen-audio exe resolves
+  /// this HWND -> owning pid -> the app's audio-rendering pids itself, which is
+  /// far more reliable than [pid] (libwebrtc does not populate a window pid
+  /// dependably; it arrived as 0, so window shares fell back to system audio).
+  final int windowHwnd;
+
   const ScreenShareSelection({
     required this.sourceId,
     required this.width,
@@ -55,6 +63,7 @@ class ScreenShareSelection {
     required this.fps,
     this.shareAudio = false,
     this.pid = 0,
+    this.windowHwnd = 0,
   });
 
   /// Human-readable quality label, e.g. "1080p60", "4K30".
@@ -358,6 +367,24 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                         onPressed: _selectedSourceId != null
                             ? () {
                                 final selectedSource = _sources[_selectedSourceId!];
+                                // For a WINDOW source the source id IS the HWND
+                                // (decimal) — hand THAT to the per-app capturer,
+                                // which resolves HWND -> pid -> audio pids itself.
+                                // libwebrtc's `pid` field arrives as 0 for
+                                // windows, so we must NOT rely on it.
+                                final isWindow =
+                                    selectedSource?.type == SourceType.Window;
+                                final hwnd = isWindow
+                                    ? (int.tryParse(_selectedSourceId!) ?? 0)
+                                    : 0;
+                                network_api.logFromDart(
+                                  message: '[SCREEN-AUDIO] Share confirmed: '
+                                      'type=${selectedSource?.type} '
+                                      'pid=${selectedSource?.pid ?? 0} '
+                                      'hwnd=$hwnd '
+                                      'audio=$_shareAudio '
+                                      'id=$_selectedSourceId',
+                                );
                                 Navigator.pop(
                                   context,
                                   ScreenShareSelection(
@@ -367,6 +394,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                                     fps: _fps.value,
                                     shareAudio: _shareAudio,
                                     pid: selectedSource?.pid ?? 0,
+                                    windowHwnd: hwnd,
                                   ),
                                 );
                               }

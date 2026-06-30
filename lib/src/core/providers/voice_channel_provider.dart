@@ -278,6 +278,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   int _screenShareFps = 60;
   bool _screenShareAudio = false;
   int _screenSharePid = 0;
+  int _screenShareHwnd = 0;
   ScreenAudioReceiver? _screenAudioRenderer;
 
   /// Timer that polls for screen track ending (window closed).
@@ -949,6 +950,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     int fps, {
     bool shareAudio = false,
     int pid = 0,
+    int windowHwnd = 0,
   }) async {
     if (!state.isInVoiceChannel || _leaving) return;
     if (state.isScreenSharing) return;
@@ -966,6 +968,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _screenShareFps = fps;
     _screenShareAudio = shareAudio;
     _screenSharePid = pid;
+    _screenShareHwnd = windowHwnd;
 
     // Capture screen ONCE.
     await desktopCapturer.getSources(
@@ -1176,6 +1179,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         await service.startScreenAudioCapture(
           _screenCaptureStream!.id,
           pid: _screenSharePid,
+          windowHwnd: _screenShareHwnd,
           onPacket: (packet) {
             webrtc.sendScreenAudio(peerId, packet);
           },

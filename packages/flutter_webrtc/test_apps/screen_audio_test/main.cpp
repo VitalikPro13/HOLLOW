@@ -25,6 +25,8 @@
 #ifdef _WIN32
 #include "wasapi_loopback_capturer.h"
 #include "process_audio_capturer.h"
+#include "multi_process_capturer.h"
+#include "audio_session_enum.h"
 #endif
 #include "wav_writer.h"
 #include "opus_encoder_wrapper.h"
@@ -62,6 +64,17 @@ struct Options {
                                  // (Hollow's own PID — avoids capturing the call
                                  // audio it plays back -> echo). Used only when
                                  // pid == 0 (whole-system share). Win 10 2004+.
+  unsigned int window_pid = 0;   // SHARED WINDOW's process id. The exe resolves
+                                 // it to the set of audio-rendering pids (browser
+                                 // audio service, etc.), INCLUDE-captures that set
+                                 // and MIXES — the per-app (Discord) share path.
+                                 // Takes precedence over pid/exclude_pid.
+  unsigned long long window_hwnd = 0;  // SHARED WINDOW's HWND (decimal). PREFERRED
+                                 // per-app entry: the exe resolves HWND -> pid
+                                 // itself (GetWindowThreadProcessId), so it does
+                                 // not depend on the caller knowing the pid (the
+                                 // desktop source `id` IS the HWND). If set, this
+                                 // overrides window_pid.
   int duration = 10;
   std::string format = "both";   // "wav", "opus", "both"
   std::string output = "captured_audio";
@@ -92,6 +105,16 @@ static void PrintUsage() {
     "  --exclude-pid <pid>     With pid==0 (whole-system), capture all audio\n"
     "                          EXCLUDING this process tree (e.g. the host app,\n"
     "                          to avoid echoing call audio). Win 10 2004+.\n"
+    "  --window-hwnd <hwnd>    Per-app share (PREFERRED): the shared WINDOW's\n"
+    "                          HWND (decimal). The exe resolves HWND -> pid ->\n"
+    "                          audio-rendering pid set itself, INCLUDE-captures\n"
+    "                          that set and mixes. Use this when the caller knows\n"
+    "                          the window handle but not its pid. Win 10 2004+.\n"
+    "  --window-pid <pid>      Per-app share: the shared WINDOW's process id\n"
+    "                          (alternative to --window-hwnd when the pid is\n"
+    "                          already known). INCLUDE-captures the resolved\n"
+    "                          audio pids and mixes. Silent app -> silence\n"
+    "                          (no system-audio fallback). Win 10 2004+.\n"
     "  --duration <seconds>    Capture duration (default: 10)\n"
     "  --format wav|opus|both  Output format (default: both)\n"
     "  --output <basename>     Output file basename (default: captured_audio)\n"
@@ -119,6 +142,10 @@ static Options ParseArgs(int argc, char* argv[]) {
       opts.pid = static_cast<unsigned int>(atoi(argv[++i]));
     } else if (arg == "--exclude-pid" && i + 1 < argc) {
       opts.exclude_pid = static_cast<unsigned int>(atoi(argv[++i]));
+    } else if (arg == "--window-pid" && i + 1 < argc) {
+      opts.window_pid = static_cast<unsigned int>(atoi(argv[++i]));
+    } else if (arg == "--window-hwnd" && i + 1 < argc) {
+      opts.window_hwnd = strtoull(argv[++i], nullptr, 10);
     } else if (arg == "--duration" && i + 1 < argc) {
       opts.duration = atoi(argv[++i]);
     } else if (arg == "--format" && i + 1 < argc) {
@@ -635,12 +662,50 @@ static int RunPipeMode(const Options& opts) {
     }
   };
 
-  // Start capture: per-process (if --pid given) or system-wide.
+  // Start capture. Precedence:
+  //   --window-pid : per-app share — resolve the window to its audio pids,
+  //                  INCLUDE-capture that set and mix (Discord model).
+  //   --pid        : single explicit INCLUDE pid (legacy/manual).
+  //   --exclude-pid: whole-system EXCLUDE host (entire-screen anti-echo).
+  //   (none)       : plain system loopback.
   flutter_webrtc_plugin::WasapiLoopbackCapturer sys_capturer;
   ProcessAudioCapturer proc_capturer;
+  MultiProcessCapturer multi_capturer;
   bool using_process = false;
+  bool using_multi = false;
 
-  if (opts.pid != 0) {
+  // Per-app share is requested by EITHER a window HWND (preferred) or an
+  // explicit window pid. Resolve the HWND to its owning pid here so we never
+  // depend on the caller knowing the pid.
+  const bool per_app_requested =
+      (opts.window_hwnd != 0) || (opts.window_pid != 0);
+  unsigned int resolved_window_pid = opts.window_pid;
+  if (opts.window_hwnd != 0) {
+    resolved_window_pid = PidForWindowHandle(opts.window_hwnd);
+  }
+
+  if (per_app_requested) {
+    if (!ProcessAudioCapturer::IsSupported()) {
+      fprintf(stderr,
+              "[PIPE] ERROR: per-app capture requires Windows 10 2004+\n");
+      return 1;
+    }
+    // Resolve the window pid to the audio-rendering pid set. An EMPTY set is
+    // valid (silent app, OR an hwnd that no longer resolves) — the mixer emits
+    // silence; we NEVER fall back to system capture on a per-app share (that is
+    // what leaked Brave's audio). resolved_window_pid==0 -> empty set -> silence.
+    std::vector<DWORD> pids = ResolveWindowToAudioPids(resolved_window_pid);
+    fprintf(stderr,
+            "[PIPE] Per-app share: window PID %u resolved to %zu audio pid(s)\n",
+            resolved_window_pid, pids.size());
+    if (!multi_capturer.Start(frame_callback, pids)) {
+      fprintf(stderr,
+              "[PIPE] ERROR: Failed to start per-app multi-capture\n");
+      return 1;
+    }
+    using_multi = true;
+    fprintf(stderr, "[PIPE] Capturing per-app audio (INCLUDE+mix)...\n");
+  } else if (opts.pid != 0) {
     if (!ProcessAudioCapturer::IsSupported()) {
       fprintf(stderr, "[PIPE] ERROR: Process loopback requires Windows 10 2004+\n");
       return 1;
@@ -670,7 +735,7 @@ static int RunPipeMode(const Options& opts) {
     }
   }
 
-  if (!using_process) {
+  if (!using_process && !using_multi) {
     if (!sys_capturer.Start(frame_callback)) {
       fprintf(stderr, "[PIPE] ERROR: Failed to start WASAPI capture\n");
       return 1;
@@ -704,7 +769,9 @@ static int RunPipeMode(const Options& opts) {
   }
 
   active.store(false);
-  if (using_process)
+  if (using_multi)
+    multi_capturer.Stop();
+  else if (using_process)
     proc_capturer.Stop();
   else
     sys_capturer.Stop();

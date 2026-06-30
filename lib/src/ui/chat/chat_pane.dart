@@ -2838,6 +2838,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
               fps: selection.fps,
               shareAudio: selection.shareAudio,
               pid: selection.pid,
+              windowHwnd: selection.windowHwnd,
             );
       }
     }
@@ -3514,6 +3515,7 @@ class _ScreenShareControlsOverlayState
               fps: selection.fps,
               shareAudio: selection.shareAudio,
               pid: selection.pid,
+              windowHwnd: selection.windowHwnd,
             );
       }
     }

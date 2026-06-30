@@ -207,8 +207,9 @@ Uses `HollowDialog` with title "Your Recovery Phrase".
 **`ScreenShareFps` enum:** fps5, fps15, fps30, fps60 -- each with `value`, `label`.
 
 **`ScreenShareSelection` class:**
-- Fields: `sourceId`, `width`, `height`, `fps`, `shareAudio`, `pid`
-- `pid`: process ID from `DesktopCapturerSource.pid` (Windows only, 0 for screens). Used for per-process audio capture
+- Fields: `sourceId`, `width`, `height`, `fps`, `shareAudio`, `pid`, `windowHwnd`
+- `windowHwnd`: for a WINDOW share on Windows, the window's HWND (the desktop source `id` IS the decimal HWND); 0 for screens. The screen-audio exe resolves HWND→owning pid→the app's audio-rendering pids itself (per-app INCLUDE+mix). This is the RELIABLE per-app target — `pid` arrives as 0 for windows, so it isn't trusted
+- `pid`: process ID from `DesktopCapturerSource.pid` (Windows only, often 0 for windows — see `windowHwnd`). Legacy per-process target
 - `qualityLabel` getter: e.g. "1080p60", "4K30"
 
 ### Widget: `_ScreenShareDialog` (StatefulWidget)
@@ -243,7 +244,7 @@ Uses `HollowDialog` with title "Your Recovery Phrase".
 - Share audio toggle: `HollowToggle` + label
 - Actions: Cancel (ghost) + Share (filled, disabled when no source selected)
 
-**Share button:** Pops dialog with `ScreenShareSelection(sourceId:, width:, height:, fps:, shareAudio:, pid:)`. The `pid` is read from `_sources[_selectedSourceId]?.pid` (0 for screens, non-zero for windows on Windows).
+**Share button:** Pops dialog with `ScreenShareSelection(sourceId:, width:, height:, fps:, shareAudio:, pid:, windowHwnd:)`. For a WINDOW source, `windowHwnd = int.tryParse(sourceId)` (the source id IS the decimal HWND); 0 for screens. `pid` is still read from the source but is unreliable for windows (0). Also logs a `[SCREEN-AUDIO] Share confirmed: type/pid/hwnd/audio/id` diagnostic line via `network_api.logFromDart`.
 
 ### External dependencies
 - `flutter_webrtc` -- `desktopCapturer`, `DesktopCapturerSource`, `SourceType`

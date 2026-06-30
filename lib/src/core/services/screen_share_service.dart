@@ -491,13 +491,15 @@ class ScreenShareService {
     String streamId, {
     String mode = 'system',
     int pid = 0,
+    int windowHwnd = 0,
     required void Function(Uint8List packet) onPacket,
   }) async {
     if (Platform.isWindows) {
       if (_screenAudioCapturer?.isActive == true) return;
-      _log('[HOLLOW-AU-SCREEN] Starting WASAPI capture (pid=$pid)');
+      _log('[HOLLOW-AU-SCREEN] Starting WASAPI capture (pid=$pid hwnd=$windowHwnd)');
       _screenAudioCapturer = ScreenAudioCapturer();
-      final ok = await _screenAudioCapturer!.start(pid: pid, onPacket: onPacket);
+      final ok = await _screenAudioCapturer!
+          .start(pid: pid, windowHwnd: windowHwnd, onPacket: onPacket);
       if (!ok) {
         _log('[HOLLOW-AU-SCREEN] Failed to start WASAPI capturer');
         _screenAudioCapturer = null;

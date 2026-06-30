@@ -54,6 +54,8 @@ set(COMMON_SOURCES
 if(WIN32)
   list(APPEND COMMON_SOURCES
     process_audio_capturer.cc
+    multi_process_capturer.cc
+    audio_session_enum.cc
     ../../windows/wasapi_loopback_capturer.cc
     audio_player_win.cpp
   )
@@ -86,7 +88,7 @@ if(WIN32)
     ${CMAKE_CURRENT_SOURCE_DIR}/../../windows
   )
   target_link_libraries(screen_audio_test PRIVATE
-    Mmdevapi.lib Avrt.lib ole32.lib RuntimeObject.lib winmm.lib
+    Mmdevapi.lib Avrt.lib ole32.lib RuntimeObject.lib winmm.lib user32.lib
   )
   # Static CRT linking — no MSVCP140/VCRUNTIME140 dependency.
   set_property(TARGET screen_audio_test PROPERTY

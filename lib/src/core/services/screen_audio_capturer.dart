@@ -66,15 +66,24 @@ class ScreenAudioCapturer {
   /// Each packet is `[uint32_le: seq][...opus_bytes...]` — ready to send
   /// over the data channel with the 0x03 type prefix.
   ///
-  /// If [pid] is non-zero, captures only that process's audio (INCLUDE mode,
-  /// requires Windows 10 2004+) — used when sharing a specific window.
-  /// Otherwise (sharing the whole screen) captures system-wide, but EXCLUDES
-  /// THIS process's audio so the call playback isn't re-captured and echoed
-  /// back to the remote peer (the Windows equivalent of the macOS share path's
-  /// excludesCurrentProcessAudio). The exe falls back to plain system loopback
-  /// if EXCLUDE capture is unavailable (Windows < 2004).
+  /// For a WINDOW share, [windowHwnd] is the window's HWND (the desktop source
+  /// `id`): the exe resolves HWND -> owning pid -> the app's audio-rendering
+  /// pids (the browser/Electron audio-service child process etc.), INCLUDE-
+  /// captures that set and mixes — so only that app's audio is sent, and a
+  /// silent app sends silence (NOT the whole system). This is preferred over
+  /// [pid] because libwebrtc does not reliably populate a window pid (it arrives
+  /// as 0). Requires Windows 10 2004+.
+  ///
+  /// [pid] is an alternative per-app target when a window pid is already known.
+  ///
+  /// If NEITHER is set (sharing the whole screen) captures system-wide, but
+  /// EXCLUDES THIS process's audio so the call playback isn't re-captured and
+  /// echoed back to the remote peer (the Windows equivalent of the macOS share
+  /// path's excludesCurrentProcessAudio). The exe falls back to plain system
+  /// loopback if EXCLUDE capture is unavailable (Windows < 2004).
   Future<bool> start({
     int pid = 0,
+    int windowHwnd = 0,
     required void Function(Uint8List packet) onPacket,
   }) async {
     if (_active) return true;
@@ -86,8 +95,14 @@ class ScreenAudioCapturer {
     }
 
     final args = ['--mode', 'pipe', '--duration', '0'];
-    if (pid != 0) {
-      args.addAll(['--pid', pid.toString()]);
+    if (windowHwnd != 0) {
+      // Per-app (window) share: hand the window HANDLE to the exe, which resolves
+      // it to the owning pid then the real audio-rendering pid set (browser audio
+      // service etc.) and INCLUDE-captures + mixes that set.
+      args.addAll(['--window-hwnd', windowHwnd.toString()]);
+    } else if (pid != 0) {
+      // Per-app share with a known pid.
+      args.addAll(['--window-pid', pid.toString()]);
     } else {
       // Whole-screen share: capture everything except our own audio (anti-echo).
       args.addAll(['--exclude-pid', io.pid.toString()]);

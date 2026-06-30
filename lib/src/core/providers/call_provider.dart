@@ -588,6 +588,7 @@ class CallNotifier extends Notifier<CallState> {
     required int fps,
     bool shareAudio = false,
     int pid = 0,
+    int windowHwnd = 0,
   }) async {
     if (state.status != CallStatus.active) return;
 
@@ -660,6 +661,7 @@ class CallNotifier extends Notifier<CallState> {
         await _outgoingScreenShare!.startScreenAudioCapture(
           streamId,
           pid: pid,
+          windowHwnd: windowHwnd,
           onPacket: (packet) {
             webrtc.sendScreenAudio(peerId, packet);
           },
