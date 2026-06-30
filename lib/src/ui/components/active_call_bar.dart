@@ -266,14 +266,16 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                         ),
                       ),
                     ],
-                    // Record button (desktop only). Shown; if the backend isn't
-                    // available the start call surfaces a clear error toast
-                    // instead of silently hiding it. On macOS < 13.0 the native
-                    // recorder doesn't exist, so the button is disabled with an
-                    // explanatory tooltip (mirrors the audio-share toggle).
-                    if (Platform.isWindows ||
-                        Platform.isLinux ||
-                        Platform.isMacOS) ...[
+                    // Record button (Windows + macOS only). Shown; if the
+                    // backend isn't available the start call surfaces a clear
+                    // error toast instead of silently hiding it. On macOS < 13.0
+                    // the native recorder doesn't exist, so the button is
+                    // disabled with an explanatory tooltip (mirrors the
+                    // audio-share toggle). Hidden on Linux — there's no native
+                    // recorder there yet (the libwebrtc-capture + ffmpeg pipe
+                    // path was choppy/out-of-sync), so the button is omitted
+                    // entirely rather than shipping a broken capture.
+                    if (Platform.isWindows || Platform.isMacOS) ...[
                       const SizedBox(width: HollowSpacing.xs),
                       HollowTooltip(
                         message: MacOsScreenAudioSupport.recordBlockedByOldOs

@@ -7,6 +7,7 @@ import 'api/archive.dart';
 import 'api/crdt.dart';
 import 'api/identity.dart';
 import 'api/network.dart';
+import 'api/screen_audio.dart';
 import 'api/share.dart';
 import 'api/simple.dart';
 import 'api/storage.dart';

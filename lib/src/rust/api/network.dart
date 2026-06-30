@@ -65,13 +65,15 @@ Future<String> identityFor({required String peerId}) =>
 Future<List<DeviceLink>> getDeviceLinks() =>
     RustLib.instance.api.crateApiNetworkGetDeviceLinks();
 
-/// Wipe all persisted device lists + the in-memory resolver (multi-device,
-/// Phase 6). Testing/maintenance aid: union-merge never removes a device id, so
-/// repeated wipe+reimport cycles leave ghost devices accumulating in the
-/// published list. Calling this lets the device set rebuild from currently-live
-/// siblings on the next profile exchange. Restart the node afterward (or just
-/// reconnect) so siblings re-merge. Production single-device removal = Step 7
-/// revocation, not this blunt reset.
+/// Full sibling teardown ("Reset Device List"): tombstone EVERY device except the
+/// one we're running on, in a single master-signed version bump, and PROPAGATE it —
+/// friends converge and drop the revoked siblings (and can never un-revoke them),
+/// each revoked sibling self-nukes (wipe + relaunch) on ingest, and we drop their
+/// Olm sessions + MLS leaves. This is the permanent fix for accumulated ghost
+/// devices from link/re-link cycles (the old version did a blunt LOCAL wipe of the
+/// device-list table, which the grow-only union-merge simply regrew from siblings
+/// on the next profile exchange — so ghosts came right back). Requires the node to
+/// be running. After this, only THIS device remains; re-link others fresh.
 Future<void> resetDeviceLists() =>
     RustLib.instance.api.crateApiNetworkResetDeviceLists();
 

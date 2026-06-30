@@ -33,6 +33,7 @@
 #import "LocalAudioTrack.h"
 #import "LocalVideoTrack.h"
 #import "CaptureGainProcessor.h"
+#import "ScreenAudioPlayer.h"
 #if TARGET_OS_OSX
 #import "MacScreenShareAudioTap.h"
 #import "MacScreenShareAudioCapturer.h"
@@ -162,6 +163,10 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
   // Hollow fork: post-APM capture makeup gain + limiter, driven by
   // setCaptureGain. Registered on the shared capture-post-processing adapter.
   CaptureGainProcessor* _captureGainProcessor;
+
+  // Hollow fork: media-path PCM player for received screen-share audio, driven
+  // by startScreenAudioPlayer / writeScreenAudioPcm / stopScreenAudioPlayer.
+  ScreenAudioPlayer* _screenAudioPlayer;
 }
 
 static FlutterWebRTCPlugin *sharedSingleton;
@@ -1455,6 +1460,26 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     NSNumber* gain = argsMap[@"gain"];
     if (gain != nil && _captureGainProcessor != nil) {
       [_captureGainProcessor setGain:[gain floatValue]];
+    }
+    result(nil);
+  } else if ([@"startScreenAudioPlayer" isEqualToString:call.method]) {
+    // Hollow fork: media-path PCM player for received screen-share audio.
+    if (_screenAudioPlayer == nil) {
+      _screenAudioPlayer = [[ScreenAudioPlayer alloc] init];
+    }
+    [_screenAudioPlayer start];
+    result(nil);
+  } else if ([@"writeScreenAudioPcm" isEqualToString:call.method]) {
+    NSDictionary* argsMap = call.arguments;
+    FlutterStandardTypedData* pcm = argsMap[@"pcm"];
+    if (pcm != nil && _screenAudioPlayer != nil) {
+      [_screenAudioPlayer write:pcm.data];
+    }
+    result(nil);
+  } else if ([@"stopScreenAudioPlayer" isEqualToString:call.method]) {
+    if (_screenAudioPlayer != nil) {
+      [_screenAudioPlayer stop];
+      _screenAudioPlayer = nil;
     }
     result(nil);
   } else if ([@"setMicrophoneMute" isEqualToString:call.method]) {

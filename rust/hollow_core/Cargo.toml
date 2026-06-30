@@ -38,6 +38,9 @@ ed25519-dalek = { version = "2", features = ["pkcs8"] }
 bs58 = "0.5"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 argon2 = "0.5"
+# Pure-Rust Opus (libopus transpiled via c2rust) — decodes screen-share audio
+# packets on mobile. Pure Rust = no cmake/NDK, rides the existing cross-compile.
+unsafe-libopus = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_Foundation"] }

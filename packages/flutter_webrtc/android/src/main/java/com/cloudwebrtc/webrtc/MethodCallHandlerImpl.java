@@ -146,6 +146,11 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   // setCaptureGain. Registered on the capture-post-processing chain.
   private com.cloudwebrtc.webrtc.audio.CaptureGainProcessor captureGainProcessor;
 
+  // Hollow fork: native PCM player for received screen-share audio, driven by
+  // startScreenAudioPlayer / writeScreenAudioPcm / stopScreenAudioPlayer.
+  // Plays on the MEDIA stream, outside the call's voice-comm audio path.
+  private com.cloudwebrtc.webrtc.audio.ScreenAudioPlayer screenAudioPlayer;
+
   public static class LogSink implements Loggable {
     @Override
     public void onLogMessage(String message, Severity sev, String tag) {
@@ -818,9 +823,38 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         result.success(null);
         break;
       }
+      case "startScreenAudioPlayer": {
+        // Hollow fork: media-path PCM player for received screen-share audio.
+        if (screenAudioPlayer == null) {
+          screenAudioPlayer = new com.cloudwebrtc.webrtc.audio.ScreenAudioPlayer(context);
+        }
+        screenAudioPlayer.start();
+        // Match the current speaker route so the media track isn't stolen by
+        // the legacy speakerphone override (mutes it on the speaker route).
+        repinScreenAudioToRoute();
+        result.success(null);
+        break;
+      }
+      case "writeScreenAudioPcm": {
+        byte[] pcm = call.argument("pcm");
+        if (pcm != null && screenAudioPlayer != null) {
+          screenAudioPlayer.write(pcm);
+        }
+        result.success(null);
+        break;
+      }
+      case "stopScreenAudioPlayer": {
+        if (screenAudioPlayer != null) {
+          screenAudioPlayer.stop();
+          screenAudioPlayer = null;
+        }
+        result.success(null);
+        break;
+      }
       case "selectAudioOutput": {
         String deviceId = call.argument("deviceId");
         AudioSwitchManager.instance.selectAudioOutput(AudioDeviceKind.fromTypeName(deviceId));
+        repinScreenAudioToRoute();
         result.success(null);
         break;
       }
@@ -852,10 +886,12 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
       case "enableSpeakerphone":
         boolean enable = call.argument("enable");
         AudioSwitchManager.instance.enableSpeakerphone(enable);
+        repinScreenAudioToRoute();
         result.success(null);
         break;
       case "enableSpeakerphoneButPreferBluetooth":
         AudioSwitchManager.instance.enableSpeakerButPreferBluetooth();
+        repinScreenAudioToRoute();
         result.success(null);
         break;
       case "requestCapturePermission": {
@@ -1599,6 +1635,21 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   @Override
   public Activity getActivity() {
     return activity;
+  }
+
+  // Hollow fork: re-pin the screen-audio media track to the active output route
+  // whenever the call's route changes. The legacy speakerphone override
+  // (audioswitch) otherwise steals the media track's speaker route, muting it.
+  private void repinScreenAudioToRoute() {
+    if (screenAudioPlayer == null) return;
+    boolean speakerOn = false;
+    try {
+      speakerOn = AudioSwitchManager.instance
+          .selectedAudioDevice() instanceof AudioDevice.Speakerphone;
+    } catch (Exception e) {
+      // audioSwitch not started yet — default to non-speaker (default routing).
+    }
+    screenAudioPlayer.setPreferredOutput(speakerOn);
   }
 
   @Nullable

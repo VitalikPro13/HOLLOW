@@ -17,7 +17,7 @@ import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
-import 'package:hollow/src/core/services/screen_audio_renderer.dart';
+import 'package:hollow/src/core/services/screen_audio_receiver.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/voice_service.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
@@ -176,7 +176,7 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Separate PCs for screen sharing (one per direction).
   ScreenShareService? _outgoingScreenShare; // We share our screen to them
-  ScreenAudioRenderer? _screenAudioRenderer;
+  ScreenAudioReceiver? _screenAudioRenderer;
   ScreenShareService? _incomingScreenShare; // They share their screen to us
 
   /// Renderer for the incoming remote screen share. Used by UI.
@@ -251,7 +251,7 @@ class CallNotifier extends Notifier<CallState> {
           final webrtc = ref.read(webRtcProvider.notifier).service;
           webrtc.onScreenAudioReceived = (fromPeer, data) async {
             if (_screenAudioRenderer == null) {
-              _screenAudioRenderer = ScreenAudioRenderer();
+              _screenAudioRenderer = ScreenAudioReceiver.forPlatform();
               final ok = await _screenAudioRenderer!.start();
               if (!ok) {
                 _screenAudioRenderer = null;

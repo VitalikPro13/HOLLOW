@@ -1,5 +1,8 @@
 import 'dart:async';
 import 'dart:io';
+// Prefixed alias so the top-level `pid` getter (this process's PID) is reachable
+// inside start(), where the `pid` parameter would otherwise shadow it.
+import 'dart:io' as io;
 import 'dart:typed_data';
 
 import '../../rust/api/network.dart' as network_api;
@@ -64,7 +67,12 @@ class ScreenAudioCapturer {
   /// over the data channel with the 0x03 type prefix.
   ///
   /// If [pid] is non-zero, captures only that process's audio (INCLUDE mode,
-  /// requires Windows 10 2004+). Otherwise captures system-wide.
+  /// requires Windows 10 2004+) — used when sharing a specific window.
+  /// Otherwise (sharing the whole screen) captures system-wide, but EXCLUDES
+  /// THIS process's audio so the call playback isn't re-captured and echoed
+  /// back to the remote peer (the Windows equivalent of the macOS share path's
+  /// excludesCurrentProcessAudio). The exe falls back to plain system loopback
+  /// if EXCLUDE capture is unavailable (Windows < 2004).
   Future<bool> start({
     int pid = 0,
     required void Function(Uint8List packet) onPacket,
@@ -78,7 +86,12 @@ class ScreenAudioCapturer {
     }
 
     final args = ['--mode', 'pipe', '--duration', '0'];
-    if (pid != 0) args.addAll(['--pid', pid.toString()]);
+    if (pid != 0) {
+      args.addAll(['--pid', pid.toString()]);
+    } else {
+      // Whole-screen share: capture everything except our own audio (anti-echo).
+      args.addAll(['--exclude-pid', io.pid.toString()]);
+    }
 
     _log('[SCREEN-AUDIO] Spawning: $exePath ${args.join(' ')}');
 

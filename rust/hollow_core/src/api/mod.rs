@@ -2,6 +2,7 @@ pub mod archive;
 pub mod crdt;
 pub mod identity;
 pub mod network;
+pub mod screen_audio;
 pub mod share;
 pub mod simple;
 pub mod storage;

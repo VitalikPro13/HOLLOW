@@ -58,6 +58,10 @@ static void InstallSignalHandler() {
 struct Options {
   std::string mode = "system";   // system, process, packet, pipe, render, encode
   unsigned int pid = 0;          // DWORD on Windows; portable type for cross-platform parse
+  unsigned int exclude_pid = 0;  // EXCLUDE this process tree from system capture
+                                 // (Hollow's own PID — avoids capturing the call
+                                 // audio it plays back -> echo). Used only when
+                                 // pid == 0 (whole-system share). Win 10 2004+.
   int duration = 10;
   std::string format = "both";   // "wav", "opus", "both"
   std::string output = "captured_audio";
@@ -85,6 +89,9 @@ static void PrintUsage() {
     "  --mode system|process|packet|pipe|render  Capture mode (default: system)\n"
     "  --pid <pid>             Target process ID (process mode, INCLUDE).\n"
     "                          Omit for EXCLUDE self mode.\n"
+    "  --exclude-pid <pid>     With pid==0 (whole-system), capture all audio\n"
+    "                          EXCLUDING this process tree (e.g. the host app,\n"
+    "                          to avoid echoing call audio). Win 10 2004+.\n"
     "  --duration <seconds>    Capture duration (default: 10)\n"
     "  --format wav|opus|both  Output format (default: both)\n"
     "  --output <basename>     Output file basename (default: captured_audio)\n"
@@ -110,6 +117,8 @@ static Options ParseArgs(int argc, char* argv[]) {
       opts.mode = argv[++i];
     } else if (arg == "--pid" && i + 1 < argc) {
       opts.pid = static_cast<unsigned int>(atoi(argv[++i]));
+    } else if (arg == "--exclude-pid" && i + 1 < argc) {
+      opts.exclude_pid = static_cast<unsigned int>(atoi(argv[++i]));
     } else if (arg == "--duration" && i + 1 < argc) {
       opts.duration = atoi(argv[++i]);
     } else if (arg == "--format" && i + 1 < argc) {
@@ -643,7 +652,25 @@ static int RunPipeMode(const Options& opts) {
     }
     using_process = true;
     fprintf(stderr, "[PIPE] Capturing PID %u (INCLUDE mode)...\n", opts.pid);
-  } else {
+  } else if (opts.exclude_pid != 0 && ProcessAudioCapturer::IsSupported()) {
+    // Whole-system share, but EXCLUDE the host app's process tree so we don't
+    // re-capture the call audio it's playing back (the macOS share path does the
+    // same via excludesCurrentProcessAudio). Falls back to plain system loopback
+    // below if this EXCLUDE capture can't start.
+    if (proc_capturer.Start(frame_callback, opts.exclude_pid, false)) {
+      using_process = true;
+      fprintf(stderr,
+              "[PIPE] Capturing system audio EXCLUDING PID %u (anti-echo)...\n",
+              opts.exclude_pid);
+    } else {
+      fprintf(stderr,
+              "[PIPE] EXCLUDE capture (PID %u) failed; falling back to system "
+              "loopback (call audio may echo)\n",
+              opts.exclude_pid);
+    }
+  }
+
+  if (!using_process) {
     if (!sys_capturer.Start(frame_callback)) {
       fprintf(stderr, "[PIPE] ERROR: Failed to start WASAPI capture\n");
       return 1;

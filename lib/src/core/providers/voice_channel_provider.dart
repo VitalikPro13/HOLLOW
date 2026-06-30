@@ -15,7 +15,7 @@ import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
-import 'package:hollow/src/core/services/screen_audio_renderer.dart';
+import 'package:hollow/src/core/services/screen_audio_receiver.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/voice_channel_service.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
@@ -278,7 +278,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   int _screenShareFps = 60;
   bool _screenShareAudio = false;
   int _screenSharePid = 0;
-  ScreenAudioRenderer? _screenAudioRenderer;
+  ScreenAudioReceiver? _screenAudioRenderer;
 
   /// Timer that polls for screen track ending (window closed).
   Timer? _screenTrackPoller;
@@ -471,7 +471,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       final webrtc = ref.read(webRtcProvider.notifier).service;
       webrtc.onScreenAudioReceived = (peerId, data) async {
         if (_screenAudioRenderer == null) {
-          _screenAudioRenderer = ScreenAudioRenderer();
+          _screenAudioRenderer = ScreenAudioReceiver.forPlatform();
           final ok = await _screenAudioRenderer!.start();
           if (!ok) {
             _screenAudioRenderer = null;

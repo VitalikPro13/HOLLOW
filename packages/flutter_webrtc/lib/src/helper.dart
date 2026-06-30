@@ -167,6 +167,22 @@ class Helper {
   static Future<void> setCaptureGain(double gain) =>
       NativeAudioManagement.setCaptureGain(gain);
 
+  /// Start a native PCM player for received screen-share audio (Hollow fork,
+  /// mobile). Plays 48 kHz stereo int16 PCM on the media output path, OUTSIDE
+  /// the WebRTC voice session so the call's AEC/AGC can't mangle the shared
+  /// music. Desktop uses an out-of-process renderer exe instead.
+  static Future<void> startScreenAudioPlayer() =>
+      NativeAudioManagement.startScreenAudioPlayer();
+
+  /// Feed one decoded PCM buffer (interleaved 48 kHz stereo s16le) to the
+  /// native screen-audio player.
+  static Future<void> writeScreenAudioPcm(Uint8List pcm) =>
+      NativeAudioManagement.writeScreenAudioPcm(pcm);
+
+  /// Stop and release the native screen-audio player.
+  static Future<void> stopScreenAudioPlayer() =>
+      NativeAudioManagement.stopScreenAudioPlayer();
+
   /// Set the microphone mute/unmute for Flutter native
   static Future<void> setMicrophoneMute(bool mute, MediaStreamTrack track) =>
       NativeAudioManagement.setMicrophoneMute(mute, track);

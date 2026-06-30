@@ -2972,9 +2972,10 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
             ),
           ),
         ],
-        // Record (desktop only). On macOS < 13.0 the native recorder doesn't
-        // exist, so the button is disabled with an explanatory tooltip.
-        if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) ...[
+        // Record (Windows + macOS only). On macOS < 13.0 the native recorder
+        // doesn't exist, so the button is disabled with an explanatory tooltip.
+        // Hidden on Linux — no working native recorder there yet.
+        if (Platform.isWindows || Platform.isMacOS) ...[
           const SizedBox(width: HollowSpacing.xs),
           HollowTooltip(
             message: MacOsScreenAudioSupport.recordBlockedByOldOs

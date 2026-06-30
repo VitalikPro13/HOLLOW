@@ -63,6 +63,33 @@ class NativeAudioManagement {
     });
   }
 
+  /// Start a native PCM player for received screen-share audio (Hollow fork,
+  /// mobile). Plays raw 48 kHz stereo int16 PCM on the MEDIA output path —
+  /// deliberately OUTSIDE the WebRTC voice session, so the call's AEC/AGC/
+  /// speech processing can't mangle the shared music. Desktop uses an
+  /// out-of-process renderer exe instead; this is the Android/iOS sibling.
+  /// No-op on web.
+  static Future<void> startScreenAudioPlayer() async {
+    if (kIsWeb) return;
+    await WebRTC.invokeMethod('startScreenAudioPlayer');
+  }
+
+  /// Feed one decoded PCM buffer (interleaved 48 kHz stereo signed-16-bit LE)
+  /// to the native screen-audio player started by [startScreenAudioPlayer].
+  /// No-op on web. Safe to call before start (dropped natively).
+  static Future<void> writeScreenAudioPcm(Uint8List pcm) async {
+    if (kIsWeb) return;
+    await WebRTC.invokeMethod('writeScreenAudioPcm', <String, dynamic>{
+      'pcm': pcm,
+    });
+  }
+
+  /// Stop and release the native screen-audio player. No-op on web.
+  static Future<void> stopScreenAudioPlayer() async {
+    if (kIsWeb) return;
+    await WebRTC.invokeMethod('stopScreenAudioPlayer');
+  }
+
   static Future<void> setMicrophoneMute(
       bool mute, MediaStreamTrack track) async {
     if (track.kind != 'audio') {
