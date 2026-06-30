@@ -183,6 +183,19 @@ class Helper {
   static Future<void> stopScreenAudioPlayer() =>
       NativeAudioManagement.stopScreenAudioPlayer();
 
+  /// Begin out-of-process rendering of the given REMOTE audio tracks (Hollow
+  /// fork, Windows only) so the call voices render from a separate pid the
+  /// screen-audio capturer can exclude during an entire-screen share (anti-echo
+  /// without dropping Hollow's own in-app media). Returns the renderer child
+  /// pid (to exclude), or 0 if not started / unsupported.
+  static Future<int> voiceRedirectStart(List<String> trackIds) =>
+      NativeAudioManagement.voiceRedirectStart(trackIds);
+
+  /// Stop the out-of-process voice redirect: restores in-process playout and
+  /// shuts the renderer child down.
+  static Future<void> voiceRedirectStop() =>
+      NativeAudioManagement.voiceRedirectStop();
+
   /// Set the microphone mute/unmute for Flutter native
   static Future<void> setMicrophoneMute(bool mute, MediaStreamTrack track) =>
       NativeAudioManagement.setMicrophoneMute(mute, track);

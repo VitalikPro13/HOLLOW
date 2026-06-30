@@ -281,6 +281,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   int _screenShareHwnd = 0;
   ScreenAudioReceiver? _screenAudioRenderer;
 
+  /// Entire-screen anti-echo (Windows): the out-of-process voice-render child
+  /// pid to EXCLUDE from the screen-audio capture (so the VC voices it plays
+  /// aren't re-captured while Hollow's own media is), and whether the redirect
+  /// is currently armed. Armed once per share (covers all peers), reset on stop.
+  int _screenShareExcludePid = 0;
+  bool _voiceRedirectActive = false;
+
   /// Timer that polls for screen track ending (window closed).
   Timer? _screenTrackPoller;
 
@@ -684,8 +691,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
       _remoteCameraRenderers.clear();
 
-      // Clean up screen sharing.
+      // Clean up screen sharing (stops the screen-audio capturer).
       await _cleanupAllScreenShares();
+
+      // Disarm the entire-screen anti-echo voice redirect AFTER the capturer is
+      // gone (idempotent — also disarmed by stopScreenShare; covers leaving the
+      // channel while sharing).
+      await _disarmVoiceRedirect();
 
       // Stop out-of-process screen audio renderer.
       if (_screenAudioRenderer != null) {
@@ -1006,6 +1018,34 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       focusedScreenSharePeerId: localPeerId,
     );
 
+    // ENTIRE-SCREEN anti-echo (Windows): in a voice channel we're already in a
+    // call with everyone, so the peers' voices play from hollow.exe and a
+    // whole-system capture would re-capture them. Redirect ALL peers' inbound
+    // audio to an out-of-process renderer (one child, mixed) and exclude THAT
+    // pid from the capture — keeps Hollow's own in-app media, drops the voices.
+    // Armed ONCE here (covers every peer); the per-peer capture below passes the
+    // resulting exclude pid. Only for an entire-screen share (no per-app target).
+    _screenShareExcludePid = 0;
+    _voiceRedirectActive = false;
+    final isEntireScreen = pid == 0 && windowHwnd == 0;
+    if (Platform.isWindows && shareAudio && isEntireScreen) {
+      try {
+        final trackIds =
+            await _service?.getAllRemoteAudioTrackIds() ?? const <String>[];
+        if (trackIds.isNotEmpty) {
+          _screenShareExcludePid = await Helper.voiceRedirectStart(trackIds);
+          _voiceRedirectActive = _screenShareExcludePid != 0;
+          debugPrint('[HOLLOW-AU-SCREEN] VC voice redirect '
+              '${_voiceRedirectActive ? "armed (pid=$_screenShareExcludePid, "
+                  "${trackIds.length} track(s))" : "did not start"}');
+        } else {
+          debugPrint('[HOLLOW-AU-SCREEN] VC: no remote audio tracks to redirect');
+        }
+      } catch (e) {
+        debugPrint('[HOLLOW-AU-SCREEN] VC voice redirect failed to arm: $e');
+      }
+    }
+
     // Send screen share to each peer in the channel (up to cap).
     final peers = state.getParticipants(
         state.currentServerId!, state.currentChannelId!);
@@ -1037,11 +1077,17 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _screenTrackPoller?.cancel();
       _screenTrackPoller = null;
 
-      // Close all outgoing screen share PCs.
+      // Close all outgoing screen share PCs (this stops the screen-audio
+      // capturer) BEFORE disarming the redirect, so the brief window where the
+      // VC voices' in-process volume is restored isn't re-captured.
       for (final service in _outgoingScreenShares.values) {
         try { await service.close(); } catch (_) {}
       }
       _outgoingScreenShares.clear();
+
+      // Disarm the entire-screen anti-echo voice redirect (restore VC voices +
+      // kill the renderer child) now that the capturer is gone.
+      await _disarmVoiceRedirect();
 
       // Dispose local preview renderer.
       if (_localScreenPreviewRenderer != null) {
@@ -1079,6 +1125,21 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       );
     } finally {
       _stoppingScreenShare = false;
+    }
+  }
+
+  /// Disarm the entire-screen anti-echo voice redirect if armed: restores the
+  /// VC voices to normal in-process playout and shuts the renderer child down.
+  /// Safe/no-op when not armed.
+  Future<void> _disarmVoiceRedirect() async {
+    _screenShareExcludePid = 0;
+    if (!_voiceRedirectActive) return;
+    _voiceRedirectActive = false;
+    try {
+      await Helper.voiceRedirectStop();
+      debugPrint('[HOLLOW-AU-SCREEN] VC voice redirect disarmed');
+    } catch (e) {
+      debugPrint('[HOLLOW-AU-SCREEN] VC voice redirect disarm failed: $e');
     }
   }
 
@@ -1180,10 +1241,31 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           _screenCaptureStream!.id,
           pid: _screenSharePid,
           windowHwnd: _screenShareHwnd,
+          excludePid: _screenShareExcludePid,
           onPacket: (packet) {
             webrtc.sendScreenAudio(peerId, packet);
           },
         );
+
+        // Late-joiner anti-echo: if the voice redirect is already armed (entire-
+        // screen+audio share started earlier), redirect THIS peer's voice too so
+        // it doesn't play from hollow.exe and get re-captured. voiceRedirectStart
+        // is incremental — it only AddSinks track ids not already redirected, and
+        // the child pid (hence excludePid) is unchanged, so the capturer needs no
+        // restart. No-op if this peer's tracks are already redirected.
+        if (_voiceRedirectActive) {
+          try {
+            final ids =
+                await _service?.getAllRemoteAudioTrackIds() ?? const <String>[];
+            if (ids.isNotEmpty) {
+              await Helper.voiceRedirectStart(ids);
+              debugPrint('[HOLLOW-AU-SCREEN] VC redirect refreshed for late peer '
+                  '$peerId (${ids.length} track(s))');
+            }
+          } catch (e) {
+            debugPrint('[HOLLOW-AU-SCREEN] late-peer redirect refresh failed: $e');
+          }
+        }
       }
     } catch (e) {
       // A throw mid-setup leaves a half-built service (live PC) in the map.

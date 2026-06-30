@@ -3,6 +3,9 @@
 #include "flutter_capture_gain_processor.h"
 #include "flutter_data_channel.h"
 #include "flutter_peerconnection.h"
+#ifdef _WIN32
+#include "flutter_voice_redirect.h"
+#endif
 
 #include "helper.h"
 
@@ -43,6 +46,15 @@ FlutterWebRTCBase::~FlutterWebRTCBase() {
 EventChannelProxy* FlutterWebRTCBase::event_channel() {
   return event_channel_ ? event_channel_.get() : nullptr;
 }
+
+#ifdef _WIN32
+FlutterVoiceRedirect* FlutterWebRTCBase::voice_redirect() {
+  if (!voice_redirect_) {
+    voice_redirect_ = std::make_unique<FlutterVoiceRedirect>();
+  }
+  return voice_redirect_.get();
+}
+#endif
 
 std::string FlutterWebRTCBase::GenerateUUID() {
   return libwebrtc::Helper::CreateRandomUuid().std_string();

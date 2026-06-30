@@ -476,6 +476,22 @@ class VoiceService {
     }
   }
 
+  /// Track ids of the remote peer's inbound audio (the call voices). Used by the
+  /// Windows entire-screen-share anti-echo path to redirect these tracks to an
+  /// out-of-process renderer. Empty if no PC / no remote audio yet.
+  Future<List<String>> getRemoteAudioTrackIds() async {
+    if (_pc == null) return const [];
+    final ids = <String>[];
+    final receivers = await _pc!.getReceivers();
+    for (final r in receivers) {
+      final t = r.track;
+      if (t != null && t.kind == 'audio' && (t.id?.isNotEmpty ?? false)) {
+        ids.add(t.id!);
+      }
+    }
+    return ids;
+  }
+
   /// Toggle camera on/off. Returns the new state.
   ///
   /// Uses the same `addTrack` / `removeTrack` pattern as

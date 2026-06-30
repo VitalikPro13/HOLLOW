@@ -179,6 +179,11 @@ class CallNotifier extends Notifier<CallState> {
   ScreenAudioReceiver? _screenAudioRenderer;
   ScreenShareService? _incomingScreenShare; // They share their screen to us
 
+  /// True while the entire-screen anti-echo voice redirect is armed (Windows):
+  /// the remote call voice is rendered out-of-process so the screen capture can
+  /// exclude its pid. Reset on stop so we only call voiceRedirectStop when armed.
+  bool _voiceRedirectActive = false;
+
   /// Renderer for the incoming remote screen share. Used by UI.
   RTCVideoRenderer? get screenShareRenderer =>
       _incomingScreenShare?.remoteRenderer;
@@ -656,12 +661,40 @@ class CallNotifier extends Notifier<CallState> {
           _callLog('[HOLLOW-AU-SCREEN] Ensuring WebRtcService DC for $peerId');
           await webrtc.connectToPeer(peerId);
         }
+
+        // ENTIRE-SCREEN anti-echo (Windows): the remote call voice plays from
+        // hollow.exe, so a whole-system capture would re-capture it. Move that
+        // voice to an out-of-process renderer (separate pid) and exclude THAT
+        // pid from the capture — so the voice isn't re-captured while Hollow's
+        // own in-app media (a video opened in chat) still is. Only for an
+        // entire-screen share (no per-app window/pid target).
+        int excludePid = 0;
+        final isEntireScreen = pid == 0 && windowHwnd == 0;
+        if (Platform.isWindows && isEntireScreen) {
+          try {
+            final trackIds = await _service.getRemoteAudioTrackIds();
+            if (trackIds.isNotEmpty) {
+              excludePid = await Helper.voiceRedirectStart(trackIds);
+              _voiceRedirectActive = excludePid != 0;
+              _callLog('[HOLLOW-AU-SCREEN] Voice redirect '
+                  '${_voiceRedirectActive ? "armed (pid=$excludePid, "
+                      "${trackIds.length} track(s))" : "did not start"}');
+            } else {
+              _callLog('[HOLLOW-AU-SCREEN] No remote audio tracks to redirect '
+                  '(voices will be excluded via hollow.exe fallback)');
+            }
+          } catch (e) {
+            _callLog('[HOLLOW-AU-SCREEN] Voice redirect failed to arm: $e');
+          }
+        }
+
         final streamId = _outgoingScreenShare!.pc?.getLocalStreams().firstOrNull?.id ?? 'call_$callId';
         _callLog('[HOLLOW-AU-SCREEN] Starting screen audio capture (stream=$streamId)');
         await _outgoingScreenShare!.startScreenAudioCapture(
           streamId,
           pid: pid,
           windowHwnd: windowHwnd,
+          excludePid: excludePid,
           onPacket: (packet) {
             webrtc.sendScreenAudio(peerId, packet);
           },
@@ -669,15 +702,34 @@ class CallNotifier extends Notifier<CallState> {
       }
     } catch (e) {
       debugPrint('[HOLLOW-CALL] Failed to start screen share: $e');
+      await _disarmVoiceRedirect();
       await _outgoingScreenShare?.close();
       _outgoingScreenShare = null;
     }
   }
 
+  /// Disarm the entire-screen anti-echo voice redirect if armed: restores the
+  /// remote call voice to normal in-process playout and shuts the renderer child
+  /// down. Safe/no-op when not armed.
+  Future<void> _disarmVoiceRedirect() async {
+    if (!_voiceRedirectActive) return;
+    _voiceRedirectActive = false;
+    try {
+      await Helper.voiceRedirectStop();
+      _callLog('[HOLLOW-AU-SCREEN] Voice redirect disarmed');
+    } catch (e) {
+      _callLog('[HOLLOW-AU-SCREEN] Voice redirect disarm failed: $e');
+    }
+  }
+
   /// Stop screen sharing.
   Future<void> stopScreenShare() async {
+    // Stop the capturer FIRST, then disarm the redirect — so the brief window
+    // where the remote voice's in-process volume is restored isn't captured
+    // (the capturer is already gone), avoiding a momentary echo blip on stop.
     await _outgoingScreenShare?.close();
     _outgoingScreenShare = null;
+    await _disarmVoiceRedirect();
     state = state.copyWith(isScreenSharing: false, clearScreenShareLabel: true);
 
     final peerId = state.peerId;
@@ -1315,6 +1367,10 @@ class CallNotifier extends Notifier<CallState> {
     _outgoingScreenShare = null;
     await _incomingScreenShare?.close();
     _incomingScreenShare = null;
+    // Disarm the entire-screen anti-echo voice redirect AFTER the capturer is
+    // gone (restores remote-voice playout + kills the renderer child) so the
+    // restored voice isn't briefly re-captured.
+    await _disarmVoiceRedirect();
     // Reset the screen-share view focus so the next call starts fresh.
     ref.read(focusedDmSourceProvider.notifier).state =
         const DmFocusedSource.none();

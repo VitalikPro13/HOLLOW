@@ -694,6 +694,23 @@ class VoiceChannelService {
     }
   }
 
+  /// Track ids of every connected peer's inbound audio (all the voice-channel
+  /// voices). Used by the Windows entire-screen-share anti-echo path to redirect
+  /// these tracks to an out-of-process renderer so they aren't re-captured.
+  Future<List<String>> getAllRemoteAudioTrackIds() async {
+    final ids = <String>[];
+    for (final pc in _peerConnections.values) {
+      final receivers = await pc.getReceivers();
+      for (final r in receivers) {
+        final t = r.track;
+        if (t != null && t.kind == 'audio' && (t.id?.isNotEmpty ?? false)) {
+          ids.add(t.id!);
+        }
+      }
+    }
+    return ids;
+  }
+
   // ---------------------------------------------------------------
   //  Camera (video) controls
   // ---------------------------------------------------------------

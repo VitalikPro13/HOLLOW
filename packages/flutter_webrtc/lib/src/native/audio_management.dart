@@ -63,6 +63,49 @@ class NativeAudioManagement {
     });
   }
 
+  /// Begin out-of-process rendering of the given REMOTE audio tracks (Hollow
+  /// fork, Windows only). Each track's decoded PCM is tapped via an
+  /// AudioTrackSink and forwarded to a child `render-pcm` process that plays it,
+  /// while the track's in-process playout is muted (SetVolume(0)). This is used
+  /// during an ENTIRE-SCREEN share with audio so the call voices render from a
+  /// SEPARATE pid that the screen-audio capturer excludes (anti-echo) — while
+  /// Hollow's own in-app media (same hollow.exe) is still captured.
+  ///
+  /// Returns the renderer child's process id (to pass to the capturer's exclude
+  /// list), or 0 if it didn't start / unsupported platform. No-op (returns 0) on
+  /// web and non-Windows.
+  static Future<int> voiceRedirectStart(List<String> trackIds) async {
+    if (kIsWeb) return 0;
+    try {
+      final res = await WebRTC.invokeMethod('voiceRedirectStart',
+          <String, dynamic>{'trackIds': trackIds});
+      if (res is Map) {
+        final pid = res['pid'];
+        if (pid is int) return pid;
+        if (pid is num) return pid.toInt();
+      }
+      return 0;
+    } on PlatformException {
+      return 0;
+    } on MissingPluginException {
+      return 0;
+    }
+  }
+
+  /// Stop the out-of-process voice redirect started by [voiceRedirectStart]:
+  /// detaches every sink, restores in-process playout volume, and shuts the
+  /// renderer child down. No-op on web / non-Windows.
+  static Future<void> voiceRedirectStop() async {
+    if (kIsWeb) return;
+    try {
+      await WebRTC.invokeMethod('voiceRedirectStop');
+    } on PlatformException {
+      // best-effort
+    } on MissingPluginException {
+      // best-effort
+    }
+  }
+
   /// Start a native PCM player for received screen-share audio (Hollow fork,
   /// mobile). Plays raw 48 kHz stereo int16 PCM on the MEDIA output path —
   /// deliberately OUTSIDE the WebRTC voice session, so the call's AEC/AGC/

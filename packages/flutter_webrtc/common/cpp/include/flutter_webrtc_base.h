@@ -31,6 +31,9 @@ class FlutterVideoRenderer;
 class FlutterCaptureGainProcessor;
 class FlutterRTCDataChannelObserver;
 class FlutterPeerConnectionObserver;
+#ifdef _WIN32
+class FlutterVoiceRedirect;
+#endif
 
 class FlutterWebRTCBase {
  public:
@@ -59,6 +62,14 @@ class FlutterWebRTCBase {
   FlutterCaptureGainProcessor* capture_gain_processor() {
     return capture_gain_processor_;
   }
+
+#ifdef _WIN32
+  // Hollow fork (Windows): out-of-process renderer for remote call/voice audio,
+  // used during entire-screen share so the call voices play from a separate pid
+  // that the screen capture excludes (anti-echo) while Hollow's own media is
+  // still captured. Lazily constructed on first use.
+  FlutterVoiceRedirect* voice_redirect();
+#endif
 
   virtual scoped_refptr<RTCMediaTrack> MediaTrackForId(const std::string& id);
 
@@ -125,6 +136,11 @@ class FlutterWebRTCBase {
   // can't be deleted through the base interface; we delete the concrete type
   // in ~FlutterWebRTCBase). Held alive for the lifetime of the audio pipeline.
   FlutterCaptureGainProcessor* capture_gain_processor_ = nullptr;
+#ifdef _WIN32
+  // Owned; lazily created. Its dtor (which tears down the child process + writer
+  // thread) runs from ~FlutterWebRTCBase, where the type is complete.
+  std::unique_ptr<FlutterVoiceRedirect> voice_redirect_;
+#endif
   RTCConfiguration configuration_;
 
   std::map<std::string, scoped_refptr<libwebrtc::KeyProvider>> key_providers_;

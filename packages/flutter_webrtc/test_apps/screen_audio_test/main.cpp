@@ -6,17 +6,21 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <timeapi.h>  // timeBeginPeriod/timeEndPeriod (WIN32_LEAN_AND_MEAN drops mmsystem)
 #include <fcntl.h>
 #include <io.h>
 #else
 #include <csignal>
 #endif
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <atomic>
+#include <cmath>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -95,6 +99,9 @@ static void PrintUsage() {
     "             For out-of-process capture by the Flutter app\n"
     "  render   - Read framed Opus from stdin -> decode -> platform playback\n"
     "             For out-of-process audio rendering by the Flutter app\n"
+    "  render-pcm - Read framed raw PCM from stdin -> platform playback (no Opus).\n"
+    "             For out-of-process playback of decoded call/voice audio so it\n"
+    "             renders from a SEPARATE pid (excluded from entire-screen capture)\n"
     "  encode   - Read raw PCM from stdin -> Opus encode -> framed on stdout\n"
     "             For out-of-process encoding (macOS/Linux SEND path)\n"
     "\n"
@@ -663,10 +670,18 @@ static int RunPipeMode(const Options& opts) {
   };
 
   // Start capture. Precedence:
-  //   --window-pid : per-app share — resolve the window to its audio pids,
-  //                  INCLUDE-capture that set and mix (Discord model).
+  //   --window-hwnd / --window-pid : per-app share — resolve the window to its
+  //                  audio pids, INCLUDE-capture that set and mix (Discord model).
   //   --pid        : single explicit INCLUDE pid (legacy/manual).
-  //   --exclude-pid: whole-system EXCLUDE host (entire-screen anti-echo).
+  //   --exclude-pid: whole-system EXCLUDE the target process TREE. Entire-screen
+  //                  anti-echo. The target is normally Hollow's out-of-process
+  //                  VOICE-RENDER CHILD (a descendant of hollow.exe): excluding
+  //                  the child drops the call voices it plays, but NOT its parent
+  //                  hollow.exe — so Hollow's own in-app media is still captured.
+  //                  (Voices are also SetVolume(0)'d inside hollow.exe so it never
+  //                  renders them.) When no redirect child exists (e.g. share
+  //                  without audio, or pre-redirect), the target is hollow.exe
+  //                  itself (coarser — also drops Hollow's media).
   //   (none)       : plain system loopback.
   flutter_webrtc_plugin::WasapiLoopbackCapturer sys_capturer;
   ProcessAudioCapturer proc_capturer;
@@ -856,6 +871,209 @@ static int RunRenderMode(const Options&) {
 }
 
 // =============================================================================
+// Render-PCM mode — out-of-process RAW-PCM renderer + MIXER for Flutter.
+//
+// Reads framed raw interleaved 16-bit PCM from stdin, one frame per call/voice
+// remote audio track:
+//   [u16_le payload_len][u8 stream_id][u16_le src_rate][u8 src_channels][int16 PCM]
+//   payload_len counts the bytes AFTER it (stream_id 1 + rate 2 + ch 1 + PCM).
+//
+// Each stream_id is one remote participant's decoded audio (delivered by the
+// plugin's AudioTrackSink). They arrive independently and at possibly different
+// rates/channel counts; we resample each to 48k stereo (per-stream resampler
+// state, fractional cursor carried across that stream's frames) into a per-stream
+// bounded buffer, and a wall-clock-paced mixer thread sums one 10ms frame across
+// all streams and feeds the platform AudioPlayer (48k stereo). This is the same
+// model as MultiProcessCapturer, just sink-fed instead of WASAPI-fed.
+//
+// Why a SEPARATE process: its audio renders under a pid != hollow.exe, so the
+// entire-screen capture excludes this pid (anti-echo) while hollow.exe's own
+// in-app media is still captured. The plugin SetVolume(0)'s the remote tracks so
+// hollow.exe itself doesn't also render them.
+// =============================================================================
+
+#ifdef _WIN32
+
+namespace {
+
+// One remote participant's audio: a resampler cursor + a bounded 48k-stereo
+// output buffer, all guarded by the shared mixer mutex.
+struct RenderPcmStream {
+  // Resampler state (source-frame cursor + carried last source frame).
+  double src_pos = 0.0;
+  int16_t prev_l = 0, prev_r = 0;
+  bool have_prev = false;
+  // Converted 48k-stereo, interleaved, awaiting the mixer.
+  std::deque<int16_t> buffer;
+};
+
+constexpr int kRpDstRate = 48000;
+constexpr int kRpDstCh = 2;
+constexpr size_t kRpFrameInterleaved = (kRpDstRate / 100) * kRpDstCh;  // 960 = 10ms
+// ~400ms per-stream cap so a fast/early stream can't grow unbounded; drop oldest.
+constexpr size_t kRpMaxBuffered = kRpFrameInterleaved * 40;
+
+// Resample one source chunk (src_rate/src_ch) to 48k stereo, appending to dst.
+// Carries the cursor + last-frame in `st` so consecutive chunks of the SAME
+// stream join seamlessly.
+void ResampleChunkToStereo(RenderPcmStream& st, const int16_t* in,
+                           size_t in_frames, int src_rate, int src_ch,
+                           std::deque<int16_t>& dst) {
+  if (in_frames == 0 || src_rate <= 0 || src_ch <= 0) return;
+
+  auto src_frame = [&](long i, int16_t& l, int16_t& r) {
+    if (i < 0) {
+      if (st.have_prev) { l = st.prev_l; r = st.prev_r; return; }
+      i = 0;
+    }
+    if (i >= static_cast<long>(in_frames)) i = static_cast<long>(in_frames) - 1;
+    const size_t base = static_cast<size_t>(i) * static_cast<size_t>(src_ch);
+    const int16_t s0 = in[base];
+    if (src_ch == 1) { l = s0; r = s0; }
+    else { l = s0; r = in[base + 1]; }  // ch>=2: first two channels
+  };
+
+  const double ratio = static_cast<double>(src_rate) / kRpDstRate;  // src/dst
+  while (st.src_pos < static_cast<double>(in_frames)) {
+    const long i0 = static_cast<long>(std::floor(st.src_pos));
+    const double frac = st.src_pos - static_cast<double>(i0);
+    int16_t l0, r0, l1, r1;
+    src_frame(i0, l0, r0);
+    src_frame(i0 + 1, l1, r1);
+    const int li = static_cast<int>(static_cast<double>(l0) +
+                                    (static_cast<double>(l1) - l0) * frac);
+    const int ri = static_cast<int>(static_cast<double>(r0) +
+                                    (static_cast<double>(r1) - r0) * frac);
+    dst.push_back(static_cast<int16_t>(li));
+    dst.push_back(static_cast<int16_t>(ri));
+    st.src_pos += ratio;
+  }
+  st.src_pos -= static_cast<double>(in_frames);  // carry fraction to next chunk
+
+  const size_t base = (in_frames - 1) * static_cast<size_t>(src_ch);
+  const int16_t s0 = in[base];
+  st.prev_l = s0;
+  st.prev_r = (src_ch == 1) ? s0 : in[base + 1];
+  st.have_prev = true;
+}
+
+}  // namespace
+
+#endif  // _WIN32
+
+static int RunRenderPcmMode(const Options&) {
+#ifdef _WIN32
+  _setmode(_fileno(stdin), _O_BINARY);
+
+  fprintf(stderr, "[RENDER-PCM] Starting out-of-process PCM renderer+mixer\n");
+
+  AudioPlayer player;
+  if (!player.Start()) {
+    fprintf(stderr, "[RENDER-PCM] ERROR: audio output open failed\n");
+    return 1;
+  }
+  fprintf(stderr, "[RENDER-PCM] Audio output ready (%dHz %dch), "
+                  "reading PCM from stdin...\n", kRpDstRate, kRpDstCh);
+
+  std::mutex mix_mutex;
+  std::map<uint8_t, RenderPcmStream> streams;  // stream_id -> resampler+buffer
+  std::atomic<bool> active{true};
+
+  // Mixer thread: wall-clock-paced, emits one summed 10ms frame per 10ms,
+  // zero-filling streams that are momentarily short. Mirrors MultiProcessCapturer.
+  std::thread mixer([&]() {
+    timeBeginPeriod(1);
+    std::vector<int16_t> frame(kRpFrameInterleaved);
+    const ULONGLONG start = GetTickCount64();
+    uint64_t emitted = 0;
+    while (active.load()) {
+      Sleep(5);
+      const ULONGLONG now = GetTickCount64();
+      const uint64_t due = (now - start) / 10;
+      while (emitted < due && active.load()) {
+        std::memset(frame.data(), 0, kRpFrameInterleaved * sizeof(int16_t));
+        {
+          std::lock_guard<std::mutex> lock(mix_mutex);
+          for (auto& kv : streams) {
+            auto& buf = kv.second.buffer;
+            const size_t take = std::min(buf.size(), kRpFrameInterleaved);
+            for (size_t i = 0; i < take; ++i) {
+              int32_t m = static_cast<int32_t>(frame[i]) +
+                          static_cast<int32_t>(buf[i]);
+              if (m > 32767) m = 32767;
+              if (m < -32768) m = -32768;
+              frame[i] = static_cast<int16_t>(m);
+            }
+            buf.erase(buf.begin(), buf.begin() + take);
+          }
+        }
+        player.Push(frame.data(), kRpFrameInterleaved / kRpDstCh, kRpDstCh);
+        ++emitted;
+      }
+    }
+    timeEndPeriod(1);
+  });
+
+  std::vector<uint8_t> frame_buf;
+  uint32_t chunks = 0;
+
+  while (g_running.load()) {
+    uint8_t len_hdr[2];
+    if (fread(len_hdr, 1, 2, stdin) != 2) break;  // EOF / closed stdin
+    uint16_t payload_len = len_hdr[0] | (len_hdr[1] << 8);
+    if (payload_len < 4) {  // stream_id(1)+rate(2)+ch(1) minimum
+      fprintf(stderr, "[RENDER-PCM] Runt payload len %u, stopping\n", payload_len);
+      break;
+    }
+
+    frame_buf.resize(payload_len);
+    if (fread(frame_buf.data(), 1, payload_len, stdin) !=
+        static_cast<size_t>(payload_len))
+      break;
+
+    const uint8_t stream_id = frame_buf[0];
+    const int src_rate = frame_buf[1] | (frame_buf[2] << 8);
+    const int src_ch = frame_buf[3];
+    const uint8_t* pcm_bytes = frame_buf.data() + 4;
+    const size_t pcm_byte_len = payload_len - 4;
+    if (src_rate <= 0 || src_ch <= 0 || (pcm_byte_len % 2) != 0) continue;
+
+    const int16_t* in = reinterpret_cast<const int16_t*>(pcm_bytes);
+    const size_t in_frames =
+        (pcm_byte_len / sizeof(int16_t)) / static_cast<size_t>(src_ch);
+    if (in_frames == 0) continue;
+
+    {
+      std::lock_guard<std::mutex> lock(mix_mutex);
+      RenderPcmStream& st = streams[stream_id];
+      ResampleChunkToStereo(st, in, in_frames, src_rate, src_ch, st.buffer);
+      if (st.buffer.size() > kRpMaxBuffered) {
+        st.buffer.erase(st.buffer.begin(),
+                        st.buffer.begin() + (st.buffer.size() - kRpMaxBuffered));
+      }
+    }
+
+    if (++chunks <= 5 || chunks % 1000 == 0) {
+      fprintf(stderr, "[RENDER-PCM] chunk %u: stream %u, %zu frames @ %dHz/%dch\n",
+              chunks, stream_id, in_frames, src_rate, src_ch);
+    }
+  }
+
+  active.store(false);
+  if (mixer.joinable()) mixer.join();
+  player.Stop();
+  fprintf(stderr, "[RENDER-PCM] Done. %u chunks over %zu stream(s)\n",
+          chunks, streams.size());
+  return 0;
+#else
+  // Non-Windows: the desktop voice-redirect path is Windows-only for now
+  // (macOS uses excludesCurrentProcessAudio on the share capturer instead).
+  fprintf(stderr, "[RENDER-PCM] Not supported on this platform\n");
+  return 1;
+#endif  // _WIN32
+}
+
+// =============================================================================
 // Encode mode — out-of-process Opus encoder for Flutter integration.
 //
 // Reads raw interleaved 16-bit PCM (48kHz stereo) from stdin:
@@ -977,6 +1195,8 @@ int main(int argc, char* argv[]) {
 
   if (opts.mode == "render") {
     return RunRenderMode(opts);
+  } else if (opts.mode == "render-pcm") {
+    return RunRenderPcmMode(opts);
   } else if (opts.mode == "encode") {
     return RunEncodeMode(opts);
 #ifdef _WIN32

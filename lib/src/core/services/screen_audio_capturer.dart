@@ -77,13 +77,18 @@ class ScreenAudioCapturer {
   /// [pid] is an alternative per-app target when a window pid is already known.
   ///
   /// If NEITHER is set (sharing the whole screen) captures system-wide, but
-  /// EXCLUDES THIS process's audio so the call playback isn't re-captured and
-  /// echoed back to the remote peer (the Windows equivalent of the macOS share
-  /// path's excludesCurrentProcessAudio). The exe falls back to plain system
-  /// loopback if EXCLUDE capture is unavailable (Windows < 2004).
+  /// EXCLUDES a process TREE so the call playback isn't re-captured and echoed
+  /// back to the remote peer (the Windows equivalent of the macOS share path's
+  /// excludesCurrentProcessAudio). By default the excluded tree is THIS process
+  /// (hollow.exe). When [excludePid] is given (the out-of-process voice-render
+  /// child's pid), that tree is excluded INSTEAD — the child is a descendant of
+  /// hollow.exe, so excluding it drops only the call voices it plays while
+  /// hollow.exe's own in-app media is still captured (Bug B). The exe falls back
+  /// to plain system loopback if EXCLUDE capture is unavailable (Windows < 2004).
   Future<bool> start({
     int pid = 0,
     int windowHwnd = 0,
+    int excludePid = 0,
     required void Function(Uint8List packet) onPacket,
   }) async {
     if (_active) return true;
@@ -104,8 +109,12 @@ class ScreenAudioCapturer {
       // Per-app share with a known pid.
       args.addAll(['--window-pid', pid.toString()]);
     } else {
-      // Whole-screen share: capture everything except our own audio (anti-echo).
-      args.addAll(['--exclude-pid', io.pid.toString()]);
+      // Whole-screen share: capture everything EXCLUDING one process tree. When a
+      // voice-render child exists, exclude IT (drops only the call voices it
+      // plays, keeps hollow.exe's media); otherwise exclude ourselves (legacy —
+      // also drops Hollow's own media, but no voices are out-of-process to keep).
+      final excludeTarget = excludePid != 0 ? excludePid : io.pid;
+      args.addAll(['--exclude-pid', excludeTarget.toString()]);
     }
 
     _log('[SCREEN-AUDIO] Spawning: $exePath ${args.join(' ')}');

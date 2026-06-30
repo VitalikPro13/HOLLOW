@@ -6,6 +6,7 @@
 
 #ifdef _WIN32
 #include "../../../windows/win_screen_recorder.h"
+#include "flutter_voice_redirect.h"
 #endif
 
 #ifdef __linux__
@@ -625,6 +626,39 @@ void FlutterWebRTC::HandleMethodCall(
     if (capture_gain_processor()) {
       capture_gain_processor()->SetGain(static_cast<float>(gain.value()));
     }
+    result->Success();
+  } else if (method_call.method_name().compare("voiceRedirectStart") == 0) {
+    // Hollow fork (Windows): begin out-of-process rendering of the given REMOTE
+    // audio track ids so the call voices play from a separate pid (excluded from
+    // entire-screen capture for anti-echo) while hollow.exe's media is captured.
+    // Returns {"pid": <renderer pid>} so Dart can pass it to the screen-audio
+    // capturer's --exclude-pid. {"pid": 0} means it didn't start.
+#ifdef _WIN32
+    const EncodableMap params =
+        method_call.arguments()
+            ? GetValue<EncodableMap>(*method_call.arguments())
+            : EncodableMap();
+    const EncodableList track_list = findList(params, "trackIds");
+    std::vector<std::string> track_ids;
+    for (const EncodableValue& v : track_list) {
+      track_ids.push_back(GetValue<std::string>(v));
+    }
+    bool ok = voice_redirect()->Start(this, track_ids);
+    int pid = ok ? static_cast<int>(voice_redirect()->child_pid()) : 0;
+    EncodableMap res;
+    res[EncodableValue("pid")] = EncodableValue(pid);
+    result->Success(EncodableValue(res));
+#else
+    EncodableMap res;
+    res[EncodableValue("pid")] = EncodableValue(0);
+    result->Success(EncodableValue(res));
+#endif
+  } else if (method_call.method_name().compare("voiceRedirectStop") == 0) {
+    // Hollow fork (Windows): stop the redirect — RemoveSink + restore volume on
+    // every redirected track, shut the renderer child down.
+#ifdef _WIN32
+    voice_redirect()->Stop(this);
+#endif
     result->Success();
   } else if (method_call.method_name().compare("getLocalDescription") == 0) {
     if (!method_call.arguments()) {
