@@ -181,12 +181,16 @@ class WebRtcService {
     // device-link map is cold and doesn't yet know this peer's device<->master
     // association) BUT there's exactly ONE open data channel, it's the call peer
     // — use it. Scoped to screen audio only; file transfers never take this path.
+    // Only when the channel's owner is UNKNOWN to the link map — a resolvable
+    // owner that didn't match above is a DIFFERENT person (multi-viewer VC
+    // share), and routing this viewer's audio into their channel would double it.
     if (conn == null) {
       final open = _connections.values
           .where((c) =>
               c.dataChannel?.state == RTCDataChannelState.RTCDataChannelOpen)
           .toList();
-      if (open.length == 1) {
+      if (open.length == 1 &&
+          resolveIdentity(open.first.peerId) == open.first.peerId) {
         conn = open.first;
         if (_screenAudioSent == 0 && _screenAudioDropped == 0) {
           _log('[HOLLOW-WEBRTC-DART] screen-audio: id $peerId unresolved, '
@@ -262,14 +266,24 @@ class WebRtcService {
     if (iceConfigOverride == null) {
       if (_openConnForIdentity(peerId) != null) return;
       // Cold device-link map: identity didn't resolve, but if there's already
-      // exactly one open channel it's this call peer — don't dial the master.
-      final openCount = _connections.values
+      // exactly one open channel it's PROBABLY this call peer — don't dial the
+      // master. CAVEAT: "cold map" and "a different second person" look the
+      // same to the resolver, and blindly reusing here silently skipped dialing
+      // a genuine 2nd peer (a late-joining VC screen-share viewer lost its data
+      // channel; gossip lost a neighbor). So only take the shortcut when the
+      // open channel's owner is UNKNOWN to the link map too — if the map can
+      // name that owner (resolves to a different master than [peerId], since
+      // _openConnForIdentity above already failed), it's a different person:
+      // fall through and dial.
+      final open = _connections.values
           .where((c) =>
               c.dataChannel?.state == RTCDataChannelState.RTCDataChannelOpen)
-          .length;
-      if (openCount == 1) {
+          .toList();
+      if (open.length == 1 &&
+          resolveIdentity(open.first.peerId) == open.first.peerId) {
         _log('[HOLLOW-WEBRTC-DART] connectToPeer($peerId): unresolved but one '
-            'open channel exists — reusing, not dialing master');
+            'open channel exists (owner unknown to link map) — reusing, not '
+            'dialing master');
         return;
       }
     }

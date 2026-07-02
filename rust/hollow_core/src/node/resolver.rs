@@ -187,6 +187,22 @@ pub(crate) fn is_revoked(device_peer_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Process-wide lock for EVERY test that mutates the global resolver map
+/// (`update`/`seed_self`/`clear_all`/`clear_for_test`) or asserts on state that
+/// depends on it (`resolve`, `peer_is_reachable`, elections, `ServerState`
+/// accessors via the crdt hook). cargo runs tests in parallel; without one
+/// shared lock, a test calling `clear_all` wipes another test's links mid-assert
+/// (a real intermittent failure — `master_with_online_device_is_reachable` lost
+/// exactly that race). The harness `test_guard` and the resolver-module tests
+/// both funnel through this same lock.
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static GLOBAL_RESOLVER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GLOBAL_RESOLVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 pub(crate) fn clear_for_test() {
     if let Ok(mut map) = links().write() {
@@ -215,12 +231,12 @@ mod tests {
     use std::sync::Mutex;
 
     // The resolver is process-global; serialize tests so they don't race on the
-    // shared map (cargo runs tests in parallel). Each test takes this guard,
-    // then clears, so it sees a clean map regardless of order.
-    static TEST_GUARD: Mutex<()> = Mutex::new(());
-
+    // shared map (cargo runs tests in parallel). Each test takes the PROCESS-WIDE
+    // resolver lock (shared with the harness + crypto_handler/server_state tests
+    // that also touch the global map), then clears, so it sees a clean map
+    // regardless of order.
     fn guarded() -> std::sync::MutexGuard<'static, ()> {
-        let g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let g = test_lock();
         clear_for_test();
         g
     }

@@ -507,8 +507,18 @@ class _PeerMemberContent extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final allPeers = ref.watch(peersProvider);
     final invisPeers = ref.watch(invisiblePeersProvider);
-    final peers = Map.of(allPeers)
-      ..removeWhere((id, _) => invisPeers.contains(id));
+    // This pane lists PEOPLE, but `peersProvider` is DEVICE-keyed — a
+    // multi-device peer showed as N raw-id rows with generic avatars. Fold each
+    // device to its master (profiles/avatars are master-keyed); keep the
+    // person "encrypted" if ANY of their device sessions is.
+    final links = ref.watch(deviceLinkProvider);
+    final folded = <String, bool>{};
+    for (final e in allPeers.entries) {
+      if (invisPeers.contains(e.key)) continue;
+      final master = links.identityOf(e.key);
+      folded[master] = (folded[master] ?? false) || e.value.isEncrypted;
+    }
+    final peers = folded;
     final memberListReveal =
         StartupRevealScope.interval(context, 0.60, 0.80);
 
@@ -539,7 +549,6 @@ class _PeerMemberContent extends ConsumerWidget {
               }
               final peerIndex = index - 1;
               final peerId = peers.keys.elementAt(peerIndex);
-              final peer = peers[peerId];
 
               return StaggeredListItem(
                 parentAnimation: memberListReveal,
@@ -548,7 +557,7 @@ class _PeerMemberContent extends ConsumerWidget {
                 slideFrom: const Offset(0.3, 0),
                 child: _MemberTile(
                   peerId: peerId,
-                  isEncrypted: peer?.isEncrypted ?? false,
+                  isEncrypted: peers[peerId] ?? false,
                 ),
               );
             },

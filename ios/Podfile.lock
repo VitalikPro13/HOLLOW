@@ -1,10 +1,8 @@
 PODS:
   - Flutter (1.0.0)
-  - flutter_local_notifications (0.0.1):
-    - Flutter
   - flutter_webrtc (1.4.0):
     - Flutter
-    - WebRTC-SDK (= 144.7559.01)
+    - WebRTC-SDK (= 144.7559.09)
   - fvp (0.35.2):
     - Flutter
     - FlutterMacOS
@@ -18,11 +16,10 @@ PODS:
     - Flutter
   - super_native_extensions (0.0.1):
     - Flutter
-  - WebRTC-SDK (144.7559.01)
+  - WebRTC-SDK (144.7559.09)
 
 DEPENDENCIES:
   - Flutter (from `Flutter`)
-  - flutter_local_notifications (from `.symlinks/plugins/flutter_local_notifications/ios`)
   - flutter_webrtc (from `.symlinks/plugins/flutter_webrtc/ios`)
   - fvp (from `.symlinks/plugins/fvp/darwin`)
   - hollow_core (from `.symlinks/plugins/hollow_core/ios`)
@@ -38,8 +35,6 @@ SPEC REPOS:
 EXTERNAL SOURCES:
   Flutter:
     :path: Flutter
-  flutter_local_notifications:
-    :path: ".symlinks/plugins/flutter_local_notifications/ios"
   flutter_webrtc:
     :path: ".symlinks/plugins/flutter_webrtc/ios"
   fvp:
@@ -55,15 +50,14 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
-  flutter_local_notifications: 395056b3175ba4f08480a7c5de30cd36d69827e4
-  flutter_webrtc: ec91d94b484ad49cf191ef93413f64a40ffd3b4c
+  flutter_webrtc: 3ee86aa10e0313c38c93fdb215dd86e77014f96a
   fvp: 4fe77c2b30122233a57f425dafd219ed35565809
   hollow_core: 2961c66623031f2236c18450a6f661e5d86e645f
   irondash_engine_context: 8e58ca8e0212ee9d1c7dc6a42121849986c88486
   mdk: 59bbe9e2ac2a052455ab1b076c245680d66cf6c0
   proximity_sensor: 2aef59f90cf0382935faf58ad0a79e1e860773bd
   super_native_extensions: b763c02dc3a8fd078389f410bf15149179020cb4
-  WebRTC-SDK: ab9b5319e458c2bfebdc92b3600740da35d5630d
+  WebRTC-SDK: e6006119cd730d6315d875e4a421b6cc8bb88833
 
 PODFILE CHECKSUM: 5750b27f76a542563d9ee2931ce3241dab457935
 

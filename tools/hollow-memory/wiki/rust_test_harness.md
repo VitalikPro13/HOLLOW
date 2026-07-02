@@ -61,10 +61,11 @@ ordering lives in the nodes):
 
 The GAP between the two layers is where multi-device bugs hide, so both exist on purpose:
 - **UI layer** (master-collapsed, reads through the SAME resolver/CRDT accessors the Dart providers
-  use → a green inspector == a green UI for that state): `TestNode::dm_thread`, `dm_unread`, `servers`,
-  `member_panel` (master-keyed role+online via `ServerState::get_role`, the resolver chokepoint),
-  `channel_messages`, `online_identities`/`is_online` (presence read from the relay, collapsed via
-  `resolver::resolve`).
+  use → a green inspector == a green UI for that state): `TestNode::dm_thread`, `dm_unread`, `servers`
+  (mirrors `get_joined_servers`: hides tombstoned shells AND non-empty-membership shells we're no
+  longer a member of — the left/kicked legacy-shell filter, 2026-07-02), `member_panel` (master-keyed
+  role+online via `ServerState::get_role`, the resolver chokepoint), `channel_messages`,
+  `online_identities`/`is_online` (presence read from the relay, collapsed via `resolver::resolve`).
 - **Raw layer** (device-keyed underlying truth → assert the invariant beneath the UI when it diverges):
   `raw_crdt_member_keys` (should be MASTER ids; a leaked device id = a `canonicalize_members` bug),
   `MockRelay::online_devices`/`room_devices`.
@@ -83,9 +84,13 @@ The GAP between the two layers is where multi-device bugs hide, so both exist on
   account, **pre-seeds accepted friendships BEFORE connect** so the first `Connected` auto-joins the
   DM rooms (same master_tag across nodes = siblings; distinct device_tag = distinct transport id).
 - `wait_event(node, timeout, pred)`, `drain_events(node)`, `sleep_ms(ms)`.
-- `test_guard()` — process-wide `Mutex` + `resolver::clear_for_test()`. The resolver is a process-global
-  `OnceLock` map, so harness tests run SERIALLY from a clean resolver. The guard is held across the
-  whole async test (intentional; `#[allow(clippy::await_holding_lock)]`).
+- `test_guard()` — takes `resolver::test_lock()` (the ONE process-wide lock shared with every unit
+  test that mutates the global resolver map: resolver::tests, crypto_handler election/device-list
+  tests, the server_state accessors-hook test) + `resolver::clear_for_test()`. Harness tests run
+  SERIALLY from a clean resolver; the shared lock exists because a unit test's links were being wiped
+  mid-assert by a parallel test's `clear_all` (a real intermittent failure, 2026-07-02). ANY new test
+  touching the global resolver must hold `resolver::test_lock()`. The guard is held across the whole
+  async test (intentional; `#[allow(clippy::await_holding_lock)]`).
 - Tests set `HOLLOW_DATA_DIR` to a throwaway tempdir so no stray global-data-dir path touches the
   developer's real `~/.hollow` DB.
 

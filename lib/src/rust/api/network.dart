@@ -57,6 +57,23 @@ Future<String> getLocalPublicKey() =>
 Future<String> identityFor({required String peerId}) =>
     RustLib.instance.api.crateApiNetworkIdentityFor(peerId: peerId);
 
+/// Resolve a (possibly per-device) peer_id to its MASTER identity, falling back
+/// to the PERSISTED device links in SQLCipher when the in-memory resolver is
+/// still cold.
+///
+/// The push-tap navigation path needs this (HOLLOW_PLAN "iOS DM push opens a
+/// different chat"): a cold-start notification tap is buffered and fires the
+/// moment the mobile shell mounts, which can be BEFORE the node's event loop
+/// task has warmed the in-memory resolver from the DB — `identity_for` then
+/// resolves the friend's DEVICE id to itself (no error, so callers can't tell a
+/// cold miss from a genuine single-device peer) and the DM opens a device-keyed
+/// empty thread. The NSE proves the link IS on disk at tap time (it warms from
+/// `device_links` and stores the fetched DM under the master), so a direct DB
+/// read closes the race. Any failure (locked identity, DB open error) degrades
+/// to identity-passthrough — same contract as `identity_for`.
+Future<String> identityForPersisted({required String peerId}) =>
+    RustLib.instance.api.crateApiNetworkIdentityForPersisted(peerId: peerId);
+
 /// Snapshot every known (device → master) link for the Dart attribution layer.
 ///
 /// Dart builds a `device_link_provider` from this and refreshes it whenever a

@@ -24,8 +24,14 @@ pub(crate) fn friend_device_targets(
     master: &str,
 ) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    // EXACT room membership, not identity-wide `peer_is_reachable`: this function
+    // returns socket-addressable DEVICE ids for raw SendDirect. An identity-wide
+    // check would admit the bare MASTER whenever any of its devices is online —
+    // and a send addressed to the master is silently dropped.
     let mut push = |id: String, out: &mut Vec<String>| {
-        if !out.contains(&id) && peer_is_reachable(ws_room_peers, &id) {
+        if !out.contains(&id)
+            && ws_room_peers.values().any(|peers| peers.contains(&id))
+        {
             out.push(id);
         }
     };
@@ -121,12 +127,19 @@ pub(crate) async fn handle_send_friend_request(
         room_code: inbox_room.clone(),
     });
 
-    // Try to send immediately if peer is already reachable (shared server or inbox).
-    if peer_is_reachable(&ws_room_peers, &peer_id_str) {
-        send_message_to_peer(
-            &ws_cmd_tx, &ws_room_peers,
-            &peer_id_str, HavenMessage::FriendRequest { requested_at: now },
-        );
+    // Try to send immediately if the peer has an online DEVICE (shared server or
+    // inbox). The send must target concrete devices: `peer_id_str` may be (or
+    // resolve to) a bare MASTER, which no socket authenticates as — a direct
+    // `send_message_to_peer(master)` is silently dropped AND would have skipped
+    // the queue below, losing the request entirely.
+    let targets = friend_device_targets(&ws_room_peers, &peer_id_str, &master);
+    if !targets.is_empty() {
+        for t in &targets {
+            send_message_to_peer(
+                &ws_cmd_tx, &ws_room_peers,
+                t, HavenMessage::FriendRequest { requested_at: now },
+            );
+        }
         // Defense in depth: we only joined the TARGET's inbox to DELIVER the request.
         // Leaving it now stops us lingering in the target's inbox set, where their
         // sibling-proof challenge would (correctly) reject us but we needn't be at all.
@@ -286,10 +299,15 @@ pub(crate) async fn handle_reject_friend_request(
         }
     }
 
-    if peer_is_reachable(&ws_room_peers, &peer_id_str) {
+    // Fan the reject to the requester's online DEVICES — the row (and often the
+    // UI key) is the MASTER, which no socket authenticates as, so a raw send to
+    // it was silently dropped and a multi-device requester's outgoing request
+    // stayed "pending" forever. Rejects stay best-effort (no redelivery queue,
+    // unlike accepts): an offline requester simply never learns, by design.
+    for t in &friend_device_targets(&ws_room_peers, &peer_id_str, &master) {
         send_message_to_peer(
             &ws_cmd_tx, &ws_room_peers,
-            &peer_id_str, HavenMessage::FriendReject,
+            t, HavenMessage::FriendReject,
         );
     }
 
@@ -587,7 +605,11 @@ pub(crate) async fn handle_update_profile(
         let data = serde_json::to_vec(&msg).unwrap_or_default();
         for peer in &all_ws_peers {
             if peer == &local_peer_str { continue; }
-            if mls_reached.contains(peer) { continue; }
+            // `mls_reached` holds MASTER member keys; `peer` is a room DEVICE id —
+            // collapse before the skip check, or a multi-device member always also
+            // gets (and the relay always sees) the redundant plaintext copy.
+            if mls_reached.contains(peer)
+                || mls_reached.contains(&super::resolver::resolve(peer)) { continue; }
             send_raw_to_peer(
                 &ws_cmd_tx, &ws_room_peers,
                 peer, data.clone(),

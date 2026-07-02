@@ -1949,6 +1949,28 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [X] Upgrade WebRTC
 - [X] Ship VCRUNTIME140.dll (VS distributable) inside
 - [X] System Status with message (left column Home shell tab + header), remove the Recovery Phrase card
+- [X] DM push notification on iOS opens a different chat instead of the proper friend peer ID. ATTEMPT 2 (2026-07-01, awaiting device test): root cause pinned — `identityFor` reads ONLY the in-memory resolver, which swarm.rs warms *asynchronously* inside the spawned event-loop task; a buffered cold-start tap fires the instant MobileShell mounts (before the warm), so the device id resolves to ITSELF with no error → the `deviceLinkProvider` fallback never triggers → device-keyed empty thread. (The NSE proves the link IS on disk at tap time: it warms from `device_links` and stores the fetched DM under the master — which is exactly why the real thread has the message while the tap opened an empty one.) Fix: new FFI `identity_for_persisted` (api/network.rs, next to `identity_for`) — in-memory resolve first, and when it returns the input unchanged, open SQLCipher directly (same identity/passphrase pattern as `get_push_profile`), `warm_from_links`, resolve again; failure degrades to passthrough. `_openChatFromPush` (mobile_shell.dart) now calls it. Diagnosis if still broken: grep `hollow_debug.log` for `[HOLLOW-PUSH] identity_for_persisted: <raw> -> <resolved> (memory|db)` — if raw==resolved on the `(db)` line, the link genuinely isn't in `device_links` on the phone (then carry the master in the push payload / NSE userInfo instead). ATTEMPT 1 (2026-06-20) used plain `identityFor` + mirror fallback — failed for the cold-resolver reason above. Android unaffected (taps the Dart-posted local banner whose payload is already the resolved master). Channels fine (key on server:channel).
+
+- [ ] Add proper automatic gain for the audio (both input/output). Tested between Windows/iOS. On iOS there is a problem that the audio is too quiet and it doesn't change no matter what. Also, feels like the speaker doesn't work right too. Overall, the entire pipeline needs to be fixed, but for a good, clear voice, I have a really cool idea - use EQ, Compressor and Limiter natively in our app (I guess with Rust) to apply to the microphone and serve it to the WebRTC (hopefully it doesn't require something like VB-CABLE, but if does - then we need to think of something else in order to drastically increase the quality of a call in terms of voice). My personal amazing EQ parameters out of Adobe Audition:
+
+Frequency (Hz), Gain (dB), Q/Width (-/Hz), Band
+100 Hz, 24dB/Oct, -- (doesn't apply), HP
+110, 6, low shelving filter (adjust low shelve by 12 dB per cotave), L
+291, -3, 1.5/179.3, 2
+3000, 2, 1.5/1838.4, 3
+7005, 3.5, 2/3218.5, 4
+12000, 1.5, 2/5512.9, 5
+
+Single-band compressor:
+Threshold: -18dB
+Ratio: 3x:1
+Attack: 10ms
+Release: 100ms
+
+Hard Limiter (Peak):
+Max Amplitude: -1 dB
+Look-ahead Time: 7ms
+Release time: 100ms
 
 - [ ] Get Linux out of Experimental phase, please
 
@@ -1965,7 +1987,6 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [ ] Conference as in Zoom (join link, only need identity in app; web without identity like public channels - consider later and research pros/cons)
 
 - [ ] "must-be-true-everywhere + mechanically-checkable" - add CI testing on such (e.g. #[serde(default)] guard)
-- [ ] DM push notification on iOS opens a different chat instead of the proper friend peer ID. ATTEMPTED 2026-06-20, still broken: the iOS tap arrives via FCM `data['sender']` (the friend's DEVICE id, not master), so the DM opens a device-keyed empty thread. Tried resolving device→master at the shared `_openChatFromPush` (mobile_shell.dart) via the Rust `identityFor` FFI (live resolver) with a `deviceLinkProvider` mirror fallback — did NOT fix it on iOS (Android unaffected — it taps the Dart-posted local banner whose payload is already the resolved master). Likely the resolver/mirror is still cold at cold-start tap time, OR the device→master link for the sender isn't present yet on the freshly-woken node. Channels are fine (key on server:channel). Next: confirm what id actually reaches the handler on iOS (log it) and whether the link is warm; may need to resolve inside `MobileChatRoute` after the node/links settle, or carry the master in the push payload itself.
 
 - [ ] Screen share gossip relay for voice channels — current limit is 5 outgoing viewers (direct P2P). Need gossip-style forwarding or lightweight SFU relay so larger voice channels can all watch a screen share without creating N peer connections per viewer
 - [ ] Discord import system (full implementation — parse GDPR export ZIP, map servers/channels/roles/messages, placeholder identities, member claiming) == reflect to the discord_migration_plan.md

@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::crdt::server_state::ServerState;
 use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 use super::crypto_handler::{
-    peer_is_reachable, send_mls_broadcast, send_encrypted_message,
+    peer_is_reachable, preferred_online_device, send_mls_broadcast, send_encrypted_message,
 };
 use super::file_handler;
 use super::types::*;
@@ -145,7 +145,11 @@ pub(crate) async fn handle_vault_download_file(
                         let si: u16 = ep[0].parse().unwrap_or(0);
                         let target_peer = ep[1];
                         let shard_key = ep[2];
-                            if peer_is_reachable(&ws_room_peers, target_peer) {
+                            // Placements are MASTER-keyed (server members); resolve to a
+                            // concrete online DEVICE — an Olm send to the bare master has
+                            // no session/socket. A device without the shard replies
+                            // found:false, which the retry logic already handles.
+                            if let Some(dev) = preferred_online_device(&ws_room_peers, target_peer) {
                                 let envelope = MessageEnvelope::ShardRequest {
                                     sid: server_id.clone(),
                                     cid: content_id.clone(),
@@ -156,10 +160,10 @@ pub(crate) async fn handle_vault_download_file(
                                 let json = serde_json::to_string(&envelope).unwrap_or_default();
                                 send_encrypted_message(
                                     &mut *olm, crypto_store,
-                                    target_peer, &json, &event_tx,
+                                    &dev, &json, &event_tx,
                                     &ws_cmd_tx, &ws_room_peers,
                                 ).await;
-                                hollow_log!("[HOLLOW-VAULT] Requested shard si={si} from {target_peer}");
+                                hollow_log!("[HOLLOW-VAULT] Requested shard si={si} from {target_peer} (device {dev})");
                                 requested += 1;
                             }
                     }
@@ -320,7 +324,12 @@ pub(crate) async fn handle_vault_upload_file(
             for placement in &plan.placements {
                 if placement.target_peer != local_peer {
                     if let Some((_, shard_data)) = plan.shards.iter().find(|(idx, _)| *idx == placement.shard_index) {
-                            if peer_is_reachable(&ws_room_peers, &placement.target_peer) {
+                            // The placement records the MASTER (the identity owns the
+                            // shard); deliver to ONE concrete online device of it — the
+                            // metadata Olm send AND the byte stream must hit the SAME
+                            // socket. Later requests fan across the identity's devices,
+                            // and a device without the shard replies found:false.
+                            if let Some(dev) = preferred_online_device(&ws_room_peers, &placement.target_peer) {
                                 // Send ShardStore metadata via MLS or Olm.
                                 let envelope = MessageEnvelope::ShardStore {
                                     inner: Box::new(ShardStorePayload {
@@ -337,7 +346,7 @@ pub(crate) async fn handle_vault_upload_file(
                                 let json = serde_json::to_string(&envelope).unwrap_or_default();
                                 send_encrypted_message(
                                     &mut *olm, crypto_store,
-                                    &placement.target_peer, &json, &event_tx,
+                                    &dev, &json, &event_tx,
                                     &ws_cmd_tx, &ws_room_peers,
                                 ).await;
 
@@ -346,10 +355,10 @@ pub(crate) async fn handle_vault_upload_file(
                                 super::file_handler::stream_to_peer_bytes(
                                     &ws_cmd_tx, &ws_room_peers,
                                     webrtc_peers, pending_webrtc_sends, &event_tx,
-                                    &placement.target_peer, &shard_kind,
+                                    &dev, &shard_kind,
                                     &content_id, shard_data,
                                 ).await;
-                                hollow_log!("[HOLLOW-VAULT] Streaming shard si={} ({} bytes) to {}", placement.shard_index, shard_data.len(), placement.target_peer);
+                                hollow_log!("[HOLLOW-VAULT] Streaming shard si={} ({} bytes) to {} (device {})", placement.shard_index, shard_data.len(), placement.target_peer, dev);
                             }
                     }
                 }
@@ -486,26 +495,31 @@ pub(crate) async fn handle_request_shard_from_peer(
     target_peer: String,
 ) {
     hollow_log!("[HOLLOW-VAULT] RequestShardFromPeer: cid={content_id} si={shard_index} from {target_peer}");
-        if !peer_is_reachable(&ws_room_peers, &target_peer) {
-            hollow_log!("[HOLLOW-VAULT] Cannot request shard: peer {target_peer} not reachable");
-            let _ = event_tx.send(NetworkEvent::ShardRequestFailed {
-                server_id, content_id, shard_index,
-                error: "Peer not reachable".into(),
-            }).await;
-        } else {
-            let envelope = MessageEnvelope::ShardRequest {
-                sid: server_id.clone(),
-                cid: content_id,
-                si: shard_index,
-                sk: shard_key,
-                target: None,
-            };
-            let json = serde_json::to_string(&envelope).unwrap_or_default();
-            send_encrypted_message(
-                &mut *olm, crypto_store,
-                &target_peer, &json, &event_tx,
-                &ws_cmd_tx, &ws_room_peers,
-            ).await;
+        // MASTER-keyed placement target → concrete online device (Olm sessions and
+        // sockets are per-DEVICE; the bare master has neither).
+        match preferred_online_device(&ws_room_peers, &target_peer) {
+            None => {
+                hollow_log!("[HOLLOW-VAULT] Cannot request shard: peer {target_peer} not reachable");
+                let _ = event_tx.send(NetworkEvent::ShardRequestFailed {
+                    server_id, content_id, shard_index,
+                    error: "Peer not reachable".into(),
+                }).await;
+            }
+            Some(dev) => {
+                let envelope = MessageEnvelope::ShardRequest {
+                    sid: server_id.clone(),
+                    cid: content_id,
+                    si: shard_index,
+                    sk: shard_key,
+                    target: None,
+                };
+                let json = serde_json::to_string(&envelope).unwrap_or_default();
+                send_encrypted_message(
+                    &mut *olm, crypto_store,
+                    &dev, &json, &event_tx,
+                    &ws_cmd_tx, &ws_room_peers,
+                ).await;
+            }
         }
 }
 
@@ -536,48 +550,53 @@ pub(crate) async fn handle_store_shard_on_peer(
     let _local_peer = local_peer_str.to_string();
     hollow_log!("[HOLLOW-VAULT] StoreShardOnPeer: cid={content_id} si={shard_index} -> {target_peer}");
 
-        if !peer_is_reachable(&ws_room_peers, &target_peer) {
-            hollow_log!("[HOLLOW-VAULT] Cannot store shard: peer {target_peer} not reachable");
-            let _ = event_tx.send(NetworkEvent::ShardStoreFailed {
-                server_id: server_id.clone(),
-                content_id: content_id.clone(),
-                shard_index,
-                target_peer: target_peer.clone(),
-                error: "Peer not reachable".into(),
-            }).await;
-        } else {
-            // Send ShardStore metadata via MLS or Olm fallback.
-            let envelope = MessageEnvelope::ShardStore {
-                inner: Box::new(ShardStorePayload {
-                    sid: server_id.clone(),
-                    cid: content_id.clone(),
-                    si: shard_index,
-                    sk: shard_key.clone(),
-                    k,
-                    m,
-                    total_size: total_data_size,
-                    tier: storage_tier.clone(),
-                    data: String::new(),
-                    chunks: 0,
-                    target: None,
-                }),
-            };
-            let json = serde_json::to_string(&envelope).unwrap_or_default();
-            send_encrypted_message(
-                &mut *olm, crypto_store,
-                &target_peer, &json, &event_tx,
-                &ws_cmd_tx, &ws_room_peers,
-            ).await;
+        // MASTER-keyed target → one concrete online device; metadata + byte
+        // stream must hit the SAME socket.
+        match preferred_online_device(&ws_room_peers, &target_peer) {
+            None => {
+                hollow_log!("[HOLLOW-VAULT] Cannot store shard: peer {target_peer} not reachable");
+                let _ = event_tx.send(NetworkEvent::ShardStoreFailed {
+                    server_id: server_id.clone(),
+                    content_id: content_id.clone(),
+                    shard_index,
+                    target_peer: target_peer.clone(),
+                    error: "Peer not reachable".into(),
+                }).await;
+            }
+            Some(dev) => {
+                // Send ShardStore metadata via MLS or Olm fallback.
+                let envelope = MessageEnvelope::ShardStore {
+                    inner: Box::new(ShardStorePayload {
+                        sid: server_id.clone(),
+                        cid: content_id.clone(),
+                        si: shard_index,
+                        sk: shard_key.clone(),
+                        k,
+                        m,
+                        total_size: total_data_size,
+                        tier: storage_tier.clone(),
+                        data: String::new(),
+                        chunks: 0,
+                        target: None,
+                    }),
+                };
+                let json = serde_json::to_string(&envelope).unwrap_or_default();
+                send_encrypted_message(
+                    &mut *olm, crypto_store,
+                    &dev, &json, &event_tx,
+                    &ws_cmd_tx, &ws_room_peers,
+                ).await;
 
-            // Stream shard bytes directly from memory.
-            let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index };
-            super::file_handler::stream_to_peer_bytes(
-                &ws_cmd_tx, &ws_room_peers,
-                webrtc_peers, pending_webrtc_sends, &event_tx,
-                &target_peer, &shard_kind,
-                &content_id, &data,
-            ).await;
-            hollow_log!("[HOLLOW-VAULT] Streaming shard si={shard_index} ({} bytes) to {target_peer}", data.len());
+                // Stream shard bytes directly from memory.
+                let shard_kind = super::ws_stream_transfer::StreamKind::Shard { shard_index };
+                super::file_handler::stream_to_peer_bytes(
+                    &ws_cmd_tx, &ws_room_peers,
+                    webrtc_peers, pending_webrtc_sends, &event_tx,
+                    &dev, &shard_kind,
+                    &content_id, &data,
+                ).await;
+                hollow_log!("[HOLLOW-VAULT] Streaming shard si={shard_index} ({} bytes) to {target_peer} (device {dev})", data.len());
+            }
         }
 }
 

@@ -526,6 +526,20 @@ pub(crate) async fn handle_update_server_setting(
     crdt_store: &CrdtStore,
 ) {
     if let Some(state) = server_states.get_mut(&server_id) {
+        // Local permission gate, mirroring what every RECEIVER enforces for
+        // ServerSettingChanged (Owner or Admin). Without it a non-admin FFI call
+        // applies the op locally, the network rejects it, and the caller's own
+        // state diverges from everyone else's.
+        let my_role = state.get_role(local_peer_str);
+        if my_role != crate::crdt::operations::MemberRole::Owner
+            && my_role != crate::crdt::operations::MemberRole::Admin
+        {
+            hollow_log!("[HOLLOW-CRDT] Permission denied: cannot change setting '{key}' in {server_id}");
+            let _ = event_tx.send(NetworkEvent::Error {
+                message: "Permission denied: only Owner/Admin can change server settings".to_string(),
+            }).await;
+            return;
+        }
         hollow_log!("[HOLLOW-CRDT] Updating setting '{key}'='{value}' in server {server_id}");
 
         let op = state.create_op(CrdtPayload::ServerSettingChanged {
@@ -2328,7 +2342,9 @@ pub(crate) async fn handle_envelope_crdt_op(
     {
         let state = server_states.get(&sid).unwrap();
         let sender_role = state.get_role(&op.author);
-        let sender_perms = sender_role.default_permissions();
+        // Override-aware, matching the local send handlers' `has_permission` gate
+        // (see the plaintext CrdtOpBroadcast twin in swarm.rs for the rationale).
+        let sender_perms = state.get_permissions(&op.author);
         use crate::crdt::operations::{CrdtPayload, Permission, MemberRole};
         let allowed = match &op.payload {
             CrdtPayload::ChannelAdded { .. }
@@ -2353,7 +2369,9 @@ pub(crate) async fn handle_envelope_crdt_op(
                         && sender_role.outranks(&target_role))
             }
             CrdtPayload::MemberAdded { .. } => {
-                state.members.contains_key(&op.author)
+                // is_member (resolver-aware), not raw contains_key: a legacy op
+                // authored under a DEVICE id must still validate.
+                state.is_member(&op.author)
             }
             CrdtPayload::NicknameChanged { peer_id, .. } => {
                 peer_id == &op.author || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
@@ -2559,7 +2577,8 @@ pub(crate) async fn handle_envelope_member_kick(
     let can_kick = if let Some(state) = server_states.get(&sid) {
         let sender_role = state.get_role(sender_peer_id);
         let our_role = state.get_role(local_peer);
-        let sender_perms = sender_role.default_permissions();
+        // Override-aware — must match the kicker's own has_permission gate.
+        let sender_perms = state.get_permissions(sender_peer_id);
         (sender_perms & crate::crdt::operations::Permission::KICK_MEMBERS) != 0
             && sender_role.outranks(&our_role)
     } else { false };

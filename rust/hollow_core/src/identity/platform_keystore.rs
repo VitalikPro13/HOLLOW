@@ -334,9 +334,19 @@ mod tests {
         assert_eq!(recovered, secret);
     }
 
+    /// Both round-trip tests below store/delete the SAME named Windows
+    /// credential — run in parallel they race (one deletes while the other
+    /// asserts; a real intermittent CI failure). Serialize them.
+    #[cfg(windows)]
+    fn cred_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static CRED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        CRED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[cfg(windows)]
     #[test]
     fn credential_manager_round_trip() {
+        let _lock = cred_test_lock();
         let secret = b"hollow-test-cred-mgr-32bytes!!!!";
         win::cred_store(secret).unwrap();
         let retrieved = win::cred_retrieve().unwrap();
@@ -349,6 +359,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn dual_store_retrieve() {
+        let _lock = cred_test_lock();
         let secret = vec![0x42u8; 32];
         store_key(&secret).unwrap();
         let retrieved = retrieve_key().unwrap();

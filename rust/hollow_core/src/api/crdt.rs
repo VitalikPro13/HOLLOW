@@ -133,6 +133,14 @@ pub fn get_joined_servers() -> Result<Vec<ServerFfi>, String> {
     let store = store_guard.as_ref().ok_or("Message store is not open")?;
     let servers = store.load_all_servers()?;
 
+    // Our MASTER id — memberships are master-keyed. Used to hide shells of
+    // servers we're no longer a member of (see below). If the identity can't
+    // load (locked), skip the membership filter rather than hiding everything.
+    let local_master = crate::identity::load_existing_identity()
+        .ok()
+        .flatten()
+        .map(|id| id.keypair.peer_id());
+
     let mut result = Vec::new();
     for (server_id, state_json) in servers {
         if let Ok(state) =
@@ -141,6 +149,13 @@ pub fn get_joined_servers() -> Result<Vec<ServerFfi>, String> {
             // Hide tombstoned servers — the node retains the shell to serve the
             // deletion op to reconnecting peers, but the UI must not list it.
             if state.is_deleted() { continue; }
+            // Hide servers we LEFT / were kicked from whose shell survived (the
+            // pre-teardown bug left these stranded; the eviction paths now delete
+            // them, but a legacy DB may still hold one). Never hide a server with
+            // no members at all (a freshly-created state mid-bootstrap).
+            if let Some(ref me) = local_master {
+                if !state.members.is_empty() && !state.is_member(me) { continue; }
+            }
             result.push(ServerFfi {
                 server_id,
                 name: state.name().to_string(),

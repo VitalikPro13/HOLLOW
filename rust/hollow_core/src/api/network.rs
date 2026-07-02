@@ -1333,6 +1333,47 @@ pub fn identity_for(peer_id: String) -> String {
     crate::node::resolver::resolve(&peer_id)
 }
 
+/// Resolve a (possibly per-device) peer_id to its MASTER identity, falling back
+/// to the PERSISTED device links in SQLCipher when the in-memory resolver is
+/// still cold.
+///
+/// The push-tap navigation path needs this (HOLLOW_PLAN "iOS DM push opens a
+/// different chat"): a cold-start notification tap is buffered and fires the
+/// moment the mobile shell mounts, which can be BEFORE the node's event loop
+/// task has warmed the in-memory resolver from the DB — `identity_for` then
+/// resolves the friend's DEVICE id to itself (no error, so callers can't tell a
+/// cold miss from a genuine single-device peer) and the DM opens a device-keyed
+/// empty thread. The NSE proves the link IS on disk at tap time (it warms from
+/// `device_links` and stores the fetched DM under the master), so a direct DB
+/// read closes the race. Any failure (locked identity, DB open error) degrades
+/// to identity-passthrough — same contract as `identity_for`.
+#[frb]
+pub fn identity_for_persisted(peer_id: String) -> String {
+    crate::log::init();
+    // Fast path: the live resolver already knows a mapping (or maps id→itself
+    // because it genuinely IS a master — seed_self/ingest inserted it).
+    let resolved = crate::node::resolver::resolve(&peer_id);
+    if resolved != peer_id {
+        hollow_log!("[HOLLOW-PUSH] identity_for_persisted: {peer_id} -> {resolved} (memory)");
+        return resolved;
+    }
+    // Unchanged: either a single-device peer or a COLD resolver. Warm from the
+    // persisted links (same pattern as get_push_profile) and resolve again.
+    let persisted = (|| -> Option<String> {
+        let id = identity::load_existing_identity().ok().flatten()?;
+        let proto = id.keypair.to_protobuf_encoding().ok()?;
+        let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+        let db_path = crate::identity::data_dir().ok()?.join("messages.db");
+        let store = MessageStore::open(db_path.to_str()?, &passphrase).ok()?;
+        let links = store.get_all_device_links().ok()?;
+        crate::node::resolver::warm_from_links(&links);
+        Some(crate::node::resolver::resolve(&peer_id))
+    })();
+    let out = persisted.unwrap_or_else(|| peer_id.clone());
+    hollow_log!("[HOLLOW-PUSH] identity_for_persisted: {peer_id} -> {out} (db)");
+    out
+}
+
 /// Snapshot every known (device → master) link for the Dart attribution layer.
 ///
 /// Dart builds a `device_link_provider` from this and refreshes it whenever a

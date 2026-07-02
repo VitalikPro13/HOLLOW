@@ -26,11 +26,12 @@ use super::ws_client::{WsCommand, WsEvent};
 
 /// Process-wide guard: the resolver (and other `OnceLock`/global statics the
 /// nodes touch) is process-global, so harness tests must run serially and start
-/// from a clean resolver. Each test takes this guard via [`test_guard`].
-static HARNESS_GUARD: Mutex<()> = Mutex::new(());
-
+/// from a clean resolver. Each test takes this guard via [`test_guard`]. The
+/// guard IS the shared `resolver::test_lock()` — the same lock the resolver /
+/// crypto_handler / server_state unit tests take — so no unit test's links can
+/// be wiped mid-assert by a harness test's `clear_for_test` (or vice versa).
 pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-    let g = HARNESS_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let g = super::resolver::test_lock();
     super::resolver::clear_for_test();
     g
 }
@@ -466,7 +467,9 @@ impl TestNode {
 
     /// Server ids this node is a member of (what the server strip shows). Mirrors
     /// `get_joined_servers`: tombstoned (deleted) servers are HIDDEN — the node keeps
-    /// the shell to serve the deletion op, but the UI list excludes it.
+    /// the shell to serve the deletion op, but the UI list excludes it — and so is a
+    /// non-empty-membership shell we're no longer a member of (left/kicked; a legacy
+    /// pre-teardown DB may still hold one).
     pub(crate) fn servers(&self) -> Vec<String> {
         self.store()
             .load_all_servers()
@@ -474,7 +477,10 @@ impl TestNode {
             .into_iter()
             .filter(|(_, json)| {
                 serde_json::from_str::<ServerState>(json)
-                    .map(|s| !s.is_deleted())
+                    .map(|s| {
+                        !s.is_deleted()
+                            && (s.members.is_empty() || s.is_member(&self.master_id))
+                    })
                     .unwrap_or(true)
             })
             .map(|(sid, _)| sid)
@@ -4718,4 +4724,162 @@ async fn fresh_single_device_friends_dm_both_ways() {
 
     drop(al);
     drop(vm);
+}
+
+// ---------------------------------------------------------------------------
+// LEAVE converges DURABLY on the leaver's sibling devices (2026-07-02).
+// THE AUDIT FINDING: the acting device tears down fully in handle_leave_server,
+// but a SIBLING applying the fanned self-MemberRemoved only emitted MemberLeft —
+// no state/DB teardown. The shell reloaded on restart, re-listed the server, and
+// the sibling re-announce loop (which filtered only on is_deleted, never on
+// membership) could re-ADD the identity to a server it left — authored by a
+// non-member, rejected by real members → permanent fork. This drives: owner O;
+// member identity M with devices B + C; B joins, C onboards via the reconnect
+// re-announce; B LEAVES → C must tear down durably (state deleted, UI list
+// empty), O prunes M from members, and a later C reconnect must NOT resurrect
+// the server via re-announce.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // O = owner (single device). M = member identity, devices B (actor) + C (sibling).
+    const O_MASTER: u8 = 250;
+    const O_DEV: u8 = 251;
+    const M_MASTER: u8 = 252;
+    const B_DEV: u8 = 253;
+    const C_DEV: u8 = 254;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_DEV, &[&m_master]).await;
+    sleep_ms(1000).await;
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&o_master]).await;
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
+    sleep_ms(3000).await; // O<->B rooms + B<->C sibling proof + Olm settle
+    drain_events(&mut o);
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    // --- O creates a server; B (non-owner member) joins it ---
+    let server_id = create_server_and_wait(&mut o, "Leave-Teardown Server").await;
+    sleep_ms(500).await;
+    b.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    let b_joined = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(b_joined, "member device B must join the owner's server");
+    sleep_ms(2000).await;
+
+    // --- Sibling C onboards via the reconnect re-announce (bounce C) ---
+    relay.set_online(&c.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut c);
+    relay.set_online(&c.device_id, true);
+    let c_onboarded = wait_event(&mut c, std::time::Duration::from_secs(12), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(c_onboarded, "sibling C must onboard the joined server via re-announce");
+    sleep_ms(3000).await;
+    assert!(
+        c.servers().contains(&server_id),
+        "sibling C's server list must include the server before the leave, got {:?}",
+        c.servers()
+    );
+    drain_events(&mut o);
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    // --- B LEAVES the server ---
+    b.cmd_tx
+        .send(NodeCommand::LeaveServer { server_id: server_id.clone() })
+        .await
+        .unwrap();
+    let b_gone = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::ServerDeleted { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(b_gone, "acting device B must emit ServerDeleted on leave");
+
+    // THE FIX UNDER TEST: sibling C applies the fanned self-MemberRemoved and
+    // tears down DURABLY (ServerDeleted event + state gone), not just MemberLeft.
+    let c_gone = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ServerDeleted { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(c_gone, "sibling C must emit ServerDeleted for the left server (durable teardown)");
+    sleep_ms(1500).await;
+
+    assert!(
+        !b.servers().contains(&server_id),
+        "leaver B's list must not contain the left server, got {:?}",
+        b.servers()
+    );
+    assert!(
+        !c.servers().contains(&server_id),
+        "sibling C's list must not contain the left server, got {:?}",
+        c.servers()
+    );
+    assert!(
+        c.server_state(&server_id).is_none(),
+        "sibling C's DB must no longer hold the left server's state (restart-durable)"
+    );
+    assert!(
+        b.server_state(&server_id).is_none(),
+        "leaver B's DB must no longer hold the left server's state"
+    );
+
+    // Owner keeps the server but prunes M from the members.
+    assert!(
+        o.servers().contains(&server_id),
+        "owner O must still list the server, got {:?}",
+        o.servers()
+    );
+    let o_members = o.raw_crdt_member_keys(&server_id);
+    assert!(
+        !o_members.contains(&m_master),
+        "owner O's member list must no longer contain the leaver's master, got {o_members:?}"
+    );
+
+    // --- A later sibling reconnect must NOT resurrect the left server ---
+    relay.set_online(&c.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut c);
+    relay.set_online(&c.device_id, true);
+    let resurrected = wait_event(&mut c, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(
+        !resurrected,
+        "a reconnecting sibling must NOT re-onboard a server the identity LEFT"
+    );
+    assert!(
+        !c.servers().contains(&server_id),
+        "sibling C's list must stay empty of the left server after reconnect, got {:?}",
+        c.servers()
+    );
+
+    drop(o);
+    drop(b);
+    drop(c);
 }

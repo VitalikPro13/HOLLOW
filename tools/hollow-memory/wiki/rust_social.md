@@ -20,7 +20,7 @@ Steps:
 1. **Persist as pending outgoing:** Opens `MessageStore`, calls `store.save_friend(peer_id, "pending", "outgoing", now)`.
 2. **Register DM room:** Computes the deterministic DM room code via `dm_room_code(local_peer, peer_id)` (SHA-256 hash of sorted peer IDs with "dm-" prefix). Registers the room with signaling (`SignalingCmd::SetRoom` + `SignalingCmd::Bootstrap`) and joins the WS relay room (`WsCommand::JoinRoom`). This enables peer discovery even before the request is accepted.
 3. **Join target's inbox room:** Joins `"inbox:{peer_id}"` on the WS relay. Every peer auto-joins their own inbox room on startup, so this is the reliable way to reach any peer regardless of shared servers.
-4. **Send or queue:** If the target peer is already reachable (in any shared WS room), sends `HavenMessage::FriendRequest { requested_at: now }` immediately via `send_message_to_peer()`. If not reachable, inserts into `pending_friend_requests: HashMap<String, i64>` (peer_id -> requested_at timestamp). Pending requests are drained when the peer appears via `PeerJoined` or `RoomMembers` events in swarm.rs.
+4. **Send or queue (device-targeted, 2026-07-02):** Builds concrete DEVICE targets via `friend_device_targets(ws_room_peers, peer_id, master)` — the literal id, resolver-known devices, and any room peer resolving to the master, ALL gated on EXACT room membership (never identity-wide `peer_is_reachable`: a bare master admitted by an identity-wide check is a silently-dropped send). Non-empty → sends `HavenMessage::FriendRequest { requested_at: now }` to each device + leaves the target inbox. Empty → inserts into `pending_friend_requests: HashMap<String, i64>` (peer_id -> requested_at timestamp); drained when the peer appears via `PeerJoined`/`RoomMembers` in swarm.rs (the drain targets the concrete device that appeared).
 5. **Emit event:** Sends `NetworkEvent::FriendRequestReceived { peer_id }` to Dart so the UI shows the outgoing request immediately.
 
 ### Friend Request by Nickname (two-step)
@@ -54,8 +54,8 @@ Steps:
 Called when the local user rejects an incoming friend request (`NodeCommand::RejectFriendRequest`).
 
 Steps:
-1. **Remove from DB:** Opens MessageStore, calls `store.remove_friend(peer_id)`. The friend record is deleted entirely, not set to "rejected".
-2. **Notify peer:** If reachable, sends `HavenMessage::FriendReject`.
+1. **Remove from DB:** Opens MessageStore, calls `store.remove_friend()` for BOTH the resolved master row and the original-id row. The friend record is deleted entirely, not set to "rejected".
+2. **Notify peer (device-targeted, 2026-07-02):** Fans `HavenMessage::FriendReject` to each id from `friend_device_targets()` — the old raw send to `peer_id_str` (often the MASTER) was silently dropped, so a multi-device requester's outgoing request stayed "pending" forever. Rejects remain best-effort (no redelivery queue, unlike accepts): an offline requester simply never learns, by design.
 3. **Emit event:** `NetworkEvent::FriendRequestRejected { peer_id }`.
 
 Note: No DM room registration — rejecting does not create a DM channel. No signaling cmd involvement.

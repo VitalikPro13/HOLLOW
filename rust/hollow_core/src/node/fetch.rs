@@ -487,9 +487,21 @@ fn try_decrypt_dm(
     crypto_store: &CryptoStore,
     db_path: &str,
     db_passphrase: &str,
-    _local_peer_id: &str,
+    local_peer_id: &str,
 ) -> Option<FetchedDm> {
     let haven: HavenMessage = serde_json::from_str(data).ok()?;
+
+    // DEFENSE: never process an envelope from OUR OWN identity (a sibling
+    // self-echo). This inserter hardcodes `is_mine=false` and files under
+    // `resolve(from)` — for a sibling sender that's OUR OWN master, so the row
+    // would land in a wrong/own thread on the wrong side, and the mid-keyed
+    // dedup would then block the correctly-oriented copy from ever landing.
+    // Today sibling echoes are queue-only (never room-sent/buffered), so this
+    // shouldn't fire — it's a guard against that upstream invariant changing.
+    if crate::node::resolver::same_identity(from, local_peer_id) {
+        hollow_log!("[HOLLOW-FETCH] Skipping own-sibling envelope from {from}");
+        return None;
+    }
 
     // Olm decrypt is keyed by the SENDER DEVICE id (`from`) — sessions are
     // per-device. But DB rows + the surfaced conversation key on the MASTER, so a

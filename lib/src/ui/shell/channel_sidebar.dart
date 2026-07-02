@@ -613,6 +613,10 @@ class _HomeContent extends ConsumerWidget {
 
     final hasPending = pendingIncoming.isNotEmpty || pendingOutgoing.isNotEmpty;
 
+    // Device→master mirror for the encrypted-lock lookup below (peers is
+    // DEVICE-keyed, friend.peerId is the MASTER).
+    final links = ref.watch(deviceLinkProvider);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -710,14 +714,21 @@ class _HomeContent extends ConsumerWidget {
                   itemBuilder: (context, index) {
                     final friend = accepted[index];
                     final isOnline = online.contains(friend.peerId);
-                    final peer = peers[friend.peerId];
+                    // `peers` is DEVICE-keyed but `friend.peerId` is the MASTER —
+                    // a direct lookup silently never matches a multi-device
+                    // friend, so the encrypted lock never showed here. Collapse
+                    // each device through the resolver mirror (same pattern as
+                    // home_dashboard's Friends column).
+                    final isEncrypted = peers.entries.any((e) =>
+                        links.identityOf(e.key) == friend.peerId &&
+                        e.value.isEncrypted);
                     final isSelected = friend.peerId == selectedPeerId;
                     final last = lastMessage(friend.peerId);
 
                     return PeerCard(
                       peerId: friend.peerId,
                       isSelected: isSelected,
-                      isEncrypted: peer?.isEncrypted ?? false,
+                      isEncrypted: isEncrypted,
                       isOnline: isOnline,
                       lastMessage: last,
                       formatTime: formatTime,

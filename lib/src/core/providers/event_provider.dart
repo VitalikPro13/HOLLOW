@@ -344,14 +344,16 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Listening: $address');
 
       case NetworkEvent_MessageReceived(:final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final isOwn):
-        // MULTI-DEVICE: a DM's `fromPeer` is the sender's DEVICE id, but unread
-        // counts, the "seen" pointer, mute settings, and notifications all key on
-        // the MASTER identity (a conversation is with a person, not a device).
-        // Keying unread on the raw device id created a `dmUnreadCounts[<deviceId>]`
-        // entry that `markDmSeen(master)` never cleared → a permanently-stuck pill
-        // that even counted a since-disconnected device; the notification likewise
-        // showed a raw peer id instead of the name. Resolve to master first. Single-
-        // device senders resolve to themselves (no-op).
+        // MULTI-DEVICE: unread counts, the "seen" pointer, mute settings, and
+        // notifications all key on the MASTER identity (a conversation is with a
+        // person, not a device). NOTE: since the Rust `convo_peer` work, the main
+        // DM receive path already emits `fromPeer` RESOLVED to the master — only
+        // the legacy unsigned raw-text fallback (swarm.rs) still emits a device
+        // id. This resolve is therefore belt-and-braces (identityOf is a no-op on
+        // an already-master id); keeping it protects the unread pill against any
+        // future emit site that forgets to resolve (the original bug: a
+        // device-keyed `dmUnreadCounts` entry that `markDmSeen(master)` never
+        // cleared → a permanently-stuck pill).
         final dmMaster = ref.read(deviceLinkProvider).identityOf(fromPeer);
         ref.read(chatProvider.notifier).receiveMessage(
               fromPeer, text, timestamp, messageId, replyToMid,

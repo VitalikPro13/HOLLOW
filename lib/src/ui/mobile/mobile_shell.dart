@@ -76,13 +76,16 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     // opens a separate empty thread keyed on the device id. (Covers all 3 tap
     // entry points; a single-device / unknown peer resolves to itself.)
     //
-    // Resolve via the Rust FFI (the live node resolver is warmed at startup) —
-    // more reliable on a COLD-START tap than the `deviceLinkProvider` mirror,
-    // which warms async and could still be empty when a buffered tap fires. Fall
-    // back to the provider mirror if the FFI call fails.
+    // Resolve via the PERSISTED-links FFI: a buffered cold-start tap fires the
+    // instant this shell mounts, BEFORE the node's event loop has warmed the
+    // in-memory resolver from the DB — the plain `identityFor` then resolves the
+    // device id to itself with no error (the 2026-06-20 attempt failed exactly
+    // here). `identityForPersisted` falls back to reading `device_links`
+    // straight from SQLCipher, which the NSE proves is warm at tap time. Fall
+    // back to the provider mirror if the FFI call itself fails.
     String masterId;
     try {
-      masterId = await network_api.identityFor(peerId: peerId);
+      masterId = await network_api.identityForPersisted(peerId: peerId);
     } catch (_) {
       masterId = ref.read(deviceLinkProvider).identityOf(peerId);
     }

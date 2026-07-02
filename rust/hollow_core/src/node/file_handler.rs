@@ -548,6 +548,22 @@ pub(crate) async fn handle_send_file(
                     }
                 }
             } // if peer reachable (live stream) / else offline image (inline)
+        } else {
+            // No Olm session with this device yet (a freshly-appeared device before
+            // key exchange completes). The text-DM path queues + KeyRequests here
+            // (send_dm_to_device); a FILE can't ride the pending-envelope queue, so
+            // kick off the session (KeyRequest to a LIVE device) and let the normal
+            // heal paths deliver the content later (DM-sync backfill re-serves the
+            // message; the file re-serves on request/open). Without this the target
+            // device got NOTHING — no queue, no key exchange — until some other
+            // traffic happened to establish the session.
+            if ws_room_for_peer(&ws_room_peers, peer_str).is_some() {
+                hollow_log!("[HOLLOW-FILE] No session for DM file target {peer_str} — sending KeyRequest");
+                send_message_to_peer(
+                    &ws_cmd_tx, &ws_room_peers,
+                    peer_str, HavenMessage::KeyRequest,
+                );
+            }
         }
 
         hollow_log!("[HOLLOW-FILE] Sent {total_chunks} chunks for {file_id} to DM {peer_str}");

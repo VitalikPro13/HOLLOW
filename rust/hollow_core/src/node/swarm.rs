@@ -159,8 +159,13 @@ fn on_verified_sibling(
 
     // Multi-device (Step 9D follow-up): RE-ANNOUNCE every non-deleted server we belong
     // to, to this freshly-verified sibling (idempotent on the receiver).
+    // MEMBERSHIP filter, not just the tombstone: a shell retained after our own
+    // LEAVE (legacy pre-teardown DBs) must never be re-announced — the announce
+    // handler runs an unconditional join and the sibling fast-path would re-ADD
+    // our identity to a server we left (authored by a non-member → real members
+    // reject the op → the actor's devices fork from the server).
     for (sid, st) in server_states.iter() {
-        if st.is_deleted() { continue; }
+        if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
         let announce = serde_json::to_vec(
             &HavenMessage::SiblingServerAnnounce { server_id: sid.clone() },
         ).unwrap_or_default();
@@ -174,7 +179,9 @@ fn on_verified_sibling(
     }
     hollow_log!(
         "[HOLLOW-CRDT] Re-announced {} server(s) to verified sibling {peer_id}",
-        server_states.values().filter(|s| !s.is_deleted()).count()
+        server_states.values()
+            .filter(|s| !s.is_deleted() && s.is_member(local_peer_str))
+            .count()
     );
 
     // Multi-device link (Step 4): if WE are essentially empty (a fresh mnemonic
@@ -4117,8 +4124,13 @@ async fn run_event_loop(
                     }
 
                     // 3. Shard health: detect under-replicated content and request repairs via MLS.
+                    // Rooms hold DEVICE ids but placements/members are MASTER-keyed —
+                    // include each room peer's resolved master so a multi-device
+                    // member counts as an online shard holder/target (single-device
+                    // resolves to itself; dedup via the set).
                     let online_peers: std::collections::HashSet<String> = ws_room_peers.values()
-                        .flat_map(|peers| peers.iter().cloned())
+                        .flat_map(|peers| peers.iter())
+                        .flat_map(|p| [p.clone(), super::resolver::resolve(p)])
                         .collect();
 
                     for (server_id, state) in &server_states {
@@ -4178,11 +4190,15 @@ async fn run_event_loop(
                                             target: None,
                                         };
                                         let env_json = serde_json::to_string(&envelope).unwrap_or_default();
-                                        send_encrypted_message(
-                                            &mut olm, &crypto_store, source_peer, &env_json,
-                                            &event_tx, &ws_cmd_tx, &ws_room_peers,
-                                        ).await;
-                                        total_requested += 1;
+                                        // source_peer may be a MASTER (placements are
+                                        // master-keyed) — Olm/sockets are per-device.
+                                        if let Some(dev) = crate::node::crypto_handler::preferred_online_device(&ws_room_peers, source_peer) {
+                                            send_encrypted_message(
+                                                &mut olm, &crypto_store, &dev, &env_json,
+                                                &event_tx, &ws_cmd_tx, &ws_room_peers,
+                                            ).await;
+                                            total_requested += 1;
+                                        }
                                     }
                                 }
                             }
@@ -4228,8 +4244,11 @@ async fn run_event_loop(
                     let vault_dir = crate::identity::data_dir().unwrap_or_default().join("vault");
 
                     if let Ok(cs) = crate::vault::content_store::ContentStore::open(&db_path, &db_passphrase, &vault_dir) {
+                        // DEVICE ids + resolved masters, same as the 30-min rebalance —
+                        // placements/members are MASTER-keyed.
                         let online_peers: std::collections::HashSet<String> = ws_room_peers.values()
-                            .flat_map(|peers| peers.iter().cloned())
+                            .flat_map(|peers| peers.iter())
+                            .flat_map(|p| [p.clone(), super::resolver::resolve(p)])
                             .collect();
 
                         for server_id in &servers_to_check {
@@ -4291,11 +4310,15 @@ async fn run_event_loop(
                                                     target: None,
                                                 };
                                                 let env_json = serde_json::to_string(&envelope).unwrap_or_default();
-                                                send_encrypted_message(
-                                                    &mut olm, &crypto_store, source_peer, &env_json,
-                                                    &event_tx, &ws_cmd_tx, &ws_room_peers,
-                                                ).await;
-                                                total_requested += 1;
+                                                // source_peer may be a MASTER (placements
+                                                // are master-keyed) — resolve to a device.
+                                                if let Some(dev) = crate::node::crypto_handler::preferred_online_device(&ws_room_peers, source_peer) {
+                                                    send_encrypted_message(
+                                                        &mut olm, &crypto_store, &dev, &env_json,
+                                                        &event_tx, &ws_cmd_tx, &ws_room_peers,
+                                                    ).await;
+                                                    total_requested += 1;
+                                                }
                                             }
                                         }
                                     }
@@ -7200,9 +7223,12 @@ async fn handle_incoming_request(
 
                         // Reconcile changes that happened while we were OFFLINE (the
                         // grow-only sync just delivered the ops): a server DELETION
-                        // (tombstone), a BAN, or a plain KICK of us.
+                        // (tombstone), a BAN, or a plain KICK / our own LEAVE (fanned by
+                        // a sibling) of us.
                         let deleted_now = state.is_deleted();
                         let kicked_now = was_member_before && !state.is_member(local_peer_str);
+                        let banned_now = state.is_banned(&local_peer_str);
+                        let evicted_sub_cids: Vec<String> = state.subgroup_channel_ids();
                         let pending = pending_server_joins.contains_key(&server_id);
                         if deleted_now {
                             // Owner tombstoned the server while we were offline. Leave the
@@ -7216,7 +7242,35 @@ async fn handle_incoming_request(
                             let _ = event_tx.send(NetworkEvent::ServerDeleted {
                                 server_id,
                             }).await;
-                        } else if state.is_banned(&local_peer_str) || (kicked_now && !pending) {
+                        } else if banned_now || (kicked_now && !pending) {
+                            // Self-eviction reconciled from sync — tear down DURABLY, not
+                            // just the UI event: without removing the state + DB row, the
+                            // shell reloads on restart, re-lists the server, and the
+                            // sibling re-announce path can even re-ADD us as a member of
+                            // a server we left/were kicked from (authored by a non-member,
+                            // so real members reject it → permanent fork). Mirrors the
+                            // MemberKickBroadcast teardown, which only covers devices that
+                            // were ONLINE at kick time.
+                            hollow_log!("[HOLLOW-CRDT] Offline-reconciled self-eviction from {server_id} (banned={banned_now}) — durable teardown");
+                            server_states.remove(&server_id);
+                            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                                let _ = store.delete_server_state(&server_id);
+                            }
+                            if let Some(mls_mgr) = mls.as_mut() {
+                                if mls_mgr.has_group(&server_id) {
+                                    mls_mgr.remove_group(&server_id);
+                                }
+                                for cid in &evicted_sub_cids {
+                                    let gk = crate::crypto::subgroup_id(&server_id, cid);
+                                    if mls_mgr.has_group(&gk) {
+                                        mls_mgr.remove_group(&gk);
+                                    }
+                                }
+                                persist_mls_state(mls_mgr, crypto_store);
+                            }
+                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+                                room_code: server_id.clone(),
+                            });
                             let _ = event_tx.send(NetworkEvent::MemberLeft {
                                 server_id,
                                 peer_id: local_peer_str.to_string(),
@@ -7257,7 +7311,13 @@ async fn handle_incoming_request(
                 {
                     let state = server_states.get(&server_id).unwrap();
                     let sender_role = state.get_role(&op.author);
-                    let sender_perms = sender_role.default_permissions();
+                    // Override-aware (`role_permissions` from RolePermissionsChanged ops),
+                    // NOT `default_permissions()`: local send handlers gate on
+                    // `has_permission`, so ingest must apply the SAME matrix — otherwise
+                    // an override-granted permission authors ops the whole network
+                    // rejects (the actor's devices fork), and an override-REVOKED
+                    // permission still passes ingest (unenforced remotely).
+                    let sender_perms = state.get_permissions(&op.author);
                     use crate::crdt::operations::{CrdtPayload, Permission, MemberRole};
 
                     let allowed = match &op.payload {
@@ -7288,7 +7348,9 @@ async fn handle_incoming_request(
                         // Members can add other members (via invite), change own nickname,
                         // pin/unpin messages (if they have MANAGE_CHANNELS), create servers
                         CrdtPayload::MemberAdded { .. } => {
-                            state.members.contains_key(&op.author)
+                            // is_member (resolver-aware), not raw contains_key: a legacy
+                            // op authored under a DEVICE id must still validate.
+                            state.is_member(&op.author)
                         }
                         CrdtPayload::NicknameChanged { peer_id, .. } => {
                             // Members can only change their own nickname
@@ -7374,6 +7436,9 @@ async fn handle_incoming_request(
                     }
 
                     // Emit specific events based on op payload so Dart UI updates correctly.
+                    // Set when a MemberRemoved op evicts OUR OWN identity — the durable
+                    // teardown runs AFTER the match (the `state` borrow spans the match).
+                    let mut self_evict_teardown = false;
                     match &op.payload {
                         CrdtPayload::ChannelAdded { channel_id, name, channel_type, .. } => {
                             let _ = event_tx.send(NetworkEvent::ChannelAdded {
@@ -7403,10 +7468,30 @@ async fn handle_incoming_request(
                             }).await;
                         }
                         CrdtPayload::MemberRemoved { peer_id } => {
-                            let _ = event_tx.send(NetworkEvent::MemberLeft {
-                                server_id: server_id.clone(),
-                                peer_id: peer_id.clone(),
-                            }).await;
+                            // Self-eviction: OUR identity was removed (our own LEAVE
+                            // fanned from a sibling device, or a plain kick of us) and
+                            // the merge confirms we're no longer a member. Tear down
+                            // DURABLY — the acting device deletes its state in
+                            // handle_leave_server, but a sibling that only emitted
+                            // MemberLeft kept the shell, which reloaded on restart and
+                            // fed the sibling re-announce loop (a left server could
+                            // resurrect on our own devices and even re-ADD us via the
+                            // sibling join fast-path). Guarded on !pending so a rejoin
+                            // replaying the old removal op can't nuke the fresh join.
+                            let self_evicted = super::resolver::same_identity(peer_id, &local_peer_str)
+                                && !pending_server_joins.contains_key(&server_id)
+                                && !state.is_member(&local_peer_str);
+                            if self_evicted {
+                                self_evict_teardown = true; // teardown after the match
+                                let _ = event_tx.send(NetworkEvent::ServerDeleted {
+                                    server_id: server_id.clone(),
+                                }).await;
+                            } else {
+                                let _ = event_tx.send(NetworkEvent::MemberLeft {
+                                    server_id: server_id.clone(),
+                                    peer_id: peer_id.clone(),
+                                }).await;
+                            }
                         }
                         CrdtPayload::ServerDeleted { .. } => {
                             // Owner tombstoned the server. The state shell is RETAINED
@@ -7503,6 +7588,35 @@ async fn handle_incoming_request(
                                 server_id: server_id.clone(),
                             }).await;
                         }
+                    }
+
+                    // Durable self-eviction teardown (flag set in the MemberRemoved arm;
+                    // runs here because the `state` borrow spans the match). Removing the
+                    // state FIRST also makes the subgroup reconcile below skip the server.
+                    if self_evict_teardown {
+                        hollow_log!("[HOLLOW-CRDT] Self MemberRemoved for {server_id} — durable teardown (sibling leave / kick)");
+                        let sub_cids: Vec<String> = server_states.get(&server_id)
+                            .map(|s| s.subgroup_channel_ids())
+                            .unwrap_or_default();
+                        server_states.remove(&server_id);
+                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                            let _ = store.delete_server_state(&server_id);
+                        }
+                        if let Some(mls_mgr) = mls.as_mut() {
+                            if mls_mgr.has_group(&server_id) {
+                                mls_mgr.remove_group(&server_id);
+                            }
+                            for cid in &sub_cids {
+                                let gk = crate::crypto::subgroup_id(&server_id, cid);
+                                if mls_mgr.has_group(&gk) {
+                                    mls_mgr.remove_group(&gk);
+                                }
+                            }
+                            persist_mls_state(mls_mgr, crypto_store);
+                        }
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+                            room_code: server_id.clone(),
+                        });
                     }
 
                     // Option B: a role/visibility op shifts who qualifies for restricted
@@ -7885,7 +7999,8 @@ async fn handle_incoming_request(
             // SECURITY: Verify sender has KICK_MEMBERS permission and outranks us.
             if let Some(state) = server_states.get(&server_id) {
                 let sender_role = state.get_role(&peer_str);
-                let sender_perms = sender_role.default_permissions();
+                // Override-aware — must match the kicker's own has_permission gate.
+                let sender_perms = state.get_permissions(&peer_str);
                 let local_peer = local_peer_str.to_string();
                 let our_role = state.get_role(&local_peer);
                 if (sender_perms & crate::crdt::operations::Permission::KICK_MEMBERS) == 0 {
@@ -8518,12 +8633,54 @@ async fn handle_incoming_request(
                                     })
                                 } else { None };
 
+                                // Capture membership BEFORE apply: a MemberRemoved of OUR
+                                // identity arriving via MLS must trigger the same durable
+                                // self-eviction teardown as the plaintext CrdtOpBroadcast
+                                // path. The op is sent BOTH ways and the op_log dedups —
+                                // when MLS wins the race the plaintext copy no-ops, so
+                                // this path must tear down too or the shell survives.
+                                let was_member_before = server_states.get(&sid)
+                                    .map(|s| s.is_member(&local_peer_str))
+                                    .unwrap_or(false);
+
                                 sync_handler::handle_envelope_crdt_op(
                                     server_states, bundle_keypair, event_tx,
                                     sid.clone(), op_json,
                                     crdt_store,
                                     ws_cmd_tx,
                                 ).await;
+
+                                let self_evicted = was_member_before
+                                    && !pending_server_joins.contains_key(&sid)
+                                    && server_states.get(&sid)
+                                        .map(|s| !s.is_member(&local_peer_str) && !s.is_deleted())
+                                        .unwrap_or(false);
+                                if self_evicted {
+                                    hollow_log!("[HOLLOW-CRDT] Self-eviction via MLS CrdtOp for {sid} — durable teardown");
+                                    let sub_cids: Vec<String> = server_states.get(&sid)
+                                        .map(|s| s.subgroup_channel_ids())
+                                        .unwrap_or_default();
+                                    server_states.remove(&sid);
+                                    crdt_store.delete_server(sid.clone());
+                                    if let Some(mls_mgr) = mls.as_mut() {
+                                        if mls_mgr.has_group(&sid) {
+                                            mls_mgr.remove_group(&sid);
+                                        }
+                                        for cid in &sub_cids {
+                                            let gk = crate::crypto::subgroup_id(&sid, cid);
+                                            if mls_mgr.has_group(&gk) {
+                                                mls_mgr.remove_group(&gk);
+                                            }
+                                        }
+                                        persist_mls_state(mls_mgr, crypto_store);
+                                    }
+                                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+                                        room_code: sid.clone(),
+                                    });
+                                    let _ = event_tx.send(NetworkEvent::ServerDeleted {
+                                        server_id: sid.clone(),
+                                    }).await;
+                                }
 
                                 if affects_subgroups {
                                     if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&sid)) {
@@ -9738,12 +9895,15 @@ async fn handle_incoming_request(
                 );
                 return;
             }
-            // 1) Announce EVERY non-deleted server we hold to the requester. Each
+            // 1) Announce every server we're STILL A MEMBER of to the requester. Each
             //    announce drives the requester's join flow → ServerJoined → its UI
             //    list refresh (the proven path). Idempotent on the requester.
+            //    Membership filter mirrors on_verified_sibling: a shell retained
+            //    after our own leave must never be re-announced (it would re-join /
+            //    re-ADD us to a server we left).
             let mut announced = 0u32;
             for (sid, st) in server_states.iter() {
-                if st.is_deleted() { continue; }
+                if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
                 let announce = serde_json::to_vec(
                     &HavenMessage::SiblingServerAnnounce { server_id: sid.clone() },
                 ).unwrap_or_default();

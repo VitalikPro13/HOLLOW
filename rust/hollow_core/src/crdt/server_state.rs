@@ -763,10 +763,15 @@ impl ServerState {
             .filter(|&n| n > 0)
     }
 
-    /// Look up author's priority from their role in this server.
+    /// Look up author's priority from their role in this server. Resolves a
+    /// DEVICE-id author to its master first (roles are master-keyed) so LWW
+    /// priority works for replayed legacy device-authored ops. Unknown authors
+    /// stay at 0 (deliberately BELOW plain members — do not route via `get_role`,
+    /// which defaults unknowns to `Member`).
     fn author_priority(&self, author: &str) -> u8 {
+        let key = super::resolve_identity(author);
         self.roles
-            .get(author)
+            .get(&key)
             .map(|reg| reg.read().priority())
             .unwrap_or(0)
     }
@@ -1055,7 +1060,9 @@ mod tests {
     fn accessors_resolve_device_to_master_via_hook() {
         // The chokepoint: ServerState accessors must collapse a DEVICE id to its
         // master before the keyed lookup, via the installed resolver hook.
-        // Drive it through the real process-global node::resolver.
+        // Drive it through the real process-global node::resolver (under the
+        // shared test lock — parallel tests clear/mutate the same map).
+        let _lock = crate::node::resolver::test_lock();
         crate::node::resolver::clear_all();
         crate::node::resolver::update("dev_owner", "owner_master");
         crate::node::resolver::update("dev_bob", "bob_master");

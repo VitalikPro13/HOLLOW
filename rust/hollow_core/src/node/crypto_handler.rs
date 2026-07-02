@@ -1103,15 +1103,38 @@ pub(crate) fn peer_is_reachable(
     if ws_room_peers.values().any(|peers| peers.contains(peer_str)) {
         return true;
     }
-    // Slow path: is any connected device of the SAME identity present?
+    // Slow path: is any connected device of the SAME identity present? The input
+    // may be a DEVICE id (resolve maps it to its master) or a bare MASTER id
+    // (resolve returns it UNCHANGED — masters are only VALUES in the link map,
+    // never keys except the self-seed). Either way, compare room peers against
+    // the resolved target. There must be NO `resolve(peer) == peer → false`
+    // early-return here: it would fire for every master id, making a friend or
+    // server member with online devices permanently "unreachable" — which
+    // silently disabled the owner-preferred coordinator election, MLS recovery
+    // targeting, subgroup self-bootstrap, and offline-push classification for
+    // every modern (device != master) identity. A genuinely offline
+    // single-device peer still returns false: no room peer resolves to it.
     let target_master = super::resolver::resolve(peer_str);
-    // No links for this peer (resolve == self) → fast path already settled it.
-    if target_master == peer_str {
-        return false;
-    }
     ws_room_peers.values().any(|peers| {
         peers.iter().any(|p| super::resolver::resolve(p) == target_master)
     })
+}
+
+/// The single concrete DEVICE id to address when a caller holds a (possibly
+/// master) peer id and needs ONE socket-addressable target. The exact id wins
+/// when it is itself in a room (single-device / legacy keystone); otherwise the
+/// deterministic lowest online device of the identity. `None` when nothing is
+/// online. Pairs with `peer_is_reachable`: reachable ⇒ this returns `Some`.
+pub(crate) fn preferred_online_device(
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    peer_str: &str,
+) -> Option<String> {
+    if ws_room_peers.values().any(|peers| peers.contains(peer_str)) {
+        return Some(peer_str.to_string());
+    }
+    let mut devices = online_devices_for(ws_room_peers, peer_str);
+    devices.sort();
+    devices.into_iter().next()
 }
 
 /// Multi-device: the set of LIVE device peer_ids (currently in some WS room) that
@@ -1988,6 +2011,7 @@ mod tests {
         // Multi-device: master M1 has two online device leaves (D1a, D1b); master
         // M2 has one (D2). The MLS group lists DEVICE ids. Election must collapse
         // to masters and pick the lowest MASTER — counting M1 once, not twice.
+        let _lock = super::super::resolver::test_lock();
         super::super::resolver::clear_all();
         super::super::resolver::update("dev_m1_a", "master1");
         super::super::resolver::update("dev_m1_b", "master1");
@@ -2006,6 +2030,53 @@ mod tests {
         super::super::resolver::clear_all();
     }
 
+    #[test]
+    fn master_with_online_device_is_reachable() {
+        // THE regression test for the early-return bug: `resolve(master) ==
+        // master` always (masters are only VALUES in the link map), so an
+        // early "resolve == self → false" made every bare MASTER id
+        // unreachable even with its device online — silently disabling the
+        // owner-preferred election, MLS recovery targeting, subgroup
+        // self-bootstrap and offline-push classification for every modern
+        // (device != master) identity. The resolver map is process-global —
+        // hold the shared test lock so a parallel test's clear_all can't wipe
+        // the links mid-assert.
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::update("pir_dev_a", "pir_master_a");
+        let rooms = make_room_peers(&[("srvP", &["pir_dev_a"])]);
+
+        // The bare master IS reachable through its online device...
+        assert!(peer_is_reachable(&rooms, "pir_master_a"));
+        // ...and the device id itself stays reachable (exact fast path).
+        assert!(peer_is_reachable(&rooms, "pir_dev_a"));
+        // A master whose devices are all offline is NOT reachable.
+        super::super::resolver::update("pir_dev_b", "pir_master_b");
+        assert!(!peer_is_reachable(&rooms, "pir_master_b"));
+        // An unknown single-device peer not in any room is NOT reachable.
+        assert!(!peer_is_reachable(&rooms, "pir_stranger"));
+    }
+
+    #[test]
+    fn preferred_online_device_picks_socket_addressable_id() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::update("pod_dev_1", "pod_master");
+        super::super::resolver::update("pod_dev_2", "pod_master");
+        let rooms = make_room_peers(&[("srvQ", &["pod_dev_2", "pod_dev_1"])]);
+
+        // Master input → deterministic lowest online device.
+        assert_eq!(
+            preferred_online_device(&rooms, "pod_master").as_deref(),
+            Some("pod_dev_1")
+        );
+        // Exact id in a room wins as-is (single-device / legacy keystone).
+        assert_eq!(
+            preferred_online_device(&rooms, "pod_dev_2").as_deref(),
+            Some("pod_dev_2")
+        );
+        // Nothing online → None (reachable ⇒ Some invariant holds inversely).
+        assert_eq!(preferred_online_device(&rooms, "pod_ghost_master"), None);
+    }
+
     fn test_master() -> crate::identity::native_identity::NativeKeypair {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let m: bip39::Mnemonic = phrase.parse().unwrap();
@@ -2020,6 +2091,7 @@ mod tests {
     /// master) keeps its single entry untouched (it owns its MLS leaf).
     #[test]
     fn local_device_list_strips_master_as_device() {
+        let _lock = super::super::resolver::test_lock();
         super::super::resolver::clear_all();
         let master = test_master();
         let master_id = master.peer_id();
