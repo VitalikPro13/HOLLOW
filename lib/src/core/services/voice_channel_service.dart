@@ -52,6 +52,17 @@ class VoiceChannelService {
   /// Microphone input gain (0.0-2.0). Applied via SetVolume on local audio track.
   double micGain = 1.0;
 
+  /// Voice enhancement: EQ+compressor+limiter chain in the native capture
+  /// post-processor (default on; off = legacy flat makeup gain).
+  bool voiceEnhance = true;
+
+  /// Enhancement strength = the chain's compressor makeup gain in dB
+  /// (0 = no loudness boost, 12 = 100% on the slider).
+  double enhanceMakeupDb = 3.6;
+
+  /// Dynamic mode: the native auto-level servo (ignores micGain/makeup).
+  bool enhanceDynamic = true;
+
   /// VAD: set of currently speaking peer IDs (updated every 200ms).
   final Set<String> _speakingPeers = {};
   Timer? _vadTimer;
@@ -171,10 +182,19 @@ class VoiceChannelService {
       // it's transparent. NOT setVolume(): that only scales remote tracks.
       try {
         await Helper.setCaptureGain(micGain);
-        _vcLog('[HOLLOW-VC] Applied capture gain: ${micGain.toStringAsFixed(2)}');
+        await Helper.setVoiceEnhance(voiceEnhance,
+            makeupDb: enhanceMakeupDb, dynamicMode: enhanceDynamic);
+        _vcLog('[HOLLOW-VC] Applied capture gain: ${micGain.toStringAsFixed(2)} '
+            'enhance=$voiceEnhance makeup=${enhanceMakeupDb.toStringAsFixed(1)}dB '
+            'dynamic=$enhanceDynamic');
       } catch (e) {
         _vcLog('[HOLLOW-VC] Failed to apply capture gain: $e');
       }
+
+      // NOTE: do NOT bypass Apple's Voice-Processing IO here (tried
+      // 2026-07-02): it kills Apple's hardware AEC → echo everywhere and a
+      // persistent feedback howl on the loudspeaker route. See
+      // voice_service._captureLocalAudio for the full story.
     } catch (e) {
       _vcLog('[HOLLOW-VC] Failed to capture audio: $e');
       // Proceed without audio — user can still hear others.
@@ -680,6 +700,29 @@ class VoiceChannelService {
     // atomically. Process-global, so works without a local stream too.
     await Helper.setCaptureGain(gain);
     _vcLog('[HOLLOW-VC] Updated capture gain: ${gain.toStringAsFixed(2)}');
+  }
+
+  Future<void> updateVoiceEnhance(bool enabled) async {
+    voiceEnhance = enabled;
+    // Live mid-session A/B toggle — same process-global atomic as the gain.
+    await Helper.setVoiceEnhance(enabled,
+        makeupDb: enhanceMakeupDb, dynamicMode: enhanceDynamic);
+    _vcLog('[HOLLOW-VC] Updated voice enhance: $enabled');
+  }
+
+  Future<void> updateVoiceEnhanceStrength(double makeupDb) async {
+    enhanceMakeupDb = makeupDb;
+    await Helper.setVoiceEnhance(voiceEnhance,
+        makeupDb: makeupDb, dynamicMode: enhanceDynamic);
+    _vcLog('[HOLLOW-VC] Updated voice enhance strength: '
+        '${makeupDb.toStringAsFixed(1)}dB');
+  }
+
+  Future<void> updateVoiceEnhanceDynamic(bool enabled) async {
+    enhanceDynamic = enabled;
+    await Helper.setVoiceEnhance(voiceEnhance,
+        makeupDb: enhanceMakeupDb, dynamicMode: enabled);
+    _vcLog('[HOLLOW-VC] Updated voice enhance dynamic: $enabled');
   }
 
   Future<void> setRemoteVolume(String peerId, double volume) async {

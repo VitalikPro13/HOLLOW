@@ -1462,6 +1462,23 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
       [_captureGainProcessor setGain:[gain floatValue]];
     }
     result(nil);
+  } else if ([@"setVoiceEnhance" isEqualToString:call.method]) {
+    // Hollow fork: toggles the EQ+compressor+limiter voice chain in the
+    // post-APM capture processor (OFF = legacy flat gain + limiter).
+    NSDictionary* argsMap = call.arguments;
+    NSNumber* enabled = argsMap[@"enabled"];
+    NSNumber* makeupDb = argsMap[@"makeupDb"];
+    NSNumber* dynamic = argsMap[@"dynamic"];
+    if (enabled != nil && _captureGainProcessor != nil) {
+      [_captureGainProcessor setEnhance:[enabled boolValue]];
+    }
+    if (makeupDb != nil && _captureGainProcessor != nil) {
+      [_captureGainProcessor setEnhanceMakeup:[makeupDb floatValue]];
+    }
+    if (dynamic != nil && _captureGainProcessor != nil) {
+      [_captureGainProcessor setEnhanceDynamic:[dynamic boolValue]];
+    }
+    result(nil);
   } else if ([@"startScreenAudioPlayer" isEqualToString:call.method]) {
     // Hollow fork: media-path PCM player for received screen-share audio.
     if (_screenAudioPlayer == nil) {

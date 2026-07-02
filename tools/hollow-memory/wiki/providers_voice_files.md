@@ -94,7 +94,7 @@ Called by event_provider after the Rust event arrives. This is the real initiali
 2. Creates `VoiceChannelService` with local peer ID and ICE config.
 3. Loads device preferences from `audioInputDeviceProvider`, `audioOutputDeviceProvider`, `cameraDeviceProvider`.
 4. Loads audio quality preset (bitrate, stereo) from `audioQualityProvider`.
-5. Loads mic gain from `micGainProvider` (default 2.0 = `kMicGainDefault`, falls back to `kMicGainDefault` not 1.0). Adds `ref.listen(micGainProvider)` for mid-session gain changes via `_service.updateMicGain()`.
+5. Loads mic gain from `micGainProvider` (default 1.0 = "50%", key `mic_gain_v2`) plus `voiceEnhanceProvider` / `voiceEnhanceStrengthProvider` (→ `enhanceStrengthToMakeupDb`) / `voiceEnhanceDynamicProvider` into the service fields. Adds `ref.listen` on all four for live mid-session updates (`updateMicGain` / `updateVoiceEnhance` / `updateVoiceEnhanceStrength` / `updateVoiceEnhanceDynamic`).
 6. Wires service callbacks:
    - `onSpeakingChanged` -- updates `speakingPeers` in state.
    - `onPeerConnected` -- when an audio PC connects, sends screen share offer if local is sharing (deferred send to ensure MLS is ready).

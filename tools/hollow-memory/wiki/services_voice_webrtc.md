@@ -29,7 +29,7 @@ Manages WebRTC mesh connections for server voice channels. Each remote participa
 - `_isMuted`, `_isCameraOn`: local media state
 - `_serverId`, `_channelId`: current voice channel context (null when inactive)
 
-Audio quality settings: `opusBitrate` (default 32000), `opusStereo` (default false). Device preferences: `preferredAudioInputDeviceId`, `preferredAudioOutputDeviceId`, `preferredCameraDeviceId`. Mic gain: `micGain` (default 2.0 = `kMicGainDefault`, range 1.0-3.0) — applied via `Helper.setCaptureGain()` (native post-APM flat makeup gain + -3 dBFS soft limiter; NOT `setVolume`, which is a no-op on local/outgoing tracks). `updateMicGain(gain)` applies mid-session.
+Audio quality settings: `opusBitrate` (default 32000), `opusStereo` (default false). Device preferences: `preferredAudioInputDeviceId`, `preferredAudioOutputDeviceId`, `preferredCameraDeviceId`. Voice processing fields (all applied in `startAudio` + live-updatable): `micGain` (default 1.0 = 50%, range 0.68–4.0, key `mic_gain_v2`) via `Helper.setCaptureGain()` (NOT `setVolume`, a no-op on local tracks); `voiceEnhance` (default true — the native EQ+compressor+limiter chain; OFF = legacy flat gain + −3 dBFS limiter), `enhanceMakeupDb` (default 3.6 = the 30% strength), `enhanceDynamic` (default true — the auto-level servo, ignores micGain/makeup) via `Helper.setVoiceEnhance(enabled, makeupDb:, dynamicMode:)`. `updateMicGain` / `updateVoiceEnhance` / `updateVoiceEnhanceStrength` / `updateVoiceEnhanceDynamic` apply mid-session.
 
 ### Lifecycle
 
@@ -214,7 +214,7 @@ Key state:
 - `_remoteStream`, `_remoteStreamIsSynthetic`: remote video stream ownership tracking
 - `_frameCryptor`: FrameCryptorService instance for SFrame E2EE
 
-Audio quality: `opusBitrate` (default 32000), `opusStereo` (default false). Set by CallNotifier before offer/answer creation. Mic gain: `micGain` (default 2.0 = `kMicGainDefault`, range 1.0-3.0) — applied via `Helper.setCaptureGain()` (native post-APM flat makeup gain + -3 dBFS soft limiter) in `_captureLocalAudio()`. `updateMicGain(gain)` applies mid-call.
+Audio quality: `opusBitrate` (default 32000), `opusStereo` (default false). Set by CallNotifier before offer/answer creation. Voice processing: `micGain` (default 1.0 = 50%, range 0.68–4.0) + `voiceEnhance`/`enhanceMakeupDb`/`enhanceDynamic` — applied via `Helper.setCaptureGain()` + `Helper.setVoiceEnhance()` in `_captureLocalAudio()` (see VoiceChannelService above for semantics; the native chain lives in the fork's capture post-processor, all 4 platforms). `updateMicGain`/`updateVoiceEnhance*` apply mid-call. NOTE: iOS VPIO is deliberately NOT bypassed (kills Apple AEC → feedback howl on speaker; do-not comment at the capture site).
 
 ### SDP Offer/Answer Flow
 

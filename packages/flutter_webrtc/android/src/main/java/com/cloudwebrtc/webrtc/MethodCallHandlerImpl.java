@@ -823,6 +823,26 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         result.success(null);
         break;
       }
+      case "setVoiceEnhance": {
+        // Hollow fork: toggles the EQ+compressor+limiter voice chain in the
+        // post-APM capture processor (OFF = legacy flat gain + limiter).
+        // Optional "makeupDb" = the chain's compressor makeup (strength);
+        // "dynamic" = the auto-level servo (ignores gain/strength).
+        Boolean enabled = call.argument("enabled");
+        Number makeupDb = call.argument("makeupDb");
+        Boolean dynamic = call.argument("dynamic");
+        if (enabled != null && captureGainProcessor != null) {
+          captureGainProcessor.setEnhance(enabled);
+        }
+        if (makeupDb != null && captureGainProcessor != null) {
+          captureGainProcessor.setEnhanceMakeup(makeupDb.floatValue());
+        }
+        if (dynamic != null && captureGainProcessor != null) {
+          captureGainProcessor.setEnhanceDynamic(dynamic);
+        }
+        result.success(null);
+        break;
+      }
       case "startScreenAudioPlayer": {
         // Hollow fork: media-path PCM player for received screen-share audio.
         if (screenAudioPlayer == null) {

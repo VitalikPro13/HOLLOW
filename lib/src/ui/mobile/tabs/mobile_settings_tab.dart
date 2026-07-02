@@ -1358,6 +1358,8 @@ class _AudioTab extends StatelessWidget {
         const SizedBox(height: HollowSpacing.md),
         _MicGainSlider(),
         const SizedBox(height: HollowSpacing.md),
+        _VoiceEnhanceToggle(),
+        const SizedBox(height: HollowSpacing.md),
         _AudioProcessingInfo(),
         const SizedBox(height: HollowSpacing.xl),
         _SectionLabel(label: 'Ringtone'),
@@ -2193,37 +2195,177 @@ class _MicGainSlider extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final asyncGain = ref.watch(micGainProvider);
     final gain = asyncGain.valueOrNull ?? kMicGainDefault;
+    final enhance = ref.watch(voiceEnhanceProvider).valueOrNull ?? true;
+    final dynMode =
+        ref.watch(voiceEnhanceDynamicProvider).valueOrNull ?? true;
+    final locked = enhance && dynMode;
+
+    return AnimatedOpacity(
+      duration: const Duration(milliseconds: 150),
+      opacity: locked ? 0.4 : 1.0,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Microphone Gain',
+                  style: HollowTypography.bodySmall
+                      .copyWith(color: hollow.textSecondary)),
+              Text(
+                  locked
+                      ? 'Auto'
+                      : '${(gain / kMicGainDisplayUnit * 100).round()}%',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.accent,
+                    fontWeight: FontWeight.w600,
+                  )),
+            ],
+          ),
+          Slider(
+            value: gain.clamp(kMicGainMin, kMicGainMax),
+            min: kMicGainMin,
+            max: kMicGainMax,
+            divisions: 83,
+            activeColor: hollow.accent,
+            inactiveColor: hollow.border,
+            onChanged: locked
+                ? null
+                : (v) => ref.read(micGainProvider.notifier).setGain(v),
+          ),
+          Text(
+            'Boosts your outgoing voice (applies live during calls). '
+            'A limiter prevents clipping.',
+            style:
+                HollowTypography.caption.copyWith(color: hollow.textSecondary),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VoiceEnhanceToggle extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final enhance = ref.watch(voiceEnhanceProvider).valueOrNull ?? true;
+    final dynMode =
+        ref.watch(voiceEnhanceDynamicProvider).valueOrNull ?? true;
+    final strength = ref.watch(voiceEnhanceStrengthProvider).valueOrNull ??
+        kEnhanceStrengthDefault;
+    final strengthLocked = !enhance || dynMode;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('Microphone Gain',
-                style: HollowTypography.bodySmall
-                    .copyWith(color: hollow.textSecondary)),
-            Text('${(gain / kMicGainDisplayUnit * 100).round()}%',
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.accent,
-                  fontWeight: FontWeight.w600,
-                )),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Voice Enhancement',
+                      style: HollowTypography.bodySmall
+                          .copyWith(color: hollow.textSecondary)),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Studio EQ + compressor for a fuller, louder voice. '
+                    'Switches live mid-call.',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: HollowSpacing.md),
+            Switch(
+              value: enhance,
+              onChanged: (v) =>
+                  ref.read(voiceEnhanceProvider.notifier).setEnabled(v),
+              activeTrackColor: hollow.accent,
+              activeColor: Colors.white,
+              inactiveTrackColor: hollow.border,
+            ),
           ],
         ),
-        Slider(
-          value: gain.clamp(kMicGainMin, kMicGainMax),
-          min: kMicGainMin,
-          max: kMicGainMax,
-          divisions: 83,
-          activeColor: hollow.accent,
-          inactiveColor: hollow.border,
-          onChanged: (v) =>
-              ref.read(micGainProvider.notifier).setGain(v),
+        const SizedBox(height: HollowSpacing.sm),
+        AnimatedOpacity(
+          duration: const Duration(milliseconds: 150),
+          opacity: enhance ? 1.0 : 0.4,
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Dynamic Mode',
+                        style: HollowTypography.bodySmall
+                            .copyWith(color: hollow.textSecondary)),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Continuously balances your mic level for you — any '
+                      'microphone lands at the same natural loudness.',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.md),
+              Switch(
+                value: dynMode && enhance,
+                onChanged: enhance
+                    ? (v) => ref
+                        .read(voiceEnhanceDynamicProvider.notifier)
+                        .setEnabled(v)
+                    : null,
+                activeTrackColor: hollow.accent,
+                activeColor: Colors.white,
+                inactiveTrackColor: hollow.border,
+              ),
+            ],
+          ),
         ),
-        Text(
-          'Boosts your outgoing voice (applies live during calls). '
-          'A limiter at -3 dB prevents clipping.',
-          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
+        AnimatedOpacity(
+          duration: const Duration(milliseconds: 150),
+          opacity: strengthLocked ? 0.4 : 1.0,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('Strength',
+                      style: HollowTypography.caption
+                          .copyWith(color: hollow.textSecondary)),
+                  Text(enhance && dynMode ? 'Auto' : '${strength.round()}%',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.accent,
+                        fontWeight: FontWeight.w600,
+                      )),
+                ],
+              ),
+              Slider(
+                value:
+                    strength.clamp(kEnhanceStrengthMin, kEnhanceStrengthMax),
+                min: kEnhanceStrengthMin,
+                max: kEnhanceStrengthMax,
+                divisions: 30,
+                activeColor: hollow.accent,
+                inactiveColor: hollow.border,
+                onChanged: strengthLocked
+                    ? null
+                    : (v) => ref
+                        .read(voiceEnhanceStrengthProvider.notifier)
+                        .setStrength(v),
+              ),
+            ],
+          ),
         ),
       ],
     );

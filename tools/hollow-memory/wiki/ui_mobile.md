@@ -578,7 +578,8 @@ Added to `_SystemTab` in `mobile_settings_tab.dart`:
 
 ### Voice & Audio Section
 - **Audio quality picker**: 3 pills (Voice/Music/Hi-Fi) with description label underneath. Reads/writes `audioQualityProvider`
-- **Mic gain slider** (`_MicGainSlider`): 83 divisions, with a caption line. Reads/writes `micGainProvider` (the actual linear multiplier, clamped 1.0–3.0; `kMicGainMin`/`kMicGainMax`). **Default 2.0** (`kMicGainDefault`) = a 2× boost over WebRTC's quiet AGC output. Display RESCALES via `(gain / kMicGainDisplayUnit * 100)%` (`kMicGainDisplayUnit`=2.0), so **2.0x reads "100%"** (1.0x→50%, 3.0x→150%). Drives the native **post-APM flat makeup gain + -3 dB soft limiter** via `Helper.setCaptureGain()`. Applies live mid-call
+- **Mic gain slider** (`_MicGainSlider`): 83 divisions, with a caption line. Reads/writes `micGainProvider` (linear multiplier, clamped 0.68–4.0, key `mic_gain_v2`; **default 1.0 = "50%"**). Display = `(gain / kMicGainDisplayUnit(2.0) * 100)%` → 34%–200%. With Voice Enhancement ON it's the chain's input trim (2.0 = unity); OFF = legacy flat gain. **Dims + disables + shows "Auto" while Dynamic mode is on.** Drives `Helper.setCaptureGain()`, live mid-call
+- **Voice Enhancement** (`_VoiceEnhanceToggle`): Switch for `voiceEnhanceProvider` (the native EQ+compressor+limiter chain, default ON) + a **Dynamic Mode** Switch (`voiceEnhanceDynamicProvider`, default ON — auto-level servo, "any microphone lands at the same natural loudness") + a **Strength** slider (`voiceEnhanceStrengthProvider`, 0–150%, default 30%, 30 divisions = compressor makeup). Strength dims/locks ("Auto") while Dynamic is on or enhancement is off
 - **Audio processing info**: Echo cancellation, noise suppression, AGC shown as "Auto" (always on)
 
 ### Ringtone Section

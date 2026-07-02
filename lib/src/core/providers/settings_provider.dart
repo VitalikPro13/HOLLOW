@@ -247,34 +247,40 @@ class AudioQualityNotifier extends AsyncNotifier<AudioQualityPreset> {
   }
 }
 
-/// Microphone input gain — the LINEAR makeup multiplier applied post-APM by the
-/// native capture-gain processor (then a -3 dBFS soft limiter caps peaks).
-///
-/// WebRTC's own AGC leaves the mic quiet (~-18 dBFS), so the DEFAULT is a 2.0x
-/// boost: that's what makes calls land at a normal, audible loudness with no
-/// user setup. The UI calls 2.0x "100%" (the standard/normalized level), with
-/// room to go quieter (down to 1.0x = 50%) or louder (up to 3.0x = 150%). See
-/// [kMicGainDisplayUnit] for the % mapping.
+/// Microphone input gain — the LINEAR multiplier applied post-APM by the
+/// native capture processor. With voice enhancement ON it is the chain's
+/// input trim (2.0x = "100%" = unity trim); with enhancement OFF it is the
+/// legacy flat makeup gain. Ignored entirely while Dynamic mode auto-levels.
+/// See [kMicGainDisplayUnit] for the % mapping.
 final micGainProvider =
     AsyncNotifierProvider<MicGainNotifier, double>(MicGainNotifier.new);
 
-/// Mic gain bounds (actual linear multiplier). 1.0x is WebRTC's quiet baseline
-/// (no boost); 3.0x is extra-hot (the -3 dB limiter still prevents clipping).
-const double kMicGainMin = 1.0;
-const double kMicGainMax = 3.0;
+/// Mic gain bounds (actual linear multiplier). The slider goes BOTH ways
+/// around the default: down to 34% (0.68x — floor is non-zero so the slider
+/// can't mute the mic) and up to 200% (4.0x — the limiter still prevents
+/// clipping).
+const double kMicGainMin = 0.68;
+const double kMicGainMax = 4.0;
 
-/// The actual gain that the UI shows as "100%" — the standard/normalized loud
-/// level and the default. Display % = round(gain / kMicGainDisplayUnit * 100),
-/// so 1.0x→50%, 2.0x→100%, 3.0x→150%.
+/// The gain the UI shows as "100%". Display % = round(gain /
+/// kMicGainDisplayUnit * 100), so 0.68x→34%, 2.0x→100%, 4.0x→200%.
 const double kMicGainDisplayUnit = 2.0;
 
-/// Default gain (== the "100%" / normalized level).
-const double kMicGainDefault = kMicGainDisplayUnit;
+/// Default gain: 50% (0.5x trim into the enhancement chain). Device-tested
+/// 2026-07-02: unity trim overdrives the chain on decent mics ("insanity");
+/// a good hot mic wanted 34%, so 50% is the sane manual starting point.
+/// (Dynamic mode, the default, ignores this and auto-levels instead.)
+const double kMicGainDefault = 1.0;
 
 class MicGainNotifier extends AsyncNotifier<double> {
   @override
   Future<double> build() async {
-    final val = await storage_api.loadSetting(key: 'mic_gain');
+    // v2 key: the 2026-07-02 rescale changed both the range and the meaning
+    // (with voice enhancement the gain is an input TRIM around unity at
+    // "100%"). Reading the old 'mic_gain' key would pin pre-rescale users at
+    // its old clamp floor ("stuck at 50%"), so everyone restarts at the
+    // 100% default instead.
+    final val = await storage_api.loadSetting(key: 'mic_gain_v2');
     if (val == null || val.isEmpty) return kMicGainDefault;
     return (double.tryParse(val) ?? kMicGainDefault)
         .clamp(kMicGainMin, kMicGainMax);
@@ -283,10 +289,100 @@ class MicGainNotifier extends AsyncNotifier<double> {
   Future<void> setGain(double gain) async {
     final clamped = gain.clamp(kMicGainMin, kMicGainMax);
     await storage_api.saveSetting(
-      key: 'mic_gain',
+      key: 'mic_gain_v2',
       value: clamped.toStringAsFixed(2),
     );
     state = AsyncData(clamped);
+  }
+}
+
+/// Voice enhancement — the native EQ + compressor + limiter chain applied to
+/// the mic AFTER WebRTC's AGC (highpass + presence EQ, -18 dBFS 3:1
+/// compressor with makeup, -1 dBFS limiter). Default ON: this is what makes
+/// any mic land at a consistent, full loudness with zero setup. OFF falls
+/// back to the flat makeup-gain + limiter path. All parameters are static —
+/// the toggle exists so the two paths can be A/B'd live mid-call.
+final voiceEnhanceProvider =
+    AsyncNotifierProvider<VoiceEnhanceNotifier, bool>(VoiceEnhanceNotifier.new);
+
+class VoiceEnhanceNotifier extends AsyncNotifier<bool> {
+  @override
+  Future<bool> build() async {
+    final val = await storage_api.loadSetting(key: 'voice_enhance');
+    if (val == null || val.isEmpty) return true;
+    return val != 'false';
+  }
+
+  Future<void> setEnabled(bool enabled) async {
+    await storage_api.saveSetting(
+      key: 'voice_enhance',
+      value: enabled ? 'true' : 'false',
+    );
+    state = AsyncData(enabled);
+  }
+}
+
+/// Voice-enhancement strength, in UI percent. Drives the chain's compressor
+/// makeup gain live: 100% = +12 dB, 0% = no loudness boost (EQ + compression
+/// still apply), 150% = +18 dB (the -1 dBFS limiter still caps peaks).
+/// Default 30% (+3.6 dB) — the device-tested golden clarity setting.
+const double kEnhanceStrengthMin = 0.0;
+const double kEnhanceStrengthMax = 150.0;
+const double kEnhanceStrengthDefault = 30.0;
+
+/// The makeup gain (dB) the native chain applies at 100% strength.
+const double kEnhanceMakeupDbAt100 = 12.0;
+
+/// Maps the strength percent to the native chain's makeup gain in dB.
+double enhanceStrengthToMakeupDb(double percent) =>
+    kEnhanceMakeupDbAt100 * percent / 100.0;
+
+final voiceEnhanceStrengthProvider =
+    AsyncNotifierProvider<VoiceEnhanceStrengthNotifier, double>(
+        VoiceEnhanceStrengthNotifier.new);
+
+class VoiceEnhanceStrengthNotifier extends AsyncNotifier<double> {
+  @override
+  Future<double> build() async {
+    final val = await storage_api.loadSetting(key: 'voice_enhance_strength');
+    if (val == null || val.isEmpty) return kEnhanceStrengthDefault;
+    return (double.tryParse(val) ?? kEnhanceStrengthDefault)
+        .clamp(kEnhanceStrengthMin, kEnhanceStrengthMax);
+  }
+
+  Future<void> setStrength(double percent) async {
+    final clamped = percent.clamp(kEnhanceStrengthMin, kEnhanceStrengthMax);
+    await storage_api.saveSetting(
+      key: 'voice_enhance_strength',
+      value: clamped.toStringAsFixed(0),
+    );
+    state = AsyncData(clamped);
+  }
+}
+
+/// Dynamic mode — the "always sounds good" auto-level. A slow speech-gated
+/// RMS meter in the native chain servos the input trim so ANY mic converges
+/// to the calibrated speech level (the setting that sounded right on real
+/// hardware), with the golden 30% strength. Locks the manual gain/strength
+/// sliders while active. Default ON.
+final voiceEnhanceDynamicProvider =
+    AsyncNotifierProvider<VoiceEnhanceDynamicNotifier, bool>(
+        VoiceEnhanceDynamicNotifier.new);
+
+class VoiceEnhanceDynamicNotifier extends AsyncNotifier<bool> {
+  @override
+  Future<bool> build() async {
+    final val = await storage_api.loadSetting(key: 'voice_enhance_dynamic');
+    if (val == null || val.isEmpty) return true;
+    return val != 'false';
+  }
+
+  Future<void> setEnabled(bool enabled) async {
+    await storage_api.saveSetting(
+      key: 'voice_enhance_dynamic',
+      value: enabled ? 'true' : 'false',
+    );
+    state = AsyncData(enabled);
   }
 }
 

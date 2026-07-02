@@ -579,10 +579,22 @@ Controls Opus bitrate and stereo settings via SDP munging in voice calls.
 
 ### Microphone Gain
 Provider: `micGainProvider` -- `AsyncNotifierProvider<MicGainNotifier, double>`
-- Key: `'mic_gain'`
-- Default: `1.0` (no boost). Range: 0.0 to 2.0.
-- Values >1.0 boost, <1.0 reduce. Applied to the local audio track.
-- `setGain(double gain)` -- Persists with 2 decimal places.
+- Key: `'mic_gain_v2'` (fresh key 2026-07-02 — the old `'mic_gain'` predates the trim-semantics rescale and pinned users at its old floor)
+- Default: `1.0` = displays "50%". Range 0.68–4.0 (`kMicGainMin`/`kMicGainMax`), display % = `gain / kMicGainDisplayUnit(2.0) * 100` → 34%–200%.
+- Semantics: with Voice Enhancement ON this is the chain's input TRIM (2.0 = unity); with it OFF, the legacy flat makeup gain. IGNORED (slider shows "Auto") while Dynamic mode is on.
+- `setGain(double gain)` -- Persists with 2 decimal places. Applied natively via `Helper.setCaptureGain` (post-APM capture processor), live mid-call.
+
+### Voice Enhancement (3 providers, 2026-07-02)
+**voiceEnhanceProvider** -- `AsyncNotifierProvider<VoiceEnhanceNotifier, bool>`
+- Key: `'voice_enhance'`, default `true`. The native EQ+compressor+limiter capture chain (Audition curve: HP 100 Hz 24 dB/oct, shelf 110/+6, peaks 291/−3, 3k/+2, 7k/+3.5, 12k/+1.5 → comp −18 dBFS 3:1 10/100 ms → −1 dBFS limiter). OFF = legacy flat gain + −3 dBFS limiter. Live mid-call A/B.
+
+**voiceEnhanceStrengthProvider** -- `AsyncNotifierProvider<VoiceEnhanceStrengthNotifier, double>`
+- Key: `'voice_enhance_strength'`, percent 0–150, default `30`. Maps to the chain's compressor makeup gain via `enhanceStrengthToMakeupDb` (100% = +12 dB, 30% = +3.6 dB). Locked ("Auto") while Dynamic mode is on.
+
+**voiceEnhanceDynamicProvider** -- `AsyncNotifierProvider<VoiceEnhanceDynamicNotifier, bool>`
+- Key: `'voice_enhance_dynamic'`, default `true`. The auto-level servo: a slow speech-gated RMS meter in the native processor servos the input trim so ANY mic converges to the calibrated golden level (speech ≈ −28 dBFS RMS at the compressor input, makeup fixed at +3.6 dB). Locks the gain + strength sliders while active.
+
+All three are seeded into `VoiceService`/`VoiceChannelService` at service creation and `ref.listen`ed for live mid-call updates (`updateVoiceEnhance` / `updateVoiceEnhanceStrength` / `updateVoiceEnhanceDynamic` → one method channel `setVoiceEnhance{enabled, makeupDb, dynamic}`; the Dart param is `dynamicMode` because `dynamic` shadows the built-in type).
 
 ### Ringtone Settings (5 providers)
 

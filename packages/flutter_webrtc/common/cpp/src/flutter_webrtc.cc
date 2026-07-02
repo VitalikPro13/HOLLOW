@@ -627,6 +627,28 @@ void FlutterWebRTC::HandleMethodCall(
       capture_gain_processor()->SetGain(static_cast<float>(gain.value()));
     }
     result->Success();
+  } else if (method_call.method_name().compare("setVoiceEnhance") == 0) {
+    // Hollow fork: toggles the EQ+compressor+limiter voice chain in the
+    // post-APM capture processor (OFF = legacy flat gain + limiter).
+    auto args = method_call.arguments();
+    if (!args) {
+      result->Error("Bad Arguments",
+                    "setVoiceEnhance() Null arguments received");
+      return;
+    }
+    const EncodableMap params = GetValue<EncodableMap>(*args);
+    const bool enabled = findBoolean(params, "enabled");
+    const bool dynamic = findBoolean(params, "dynamic");
+    const std::optional<double> makeup_db = maybeFindDouble(params, "makeupDb");
+    if (capture_gain_processor()) {
+      capture_gain_processor()->SetEnhance(enabled);
+      capture_gain_processor()->SetEnhanceDynamic(dynamic);
+      if (makeup_db.has_value()) {
+        capture_gain_processor()->SetEnhanceMakeup(
+            static_cast<float>(makeup_db.value()));
+      }
+    }
+    result->Success();
   } else if (method_call.method_name().compare("voiceRedirectStart") == 0) {
     // Hollow fork (Windows): begin out-of-process rendering of the given REMOTE
     // audio track ids so the call voices play from a separate pid (excluded from

@@ -3976,54 +3976,67 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         ),
         const SizedBox(height: HollowSpacing.sm),
 
-        // Mic gain slider
+        // Mic gain slider (locked while Dynamic mode auto-levels)
         Builder(builder: (context) {
           final gain = ref.watch(micGainProvider).valueOrNull ?? kMicGainDefault;
-          return Padding(
-            padding: const EdgeInsets.only(left: 30),
-            child: Row(
-              children: [
-                Icon(LucideIcons.volume1, size: 14, color: hollow.textSecondary),
-                const SizedBox(width: HollowSpacing.sm),
-                Text(
-                  'Gain',
-                  style: HollowTypography.bodySmall.copyWith(
-                    color: hollow.textSecondary,
-                  ),
-                ),
-                const SizedBox(width: HollowSpacing.md),
-                Expanded(
-                  child: SliderTheme(
-                    data: SliderThemeData(
-                      activeTrackColor: hollow.accent,
-                      inactiveTrackColor: hollow.border,
-                      thumbColor: hollow.accent,
-                      overlayColor: hollow.accent.withValues(alpha: 0.08),
-                      trackHeight: 2,
-                      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-                      overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
-                    ),
-                    child: Slider(
-                      value: gain.clamp(kMicGainMin, kMicGainMax),
-                      min: kMicGainMin,
-                      max: kMicGainMax,
-                      divisions: 83,
-                      onChanged: (v) => ref.read(micGainProvider.notifier).setGain(v),
+          final enhance = ref.watch(voiceEnhanceProvider).valueOrNull ?? true;
+          final dynMode =
+              ref.watch(voiceEnhanceDynamicProvider).valueOrNull ?? true;
+          final locked = enhance && dynMode;
+          return AnimatedOpacity(
+            duration: const Duration(milliseconds: 150),
+            opacity: locked ? 0.4 : 1.0,
+            child: Padding(
+              padding: const EdgeInsets.only(left: 30),
+              child: Row(
+                children: [
+                  Icon(LucideIcons.volume1, size: 14, color: hollow.textSecondary),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Text(
+                    'Gain',
+                    style: HollowTypography.bodySmall.copyWith(
+                      color: hollow.textSecondary,
                     ),
                   ),
-                ),
-                SizedBox(
-                  width: 40,
-                  child: Text(
-                    '${(gain / kMicGainDisplayUnit * 100).round()}%',
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.accent,
-                      fontWeight: FontWeight.w600,
+                  const SizedBox(width: HollowSpacing.md),
+                  Expanded(
+                    child: SliderTheme(
+                      data: SliderThemeData(
+                        activeTrackColor: hollow.accent,
+                        inactiveTrackColor: hollow.border,
+                        thumbColor: hollow.accent,
+                        overlayColor: hollow.accent.withValues(alpha: 0.08),
+                        trackHeight: 2,
+                        thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+                        overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
+                      ),
+                      child: Slider(
+                        value: gain.clamp(kMicGainMin, kMicGainMax),
+                        min: kMicGainMin,
+                        max: kMicGainMax,
+                        divisions: 83,
+                        onChanged: locked
+                            ? null
+                            : (v) =>
+                                ref.read(micGainProvider.notifier).setGain(v),
+                      ),
                     ),
-                    textAlign: TextAlign.right,
                   ),
-                ),
-              ],
+                  SizedBox(
+                    width: 40,
+                    child: Text(
+                      locked
+                          ? 'Auto'
+                          : '${(gain / kMicGainDisplayUnit * 100).round()}%',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.accent,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      textAlign: TextAlign.right,
+                    ),
+                  ),
+                ],
+              ),
             ),
           );
         }),
@@ -4031,10 +4044,126 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
           padding: const EdgeInsets.only(left: 30, top: 4),
           child: Text(
             'Boosts your outgoing voice (applies live during calls). '
-            'A limiter at -3 dB prevents clipping.',
+            'A limiter prevents clipping.',
             style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
           ),
         ),
+        const SizedBox(height: HollowSpacing.md),
+
+        // Voice enhancement (EQ + compressor + limiter chain)
+        Padding(
+          padding: const EdgeInsets.only(left: 30),
+          child: Builder(builder: (context) {
+            final enhance =
+                ref.watch(voiceEnhanceProvider).valueOrNull ?? true;
+            return _ToggleRow(
+              icon: LucideIcons.sparkles,
+              label: 'Voice enhancement',
+              subtitle: 'Studio EQ + compressor for a fuller, louder voice. '
+                  'Switches live mid-call.',
+              value: enhance,
+              onChanged: (v) =>
+                  ref.read(voiceEnhanceProvider.notifier).setEnabled(v),
+            );
+          }),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+
+        // Dynamic mode (auto-level servo)
+        Padding(
+          padding: const EdgeInsets.only(left: 30),
+          child: Builder(builder: (context) {
+            final enhance =
+                ref.watch(voiceEnhanceProvider).valueOrNull ?? true;
+            final dynMode =
+                ref.watch(voiceEnhanceDynamicProvider).valueOrNull ?? true;
+            return AnimatedOpacity(
+              duration: const Duration(milliseconds: 150),
+              opacity: enhance ? 1.0 : 0.4,
+              child: _ToggleRow(
+                icon: LucideIcons.audioWaveform,
+                label: 'Dynamic mode',
+                subtitle: 'Continuously balances your mic level for you — '
+                    'any microphone lands at the same natural loudness.',
+                value: dynMode && enhance,
+                onChanged: enhance
+                    ? (v) => ref
+                        .read(voiceEnhanceDynamicProvider.notifier)
+                        .setEnabled(v)
+                    : (_) {},
+              ),
+            );
+          }),
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+
+        // Enhancement strength (compressor makeup gain; locked in Dynamic)
+        Builder(builder: (context) {
+          final enhance = ref.watch(voiceEnhanceProvider).valueOrNull ?? true;
+          final dynMode =
+              ref.watch(voiceEnhanceDynamicProvider).valueOrNull ?? true;
+          final locked = !enhance || dynMode;
+          final strength = ref.watch(voiceEnhanceStrengthProvider).valueOrNull ??
+              kEnhanceStrengthDefault;
+          return AnimatedOpacity(
+            duration: const Duration(milliseconds: 150),
+            opacity: locked ? 0.4 : 1.0,
+            child: Padding(
+              padding: const EdgeInsets.only(left: 30),
+              child: Row(
+                children: [
+                  Icon(LucideIcons.gauge, size: 14, color: hollow.textSecondary),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Text(
+                    'Strength',
+                    style: HollowTypography.bodySmall.copyWith(
+                      color: hollow.textSecondary,
+                    ),
+                  ),
+                  const SizedBox(width: HollowSpacing.md),
+                  Expanded(
+                    child: SliderTheme(
+                      data: SliderThemeData(
+                        activeTrackColor: hollow.accent,
+                        inactiveTrackColor: hollow.border,
+                        thumbColor: hollow.accent,
+                        overlayColor: hollow.accent.withValues(alpha: 0.08),
+                        trackHeight: 2,
+                        thumbShape:
+                            const RoundSliderThumbShape(enabledThumbRadius: 5),
+                        overlayShape:
+                            const RoundSliderOverlayShape(overlayRadius: 10),
+                      ),
+                      child: Slider(
+                        value: strength.clamp(
+                            kEnhanceStrengthMin, kEnhanceStrengthMax),
+                        min: kEnhanceStrengthMin,
+                        max: kEnhanceStrengthMax,
+                        divisions: 30,
+                        onChanged: locked
+                            ? null
+                            : (v) => ref
+                                .read(voiceEnhanceStrengthProvider.notifier)
+                                .setStrength(v),
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 40,
+                    child: Text(
+                      enhance && dynMode ? 'Auto' : '${strength.round()}%',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.accent,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      textAlign: TextAlign.right,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }),
         const SizedBox(height: HollowSpacing.md),
 
         // Speaker output (win32audio)

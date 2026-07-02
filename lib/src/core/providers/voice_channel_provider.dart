@@ -441,8 +441,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _service!.opusBitrate = preset.bitrate;
     _service!.opusStereo = preset.stereo;
 
-    // Load mic gain.
+    // Load mic gain + voice enhancement.
     _service!.micGain = await ref.read(micGainProvider.future);
+    _service!.voiceEnhance = await ref.read(voiceEnhanceProvider.future);
+    _service!.enhanceMakeupDb = enhanceStrengthToMakeupDb(
+        await ref.read(voiceEnhanceStrengthProvider.future));
+    _service!.enhanceDynamic =
+        await ref.read(voiceEnhanceDynamicProvider.future);
 
     // Wire VAD callback.
     _service!.onSpeakingChanged = (speaking) {
@@ -510,6 +515,20 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     ref.listen(micGainProvider, (_, next) {
       final gain = next.valueOrNull ?? kMicGainDefault;
       _service?.updateMicGain(gain);
+    });
+
+    // Live A/B of the voice-enhancement chain mid-session.
+    ref.listen(voiceEnhanceProvider, (_, next) {
+      final enabled = next.valueOrNull ?? true;
+      _service?.updateVoiceEnhance(enabled);
+    });
+    ref.listen(voiceEnhanceStrengthProvider, (_, next) {
+      final pct = next.valueOrNull ?? kEnhanceStrengthDefault;
+      _service?.updateVoiceEnhanceStrength(enhanceStrengthToMakeupDb(pct));
+    });
+    ref.listen(voiceEnhanceDynamicProvider, (_, next) {
+      final enabled = next.valueOrNull ?? true;
+      _service?.updateVoiceEnhanceDynamic(enabled);
     });
 
     // Apply cached SFrame key (may have arrived before the service was created).

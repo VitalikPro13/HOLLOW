@@ -80,7 +80,7 @@
                                         AVAudioSessionCategoryOptionAllowBluetooth
                                   error:&error];
 
-    success = [session.session overrideOutputAudioPort:kAudioSessionOverrideAudioRoute_None
+    success = [session.session overrideOutputAudioPort:AVAudioSessionPortOverrideNone
                                                  error:&error];
     if (!success)
       NSLog(@"setSpeakerphoneOn: Port override failed due to: %@", error);
@@ -93,11 +93,22 @@
                                         AVAudioSessionCategoryOptionAllowBluetooth
                                   error:&error];
 
-    success = [session overrideOutputAudioPort:kAudioSessionProperty_OverrideAudioRoute
-                                         error:&error];
+    // Hollow fork fix: this passed kAudioSessionProperty_OverrideAudioRoute
+    // ('ovrr' — a legacy PROPERTY SELECTOR, not a port-override VALUE) to
+    // overrideOutputAudioPort:, so forcing the loudspeaker was a broken
+    // no-op. The correct value is AVAudioSessionPortOverrideSpeaker
+    // (== kAudioSessionOverrideAudioRoute_Speaker, as selectAudioOutput
+    // already uses).
+    success = [session.session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker
+                                                 error:&error];
     if (!success)
       NSLog(@"setSpeakerphoneOn: Port override failed due to: %@", error);
   }
+  // Commit the route (mirrors setSpeakerphoneOnButPreferBluetooth) — without
+  // an active session the override may not take effect.
+  BOOL activated = [session setActive:YES error:&error];
+  if (!activated)
+    NSLog(@"setSpeakerphoneOn: setActive failed due to: %@", error);
   [session unlockForConfiguration];
 }
 

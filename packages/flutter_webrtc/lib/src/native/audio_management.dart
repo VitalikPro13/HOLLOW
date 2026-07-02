@@ -63,6 +63,27 @@ class NativeAudioManagement {
     });
   }
 
+  /// Toggle the EQ+compressor+limiter voice chain in the capture
+  /// post-processor (Hollow fork addition).
+  ///
+  /// When enabled, the processor runs a STATIC broadcast voice chain (highpass
+  /// + presence EQ -> compressor -> -1 dBFS limiter) instead of the legacy
+  /// flat makeup gain, and [setCaptureGain]'s value becomes an input trim
+  /// (2.0 = unity). [makeupDb] is the compressor's makeup gain — the chain's
+  /// loudness/"strength" knob (0 = no boost, 12 = default). [dynamicMode]
+  /// enables the auto-level servo: a slow speech-gated RMS meter drives the
+  /// trim so any mic lands at the calibrated level, ignoring the manual
+  /// gain/strength knobs. Process-global, live mid-call. No-op on web.
+  static Future<void> setVoiceEnhance(bool enabled,
+      {double makeupDb = 12.0, bool dynamicMode = false}) async {
+    if (kIsWeb) return;
+    await WebRTC.invokeMethod('setVoiceEnhance', <String, dynamic>{
+      'enabled': enabled,
+      'makeupDb': makeupDb,
+      'dynamic': dynamicMode,
+    });
+  }
+
   /// Begin out-of-process rendering of the given REMOTE audio tracks (Hollow
   /// fork, Windows only). Each track's decoded PCM is tapped via an
   /// AudioTrackSink and forwarded to a child `render-pcm` process that plays it,

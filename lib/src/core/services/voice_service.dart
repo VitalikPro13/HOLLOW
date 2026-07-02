@@ -69,6 +69,17 @@ class VoiceService {
   /// Microphone input gain (0.0-2.0). Applied via SetVolume on local audio track.
   double micGain = 1.0;
 
+  /// Voice enhancement: EQ+compressor+limiter chain in the native capture
+  /// post-processor (default on; off = legacy flat makeup gain).
+  bool voiceEnhance = true;
+
+  /// Enhancement strength = the chain's compressor makeup gain in dB
+  /// (0 = no loudness boost, 12 = 100% on the slider).
+  double enhanceMakeupDb = 3.6;
+
+  /// Dynamic mode: the native auto-level servo (ignores micGain/makeup).
+  bool enhanceDynamic = true;
+
   /// SFrame encryption service for DM call E2EE.
   FrameCryptorService? _frameCryptor;
   FrameCryptorService? get frameCryptor => _frameCryptor;
@@ -1122,10 +1133,21 @@ class VoiceService {
       // it's transparent. NOT setVolume(): that only scales remote tracks.
       try {
         await Helper.setCaptureGain(micGain);
-        _log('[HOLLOW-VOICE] Applied capture gain: ${micGain.toStringAsFixed(2)}');
+        await Helper.setVoiceEnhance(voiceEnhance,
+            makeupDb: enhanceMakeupDb, dynamicMode: enhanceDynamic);
+        _log('[HOLLOW-VOICE] Applied capture gain: ${micGain.toStringAsFixed(2)} '
+            'enhance=$voiceEnhance makeup=${enhanceMakeupDb.toStringAsFixed(1)}dB '
+            'dynamic=$enhanceDynamic');
       } catch (e) {
         _log('[HOLLOW-VOICE] Failed to apply capture gain: $e');
       }
+
+      // NOTE: do NOT bypass Apple's Voice-Processing IO here (tried
+      // 2026-07-02 to recover its ~6-10 dB playback attenuation): the bypass
+      // kills Apple's hardware AEC → echo on every route, and on the
+      // loudspeaker a feedback howl (loud/distorted/bass-boosted mic) that
+      // persists after toggling back. The sender-side enhancement chain
+      // already delivers hot audio, so VPIO's attenuation is affordable.
 
       // Apply preferred output device if set.
       if (preferredAudioOutputDeviceId != null) {
@@ -1148,6 +1170,29 @@ class VoiceService {
     // Process-global, so this works even before/without a local stream.
     await Helper.setCaptureGain(gain);
     _log('[HOLLOW-VOICE] Updated capture gain: ${gain.toStringAsFixed(2)}');
+  }
+
+  Future<void> updateVoiceEnhance(bool enabled) async {
+    voiceEnhance = enabled;
+    // Live mid-call A/B toggle — same process-global atomic as the gain.
+    await Helper.setVoiceEnhance(enabled,
+        makeupDb: enhanceMakeupDb, dynamicMode: enhanceDynamic);
+    _log('[HOLLOW-VOICE] Updated voice enhance: $enabled');
+  }
+
+  Future<void> updateVoiceEnhanceStrength(double makeupDb) async {
+    enhanceMakeupDb = makeupDb;
+    await Helper.setVoiceEnhance(voiceEnhance,
+        makeupDb: makeupDb, dynamicMode: enhanceDynamic);
+    _log('[HOLLOW-VOICE] Updated voice enhance strength: '
+        '${makeupDb.toStringAsFixed(1)}dB');
+  }
+
+  Future<void> updateVoiceEnhanceDynamic(bool enabled) async {
+    enhanceDynamic = enabled;
+    await Helper.setVoiceEnhance(voiceEnhance,
+        makeupDb: enhanceMakeupDb, dynamicMode: enabled);
+    _log('[HOLLOW-VOICE] Updated voice enhance dynamic: $enabled');
   }
 
   /// Add pre-captured audio tracks to the peer connection (synchronous aside

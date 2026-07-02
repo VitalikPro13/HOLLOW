@@ -167,6 +167,19 @@ class Helper {
   static Future<void> setCaptureGain(double gain) =>
       NativeAudioManagement.setCaptureGain(gain);
 
+  /// Toggle the EQ+compressor+limiter voice chain in the capture
+  /// post-processor (Hollow fork addition). When enabled, [setCaptureGain]'s
+  /// value acts as an input trim (2.0 = unity) and the chain owns the
+  /// loudness; when disabled the legacy flat makeup gain applies. [makeupDb]
+  /// is the chain's loudness/"strength" knob (0 = no boost, 12 = default).
+  /// [dynamicMode] enables the auto-level servo (any mic converges to the
+  /// calibrated speech level; manual knobs ignored). Process-global, live
+  /// mid-call. No-op on web.
+  static Future<void> setVoiceEnhance(bool enabled,
+          {double makeupDb = 12.0, bool dynamicMode = false}) =>
+      NativeAudioManagement.setVoiceEnhance(enabled,
+          makeupDb: makeupDb, dynamicMode: dynamicMode);
+
   /// Start a native PCM player for received screen-share audio (Hollow fork,
   /// mobile). Plays 48 kHz stereo int16 PCM on the media output path, OUTSIDE
   /// the WebRTC voice session so the call's AEC/AGC can't mangle the shared

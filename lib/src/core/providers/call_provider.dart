@@ -216,6 +216,13 @@ class CallNotifier extends Notifier<CallState> {
         ref.read(cameraDeviceProvider).valueOrNull;
     _voiceService!.micGain =
         ref.read(micGainProvider).valueOrNull ?? kMicGainDefault;
+    _voiceService!.voiceEnhance =
+        ref.read(voiceEnhanceProvider).valueOrNull ?? true;
+    _voiceService!.enhanceMakeupDb = enhanceStrengthToMakeupDb(
+        ref.read(voiceEnhanceStrengthProvider).valueOrNull ??
+            kEnhanceStrengthDefault);
+    _voiceService!.enhanceDynamic =
+        ref.read(voiceEnhanceDynamicProvider).valueOrNull ?? true;
     return _voiceService!;
   }
 
@@ -288,6 +295,17 @@ class CallNotifier extends Notifier<CallState> {
                 !state.isVideoEnabled) {
               _callLog('[HOLLOW-CALL] Auto-enabling camera for video call');
               toggleVideo();
+              // iOS: the camera enable restarts the voice-processing audio
+              // unit, which re-applies WebRTC's default session config and
+              // can silently drop the loudspeaker override — re-assert the
+              // current route once the renegotiation settles.
+              if (_isMobile) {
+                Future.delayed(const Duration(milliseconds: 1200), () {
+                  if (state.status == CallStatus.active) {
+                    _setSpeakerRoute(state.isSpeakerOn);
+                  }
+                });
+              }
             } else {
               _callLog('[HOLLOW-CALL] Auto-toggle skipped: '
                   'status=${state.status} isVideoCall=${state.isVideoCall} '
@@ -333,6 +351,20 @@ class CallNotifier extends Notifier<CallState> {
     ref.listen(micGainProvider, (_, next) {
       final gain = next.valueOrNull ?? kMicGainDefault;
       _voiceService?.updateMicGain(gain);
+    });
+
+    // Live A/B of the voice-enhancement chain mid-call.
+    ref.listen(voiceEnhanceProvider, (_, next) {
+      final enabled = next.valueOrNull ?? true;
+      _voiceService?.updateVoiceEnhance(enabled);
+    });
+    ref.listen(voiceEnhanceStrengthProvider, (_, next) {
+      final pct = next.valueOrNull ?? kEnhanceStrengthDefault;
+      _voiceService?.updateVoiceEnhanceStrength(enhanceStrengthToMakeupDb(pct));
+    });
+    ref.listen(voiceEnhanceDynamicProvider, (_, next) {
+      final enabled = next.valueOrNull ?? true;
+      _voiceService?.updateVoiceEnhanceDynamic(enabled);
     });
   }
 
