@@ -523,12 +523,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       return;
     }
     _lastTypingSent = now;
-    try {
-      network_api.sendTypingIndicator(
-        serverId: widget.serverId,
-        channelId: widget.channelId,
-      );
-    } catch (_) {}
+    network_api.sendTypingIndicator(
+      serverId: widget.serverId,
+      channelId: widget.channelId,
+    ).catchError((_) {});
   }
 
   void _updateMentionAutocomplete(String text) {
@@ -1693,6 +1691,18 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                       vertical: HollowSpacing.sm,
                     ),
                     itemCount: messages.length,
+                    // Let the list MOVE row elements across index slots when
+                    // a new message shifts every revIndex by one — without
+                    // this each shift remounted every visible row (full-list
+                    // blink on every message).
+                    findChildIndexCallback: (key) {
+                      if (key is! ValueKey<Object>) return null;
+                      final id = key.value;
+                      if (id is! String) return null;
+                      final i = replyIndexById[id];
+                      if (i == null) return null;
+                      return messages.length - 1 - i;
+                    },
                     itemBuilder: (context, revIndex) {
                       // Map the reversed builder index back to chronological
                       // order — all row logic below stays chronological.
@@ -2522,12 +2532,10 @@ class _SyncIndicatorState extends ConsumerState<_SyncIndicator> {
       return;
     }
     _lastRetry = now;
-    try {
-      network_api.requestChannelSync(
-        serverId: widget.serverId,
-        channelId: widget.channelId,
-      );
-    } catch (_) {}
+    network_api.requestChannelSync(
+      serverId: widget.serverId,
+      channelId: widget.channelId,
+    ).catchError((_) {});
   }
 
   @override

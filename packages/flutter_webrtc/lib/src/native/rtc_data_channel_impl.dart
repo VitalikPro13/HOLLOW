@@ -67,7 +67,9 @@ class RTCDataChannelNative extends RTCDataChannel {
         _state = rtcDataChannelStateForString(map['state']);
         onDataChannelState?.call(_state!);
 
-        _stateChangeController.add(_state!);
+        if (!_stateChangeController.isClosed) {
+          _stateChangeController.add(_state!);
+        }
         break;
       case 'dataChannelReceiveMessage':
         _dataChannelId = map['id'];
@@ -83,7 +85,9 @@ class RTCDataChannelNative extends RTCDataChannel {
 
         onMessage?.call(message);
 
-        _messageController.add(message);
+        if (!_messageController.isClosed) {
+          _messageController.add(message);
+        }
         break;
 
       case 'dataChannelBufferedAmountChange':
@@ -132,9 +136,14 @@ class RTCDataChannelNative extends RTCDataChannel {
 
   @override
   Future<void> close() async {
+    // Cancel the native event subscription BEFORE closing the controllers:
+    // events already queued on the microtask loop (e.g. the final "closed"
+    // state change when the remote peer drops) would otherwise land on a
+    // closed StreamController and throw.
+    await _eventSubscription?.cancel();
+    _eventSubscription = null;
     await _stateChangeController.close();
     await _messageController.close();
-    await _eventSubscription?.cancel();
     await WebRTC.invokeMethod('dataChannelClose', <String, dynamic>{
       'peerConnectionId': _peerConnectionId,
       'dataChannelId': _flutterId

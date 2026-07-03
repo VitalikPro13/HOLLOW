@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
+import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
@@ -203,10 +204,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       // path never subscribed (only the push-tap path did), so a channel
       // opened from the tab received NO live topic broadcasts — messages
       // only appeared on the next sync. Route-level = every entry point.
-      try {
-        network_api.subscribeChannels(
-            serverId: widget.serverId!, channelIds: [widget.channelId!]);
-      } catch (_) {}
+      // Node-safe helper: a cold-start push tap opens this route before
+      // start_node() completes; a bare call rejected with "Node is not
+      // running" past the (ineffective, un-awaited) try/catch.
+      subscribeChannelTopics(
+          serverId: widget.serverId!, channelIds: [widget.channelId!]);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         ref.invalidate(myRoleProvider(widget.serverId!));
@@ -408,20 +410,20 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     final now = DateTime.now();
     if (_lastTypingSent != null && now.difference(_lastTypingSent!).inSeconds < 3) return;
     _lastTypingSent = now;
-    try {
-      if (widget.isDm) {
-        network_api.sendTypingIndicator(serverId: '', channelId: widget.peerId!);
-      } else {
-        // Server channel typing: same path the desktop ChannelChatPane uses
-        // (mobile previously only sent DM typing, so a phone never showed as
-        // "typing…" in a server channel — desktop sibling did, which looked
-        // like a multi-device bug but was a mobile send-side gap).
-        network_api.sendTypingIndicator(
-          serverId: widget.serverId!,
-          channelId: widget.channelId!,
-        );
-      }
-    } catch (_) {}
+    if (widget.isDm) {
+      network_api
+          .sendTypingIndicator(serverId: '', channelId: widget.peerId!)
+          .catchError((_) {});
+    } else {
+      // Server channel typing: same path the desktop ChannelChatPane uses
+      // (mobile previously only sent DM typing, so a phone never showed as
+      // "typing…" in a server channel — desktop sibling did, which looked
+      // like a multi-device bug but was a mobile send-side gap).
+      network_api.sendTypingIndicator(
+        serverId: widget.serverId!,
+        channelId: widget.channelId!,
+      ).catchError((_) {});
+    }
   }
 
   /// Scan backward from the cursor for an '@' that starts a mention token, build
@@ -1294,7 +1296,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                 onTap: () => network_api.requestChannelSync(
                   serverId: widget.serverId!,
                   channelId: widget.channelId!,
-                ),
+                ).catchError((_) {}),
                 child: Text(
                   'Retry',
                   style: HollowTypography.caption.copyWith(
@@ -1348,6 +1350,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       );
     }
 
+    // messageId → chronological index, for findChildIndexCallback below.
+    final indexById = <String, int>{
+      for (var i = 0; i < messages.length; i++)
+        if (messages[i].messageId != null) messages[i].messageId!: i,
+    };
+
     return ScrollablePositionedList.builder(
       itemScrollController: _scrollController,
       itemPositionsListener: _positionsListener,
@@ -1358,6 +1366,17 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       initialScrollIndex: 0,
       initialAlignment: 0.0,
       itemCount: messages.length,
+      // Let the list MOVE row elements across index slots when a new message
+      // shifts every revIndex by one — without this each shift remounted
+      // every visible row (full-list blink on every message).
+      findChildIndexCallback: (key) {
+        if (key is! ValueKey<Object>) return null;
+        final id = key.value;
+        if (id is! String) return null;
+        final i = indexById[id];
+        if (i == null) return null;
+        return messages.length - 1 - i;
+      },
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm,
         vertical: HollowSpacing.sm,
@@ -1498,6 +1517,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       );
     }
 
+    // messageId → chronological index, for findChildIndexCallback below.
+    final indexById = <String, int>{
+      for (var i = 0; i < messages.length; i++)
+        if (messages[i].messageId != null) messages[i].messageId!: i,
+    };
+
     return ScrollablePositionedList.builder(
       itemScrollController: _scrollController,
       itemPositionsListener: _positionsListener,
@@ -1507,6 +1532,15 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       initialScrollIndex: 0,
       initialAlignment: 0.0,
       itemCount: messages.length,
+      // Element reuse across index shifts — see _buildDmMessages.
+      findChildIndexCallback: (key) {
+        if (key is! ValueKey<Object>) return null;
+        final id = key.value;
+        if (id is! String) return null;
+        final i = indexById[id];
+        if (i == null) return null;
+        return messages.length - 1 - i;
+      },
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm,
         vertical: HollowSpacing.sm,

@@ -1276,11 +1276,14 @@ class PushNotificationService {
 
   void _registerTokenWithRelay(String token) {
     final platform = Platform.isAndroid ? 'android' : 'ios';
-    try {
-      network_api.registerPushToken(token: token, platform: platform);
-    } catch (_) {
-      // Node may not be running yet — token will be re-registered on next connect
-    }
+    // .catchError, not try/catch: the call is fire-and-forget, so the async
+    // "Node is not running" rejection (FCM token refresh can fire before
+    // start_node() completes at cold start) would escape a sync try/catch and
+    // land in the zone crash handler. The token is re-registered by
+    // initialize() after node start, so swallowing here is safe.
+    network_api
+        .registerPushToken(token: token, platform: platform)
+        .catchError((_) {});
   }
 
   void _handleForegroundMessage(RemoteMessage message) {

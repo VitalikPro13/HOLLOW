@@ -248,7 +248,7 @@ class SavedGuestServersNotifier extends AsyncNotifier<List<SavedGuestServer>> {
     if (newMode == GuestFetchMode.realtime ||
         newMode == GuestFetchMode.onLaunch ||
         newMode.interval != null) {
-      crdt_api.requestPublicChannels(serverId: serverId);
+      crdt_api.requestPublicChannels(serverId: serverId).catchError((_) {});
     } else if (newMode == GuestFetchMode.manual &&
         old.fetchMode == GuestFetchMode.realtime) {
       crdt_api.leaveGuestRoom(serverId: serverId);
@@ -280,7 +280,11 @@ Future<void> autoJoinGuestRooms(Ref ref) async {
   for (final server in servers) {
     if (server.fetchMode == GuestFetchMode.realtime ||
         server.fetchMode == GuestFetchMode.onLaunch) {
-      crdt_api.requestPublicChannels(serverId: server.serverId);
+      // Fire-and-forget — swallow the async rejection (e.g. node stopped
+      // between start() and this running) instead of crashing the zone.
+      crdt_api
+          .requestPublicChannels(serverId: server.serverId)
+          .catchError((_) {});
     }
   }
 }

@@ -1875,12 +1875,13 @@ class EventStreamNotifier extends Notifier<bool> {
         final selectedServer = ref.read(selectedServerProvider);
         final selectedChannel = ref.read(selectedChannelProvider);
         if (selectedServer == serverId && selectedChannel != null) {
-          try {
-            requestChannelSync(
-              serverId: serverId,
-              channelId: selectedChannel,
-            );
-          } catch (_) {}
+          // .catchError, not try/catch: the call is fire-and-forget, so an
+          // async rejection (e.g. "Node is not running") would escape a sync
+          // try/catch and land in the zone crash handler.
+          requestChannelSync(
+            serverId: serverId,
+            channelId: selectedChannel,
+          ).catchError((_) {});
         }
       }
     }

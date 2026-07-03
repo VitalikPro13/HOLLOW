@@ -70,7 +70,7 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
       final loading = Set<String>.from(ref.read(guestLoadingProvider));
       loading.add(serverId);
       ref.read(guestLoadingProvider.notifier).state = loading;
-      crdt_api.requestPublicChannels(serverId: serverId);
+      crdt_api.requestPublicChannels(serverId: serverId).catchError((_) {});
     });
 
     _addController.clear();
@@ -211,7 +211,8 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
                           final loading = Set<String>.from(ref.read(guestLoadingProvider));
                           loading.add(server.serverId);
                           ref.read(guestLoadingProvider.notifier).state = loading;
-                          crdt_api.requestPublicChannels(serverId: server.serverId);
+                          crdt_api.requestPublicChannels(serverId: server.serverId)
+                              .catchError((_) {});
                         },
                         onRemove: () => ref
                             .read(savedGuestServersProvider.notifier)
@@ -248,7 +249,7 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
       final loading = Set<String>.from(ref.read(guestLoadingProvider));
       loading.add(serverId);
       ref.read(guestLoadingProvider.notifier).state = loading;
-      crdt_api.requestPublicChannels(serverId: serverId);
+      crdt_api.requestPublicChannels(serverId: serverId).catchError((_) {});
     }
   }
 
@@ -262,7 +263,7 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
       crdt_api.requestPublicChannelSync(
         serverId: serverId,
         channelId: channelId,
-      );
+      ).catchError((_) {});
     }
   }
 

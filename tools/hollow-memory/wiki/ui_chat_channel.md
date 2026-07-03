@@ -354,3 +354,4 @@ Same reversed-list model as ui_chat_dm (reverse:true, newest = index 0, `_frozen
 - `_requestViewportFiles` maps the visible REVERSED index range back to chronological (`chronoFirst = len-1-maxRev`, `chronoLast = len-1-minRev`) before `requestVisibleFiles`.
 - Search-result taps index against `_displayMessages(...)` (the possibly-frozen list) and `_scrollToMessage(chrono)` converts to the reversed index.
 - The unread pill marks seen against `allMessages.last` (true newest, not the frozen view).
+- Element reuse: passes `findChildIndexCallback` (messageId via `replyIndexById` → reversed index) to the VENDORED `scrollable_positioned_list` so rows move instead of remounting on every arrival — see ui_chat_dm "Element reuse".

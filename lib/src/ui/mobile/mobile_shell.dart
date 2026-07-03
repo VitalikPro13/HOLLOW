@@ -9,6 +9,7 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
+import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -52,7 +53,9 @@ class _MobileShellState extends ConsumerState<MobileShell> {
         .map((e) => e.key.substring(prefix.length))
         .toList();
     final topics = <String>{channelId, ...unreadChannels}.toList();
-    network_api.subscribeChannels(serverId: serverId, channelIds: topics);
+    // Node-safe: a buffered cold-start push tap fires before start_node()
+    // completes — the helper retries until the node is up and never throws.
+    subscribeChannelTopics(serverId: serverId, channelIds: topics);
   }
 
   @override

@@ -264,10 +264,10 @@ class ChannelChatNotifier
   Future<void> loadHistory(String serverId, String channelId) async {
     // Always request sync from connected peers when opening a channel.
     // New messages arrive via MessageSyncCompleted → cache clear → reload.
-    try {
-      network_api.requestChannelSync(
-          serverId: serverId, channelId: channelId);
-    } catch (_) {}
+    // .catchError, not try/catch: fire-and-forget — an async rejection (e.g.
+    // "Node is not running" at startup) would escape a sync try/catch.
+    network_api.requestChannelSync(
+        serverId: serverId, channelId: channelId).catchError((_) {});
 
     try {
       final stored =

@@ -123,7 +123,7 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                   crdt_api.requestPublicChannelSync(
                     serverId: widget.serverId,
                     channelId: widget.channelId,
-                  );
+                  ).catchError((_) {});
                   HollowToast.show(context, 'Refreshing...',
                       type: HollowToastType.info);
                 },
@@ -238,7 +238,7 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                                           channelId: widget.channelId,
                                           beforeTimestamp: oldest
                                               .millisecondsSinceEpoch,
-                                        );
+                                        ).catchError((_) {});
                                       },
                                       child: const Text('Load more'),
                                     ),

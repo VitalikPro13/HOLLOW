@@ -128,7 +128,7 @@ void _browse(
   final loading = Set<String>.from(ref.read(guestLoadingProvider));
   loading.add(serverId);
   ref.read(guestLoadingProvider.notifier).state = loading;
-  crdt_api.requestPublicChannels(serverId: serverId);
+  crdt_api.requestPublicChannels(serverId: serverId).catchError((_) {});
 
   Navigator.pop(context);
 }

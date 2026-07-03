@@ -43,7 +43,11 @@ dependencies:
   tray_manager: ^0.5.2
   local_notifier: ^0.1.6
   file_picker: ^10.3.10
-  scrollable_positioned_list: ^0.3.8
+  # Vendored fork of 0.3.8: adds findChildIndexCallback so chat-list rows
+  # are MOVED across index slots instead of remounted on every new message
+  # (fixes the full-list blink in reverse chat lists).
+  scrollable_positioned_list:
+    path: packages/scrollable_positioned_list
   flutter_webrtc:
     path: packages/flutter_webrtc
   record: ^6.2.0

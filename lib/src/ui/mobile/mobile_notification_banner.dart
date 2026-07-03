@@ -5,7 +5,7 @@ import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
-import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -186,11 +186,9 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
           ref.read(selectedPeerProvider.notifier).state = null;
           // Subscribe the relay topic — without this the freshly opened
           // channel receives NO live topic broadcasts (the relay only routes
-          // a topic message to subscribed sockets).
-          try {
-            network_api.subscribeChannels(
-                serverId: serverId, channelIds: [channelId]);
-          } catch (_) {}
+          // a topic message to subscribed sockets). Node-safe helper: never
+          // throws, retries if the node isn't running yet.
+          subscribeChannelTopics(serverId: serverId, channelIds: [channelId]);
           final channelName = channels[channelId]?.name ?? '';
           nav.popUntil(
               (r) => r.settings.name != MobileChatRoute.routeName || r.isFirst);

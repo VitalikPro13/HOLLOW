@@ -509,12 +509,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       return;
     }
     _lastTypingSent = now;
-    try {
-      network_api.sendTypingIndicator(
-        serverId: '',
-        channelId: widget.peerId,
-      );
-    } catch (_) {}
+    network_api.sendTypingIndicator(
+      serverId: '',
+      channelId: widget.peerId,
+    ).catchError((_) {});
   }
 
   /// Extract the first URL from the current compose text and, if it
@@ -1366,6 +1364,19 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                                 vertical: HollowSpacing.sm,
                               ),
                               itemCount: messages.length,
+                              // Let the list MOVE row elements across index
+                              // slots when a new message shifts every
+                              // revIndex by one — without this each shift
+                              // remounted every visible row (full-list
+                              // blink on every message).
+                              findChildIndexCallback: (key) {
+                                if (key is! ValueKey<Object>) return null;
+                                final id = key.value;
+                                if (id is! String) return null;
+                                final i = replyIndexById[id];
+                                if (i == null) return null;
+                                return messages.length - 1 - i;
+                              },
                               itemBuilder: (context, revIndex) {
                                 // Map the reversed builder index back to
                                 // chronological order — all row logic below

@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/android_platform.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
+import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
@@ -149,7 +150,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
         .map((e) => e.key.substring(prefix.length))
         .toList();
     final topics = <String>{channelId, ...unreadChannels}.toList();
-    network_api.subscribeChannels(serverId: serverId, channelIds: topics);
+    // Node-safe: never throws, retries if the node isn't running yet
+    // (startup auto-select can race start_node()).
+    subscribeChannelTopics(serverId: serverId, channelIds: topics);
   }
 
   /// Wire the desktop OS-toast callbacks (tap → open conversation, Reply → send
@@ -1022,13 +1025,13 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final servers = ref.read(serverListProvider);
     final peerId = ref.read(identityProvider).peerId;
     if (peerId == null) return;
-    try {
-      network_api.joinRoom(roomCode: peerId);
-      for (final serverId in servers.keys) {
-        network_api.joinRoom(roomCode: serverId);
-      }
-    } catch (e) {
-      debugPrint('[HOLLOW] Rejoin failed: $e');
+    // .catchError, not try/catch: fire-and-forget — an async rejection (e.g.
+    // "Node is not running" when a resume fires during the startup window)
+    // would escape a sync try/catch. The node's own start path joins rooms,
+    // so a swallowed early failure self-heals.
+    network_api.joinRoom(roomCode: peerId).catchError((_) {});
+    for (final serverId in servers.keys) {
+      network_api.joinRoom(roomCode: serverId).catchError((_) {});
     }
   }
 
