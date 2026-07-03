@@ -146,19 +146,24 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
   Timer? _fileRequestDebounce;
 
+  bool _wasNearBottom = false;
+
   void _onScrollPositionChanged() {
     final nearBottom = _isNearBottom;
     if (_showScrollPill == nearBottom) {
       setState(() => _showScrollPill = !nearBottom);
     }
     ref.read(chatAtBottomProvider.notifier).state = nearBottom;
-    if (nearBottom) {
+    // Edge-triggered mark-seen (mobile-style) — this used to run a map-clone
+    // + FFI settings write per scroll frame while sitting at the bottom.
+    if (nearBottom && !_wasNearBottom) {
       final msgs = ref.read(channelChatProvider)[_stateKey];
       if (msgs != null && msgs.isNotEmpty) {
         ref.read(unreadProvider.notifier).markChannelSeen(
               widget.serverId, widget.channelId, msgs.last.messageId);
       }
     }
+    _wasNearBottom = nearBottom;
     _requestViewportFiles();
   }
 
@@ -1258,8 +1263,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final chatState = ref.watch(channelChatProvider);
-    final messages = chatState[_stateKey] ?? [];
+    // Per-channel select: a message in ANY other channel/server used to
+    // rebuild this whole pane (the map is replaced wholesale per insert).
+    final messages =
+        ref.watch(channelChatProvider.select((m) => m[_stateKey])) ?? [];
 
     // If cache was cleared by sync (clearServerCache) and we have no messages,
     // reload from DB. This catches the case where sync completed while we
@@ -1296,9 +1303,26 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       }
     });
 
-    final typingPeers = ref.watch(typingProvider)[_stateKey] ?? {};
+    final typingPeers =
+        ref.watch(typingProvider.select((t) => t[_stateKey])) ?? {};
     final profiles = ref.watch(profileProvider);
     final nicknames = ref.watch(serverNicknamesProvider(widget.serverId));
+
+    // Precomputed once per build instead of per ROW per rebuild:
+    // reply-target index (was an O(n) indexWhere scan per reply row) and the
+    // local mention needles (was a profile+nickname provider read per row).
+    final replyIndexById = <String, int>{
+      for (var i = 0; i < messages.length; i++)
+        if (messages[i].messageId != null) messages[i].messageId!: i,
+    };
+    final localPeerIdForMentions = ref.read(identityProvider).peerId ?? '';
+    final localMentionName =
+        '@${displayNameFor(profiles, localPeerIdForMentions)}';
+    final localNickRaw = nicknames[localPeerIdForMentions];
+    final String? localMentionNick =
+        (localNickRaw != null && localNickRaw.isNotEmpty)
+            ? '@$localNickRaw'
+            : null;
 
     return ChatDropZone(
       onFileDropped: _handleDroppedFile,
@@ -1861,8 +1885,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                           String? replyImagePath;
                           int? replyIndex;
                           if (msg.replyToMid != null) {
-                            final idx = messages.indexWhere(
-                                (m) => m.messageId == msg.replyToMid);
+                            final idx =
+                                replyIndexById[msg.replyToMid] ?? -1;
                             if (idx != -1) {
                               replyIndex = idx;
                               final original = messages[idx];
@@ -1883,16 +1907,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                               }
                             }
                           }
-                          // Check if this message mentions the local user.
-                          final localName = displayNameFor(
-                              ref.read(profileProvider), localPeerId);
-                          final localNick = ref.read(
-                              serverNicknamesProvider(widget.serverId))[localPeerId];
+                          // Check if this message mentions the local user
+                          // (needles precomputed once per build above).
                           final msgMentioned = msg.text.contains('@everyone') ||
-                              msg.text.contains('@$localName') ||
-                              (localNick != null &&
-                                  localNick.isNotEmpty &&
-                                  msg.text.contains('@$localNick'));
+                              msg.text.contains(localMentionName) ||
+                              (localMentionNick != null &&
+                                  msg.text.contains(localMentionNick));
                           return ChannelMessageBubble(
                             message: msg,
                             serverId: widget.serverId,
@@ -1934,16 +1954,21 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                             )
                           : wrapper;
 
-                      if (showDate) {
-                        return Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            DateSeparator(date: msg.timestamp),
-                            messageWidget,
-                          ],
-                        );
-                      }
-                      return messageWidget;
+                      // ValueKey(messageId): rows hold per-item state
+                      // (spoiler reveal, hover, decoded frames) that must not
+                      // shift onto a different message on delete/trim.
+                      return KeyedSubtree(
+                        key: ValueKey<Object>(msg.messageId ?? index),
+                        child: showDate
+                            ? Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  DateSeparator(date: msg.timestamp),
+                                  messageWidget,
+                                ],
+                              )
+                            : messageWidget,
+                      );
                     },
                   ),
                   ),

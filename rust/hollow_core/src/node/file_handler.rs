@@ -25,6 +25,12 @@ use super::ws_stream_transfer;
 const FILE_DECRYPT_MAX_RETRIES: u32 = 3;
 
 /// Handle NodeCommand::SendFile — the large file sending handler.
+///
+/// Image conversion (PNG/JPEG→WebP, GIF→animated WebP) is CPU work that used
+/// to run inline here — a multi-MB GIF froze the ENTIRE event loop (messages,
+/// CRDT, call signaling) for seconds. Convertible images now hop through
+/// `spawn_blocking` and re-enter via `NodeCommand::SendFileConverted`; all
+/// other files continue inline into `finish_send_file`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_send_file(
     peer_id: Option<String>,
@@ -37,6 +43,7 @@ pub(crate) async fn handle_send_file(
     override_width: Option<u32>,
     override_height: Option<u32>,
     share_ref: Option<super::types::ShareRef>,
+    cmd_tx: &mpsc::Sender<super::types::NodeCommand>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_states: &HashMap<String, ServerState>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
@@ -113,17 +120,77 @@ pub(crate) async fn handle_send_file(
     let mime = file_transfer::mime_from_ext(&original_ext);
     let is_image = file_transfer::is_image_mime(&mime);
 
-    let webp_quality = {
-        crate::storage::MessageStore::open(db_path, db_passphrase)
-            .ok()
-            .and_then(|s| s.load_setting("image_quality").ok().flatten())
-            .map(|s| image_convert::WebpQuality::from_setting(&s))
-            .unwrap_or_default()
-    };
+    let needs_convert = is_image
+        && (image_convert::should_convert_to_webp(&original_ext)
+            || original_ext == "webp"
+            || original_ext == "gif");
 
-    let (final_data, final_ext, width, height) = if is_image
-        && image_convert::should_convert_to_webp(&original_ext)
-    {
+    if needs_convert {
+        // CPU-heavy conversion: hop off the event loop and re-enter via
+        // SendFileConverted when done. The event loop keeps dispatching
+        // messages/CRDT/call signaling in the meantime.
+        let webp_quality = {
+            crate::storage::MessageStore::open(db_path, db_passphrase)
+                .ok()
+                .and_then(|s| s.load_setting("image_quality").ok().flatten())
+                .map(|s| image_convert::WebpQuality::from_setting(&s))
+                .unwrap_or_default()
+        };
+        let cmd_tx = cmd_tx.clone();
+        let ext = original_ext.clone();
+        tokio::spawn(async move {
+            let converted = tokio::task::spawn_blocking(move || {
+                convert_image_for_send(file_data, &ext, webp_quality, override_width, override_height)
+            })
+            .await;
+            let (final_data, final_ext, width, height) = match converted {
+                Ok(t) => t,
+                Err(e) => {
+                    // spawn_blocking join failure (panic in codec) — surface as a
+                    // failed send via the resume handler's empty-data guard.
+                    hollow_log!("[HOLLOW-FILE] Conversion task panicked: {e}");
+                    (Vec::new(), String::new(), None, None)
+                }
+            };
+            let _ = cmd_tx
+                .send(super::types::NodeCommand::SendFileConverted(Box::new(
+                    super::types::SendFileConvertedPayload {
+                        peer_id, server_id, channel_id, message_id, message_text,
+                        vthumb, share_ref, original_name, is_image,
+                        final_data, final_ext, width, height,
+                    },
+                )))
+                .await;
+        });
+        return;
+    }
+
+    // Non-image (or non-convertible) files continue inline: use Dart-supplied
+    // dimensions if any (Phase 6.75 video preview passes the source video's
+    // dimensions through here).
+    let final_data = std::mem::take(&mut file_data);
+    let final_ext = original_ext.clone();
+    finish_send_file(
+        peer_id, server_id, channel_id, message_id, message_text,
+        vthumb, share_ref, original_name, is_image,
+        final_data, final_ext, override_width, override_height,
+        event_tx, server_states, bundle_keypair, pub_key_b64, local_peer_str,
+        device_peer_id, olm, crypto_store, mls,
+        ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends,
+        gossip_overlays, db_path, db_passphrase,
+    ).await;
+}
+
+/// The moved step-4 conversion block: runs on the blocking pool, never the
+/// event loop. Fallbacks mirror the original inline behavior exactly.
+fn convert_image_for_send(
+    mut file_data: Vec<u8>,
+    original_ext: &str,
+    webp_quality: image_convert::WebpQuality,
+    override_width: Option<u32>,
+    override_height: Option<u32>,
+) -> (Vec<u8>, String, Option<u32>, Option<u32>) {
+    if image_convert::should_convert_to_webp(original_ext) {
         match image_convert::convert_to_webp_with_quality(&file_data, webp_quality) {
             Ok((webp_data, w, h)) => {
                 hollow_log!("[HOLLOW-FILE] Converted to WebP ({:?}): {}KB -> {}KB ({}x{})",
@@ -133,16 +200,16 @@ pub(crate) async fn handle_send_file(
             Err(e) => {
                 hollow_log!("[HOLLOW-FILE] WebP conversion failed, sending original: {e}");
                 let dims = image_convert::get_image_dimensions(&file_data).ok();
-                (std::mem::take(&mut file_data), original_ext.clone(), dims.map(|d| d.0), dims.map(|d| d.1))
+                (file_data, original_ext.to_string(), dims.map(|d| d.0), dims.map(|d| d.1))
             }
         }
-    } else if is_image && original_ext == "webp" {
+    } else if original_ext == "webp" {
         // WebP passthrough — strip metadata by decode+re-encode.
         let stripped = image_convert::strip_webp_metadata(&file_data)
             .unwrap_or_else(|_| std::mem::take(&mut file_data));
         let dims = image_convert::get_image_dimensions(&stripped).ok();
-        (stripped, original_ext.clone(), dims.map(|d| d.0), dims.map(|d| d.1))
-    } else if is_image && original_ext == "gif" {
+        (stripped, original_ext.to_string(), dims.map(|d| d.0), dims.map(|d| d.1))
+    } else if original_ext == "gif" {
         // GIF → animated WebP at all quality tiers (even lossless
         // WebP beats GIF's LZW compression).
         match image_convert::convert_gif_to_animated_webp(&file_data, webp_quality) {
@@ -160,14 +227,57 @@ pub(crate) async fn handle_send_file(
                 );
                 let stripped = image_convert::strip_gif_metadata(&file_data);
                 let dims = image_convert::get_image_dimensions(&stripped).ok();
-                (stripped, original_ext.clone(), dims.map(|d| d.0), dims.map(|d| d.1))
+                (stripped, original_ext.to_string(), dims.map(|d| d.0), dims.map(|d| d.1))
             }
         }
     } else {
-        // Non-image files: use Dart-supplied dimensions if any (Phase 6.75
-        // video preview passes the source video's dimensions through here).
-        (std::mem::take(&mut file_data), original_ext.clone(), override_width, override_height)
-    };
+        (file_data, original_ext.to_string(), override_width, override_height)
+    }
+}
+
+/// Steps 5+ of the original SendFile flow (file id, local store, metadata,
+/// signing, DM/channel fan-out, streaming). Runs on the event loop; reached
+/// either inline (non-image) or via SendFileConverted (converted image).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn finish_send_file(
+    peer_id: Option<String>,
+    server_id: Option<String>,
+    channel_id: Option<String>,
+    message_id: String,
+    message_text: String,
+    vthumb: Option<VideoThumbRef>,
+    share_ref: Option<super::types::ShareRef>,
+    original_name: String,
+    is_image: bool,
+    final_data: Vec<u8>,
+    final_ext: String,
+    width: Option<u32>,
+    height: Option<u32>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    server_states: &HashMap<String, ServerState>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    pub_key_b64: &str,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    mls: &mut Option<MlsManager>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    gossip_overlays: &mut HashMap<String, gossip::GossipOverlay>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if final_data.is_empty() && share_ref.is_none() {
+        // Conversion task panicked (empty sentinel from handle_send_file).
+        let _ = event_tx.send(NetworkEvent::FileFailed {
+            file_id: message_id.clone(),
+            error: "Image conversion failed".to_string(),
+        }).await;
+        return;
+    }
 
     // 5. Generate file ID.
     let file_id = file_transfer::generate_file_id();
@@ -612,6 +722,8 @@ pub(crate) async fn handle_send_file(
                 sid.clone()
             };
             if let Ok(ct) = mls_mgr.encrypt(&group_key, envelope_json.as_bytes()) {
+                // MLS rule: persist on encrypt — send-side ratchet state must
+                // never be debounced (see send_mls_broadcast for the why).
                 crate::node::crypto_handler::persist_mls_state(mls_mgr, crypto_store);
                 let mls_msg = HavenMessage::MlsChannelMessage {
                     server_id: sid.clone(),

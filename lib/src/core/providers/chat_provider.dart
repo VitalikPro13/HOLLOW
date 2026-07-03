@@ -512,11 +512,26 @@ final chatProvider =
 /// message arrives or the latest message is edited/deleted, not on every
 /// message in any conversation). Use this in the shell/sidebar instead of
 /// watching the full chatProvider to avoid root-widget rebuilds.
+///
+/// Notifier (not a plain Provider) purely for [updateShouldNotify]: the
+/// recompute mints a fresh Map on EVERY chatProvider mutation, and identity
+/// `==` made this "dampener" notify the root shell per mutation anyway.
 final lastDmMessageProvider =
-    Provider<Map<String, ChatMessage>>((ref) {
-  final history = ref.watch(chatProvider);
-  return {
-    for (final entry in history.entries)
-      if (entry.value.isNotEmpty) entry.key: entry.value.last,
-  };
-});
+    NotifierProvider<LastDmMessageNotifier, Map<String, ChatMessage>>(
+        LastDmMessageNotifier.new);
+
+class LastDmMessageNotifier extends Notifier<Map<String, ChatMessage>> {
+  @override
+  Map<String, ChatMessage> build() {
+    final history = ref.watch(chatProvider);
+    return {
+      for (final entry in history.entries)
+        if (entry.value.isNotEmpty) entry.key: entry.value.last,
+    };
+  }
+
+  @override
+  bool updateShouldNotify(
+          Map<String, ChatMessage> previous, Map<String, ChatMessage> next) =>
+      !mapEquals(previous, next);
+}

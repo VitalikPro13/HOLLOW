@@ -40,12 +40,13 @@ class DeviceLinkNotifier extends Notifier<DeviceLinkState> {
   Future<void> refresh() async {
     try {
       final rows = await network_api.getDeviceLinks();
-      if (rows.isEmpty && state.links.isEmpty) return; // nothing to change
-      state = DeviceLinkState(
-        links: {
-          for (final l in rows) l.devicePeerId: l.masterPeerId,
-        },
-      );
+      final newLinks = {
+        for (final l in rows) l.devicePeerId: l.masterPeerId,
+      };
+      // Unchanged-map guard: DeviceListUpdated fires often; a fresh-but-equal
+      // state object used to fan a rebuild to every watch site anyway.
+      if (mapEquals(newLinks, state.links)) return;
+      state = DeviceLinkState(links: newLinks);
     } catch (e) {
       // Node not started yet, or transient FFI error — keep the old map.
       debugPrint('[HOLLOW] Device link refresh failed: $e');
@@ -75,18 +76,33 @@ final deviceLinkProvider =
 ///
 /// Use [identityIsOnline] rather than the raw `peers.containsKey(id)` for any
 /// friend/DM/profile online check.
-final onlineIdentitiesProvider = Provider<Set<String>>((ref) {
-  final peers = ref.watch(peersProvider);
-  final invisible = ref.watch(invisiblePeersProvider);
-  final links = ref.watch(deviceLinkProvider);
+final onlineIdentitiesProvider =
+    NotifierProvider<OnlineIdentitiesNotifier, Set<String>>(
+        OnlineIdentitiesNotifier.new);
 
-  final online = <String>{};
-  for (final devicePeerId in peers.keys) {
-    if (invisible.contains(devicePeerId)) continue;
-    online.add(links.identityOf(devicePeerId));
+/// Notifier (not a plain Provider) purely for [updateShouldNotify]: the
+/// recompute mints a fresh Set every time a peer event fires, and identity
+/// `==` meant ~20 always-mounted watchers rebuilt per event even when the
+/// online set hadn't actually changed (e.g. markEncrypted).
+class OnlineIdentitiesNotifier extends Notifier<Set<String>> {
+  @override
+  Set<String> build() {
+    final peers = ref.watch(peersProvider);
+    final invisible = ref.watch(invisiblePeersProvider);
+    final links = ref.watch(deviceLinkProvider);
+
+    final online = <String>{};
+    for (final devicePeerId in peers.keys) {
+      if (invisible.contains(devicePeerId)) continue;
+      online.add(links.identityOf(devicePeerId));
+    }
+    return online;
   }
-  return online;
-});
+
+  @override
+  bool updateShouldNotify(Set<String> previous, Set<String> next) =>
+      !setEquals(previous, next);
+}
 
 /// True iff the friend/identity behind [masterPeerId] is online on any visible
 /// device. Pass the friend's stored peer_id (a master identity); single-device

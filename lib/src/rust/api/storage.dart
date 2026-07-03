@@ -116,6 +116,12 @@ Future<void> saveSetting({required String key, required String value}) =>
 Future<String?> loadSetting({required String key}) =>
     RustLib.instance.api.crateApiStorageLoadSetting(key: key);
 
+/// Load ALL settings whose key starts with `prefix` in ONE call — replaces
+/// the per-key startup scans (`notif:*`, `seen:*`) that cost one FFI
+/// round-trip per server/channel/DM.
+Future<List<SettingEntry>> loadSettingsWithPrefix({required String prefix}) =>
+    RustLib.instance.api.crateApiStorageLoadSettingsWithPrefix(prefix: prefix);
+
 /// Mark a peer as identity-verified (fingerprint confirmed in person).
 Future<void> setPeerVerified({required String peerId}) =>
     RustLib.instance.api.crateApiStorageSetPeerVerified(peerId: peerId);
@@ -450,6 +456,25 @@ class FriendFfi {
           direction == other.direction &&
           requestedAt == other.requestedAt &&
           updatedAt == other.updatedAt;
+}
+
+/// A single settings row for the batched prefix load.
+class SettingEntry {
+  final String key;
+  final String value;
+
+  const SettingEntry({required this.key, required this.value});
+
+  @override
+  int get hashCode => key.hashCode ^ value.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SettingEntry &&
+          runtimeType == other.runtimeType &&
+          key == other.key &&
+          value == other.value;
 }
 
 /// Full storage picture for the Storage Manager UI.

@@ -1249,8 +1249,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   Widget _buildDmMessages() {
-    final chatHistory = ref.watch(chatProvider);
-    final messages = chatHistory[widget.peerId!] ?? [];
+    // Per-conversation select — messages in other conversations must not
+    // rebuild this list (the provider map is replaced wholesale per insert).
+    final messages =
+        ref.watch(chatProvider.select((m) => m[widget.peerId!])) ?? [];
     final profiles = ref.watch(profileProvider);
 
     ref.listen<Map<String, List<ChatMessage>>>(chatProvider, (prev, next) {
@@ -1311,7 +1313,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               : editWidget;
         }
 
-        // Look up reply target for this message.
+        // Look up reply target for this message. (Linear scan is acceptable
+        // here — it only runs for rows that ARE replies, and only when the
+        // per-conversation list itself changed thanks to the select above.)
         String? replySender;
         String? replyText;
         if (msg.replyToMid != null) {
@@ -1360,23 +1364,29 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               )
             : bubble;
 
-        if (showDate) {
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _DateSeparator(date: msg.timestamp),
-              messageWidget,
-            ],
-          );
-        }
-        return messageWidget;
+        // ValueKey(messageId): rows hold per-item state that must not shift
+        // onto a different message on delete/trim.
+        return KeyedSubtree(
+          key: ValueKey<Object>(msg.messageId ?? index),
+          child: showDate
+              ? Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _DateSeparator(date: msg.timestamp),
+                    messageWidget,
+                  ],
+                )
+              : messageWidget,
+        );
       },
     );
   }
 
   Widget _buildChannelMessages() {
-    final channelHistory = ref.watch(channelChatProvider);
-    final messages = channelHistory[_channelKey] ?? [];
+    // Per-channel select — messages in other channels must not rebuild this
+    // list (the provider map is replaced wholesale per insert).
+    final messages =
+        ref.watch(channelChatProvider.select((m) => m[_channelKey])) ?? [];
     final profiles = ref.watch(profileProvider);
 
     ref.listen(channelChatProvider, (prev, next) {
@@ -1491,16 +1501,20 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               )
             : bubble;
 
-        if (showDate) {
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _DateSeparator(date: msg.timestamp),
-              messageWidget,
-            ],
-          );
-        }
-        return messageWidget;
+        // ValueKey(messageId): rows hold per-item state that must not shift
+        // onto a different message on delete/trim.
+        return KeyedSubtree(
+          key: ValueKey<Object>(msg.messageId ?? index),
+          child: showDate
+              ? Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _DateSeparator(date: msg.timestamp),
+                    messageWidget,
+                  ],
+                )
+              : messageWidget,
+        );
       },
     );
   }

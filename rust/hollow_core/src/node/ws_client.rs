@@ -57,6 +57,10 @@ pub enum WsCommand {
     /// Ask the relay for the peers currently connected to a room, over the live
     /// WS connection (replaces the HTTP /bootstrap poll — no fresh TLS handshake).
     DiscoverPeers { room_code: String },
+    /// Ask the relay for time-limited TURN credentials over the authenticated
+    /// WS connection (replaces the open HTTP /turn-credentials endpoint —
+    /// retries ride the normal reconnect machinery instead of dead-chaining).
+    GetTurnCredentials,
     /// Claim a temporary nickname on the relay (RAM only).
     ClaimNickname { nickname: String },
     /// Release the currently claimed nickname.
@@ -118,6 +122,8 @@ pub enum WsEvent {
     PeerStatus { online: Vec<String>, active_rooms: Vec<String> },
     /// Response to DiscoverPeers — peers currently in the given room.
     DiscoveredPeers { room: String, peers: Vec<String> },
+    /// Response to GetTurnCredentials — time-limited TURN credentials.
+    TurnCredentials { username: String, password: String, ttl: u64, uris: Vec<String> },
     /// Temporary nickname successfully claimed.
     NicknameClaimed { nickname: String },
     /// Temporary nickname released.
@@ -169,6 +175,13 @@ enum ServerMsg {
     Members { room: String, peers: Vec<String> },
     PeerStatus { online: Vec<String>, active_rooms: Vec<String> },
     DiscoveredPeers { room: String, peers: Vec<String> },
+    TurnCredentials {
+        #[serde(default)] username: String,
+        #[serde(default)] password: String,
+        #[serde(default)] ttl: u64,
+        #[serde(default)] uris: Vec<String>,
+        #[serde(default)] error: Option<String>,
+    },
     Error { error: String },
     NicknameClaimed { nickname: String },
     NicknameReleased,
@@ -550,6 +563,15 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
+        WsCommand::GetTurnCredentials => {
+            let msg = serde_json::json!({ "type": "get_turn_credentials" });
+            let text = msg.to_string();
+            if let Err(e) = write.send(Message::Text(text.into())).await {
+                hollow_log!("[HOLLOW-WS] GetTurnCredentials send failed: {e}");
+                return false;
+            }
+            return true;
+        }
         WsCommand::Subscribe { room_code, topics } => {
             let msg = serde_json::json!({
                 "type": "subscribe",
@@ -795,6 +817,16 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
         ServerMsg::DiscoveredPeers { room, peers } => {
             hollow_log!("[HOLLOW-WS] DiscoveredPeers: {} peers in room {room}", peers.len());
             WsEvent::DiscoveredPeers { room, peers }
+        }
+        ServerMsg::TurnCredentials { username, password, ttl, uris, error } => {
+            if let Some(err) = error {
+                // Non-fatal: relay without TURN configured (or guest socket).
+                // Calls fall back to STUN-only; the next interval retries.
+                hollow_log!("[HOLLOW-WS] TURN credentials unavailable: {err}");
+                return;
+            }
+            hollow_log!("[HOLLOW-WS] TURN credentials received: {} URI(s), ttl={ttl}s", uris.len());
+            WsEvent::TurnCredentials { username, password, ttl, uris }
         }
         ServerMsg::Error { error } => {
             hollow_log!("[HOLLOW-WS] Server error: {error}");

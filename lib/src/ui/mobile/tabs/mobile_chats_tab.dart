@@ -1003,7 +1003,10 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final voiceState = ref.watch(voiceChannelProvider);
+    // This tree only needs THIS server's participant map — mute/camera/share
+    // state changes elsewhere must not rebuild the whole channel tree.
+    final voiceParticipantsByChannel = ref.watch(
+        voiceChannelProvider.select((s) => s.participants[widget.serverId]));
     final unread = ref.watch(unreadProvider);
     final perms = ref.watch(myPermissionsProvider(widget.serverId)).valueOrNull ?? 0;
     final canManage = (perms & Permission.manageChannels) != 0;
@@ -1087,10 +1090,7 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
             serverId: widget.serverId,
             unreadCount: unread.channelUnreadCount(widget.serverId, ch.channelId),
             voiceParticipants: ch.channelType == ChannelType.voice
-                ? (voiceState.participants[widget.serverId]
-                        ?[ch.channelId]
-                        ?.length ??
-                    0)
+                ? (voiceParticipantsByChannel?[ch.channelId]?.length ?? 0)
                 : 0,
             isLast: item.isLastInGroup && !canManage,
             onTap: () => widget.onChannelTap(ch),

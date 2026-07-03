@@ -66,7 +66,7 @@ Adaptive grid based on number of camera peers `n`:
 
 Each tile is a `GestureDetector` (tap to focus/fullscreen, disabled for single-tile view). Contains a `Container` with 2px margin, `hollow.elevated` background, `radiusSm` border radius, anti-alias clipping.
 
-**Speaking indicator**: If `vcState.isSpeaking(peerId)` returns true, the tile gets a 2px accent-color border.
+**Speaking indicator**: `ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)))` (2026-07: speaking moved OUT of VoiceChannelState into `speaking_provider.dart` so a VAD flip rebuilds only the tiles whose bit changed). If speaking, the tile gets a 2px accent-color border.
 
 **Content stack**:
 - **Video layer**: If renderer exists (from `voiceChannelProvider.notifier.getCameraRenderer(peerId)`), renders `RTCVideoView` wrapped in `RepaintBoundary`. Local video is mirrored (`mirror: isLocal`). ObjectFit is `Contain`.
@@ -169,7 +169,7 @@ Contents (left to right in a `Row`):
 
 Visual feedback for voice activity detection (VAD):
 
-- **Camera grid tiles**: `_buildVideoTile()` checks `vcState.isSpeaking(peerId)`. If speaking, the tile container gets a 2px accent-color border via `Border.all(color: hollow.accent, width: 2)`.
+- **Camera grid tiles**: `_buildVideoTile()` watches `vcSpeakingProvider.select((s) => s.contains(peerId))` (per-peer membership select; speaking lives in `speaking_provider.dart` since 2026-07, not VoiceChannelState). If speaking, the tile container gets a 2px accent-color border via `Border.all(color: hollow.accent, width: 2)`.
 - **No other speaking indicators in VoiceChannelPane itself** -- the member sidebar shows speaking state for audio-only mode via the member panel provider.
 
 ## Providers Read by This Widget

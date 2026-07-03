@@ -21,6 +21,10 @@ class UnreadNotifier extends Notifier<UnreadState> {
 
   /// Load last-seen state from DB on startup and compute actual unread counts.
   /// Respects notification settings (All/Mentions/Nothing) from the start.
+  ///
+  /// The seen-pointers come from ONE batched `seen:` prefix read — this used
+  /// to issue a serial FFI `loadSetting` per channel and per DM on top of the
+  /// per-channel count queries.
   Future<void> loadAll(
       Map<String, List<String>> serverChannels,
       List<String> dmPeerIds) async {
@@ -31,6 +35,16 @@ class UnreadNotifier extends Notifier<UnreadState> {
     final notifSettings = ref.read(notificationSettingsProvider.notifier);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     final localName = displayNameFor(ref.read(profileProvider), localPeerId);
+
+    final storedSeen = <String, String>{};
+    try {
+      for (final e
+          in await storage_api.loadSettingsWithPrefix(prefix: 'seen:')) {
+        storedSeen[e.key] = e.value;
+      }
+    } catch (_) {
+      // Store not open / transient FFI error — fall through with defaults.
+    }
 
     for (final entry in serverChannels.entries) {
       final serverId = entry.key;
@@ -46,7 +60,7 @@ class UnreadNotifier extends Notifier<UnreadState> {
         final level = notifSettings.effectiveChannelLevel(serverId, cid);
         if (level == NotificationLevel.nothing) continue;
 
-        final val = await storage_api.loadSetting(key: 'seen:ch:$stateKey');
+        final val = storedSeen['seen:ch:$stateKey'];
         try {
           if (val != null) {
             channelSeen[stateKey] = val;
@@ -66,7 +80,7 @@ class UnreadNotifier extends Notifier<UnreadState> {
     }
 
     for (final peerId in dmPeerIds) {
-      final val = await storage_api.loadSetting(key: 'seen:dm:$peerId');
+      final val = storedSeen['seen:dm:$peerId'];
       try {
         final int count;
         if (val != null) {
@@ -187,6 +201,13 @@ class UnreadNotifier extends Notifier<UnreadState> {
       String serverId, String channelId, String? latestMessageId) async {
     if (latestMessageId == null) return;
     final key = '$serverId:$channelId';
+    // No-op guard: already seen up to this message and nothing pending —
+    // skip the map clones, state replacement, and FFI settings write.
+    if (state.channelLastSeen[key] == latestMessageId &&
+        !state.channelUnreadCounts.containsKey(key) &&
+        !state.channelMentionCounts.containsKey(key)) {
+      return;
+    }
 
     // Update in-memory.
     final updatedSeen =
@@ -217,6 +238,12 @@ class UnreadNotifier extends Notifier<UnreadState> {
   /// Mark a DM as seen.
   Future<void> markDmSeen(String peerId, String? latestMessageId) async {
     if (latestMessageId == null) return;
+    // No-op guard: already seen up to this message and no pending unread —
+    // skip the map clones, state replacement, and FFI settings write.
+    if (state.dmLastSeen[peerId] == latestMessageId &&
+        !state.dmUnreadCounts.containsKey(peerId)) {
+      return;
+    }
 
     final updatedSeen = Map<String, String>.from(state.dmLastSeen);
     updatedSeen[peerId] = latestMessageId;

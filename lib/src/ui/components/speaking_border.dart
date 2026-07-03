@@ -95,10 +95,15 @@ class _SpeakingBorderState extends State<SpeakingBorder>
       // The accent glow is the visual "speaking" cue. Mirror it to screen
       // readers so the state isn't color-only: when speaking, annotate the
       // subtree with "Speaking" — it merges with the child avatar's existing
-      // name (→ "Alice, Speaking"). When silent, add nothing.
-      child: widget.isSpeaking
-          ? Semantics(label: 'Speaking', container: true, child: widget.child)
-          : widget.child,
+      // name (→ "Alice, Speaking"). When silent the label is null (no-op).
+      // The Semantics widget stays in the tree in BOTH states: swapping it
+      // in/out changed the child's element type on every VAD toggle, which
+      // remounted the avatar subtree and made it blink (visible re-decode).
+      child: Semantics(
+        label: widget.isSpeaking ? 'Speaking' : null,
+        container: widget.isSpeaking,
+        child: widget.child,
+      ),
     );
   }
 }

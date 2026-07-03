@@ -204,16 +204,10 @@ pub(crate) async fn handle_vault_download_file(
 // ── 2. VaultUploadFile ───────────────────────────────────────────────
 
 pub(crate) async fn handle_vault_upload_file(
-    server_states: &mut HashMap<String, crate::crdt::server_state::ServerState>,
-    olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
-    mls: &mut Option<MlsManager>,
+    server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
     event_tx: &mpsc::Sender<NetworkEvent>,
-    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    webrtc_peers: &std::collections::HashSet<String>,
-    pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
-    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    cmd_tx: &mpsc::Sender<super::types::NodeCommand>,
     local_peer_str: &str,
     server_id: String,
     channel_id: String,
@@ -230,90 +224,164 @@ pub(crate) async fn handle_vault_upload_file(
 ) {
     hollow_log!("[HOLLOW-VAULT] VaultUploadFile: {file_name} cid={content_id} in {server_id}/{channel_id}");
 
-    let mut upload_fallback_info: Option<(usize, usize)> = None;
-    let upload_result: Result<crate::vault::pipeline::UploadPlan, String> = (|| {
-        let state = server_states.get(&server_id)
-            .ok_or_else(|| format!("Server {server_id} not found"))?;
-        let local_peer = local_peer_str.to_string();
+    // Snapshot membership/pledges on the loop (cheap borrows), then hop the
+    // Reed-Solomon encode (up to 34MB of CPU) + shard disk writes onto the
+    // blocking pool — this block used to freeze the entire event loop for the
+    // largest single CPU+disk unit in the codebase. Resumes via
+    // NodeCommand::VaultUploadPrepared.
+    let Some(state) = server_states.get(&server_id) else {
+        let _ = event_tx.send(NetworkEvent::VaultUploadFailed {
+            server_id: server_id.clone(), content_id,
+            error: format!("Server {server_id} not found"),
+        }).await;
+        return;
+    };
+    let local_peer = local_peer_str.to_string();
 
-        // Build members + pledges from server state
-        let all_members: Vec<String> = state.members.keys().cloned().collect();
-        let pledges: std::collections::HashMap<String, u64> = state.storage_pledges
-            .iter()
-            .map(|(k, v)| (k.clone(), *v.read()))
-            .collect();
+    // Build members + pledges from server state
+    let all_members: Vec<String> = state.members.keys().cloned().collect();
+    let pledges: std::collections::HashMap<String, u64> = state.storage_pledges
+        .iter()
+        .map(|(k, v)| (k.clone(), *v.read()))
+        .collect();
 
-        // Upload guard: if not enough peers are online for erasure coding,
-        // fall back to replication among online peers only.
-        let online_members: Vec<String> = all_members.iter()
-            .filter(|m| *m == &local_peer || peer_is_reachable(&ws_room_peers, m))
-            .cloned()
-            .collect();
-        let mode = crate::vault::adaptive::compute_adaptive_params(all_members.len());
-        let use_fallback = if let crate::vault::adaptive::VaultMode::ErasureCoding { k, m } = &mode {
-            online_members.len() < *k + *m
-        } else {
-            false
-        };
-        let members = if use_fallback {
-            hollow_log!("[HOLLOW-VAULT] Upload guard: {} online < k+m for {} total members — falling back to replication", online_members.len(), all_members.len());
-            online_members.clone()
-        } else {
-            all_members.clone()
-        };
+    // Upload guard: if not enough peers are online for erasure coding,
+    // fall back to replication among online peers only.
+    let online_members: Vec<String> = all_members.iter()
+        .filter(|m| *m == &local_peer || peer_is_reachable(&ws_room_peers, m))
+        .cloned()
+        .collect();
+    let mode = crate::vault::adaptive::compute_adaptive_params(all_members.len());
+    let use_fallback = if let crate::vault::adaptive::VaultMode::ErasureCoding { k, m } = &mode {
+        online_members.len() < *k + *m
+    } else {
+        false
+    };
+    let fallback_info = if use_fallback {
+        if let crate::vault::adaptive::VaultMode::ErasureCoding { k, m } = &mode {
+            Some((online_members.len(), *k + *m))
+        } else { None }
+    } else { None };
+    let members = if use_fallback {
+        hollow_log!("[HOLLOW-VAULT] Upload guard: {} online < k+m for {} total members — falling back to replication", online_members.len(), all_members.len());
+        online_members
+    } else {
+        all_members
+    };
 
-        // Prepare upload plan (single call — reused for both local storage and remote distribution)
-        let key: [u8; 32] = aes_key.try_into().map_err(|_| "Invalid AES key length")?;
-        let nonce: [u8; 12] = aes_nonce.try_into().map_err(|_| "Invalid AES nonce length")?;
-        let plan = crate::vault::pipeline::prepare_upload(
-            &ciphertext, &content_id, &key, &nonce,
-            &file_name, &mime_type, &channel_id,
-            original_size, &local_peer,
-            &members, &pledges, &message_id,
-        )?;
+    let key: [u8; 32] = match aes_key.try_into() {
+        Ok(k) => k,
+        Err(_) => {
+            let _ = event_tx.send(NetworkEvent::VaultUploadFailed {
+                server_id, content_id, error: "Invalid AES key length".into(),
+            }).await;
+            return;
+        }
+    };
+    let nonce: [u8; 12] = match aes_nonce.try_into() {
+        Ok(n) => n,
+        Err(_) => {
+            let _ = event_tx.send(NetworkEvent::VaultUploadFailed {
+                server_id, content_id, error: "Invalid AES nonce length".into(),
+            }).await;
+            return;
+        }
+    };
 
-        // Open ContentStore for local operations
-        let data_dir = crate::identity::data_dir().unwrap_or_default();
-        let vault_dir = data_dir.join("vault");
-        let cs = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir)?;
+    let cmd_tx = cmd_tx.clone();
+    let event_tx = event_tx.clone();
+    let db_path = db_path.to_string();
+    let db_passphrase = db_passphrase.to_string();
+    tokio::spawn(async move {
+        let sid = server_id.clone();
+        let cid = content_id.clone();
+        let chid = channel_id.clone();
+        let mid = message_id.clone();
+        let prepared = tokio::task::spawn_blocking(move || -> Result<crate::vault::pipeline::UploadPlan, String> {
+            // Prepare upload plan (single call — reused for both local storage
+            // and remote distribution).
+            let plan = crate::vault::pipeline::prepare_upload(
+                &ciphertext, &content_id, &key, &nonce,
+                &file_name, &mime_type, &channel_id,
+                original_size, &local_peer,
+                &members, &pledges, &message_id,
+            )?;
 
-        // Store local shards
-        let tier = crate::vault::content_store::StorageTier::from_str(&plan.manifest.storage_tier);
-        for placement in &plan.placements {
-            if placement.target_peer == local_peer {
-                if let Some((_, shard_data)) = plan.shards.iter().find(|(idx, _)| *idx == placement.shard_index) {
-                    let _ = cs.store_shard(
-                        &server_id, &content_id, placement.shard_index,
-                        plan.manifest.k, plan.manifest.m, plan.manifest.original_size,
-                        tier, shard_data,
-                    );
+            // Open ContentStore for local operations
+            let data_dir = crate::identity::data_dir().unwrap_or_default();
+            let vault_dir = data_dir.join("vault");
+            let cs = crate::vault::content_store::ContentStore::open(&db_path, &db_passphrase, &vault_dir)?;
+
+            // Store local shards
+            let tier = crate::vault::content_store::StorageTier::from_str(&plan.manifest.storage_tier);
+            for placement in &plan.placements {
+                if placement.target_peer == local_peer {
+                    if let Some((_, shard_data)) = plan.shards.iter().find(|(idx, _)| *idx == placement.shard_index) {
+                        let _ = cs.store_shard(
+                            &server_id, &content_id, placement.shard_index,
+                            plan.manifest.k, plan.manifest.m, plan.manifest.original_size,
+                            tier, shard_data,
+                        );
+                    }
                 }
             }
-        }
 
-        // Save placements + manifest
-        let _ = cs.save_placements(&server_id, &content_id, &plan.placements);
-        let _ = cs.save_manifest(&server_id, &channel_id, &plan.manifest);
+            // Save placements + manifest
+            let _ = cs.save_placements(&server_id, &content_id, &plan.placements);
+            let _ = cs.save_manifest(&server_id, &channel_id, &plan.manifest);
 
-        if use_fallback {
-            if let crate::vault::adaptive::VaultMode::ErasureCoding { k, m } = &mode {
-                upload_fallback_info = Some((online_members.len(), *k + *m));
+            Ok(plan)
+        })
+        .await
+        .map_err(|e| format!("Vault prepare task panicked: {e}"))
+        .and_then(|r| r);
+
+        match prepared {
+            Err(e) => {
+                hollow_log!("[HOLLOW-VAULT] Upload failed: {e}");
+                let _ = event_tx.send(NetworkEvent::VaultUploadFailed {
+                    server_id: sid, content_id: cid, error: e,
+                }).await;
+            }
+            Ok(plan) => {
+                let _ = cmd_tx.send(super::types::NodeCommand::VaultUploadPrepared(Box::new(
+                    super::types::VaultUploadPreparedPayload {
+                        server_id: sid, channel_id: chid, content_id: cid,
+                        message_id: mid, plan, fallback_info,
+                    },
+                ))).await;
             }
         }
+    });
+}
 
-        Ok(plan)
-    })();
-
-    match upload_result {
-        Err(e) => {
-            hollow_log!("[HOLLOW-VAULT] Upload failed: {e}");
-            let _ = event_tx.send(NetworkEvent::VaultUploadFailed {
-                server_id, content_id, error: e,
-            }).await;
-        }
-        Ok(plan) => {
+/// Resume a vault upload after off-loop erasure coding: shard distribution,
+/// manifest broadcast, file-record link, completion event.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_vault_upload_prepared(
+    server_states: &HashMap<String, crate::crdt::server_state::ServerState>,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    mls: &mut Option<MlsManager>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    pending_webrtc_sends: &mut HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)>,
+    local_peer_str: &str,
+    server_id: String,
+    channel_id: String,
+    content_id: String,
+    message_id: String,
+    plan: crate::vault::pipeline::UploadPlan,
+    fallback_info: Option<(usize, usize)>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    {
+        {
             // Emit replication fallback event if upload guard triggered.
-            if let Some((online, needed)) = upload_fallback_info {
+            if let Some((online, needed)) = fallback_info {
                 let _ = event_tx.send(NetworkEvent::VaultUploadReplicationFallback {
                     server_id: server_id.clone(), content_id: content_id.clone(),
                     online, needed,

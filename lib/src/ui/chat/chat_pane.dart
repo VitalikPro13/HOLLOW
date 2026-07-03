@@ -23,6 +23,8 @@ import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/speaking_provider.dart';
+import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
@@ -228,20 +230,25 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     _itemPositionsListener.itemPositions.addListener(_onScrollPositionChanged);
   }
 
+  bool _wasNearBottom = false;
+
   void _onScrollPositionChanged() {
     final nearBottom = _isNearBottom;
     if (_showScrollPill == nearBottom) {
       setState(() => _showScrollPill = !nearBottom);
     }
     ref.read(chatAtBottomProvider.notifier).state = nearBottom;
-    // Auto-mark as read when user scrolls back to bottom.
-    if (nearBottom) {
+    // Auto-mark as read when the user ARRIVES at the bottom. Edge-triggered
+    // (mobile-style) — this used to run per scroll frame while at the bottom,
+    // i.e. a map-clone + FFI settings write on every scroll tick.
+    if (nearBottom && !_wasNearBottom) {
       final msgs = ref.read(chatProvider)[widget.peerId];
       if (msgs != null && msgs.isNotEmpty) {
         ref.read(unreadProvider.notifier).markDmSeen(
               widget.peerId, msgs.last.messageId);
       }
     }
+    _wasNearBottom = nearBottom;
   }
 
   Future<void> _loadHistory() async {
@@ -815,8 +822,12 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final chatHistory = ref.watch(chatProvider);
-    final messages = chatHistory[widget.peerId] ?? [];
+    // Per-conversation select: a message/reaction/edit in ANY other
+    // conversation used to rebuild this whole pane (the map is replaced
+    // wholesale on every insert; this conversation's list identity only
+    // changes when IT changes).
+    final messages =
+        ref.watch(chatProvider.select((m) => m[widget.peerId])) ?? [];
 
     // Auto-scroll on new messages if the user is in the bottom capture zone.
     // Outside the zone (scrolled up meaningfully), the unread pill takes over.
@@ -828,13 +839,21 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       }
     });
 
-    final typingPeers = ref.watch(typingProvider)[widget.peerId] ?? {};
+    final typingPeers =
+        ref.watch(typingProvider.select((t) => t[widget.peerId])) ?? {};
     final showProfilePanel = ref.watch(dmProfilePanelProvider);
     final profiles = ref.watch(profileProvider);
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
 
     // Screen share layout only shows in the DM with the call peer.
-    final call = ref.watch(callProvider);
+    // Named-record select: this build only reads these four call fields, so
+    // video toggles / labels / renderer seq bumps no longer rebuild the pane.
+    final call = ref.watch(callProvider.select((c) => (
+          peerId: c.peerId,
+          status: c.status,
+          isScreenSharing: c.isScreenSharing,
+          remoteScreenSharing: c.remoteScreenSharing,
+        )));
     final isCallWithThisPeer = call.peerId == widget.peerId;
     final isScreenShareActive = isCallWithThisPeer &&
         (call.isScreenSharing || call.remoteScreenSharing);
@@ -1099,28 +1118,39 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                   // Shows only when at least one screen share is active AND
                   // there are 2+ sources to switch between. Camera-only DMs
                   // don't need a switcher (cameras live side-by-side).
-                  if ((call.isScreenSharing || call.remoteScreenSharing) &&
-                      _countActiveDmSources(call) >= 2)
-                    Positioned(
-                      top: HollowSpacing.md,
-                      left: 0,
-                      right: 0,
-                      child: AnimatedOpacity(
-                        opacity: _overlaysVisible ? 1.0 : 0.0,
-                        duration: HollowDurations.normal,
-                        child: IgnorePointer(
-                          ignoring: !_overlaysVisible,
-                          child: Center(
-                            child: _buildScreenShareSourcePill(
-                              hollow,
-                              call,
-                              ref.read(identityProvider).peerId ?? '',
-                              widget.peerId,
+                  // Scoped Consumer: the pill needs the FULL call state
+                  // (video-enabled fields) — watch it here, not pane-wide.
+                  if (call.isScreenSharing || call.remoteScreenSharing)
+                    Consumer(builder: (context, ref, _) {
+                      final fullCall = ref.watch(callProvider);
+                      if (_countActiveDmSources(fullCall) < 2) {
+                        // MUST stay Positioned: a bare (non-positioned) child
+                        // makes the Stack size to IT (0x0) instead of
+                        // expanding — which blanked the whole share view.
+                        return const Positioned(
+                            left: 0, top: 0, child: SizedBox.shrink());
+                      }
+                      return Positioned(
+                        top: HollowSpacing.md,
+                        left: 0,
+                        right: 0,
+                        child: AnimatedOpacity(
+                          opacity: _overlaysVisible ? 1.0 : 0.0,
+                          duration: HollowDurations.normal,
+                          child: IgnorePointer(
+                            ignoring: !_overlaysVisible,
+                            child: Center(
+                              child: _buildScreenShareSourcePill(
+                                hollow,
+                                fullCall,
+                                ref.read(identityProvider).peerId ?? '',
+                                widget.peerId,
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                    ),
+                      );
+                    }),
 
                   // Layer 1: chat overlay (right side) + toggle button
                   Positioned(
@@ -1243,6 +1273,12 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     Map<String, storage_api.UserProfile> profiles,
     String localPeerId,
   ) {
+    // Reply-target lookup: one pass per build instead of an O(n) indexWhere
+    // scan per reply row per rebuild.
+    final replyIndexById = <String, int>{
+      for (var i = 0; i < messages.length; i++)
+        if (messages[i].messageId != null) messages[i].messageId! as String: i,
+    };
     return [
       // Messages list + unread pill overlay
       Expanded(
@@ -1480,9 +1516,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                                     String? replyImagePath;
                                     int? replyIndex;
                                     if (msg.replyToMid != null) {
-                                      final idx = messages.indexWhere(
-                                          (m) =>
-                                              m.messageId == msg.replyToMid);
+                                      final idx =
+                                          replyIndexById[msg.replyToMid] ??
+                                              -1;
                                       if (idx != -1) {
                                         replyIndex = idx;
                                         final original = messages[idx];
@@ -1558,16 +1594,24 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                                         child: wrapper,
                                       )
                                     : wrapper;
-                                if (showDate) {
-                                  return Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      DateSeparator(date: msg.timestamp),
-                                      messageWidget,
-                                    ],
-                                  );
-                                }
-                                return messageWidget;
+                                // ValueKey(messageId): rows hold per-item
+                                // state (spoiler reveal, hover, decoded
+                                // frames) that must not shift onto a
+                                // different message on delete/trim.
+                                return KeyedSubtree(
+                                  key: ValueKey<Object>(
+                                      msg.messageId ?? index),
+                                  child: showDate
+                                      ? Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            DateSeparator(
+                                                date: msg.timestamp),
+                                            messageWidget,
+                                          ],
+                                        )
+                                      : messageWidget,
+                                );
                               },
                             ),
                           ),
@@ -1961,9 +2005,7 @@ class _InlineCallPanel extends ConsumerStatefulWidget {
 }
 
 class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
-  Timer? _durationTimer;
   double _remoteVolume = 1.0;
-  Duration _duration = Duration.zero;
   double _videoHeight = 200; // Height of the video area (only when video active).
   static const _minVideoHeight = 80.0;
   static const _maxVideoHeight = 2000.0;
@@ -2107,27 +2149,9 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     );
   }
 
-  @override
-  void dispose() {
-    _durationTimer?.cancel();
-    super.dispose();
-  }
-
-  void _startTimer(DateTime startedAt) {
-    _durationTimer?.cancel();
-    _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      setState(() {
-        _duration = DateTime.now().difference(startedAt);
-      });
-    });
-  }
-
-  String _formatDuration(Duration d) {
-    final minutes = d.inMinutes.toString().padLeft(2, '0');
-    final seconds = (d.inSeconds % 60).toString().padLeft(2, '0');
-    return '$minutes:$seconds';
-  }
+  // Call duration is rendered by CallDurationText (self-ticking leaf) — the
+  // old per-second setState rebuilt the ENTIRE inline call panel (video
+  // views, drag-resize, tabs, controls) every second of every call.
 
   @override
   Widget build(BuildContext context) {
@@ -2136,17 +2160,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     final peerProfile = ref.watch(profileProvider.select((p) => p[widget.peerId]));
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     final displayName = displayNameForPeer(peerProfile, widget.peerId);
-
-    // Start timer.
-    if (call.status == CallStatus.active && call.startedAt != null) {
-      if (_durationTimer == null) {
-        _duration = DateTime.now().difference(call.startedAt!);
-        _startTimer(call.startedAt!);
-      }
-    } else {
-      _durationTimer?.cancel();
-      _durationTimer = null;
-    }
 
     final hasRemoteVideo = call.remoteVideoEnabled;
     final hasLocalVideo = call.isVideoEnabled;
@@ -2264,7 +2277,8 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                 // Left: timer + status
                 StatusDot(color: hollow.success, size: 8, pulse: true),
                 const SizedBox(width: HollowSpacing.sm),
-                if (call.status == CallStatus.connecting)
+                if (call.status == CallStatus.connecting ||
+                    call.startedAt == null)
                   Text(
                     'Connecting...',
                     style: HollowTypography.caption.copyWith(
@@ -2273,8 +2287,8 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                     ),
                   )
                 else
-                  Text(
-                    _formatDuration(_duration),
+                  CallDurationText(
+                    startedAt: call.startedAt!,
                     style: HollowTypography.caption.copyWith(
                       color: hollow.textSecondary,
                       fontSize: 12,
@@ -2283,27 +2297,35 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                   ),
 
                 // Center: avatars (audio-only — when video is on, they're in the rectangles)
+                // Speaking state comes from callSpeakingProvider via a scoped
+                // Consumer so VAD flips rebuild ONLY these two avatars, not
+                // the whole inline call panel.
                 if (!hasAnyVideo) ...[
                   const Spacer(),
-                  SpeakingBorder(
-                    isSpeaking: call.isLocalSpeaking,
-                    child: _badgedCallAvatar(
-                      hollow: hollow,
-                      peerId: localPeerId,
-                      muted: call.isMuted,
-                      deafened: call.isDeafened,
-                    ),
-                  ),
-                  const SizedBox(width: HollowSpacing.sm),
-                  SpeakingBorder(
-                    isSpeaking: call.isRemoteSpeaking,
-                    child: _badgedCallAvatar(
-                      hollow: hollow,
-                      peerId: widget.peerId,
-                      muted: call.remoteMuted,
-                      deafened: call.remoteDeafened,
-                    ),
-                  ),
+                  Consumer(builder: (context, ref, _) {
+                    final speaking = ref.watch(callSpeakingProvider);
+                    return Row(children: [
+                      SpeakingBorder(
+                        isSpeaking: speaking.local,
+                        child: _badgedCallAvatar(
+                          hollow: hollow,
+                          peerId: localPeerId,
+                          muted: call.isMuted,
+                          deafened: call.isDeafened,
+                        ),
+                      ),
+                      const SizedBox(width: HollowSpacing.sm),
+                      SpeakingBorder(
+                        isSpeaking: speaking.remote,
+                        child: _badgedCallAvatar(
+                          hollow: hollow,
+                          peerId: widget.peerId,
+                          muted: call.remoteMuted,
+                          deafened: call.remoteDeafened,
+                        ),
+                      ),
+                    ]);
+                  }),
                 ],
 
                 const Spacer(),
@@ -3477,30 +3499,8 @@ class _ScreenShareControlsOverlay extends ConsumerStatefulWidget {
 
 class _ScreenShareControlsOverlayState
     extends ConsumerState<_ScreenShareControlsOverlay> {
-  Timer? _durationTimer;
-  Duration _duration = Duration.zero;
-
-  @override
-  void dispose() {
-    _durationTimer?.cancel();
-    super.dispose();
-  }
-
-  void _startTimer(DateTime startedAt) {
-    _durationTimer?.cancel();
-    _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      setState(() {
-        _duration = DateTime.now().difference(startedAt);
-      });
-    });
-  }
-
-  String _formatDuration(Duration d) {
-    final minutes = d.inMinutes.toString().padLeft(2, '0');
-    final seconds = (d.inSeconds % 60).toString().padLeft(2, '0');
-    return '$minutes:$seconds';
-  }
+  // Duration rendered by CallDurationText — the old per-second setState
+  // rebuilt the whole controls overlay (over a live screen-share video).
 
   Future<void> _handleScreenShareToggle(CallState call) async {
     if (call.isScreenSharing) {
@@ -3525,17 +3525,6 @@ class _ScreenShareControlsOverlayState
   Widget build(BuildContext context) {
     final call = ref.watch(callProvider);
     final hollow = HollowTheme.of(context);
-
-    // Start timer.
-    if (call.status == CallStatus.active && call.startedAt != null) {
-      if (_durationTimer == null) {
-        _duration = DateTime.now().difference(call.startedAt!);
-        _startTimer(call.startedAt!);
-      }
-    } else {
-      _durationTimer?.cancel();
-      _durationTimer = null;
-    }
 
     final peerProfile = ref.watch(profileProvider.select((p) => p[widget.peerId]));
     final displayName = displayNameForPeer(peerProfile, widget.peerId);
@@ -3582,8 +3571,8 @@ class _ScreenShareControlsOverlayState
               ),
             ),
             const SizedBox(width: HollowSpacing.sm),
-            Text(
-              _formatDuration(_duration),
+            CallDurationText(
+              startedAt: call.startedAt ?? DateTime.now(),
               style: HollowTypography.caption.copyWith(
                 color: hollow.textSecondary,
                 fontSize: 12,

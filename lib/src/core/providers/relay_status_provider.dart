@@ -7,24 +7,30 @@ class RelayStatus {
 }
 
 Future<RelayStatus> fetchRelayStatus({required String domain}) async {
+  final client = HttpClient();
   try {
     final url = 'https://$domain/relay-status';
-    final client = HttpClient();
     client.connectionTimeout = const Duration(seconds: 5);
-    final request = await client.getUrl(Uri.parse(url));
-    final response = await request.close();
-    final body = await response.transform(utf8.decoder).join();
-    client.close();
+    // TOTAL deadline, not just connect: `connectionTimeout` alone let a
+    // connected-but-stalled response body block node start indefinitely.
+    return await () async {
+      final request = await client.getUrl(Uri.parse(url));
+      final response = await request.close();
+      final body = await response.transform(utf8.decoder).join();
 
-    if (response.statusCode != 200) {
-      return const RelayStatus();
-    }
+      if (response.statusCode != 200) {
+        return const RelayStatus();
+      }
 
-    final json = jsonDecode(body) as Map<String, dynamic>;
-    return RelayStatus(
-      licenseRequired: json['license_required'] == true,
-    );
+      final json = jsonDecode(body) as Map<String, dynamic>;
+      return RelayStatus(
+        licenseRequired: json['license_required'] == true,
+      );
+    }()
+        .timeout(const Duration(seconds: 6));
   } catch (_) {
     return const RelayStatus();
+  } finally {
+    client.close(force: true);
   }
 }

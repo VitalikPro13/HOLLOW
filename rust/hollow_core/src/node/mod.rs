@@ -12,7 +12,6 @@ pub(crate) mod message_ops;
 pub(crate) mod recovery_pool;
 pub(crate) mod resolver;
 pub(crate) mod share_handler;
-pub(crate) mod signaling;
 pub(crate) mod social;
 pub(crate) mod sync_handler;
 pub(crate) mod twitch;

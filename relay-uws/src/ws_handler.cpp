@@ -1186,7 +1186,8 @@ void sweep_link_codes(RelayState& state) {
 }
 
 static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
-                                 std::string_view message, RelayState& state) {
+                                 std::string_view message, RelayState& state,
+                                 const Config& config) {
     json j;
     try {
         j = json::parse(message);
@@ -1269,6 +1270,32 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                                    j.value("platform", ""), state);
     } else if (type == "set_push_prefs") {
         handle_set_push_prefs(data, j, state);
+    } else if (type == "get_turn_credentials") {
+        // TURN credentials over the LIVE authenticated WS connection —
+        // replaces the open HTTP /turn-credentials endpoint for current
+        // clients: no fresh TLS handshake per refresh, retries ride the
+        // client's normal reconnect machinery, and the credentials sit
+        // behind relay auth instead of being farmable by anyone. The HTTP
+        // endpoint stays for older clients.
+        if (data->is_guest) {
+            send_json(ws, {{"type", "turn_credentials"}, {"error", "auth required"}});
+        } else if (config.turn_secret.empty()) {
+            send_json(ws, {{"type", "turn_credentials"}, {"error", "TURN not configured"}});
+        } else {
+            uint64_t ttl = 3600;
+            uint64_t expiry = now_unix_secs() + ttl;
+            std::string username = std::to_string(expiry) + ":hollow";
+            std::string password = hmac_sha1_base64(config.turn_secret, username);
+            send_json(ws, {{"type", "turn_credentials"},
+                           {"username", username},
+                           {"password", password},
+                           {"ttl", ttl},
+                           {"uris", {
+                               "turn:relay.anonlisten.com:3478",
+                               "turn:relay.anonlisten.com:3478?transport=tcp",
+                               "turns:relay.anonlisten.com:5349"
+                           }}});
+        }
     }
 }
 
@@ -1334,7 +1361,7 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
     }
 }
 
-void setup_ws_handler(uWS::SSLApp& app, RelayState& state) {
+void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config) {
     app.ws<PerSocketData>("/ws", {
         .compression = uWS::DISABLED,
         .maxPayloadLength = 64 * 1024 * 1024,
@@ -1388,7 +1415,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state) {
             }, 10000, 0);
         },
 
-        .message = [&state](SSLWebSocket* ws, std::string_view message, uWS::OpCode opCode) {
+        .message = [&state, &config](SSLWebSocket* ws, std::string_view message, uWS::OpCode opCode) {
             auto* data = ws->getUserData();
 
             if (!data->authenticated) {
@@ -1398,7 +1425,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state) {
 
             if (opCode == uWS::OpCode::TEXT) {
                 if (message.size() > 1024 * 1024) return;
-                handle_text_message(ws, data, message, state);
+                handle_text_message(ws, data, message, state, config);
             } else if (opCode == uWS::OpCode::BINARY) {
                 // 1-byte 0x00 = guest keepalive, don't process or count
                 if (message.size() == 1 && static_cast<uint8_t>(message[0]) == 0x00) {

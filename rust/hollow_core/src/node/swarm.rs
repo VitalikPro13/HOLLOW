@@ -252,7 +252,6 @@ use crate::crdt::operations::{CrdtPayload, Permission};
 use crate::crdt::server_state::ServerState;
 use crate::crdt::sync::{self as crdt_sync, StateVector};
 use crate::crypto::{CryptoStore, MlsManager, OlmManager};
-use super::signaling::{self, SignalingCmd, SignalingEvent};
 
 use super::types::*;
 
@@ -305,14 +304,11 @@ pub(crate) async fn spawn_node(
     let master_peer_id = native_keypair.peer_id();
     let device_peer_id = device_keypair.peer_id();
 
-    // Signaling register must be signed by the DEVICE key (it authenticates the
-    // device's transport presence under the device peer_id).
-    let sig_keypair = device_keypair.clone();
-
-    // Spawn the signaling background task (device-keyed).
-    let signaling_url = format!("https://{relay_domain}");
-    let (sig_cmd_tx, sig_event_rx) =
-        signaling::spawn_signaling_task(sig_keypair, device_peer_id.clone(), signaling_url);
+    // Legacy HTTP signaling (register/bootstrap/unregister) RETIRED 2026-07:
+    // peer discovery rides the live WS connection (`discover_peers` frame +
+    // RoomMembers on join), which replaced the per-poll TLS handshake that
+    // produced the "[HOLLOW-SIGNALING] Bootstrap failed" noise. The relay
+    // keeps its HTTP endpoints for older clients.
 
     // Spawn the WebSocket relay client (device-keyed auth).
     let ws_proto = device_keypair.to_protobuf_encoding().unwrap_or_default();
@@ -339,7 +335,7 @@ pub(crate) async fn spawn_node(
     };
 
     let handle = tokio::spawn(run_event_loop(
-        event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store, sig_cmd_tx, sig_event_rx,
+        event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
     ));
@@ -385,19 +381,12 @@ pub(crate) async fn spawn_node_mock(
     let master_peer_id = native_keypair.peer_id();
     let device_peer_id = device_keypair.peer_id();
 
-    // Dead signaling channels — the real task is never spawned. The event loop
-    // holds `sig_cmd_tx` (its sends go nowhere) and selects on `sig_event_rx`
-    // (which never yields, since its sender is dropped here). Signaling is a
-    // non-fatal HTTP peer-discovery fallback; DM/room delivery never needs it.
-    let (sig_cmd_tx, _sig_cmd_rx) = mpsc::channel::<SignalingCmd>(8);
-    let (_sig_event_tx, sig_event_rx) = mpsc::channel::<SignalingEvent>(8);
-
     // Injected WS channels (the broker owns the other ends).
     let (ws_cmd_tx, ws_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (ws_event_tx, ws_event_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let handle = tokio::spawn(run_event_loop(
-        event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store, sig_cmd_tx, sig_event_rx,
+        event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
     ));
@@ -413,8 +402,6 @@ async fn run_event_loop(
     mut olm: OlmManager,
     crypto_store: CryptoStore,
     crdt_store: super::crdt_store::CrdtStore,
-    sig_cmd_tx: mpsc::Sender<SignalingCmd>,
-    mut sig_event_rx: mpsc::Receiver<SignalingEvent>,
     bundle_keypair: crate::identity::native_identity::NativeKeypair,
     ws_cmd_tx: tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     mut ws_event_rx: tokio::sync::mpsc::UnboundedReceiver<super::ws_client::WsEvent>,
@@ -966,6 +953,13 @@ async fn run_event_loop(
     let mut peer_liveness_timer = tokio::time::interval(Duration::from_secs(60));
     peer_liveness_timer.tick().await; // consume immediate first tick
 
+    // TURN credential refresh: relay credentials last 1h; re-request at 50min
+    // so long-lived sessions never expire mid-call. A fresh set is also
+    // requested on every WsEvent::Connected, so this only matters for
+    // continuously-connected sessions.
+    let mut turn_refresh_timer = tokio::time::interval(Duration::from_secs(50 * 60));
+    turn_refresh_timer.tick().await; // consume immediate first tick
+
     loop {
         tokio::select! {
             // Handle commands from the FFI layer.
@@ -974,9 +968,6 @@ async fn run_event_loop(
                     NodeCommand::JoinRoom { room_code } => {
                         // If switching rooms, unregister from the old room and clear state.
                         if let Some(old_room) = active_room.as_ref().filter(|r| *r != &room_code) {
-                            let _ = sig_cmd_tx.send(SignalingCmd::Unregister {
-                                room_code: old_room.clone(),
-                            }).await;
                             let _ = event_tx.send(NetworkEvent::RoomCleared).await;
                         }
                         active_room = Some(room_code.clone());
@@ -985,12 +976,6 @@ async fn run_event_loop(
                             room_code: room_code.clone(),
                         });
                         // Also register with signaling for peer discovery.
-                        let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
-                            room_code: room_code.clone(),
-                        }).await;
-                        let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
-                            room_code,
-                        }).await;
                     }
                     NodeCommand::SendMessage { peer_id: peer_id_str, text, message_id, reply_to_mid, link_preview } => {
                         last_message_traffic = std::time::Instant::now();
@@ -1072,7 +1057,7 @@ async fn run_event_loop(
                     NodeCommand::DeleteServer { server_id } => {
                         if sync_handler::handle_delete_server(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &sig_cmd_tx, &bundle_keypair, &local_peer_str, &device_peer_id,
+                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1081,7 +1066,7 @@ async fn run_event_loop(
                     NodeCommand::JoinServer { server_id, twitch_proof_json, nsfw_confirmed } => {
                         sync_handler::handle_join_server(
                             &mut pending_server_joins, &mls, &ws_cmd_tx,
-                            &ws_room_peers, &sig_cmd_tx, &cmd_tx,
+                            &ws_room_peers, &cmd_tx,
                             server_id, twitch_proof_json, nsfw_confirmed,
                             &crdt_store,
                         ).await;
@@ -1189,7 +1174,7 @@ async fn run_event_loop(
                     NodeCommand::LeaveServer { server_id } => {
                         if sync_handler::handle_leave_server(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &sig_cmd_tx, &bundle_keypair, &local_peer_str, &device_peer_id,
+                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1546,7 +1531,7 @@ async fn run_event_loop(
 
                     NodeCommand::SendFriendRequest { peer_id: peer_id_str } => {
                         social::handle_send_friend_request(
-                            &event_tx, &ws_cmd_tx, &ws_room_peers, &sig_cmd_tx,
+                            &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut pending_friend_requests,
                             &mut pending_friend_removals,
                             &local_peer_str, peer_id_str,
@@ -1618,7 +1603,7 @@ async fn run_event_loop(
 
                     NodeCommand::AcceptFriendRequest { peer_id: peer_id_str } => {
                         social::handle_accept_friend_request(
-                            &event_tx, &ws_cmd_tx, &ws_room_peers, &sig_cmd_tx,
+                            &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &local_peer_str, &master_keypair, &device_peer_id, is_invisible,
                             peer_id_str,
                             &mut pending_friend_accepts,
@@ -1727,12 +1712,26 @@ async fn run_event_loop(
                             ciphertext, aes_key, aes_nonce, original_size, content_id,
                         } = *box_payload;
                         vault_ops::handle_vault_upload_file(
-                            &mut server_states, &mut olm, &crypto_store, &mut mls,
-                            &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &webrtc_peers, &mut pending_webrtc_sends,
-                            &bundle_keypair, &local_peer_str,
+                            &server_states, &event_tx, &ws_room_peers, &cmd_tx,
+                            &local_peer_str,
                             server_id, channel_id, file_name, mime_type, message_id,
                             ciphertext, aes_key, aes_nonce, original_size, content_id,
+                            &db_path, &db_passphrase,
+                        ).await;
+                    }
+
+                    // Internal re-entry: erasure coding + local shard writes done
+                    // on the blocking pool; resume distribution/broadcast.
+                    NodeCommand::VaultUploadPrepared(box_payload) => {
+                        let VaultUploadPreparedPayload {
+                            server_id, channel_id, content_id, message_id, plan, fallback_info,
+                        } = *box_payload;
+                        vault_ops::handle_vault_upload_prepared(
+                            &server_states, &mut olm, &crypto_store, &mut mls,
+                            &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &webrtc_peers, &mut pending_webrtc_sends,
+                            &local_peer_str,
+                            server_id, channel_id, content_id, message_id, plan, fallback_info,
                             &db_path, &db_passphrase,
                         ).await;
                     }
@@ -1776,6 +1775,28 @@ async fn run_event_loop(
                         file_handler::handle_send_file(
                             peer_id, server_id, channel_id, file_path, message_id, message_text,
                             vthumb, override_width, override_height, share_ref,
+                            &cmd_tx,
+                            &event_tx, &server_states, &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &device_peer_id,
+                            &mut olm, &crypto_store, &mut mls,
+                            &ws_cmd_tx, &ws_room_peers, &webrtc_peers, &mut pending_webrtc_sends,
+                            &mut gossip_overlays,
+                            &db_path, &db_passphrase,
+                        ).await;
+                    }
+
+                    // Internal re-entry: image conversion finished on the blocking
+                    // pool; resume the send at the store/fan-out steps.
+                    NodeCommand::SendFileConverted(box_payload) => {
+                        let SendFileConvertedPayload {
+                            peer_id, server_id, channel_id, message_id, message_text,
+                            vthumb, share_ref, original_name, is_image,
+                            final_data, final_ext, width, height,
+                        } = *box_payload;
+                        file_handler::finish_send_file(
+                            peer_id, server_id, channel_id, message_id, message_text,
+                            vthumb, share_ref, original_name, is_image,
+                            final_data, final_ext, width, height,
                             &event_tx, &server_states, &bundle_keypair, &pub_key_b64, &local_peer_str,
                             &device_peer_id,
                             &mut olm, &crypto_store, &mut mls,
@@ -1987,14 +2008,8 @@ async fn run_event_loop(
 
                         // Unregister from signaling server so peers don't see us as online.
                         if let Some(room) = active_room.as_ref() {
-                            let _ = sig_cmd_tx.send(SignalingCmd::Unregister {
-                                room_code: room.clone(),
-                            }).await;
                         }
                         for sid in server_states.keys() {
-                            let _ = sig_cmd_tx.send(SignalingCmd::Unregister {
-                                room_code: sid.clone(),
-                            }).await;
                         }
                     }
 
@@ -2027,43 +2042,6 @@ async fn run_event_loop(
                     }
                 }
             }
-            // Handle signaling service events (bootstrap peer discovery).
-            Some(sig_event) = sig_event_rx.recv() => {
-                match sig_event {
-                    SignalingEvent::BootstrapPeers { peers } => {
-                        // Discovery result — log quietly, never as a user-facing Error
-                        // event (0 peers is normal when everyone's already connected via WS).
-                        hollow_log!("[HOLLOW-SIGNALING] Bootstrap returned {} peers", peers.len());
-                        for bp in peers {
-                            // Skip ourselves (master AND device id — the relay/signaling
-                            // can report us under either).
-                            if bp.peer_id == local_peer_str || bp.peer_id == device_peer_id {
-                                continue;
-                            }
-                            // Skip peers already visible via WS relay.
-                            let already_ws = ws_room_peers.values().any(|ps| ps.contains(&bp.peer_id));
-                            if already_ws {
-                                continue;
-                            }
-                            // Emit PeerDiscovered for the UI.
-                            let _ = event_tx
-                                .send(NetworkEvent::PeerDiscovered {
-                                    peer: DiscoveredPeer {
-                                        peer_id: bp.peer_id.clone(),
-                                        addresses: vec!["ws-relay".to_string()],
-                                    },
-                                })
-                                .await;
-                        }
-                    }
-                    SignalingEvent::Error { message } => {
-                        let _ = event_tx
-                            .send(NetworkEvent::Error { message })
-                            .await;
-                    }
-                }
-            }
-
             // -- WebSocket relay events --
             Some(ws_event) = ws_event_rx.recv() => {
                 use super::ws_client::WsEvent;
@@ -2076,6 +2054,10 @@ async fn run_event_loop(
                         // Pure UI signal — the room-join side effects below are
                         // unchanged. Tells Dart to show real "Connected".
                         let _ = event_tx.send(NetworkEvent::RelayConnected).await;
+                        // TURN credentials over the authed socket (fresh set on
+                        // every (re)connect; the 50-min timer below refreshes
+                        // long-lived sessions before the 1h expiry).
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::GetTurnCredentials);
                         // Join personal inbox room (for receiving friend requests from strangers).
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                             room_code: format!("inbox:{}", local_peer_str),
@@ -3225,13 +3207,21 @@ async fn run_event_loop(
                             // once the mapping is learned, for the cold case.
                             let target = super::resolver::resolve(&peer_id);
                             social::handle_send_friend_request(
-                                &event_tx, &ws_cmd_tx, &ws_room_peers, &sig_cmd_tx,
+                                &event_tx, &ws_cmd_tx, &ws_room_peers,
                                 &mut pending_friend_requests,
                                 &mut pending_friend_removals,
                                 &local_peer_str, target,
                                 &db_path, &db_passphrase,
                             ).await;
                         }
+                    }
+                    // TURN credentials from the authed relay socket → Dart's
+                    // iceConfigProvider (replaces the HTTP fetch + its
+                    // dead-chain-on-503 retry bug).
+                    WsEvent::TurnCredentials { username, password, ttl, uris } => {
+                        let _ = event_tx.send(NetworkEvent::TurnCredentials {
+                            username, password, ttl, uris,
+                        }).await;
                     }
                     // -- Multi-device link codes (Step 4) --
                     WsEvent::LinkCodeClaimed { code } => {
@@ -3587,7 +3577,6 @@ async fn run_event_loop(
                                         &mut pending_server_joins,
                                         &mut pending_sync_requests, &mut mls,
                                         &mut mls_bootstrap_requested,
-                                        &sig_cmd_tx,
                                         &mut pending_shard_assembly, &mut pending_file_streams,
                                         &mut pending_shard_streams, &mut early_file_streams,
                                         &mut pending_link_snapshots,
@@ -3846,16 +3835,9 @@ async fn run_event_loop(
                     });
                 }
 
-                // Re-bootstrap signaling rooms (HTTP, non-fatal fallback).
                 if let Some(room) = &active_room {
-                    let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
-                        room_code: room.clone(),
-                    }).await;
                 }
                 for sid in server_states.keys() {
-                    let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
-                        room_code: sid.clone(),
-                    }).await;
                 }
 
                 // ── Olm session reconciliation sweep (self-heal) ──────────────
@@ -4403,7 +4385,17 @@ async fn run_event_loop(
                 super::share_handler::tick(&mut share_registry, &ws_cmd_tx, messaging_active, &webrtc_peers, &event_tx, &bundle_keypair).await;
             }
 
+            // -- TURN credential refresh (50 min) --
+            _ = turn_refresh_timer.tick() => {
+                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::GetTurnCredentials);
+            }
+
             // -- MLS state debounce (2s) --
+            // RECEIVE-path only: a regressed receive ratchet can ratchet
+            // forward again after a crash, so deferring its persistence is
+            // safe. Send-path encrypts persist IMMEDIATELY (persist-on-encrypt
+            // rule) — a regressed send ratchet re-uses generations and wedges
+            // the group for every receiver.
             _ = mls_persist_timer.tick() => {
                 if mls_dirty {
                     if let Some(ref mls_mgr) = mls {
@@ -4644,7 +4636,6 @@ async fn handle_incoming_request(
     pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
     mls: &mut Option<MlsManager>,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
-    sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     pending_shard_assembly: &mut HashMap<String, PendingShardAssembly>,
     pending_file_streams: &mut HashMap<String, PendingFileStream>,
     pending_shard_streams: &mut HashMap<String, PendingShardStream>,
@@ -5066,9 +5057,17 @@ async fn handle_incoming_request(
             match serde_json::from_str::<MessageEnvelope>(&text) {
                 Ok(MessageEnvelope::ChannelMessage { inner }) => {
                     let ChannelMessagePayload { sid, cid, text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us } = *inner;
+                    // Multi-device: this Olm-direct path (MLS-failure fallback +
+                    // offline replay) authenticates the sender's DEVICE socket,
+                    // but channel messages are SIGNED by — and attributed to —
+                    // the sender's MASTER. Resolve first so the signature
+                    // verifies and the row is master-keyed, exactly like the
+                    // MLS and public-channel paths. Verifying against the raw
+                    // device id REJECTED every multi-device fallback message.
+                    let sender_master = super::resolver::resolve(peer_str);
                     // SECURITY: Verify sender is a member of the claimed server.
                     if let Some(state) = server_states.get(&sid) {
-                        if !state.is_member(peer_str) {
+                        if !state.is_member(&sender_master) {
                             hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelMessage from {peer_str} — not a member of server {sid}");
                             return;
                         }
@@ -5080,9 +5079,9 @@ async fn handle_incoming_request(
                     // SECURITY: Reject messages with invalid signatures.
                     if sig.is_some() {
                         let payload = message_signing_payload(
-                            "ch", &format!("{sid}:{cid}"), &peer_str, ts, &msg_text,
+                            "ch", &format!("{sid}:{cid}"), &sender_master, ts, &msg_text,
                         );
-                        if !verify_message_signature(&peer_str, sig.as_deref(), pk.as_deref(), &payload) {
+                        if !verify_message_signature(&sender_master, sig.as_deref(), pk.as_deref(), &payload) {
                             hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelMessage from {peer_str} — signature verification FAILED");
                             return;
                         }
@@ -5091,12 +5090,15 @@ async fn handle_incoming_request(
                     // SECURITY: Enforce 4,000 character limit on message text.
                     let msg_text = if msg_text.len() > 4000 { msg_text[..4000].to_string() } else { msg_text };
 
+                    // Multi-device: a message authored by ANY of our own devices is ours.
+                    let is_mine = super::resolver::same_identity(&sender_master, &local_peer_str);
+
                     // Persist channel message using sender's timestamp.
                     // INSERT OR IGNORE deduplicates via UNIQUE(server_id, channel_id, sender_id, timestamp, text).
                     let mut is_new = true;
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         match store.insert_channel_message(
-                            &sid, &cid, &peer_str, &msg_text, false, ts,
+                            &sid, &cid, &sender_master, &msg_text, is_mine, ts,
                             sig.as_deref(), pk.as_deref(), mid.as_deref(),
                             reply_to.as_deref(), file_id.as_deref(), order_us,
                         ) {
@@ -5120,7 +5122,7 @@ async fn handle_incoming_request(
                             .send(NetworkEvent::ChannelMessageReceived {
                                 server_id: sid,
                                 channel_id: cid,
-                                from_peer: peer_str.to_string(),
+                                from_peer: sender_master,
                                 text: msg_text,
                                 timestamp: ts,
                                 message_id: mid.unwrap_or_default(),
@@ -8429,8 +8431,6 @@ async fn handle_incoming_request(
             // Same-identity join: bypasses the gates anyway (the receiver's NSFW
             // gate is `!is_sibling`), so no twitch proof and nsfw pre-confirmed.
             pending_server_joins.insert(server_id.clone(), PendingJoin { twitch_proof_json: None, nsfw_confirmed: true });
-            let _ = sig_cmd_tx.send(SignalingCmd::SetRoom { room_code: server_id.clone() }).await;
-            let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap { room_code: server_id.clone() }).await;
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: server_id.clone() });
             send_message_to_peer(
                 ws_cmd_tx, ws_room_peers,
@@ -9587,12 +9587,6 @@ async fn handle_incoming_request(
             let local_peer = local_peer_str.to_string();
             let req_master = super::resolver::resolve(&peer_str);
             let room = dm_room_code(&local_peer, &req_master);
-            let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
-                room_code: room.clone(),
-            }).await;
-            let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
-                room_code: room.clone(),
-            }).await;
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                 room_code: room,
             });
@@ -9646,12 +9640,6 @@ async fn handle_incoming_request(
             let local_peer = local_peer_str.to_string();
             let friend_master = super::resolver::resolve(&peer_str);
             let room = dm_room_code(&local_peer, &friend_master);
-            let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
-                room_code: room.clone(),
-            }).await;
-            let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
-                room_code: room,
-            }).await;
 
             // Push our profile + device list to the accepter while it's reachable, so it
             // learns our device→master mapping over the durable DM room (same reason as

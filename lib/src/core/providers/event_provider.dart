@@ -313,6 +313,11 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(peersProvider.notifier).addPeer(peer.peerId, peer.addresses);
         ref.read(connectionStatusProvider.notifier).onPeerConnected(peer.peerId);
 
+      case NetworkEvent_TurnCredentials(
+          :final username, :final password, :final uris):
+        ref.read(iceConfigProvider.notifier).setTurnCredentials(
+            username: username, password: password, uris: uris);
+
       case NetworkEvent_PeerExpired(:final peerId):
         ref.read(peersProvider.notifier).removePeer(peerId);
         ref.read(invisiblePeersProvider.notifier).removePeer(peerId);

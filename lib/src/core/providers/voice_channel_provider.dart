@@ -13,6 +13,7 @@ import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
@@ -49,8 +50,9 @@ class VoiceChannelState {
   /// Remote peer audio states (peer_id -> PeerAudioState).
   final Map<String, PeerAudioState> peerAudioStates;
 
-  /// Set of peer IDs currently speaking (VAD).
-  final Set<String> speakingPeers;
+  // NOTE: speaking (VAD) state deliberately lives in vcSpeakingProvider, NOT
+  // here — it changes 1-4x/sec per talker and replacing this state object
+  // rebuilt every voiceChannelProvider watcher (shell, panes, tiles) per flip.
 
   /// Per-peer volume overrides (peer_id -> 0.0-2.0).
   final Map<String, double> peerVolumes;
@@ -100,7 +102,6 @@ class VoiceChannelState {
     this.isMuted = false,
     this.isDeafened = false,
     this.peerAudioStates = const {},
-    this.speakingPeers = const {},
     this.peerVolumes = const {},
     this.voiceMode = 'mesh',
     this.gossipNeighbors = const {},
@@ -129,9 +130,6 @@ class VoiceChannelState {
     return peerAudioStates[peerId] ?? const PeerAudioState();
   }
 
-  /// Whether a peer is currently speaking (VAD).
-  bool isSpeaking(String peerId) => speakingPeers.contains(peerId);
-
   /// Get saved volume for a peer (default 1.0).
   double getPeerVolume(String peerId) => peerVolumes[peerId] ?? 1.0;
 
@@ -153,7 +151,6 @@ class VoiceChannelState {
     bool? isMuted,
     bool? isDeafened,
     Map<String, PeerAudioState>? peerAudioStates,
-    Set<String>? speakingPeers,
     Map<String, double>? peerVolumes,
     String? voiceMode,
     Set<String>? gossipNeighbors,
@@ -184,9 +181,6 @@ class VoiceChannelState {
       peerAudioStates: clearCurrent
           ? const {}
           : (peerAudioStates ?? this.peerAudioStates),
-      speakingPeers: clearCurrent
-          ? const {}
-          : (speakingPeers ?? this.speakingPeers),
       peerVolumes: clearCurrent
           ? const {}
           : (peerVolumes ?? this.peerVolumes),
@@ -449,9 +443,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _service!.enhanceDynamic =
         await ref.read(voiceEnhanceDynamicProvider.future);
 
-    // Wire VAD callback.
+    // Wire VAD callback. Writes go to the dedicated vcSpeakingProvider (NOT
+    // VoiceChannelState) so a speaking flip only rebuilds the glow consumers,
+    // never every voiceChannelProvider watcher.
     _service!.onSpeakingChanged = (speaking) {
-      state = state.copyWith(speakingPeers: speaking);
+      ref.read(vcSpeakingProvider.notifier).set(speaking);
     };
 
     // Wire peer connected callback — send screen share offer once audio PC is ready.
@@ -766,6 +762,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       unawaited(Helper.setSpeakerphoneOn(false).catchError((_) {}));
     }
     state = state.copyWith(clearCurrent: true);
+    // Speaking state lives outside this state object — clear it with the rest.
+    ref.read(vcSpeakingProvider.notifier).reset();
   }
 
   void toggleMute() {

@@ -99,7 +99,7 @@ loop {
         Some(sig) = sig_event_rx.recv()    => { /* SignalingEvent (bootstrap peers) */ }
         Some(ws)  = ws_event_rx.recv()     => { /* WsEvent from relay client */ }
         _ = mls_batch_timer.tick()         => { /* MLS batch KeyPackage processing */ }
-        _ = rebootstrap_timer.tick()       => { /* Re-register with signaling (30s) */ }
+        _ = rebootstrap_timer.tick()       => { /* WS DiscoverPeers for all rooms + Olm sweep (30s) */ }
         _ = sync_dispatch_timer.tick()     => { /* Fan-out sync coordinator (100ms) */ }
         _ = stream_progress_timer.tick()   => { /* File transfer progress poll (500ms) */ }
         _ = rebalance_timer.tick()         => { /* Vault rebalance + retention (30 min) */ }
@@ -376,7 +376,13 @@ Two-phase processing per server:
 Result: N recovering peers = 2 total epoch advances instead of 2N.
 
 ### rebootstrap_timer (30 seconds)
-Re-registers with the signaling server for all rooms (active_room + all server_ids) to discover new peers.
+Sends `WsCommand::DiscoverPeers` for the active DM room + all server rooms — WS-native peer discovery over the live socket (the HTTP signaling task this used to re-register with was RETIRED 2026-07; the relay answers `discovered_peers` from its live room map). Also hosts the Olm session reconciliation sweep.
+
+### turn_refresh_timer (50 minutes)
+Sends `WsCommand::GetTurnCredentials` so long-lived sessions refresh TURN credentials (1h TTL) before expiry. A fresh set is also requested on every `WsEvent::Connected`; the resulting `WsEvent::TurnCredentials` is forwarded to Dart as `NetworkEvent::TurnCredentials` → `iceConfigProvider`.
+
+### mls_persist_timer (2 seconds)
+Flushes `mls_dirty` (RECEIVE-path MLS ratchet changes) via `persist_mls_state`. Receive-only by design: a regressed receive ratchet can ratchet forward after a crash, but SEND-path encrypts persist immediately inside `send_mls_broadcast*` (persist-on-encrypt rule — a send-side debounce was tried 2026-07 and wedged live messages with `TooDistantInThePast`; do not retry).
 
 ### sync_dispatch_timer (100ms)
 Checks `SyncCoordinator` for servers that have passed the 500ms collection window. Dispatches channel sync probes across peers (fan-out pattern). Uses plaintext `ChannelSyncRequest` instead of MLS `ChannelProbe` for reliability after reconnection.
@@ -407,9 +413,16 @@ Event-driven vault rebalance triggered by peer join/leave. Processes `rebalance_
 ### share_tick_timer (50ms)
 Drives Hollow Share scheduler. Chunk requests, Have rebroadcast every 10s, in-flight timeout/retry. Pauses chunk requests when `last_message_traffic` is recent (coexistence with messaging/voice).
 
-## Signaling Events
+## Signaling Events — REMOVED (2026-07)
 
-`sig_event_rx.recv()` receives `SignalingEvent::BootstrapPeers` or `SignalingEvent::Error`. Bootstrap peers that are not already visible via WS relay trigger `PeerDiscovered` events.
+The `sig_event_rx` select arm and the whole HTTP signaling task are gone (see `rust_networking.md` → "HTTP Signaling — RETIRED"). `PeerDiscovered` now comes from the WS `DiscoveredPeers` handler.
+
+## Off-Loop CPU Re-entry Commands (internal, never from FFI)
+
+Two CPU-heavy send paths hop off the event loop via `spawn_blocking` and RE-ENTER through `cmd_tx` so the dispatcher keeps processing messages/CRDT/call signaling meanwhile:
+
+- `NodeCommand::SendFileConverted(Box<SendFileConvertedPayload>)` — image WebP/GIF conversion result; `handle_send_file` offloads convertible images, `finish_send_file` resumes at the store/fan-out steps (non-image files go straight through inline).
+- `NodeCommand::VaultUploadPrepared(Box<VaultUploadPreparedPayload>)` — Reed-Solomon encode + local shard writes done on the blocking pool; `handle_vault_upload_prepared` resumes distribution/manifest broadcast. Failures emit `FileFailed`/`VaultUploadFailed` from the spawned task directly.
 
 ## Coordination Between WS, WebRTC, and Gossip
 

@@ -23,6 +23,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -1255,7 +1256,10 @@ class _VoiceParticipantRow extends ConsumerWidget {
       isDeafened = peerState.isDeafened;
     }
 
-    final speaking = vcState.isSpeaking(peerId);
+    // Membership-select: this row only rebuilds when ITS peer's speaking bit
+    // flips, not on every VAD change in the channel.
+    final speaking =
+        ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
     final isRemote = peerId != localPeerId;
     final isScreenSharing = peerId == localPeerId
         ? vcState.isScreenSharing

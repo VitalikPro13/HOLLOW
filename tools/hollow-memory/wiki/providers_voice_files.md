@@ -23,7 +23,7 @@ All fields are immutable; updates go through `copyWith()`.
 | `isMuted` | `bool` | `false` | Local mic muted. |
 | `isDeafened` | `bool` | `false` | Local deafened (muted + no audio output). |
 | `peerAudioStates` | `Map<String, PeerAudioState>` | `{}` | Remote peer mute/deafen state, keyed by peer_id. |
-| `speakingPeers` | `Set<String>` | `{}` | Peer IDs currently speaking (VAD detection from service). |
+| (speaking) | — | — | MOVED (2026-07): speaking peers live in `vcSpeakingProvider` (`speaking_provider.dart`, Set<String> with setEquals guard) so 1-4Hz VAD flips don't rebuild every voiceChannelProvider watcher. Reset alongside `clearCurrent`. |
 | `peerVolumes` | `Map<String, double>` | `{}` | Per-peer volume overrides, 0.0-2.0 range (default 1.0). |
 | `voiceMode` | `String` | `'mesh'` | Current topology: `"mesh"` (direct PCs to all) or `"gossip"` (PCs to neighbors only). |
 | `gossipNeighbors` | `Set<String>` | `{}` | Peer IDs of gossip neighbors (gossip mode only). |
@@ -41,7 +41,7 @@ All fields are immutable; updates go through `copyWith()`.
 - `getParticipants(serverId, channelId)` -- returns `Set<String>` of peer IDs in a specific channel.
 - `isInVoiceChannel` -- true if `currentChannelId != null`.
 - `getPeerAudioState(peerId)` -- returns `PeerAudioState` (defaults to unmuted/undeafened).
-- `isSpeaking(peerId)` -- whether peer is in `speakingPeers`.
+- (speaking checks: `ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)))` — no longer on VoiceChannelState.)
 - `getPeerVolume(peerId)` -- returns saved volume or 1.0.
 - `isScreenShareActive` -- true if any local or remote screen share is active.
 - `isCameraActive` -- true if any local or remote camera is active.
@@ -96,7 +96,7 @@ Called by event_provider after the Rust event arrives. This is the real initiali
 4. Loads audio quality preset (bitrate, stereo) from `audioQualityProvider`.
 5. Loads mic gain from `micGainProvider` (default 1.0 = "50%", key `mic_gain_v2`) plus `voiceEnhanceProvider` / `voiceEnhanceStrengthProvider` (→ `enhanceStrengthToMakeupDb`) / `voiceEnhanceDynamicProvider` into the service fields. Adds `ref.listen` on all four for live mid-session updates (`updateMicGain` / `updateVoiceEnhance` / `updateVoiceEnhanceStrength` / `updateVoiceEnhanceDynamic`).
 6. Wires service callbacks:
-   - `onSpeakingChanged` -- updates `speakingPeers` in state.
+   - `onSpeakingChanged` -- writes `vcSpeakingProvider` (NOT state — see speaking_provider.dart).
    - `onPeerConnected` -- when an audio PC connects, sends screen share offer if local is sharing (deferred send to ensure MLS is ready).
    - `onRemoteVideoChanged` -- manages `_remoteCameraRenderers` map and updates `peerCameraOn` state.
 6. Calls `_service.startAudio(serverId, channelId)`.
@@ -257,7 +257,7 @@ Manages 1:1 DM calls (audio and video) with a single remote peer. Uses `VoiceSer
 | `remoteVideoEnabled` | `bool` | `false` | Remote peer's camera on. Set ONLY by `_handleVideoState`, never by `onRemoteVideoTrack`. |
 | `remoteVideoTrackSeq` | `int` | `0` | Bumped when a remote video renderer becomes ready (and by `_handleVideoState`'s timed re-pokes). The renderer lives OUTSIDE this state on VoiceService — without the bump the UI never rebuilds when the track arrives after the `video_state` signal and the remote camera stays invisible. |
 | `isVideoCall` | `bool` | `false` | Whether this was initiated as a video call. |
-| `isLocalSpeaking` | `bool` | `false` | Local mic VAD — updated every 200ms from `VoiceService`. |
+| (speaking) | — | — | MOVED (2026-07): local/remote speaking live in `callSpeakingProvider` (`speaking_provider.dart`, record of 2 bools) — VAD flips no longer rebuild every callProvider watcher. |
 | `isRemoteSpeaking` | `bool` | `false` | Remote peer VAD — updated every 200ms from `VoiceService`. |
 | `isScreenSharing` | `bool` | `false` | Local is sharing screen. |
 | `remoteScreenSharing` | `bool` | `false` | Remote is sharing screen. |
@@ -293,7 +293,7 @@ The `_service` getter lazily creates `VoiceService` with `localPeerId` and `iceC
 - `onConnected(peerId)` -- transitions state from `connecting` to `active`, sets `startedAt`, schedules stats dump, starts VAD (`_voiceService.startVad()`), wires `onSpeakingChanged` callback. For video calls: auto-enables camera after 300ms delay (proven mid-call addTrack/renegotiate path).
 - `onDisconnected(peerId)` -- sends `end` signal, calls `_cleanup()`.
 - `onRemoteVideoTrack(peerId)` -- prepares the renderer but does NOT set `remoteVideoEnabled`. On mobile, SDP negotiation creates video transceivers even for audio-only calls, triggering this callback spuriously. `remoteVideoEnabled` is set exclusively by `_handleVideoState` (explicit `video_state` signal).
-- `onSpeakingChanged(local, remote)` -- updates `isLocalSpeaking`/`isRemoteSpeaking` in state (wired in `onConnected`).
+- `onSpeakingChanged(local, remote)` -- writes `callSpeakingProvider` (no status gate; stopVad's (false,false) resets it).
 
 `_ensureDevicePreferences()` -- awaits async device preference providers before starting media. Called before `createOffer` and `handleOffer` to ensure correct device selection.
 

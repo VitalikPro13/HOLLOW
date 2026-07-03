@@ -1612,6 +1612,13 @@ pub(crate) fn send_mls_broadcast(
     let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
     let ciphertext = mls.encrypt(server_id, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
+    // MLS rule: persist on encrypt — SEND-side ratchet state must never be
+    // debounced. A receive ratchet that regresses (app killed before a
+    // deferred flush) can ratchet FORWARD again, but a regressed send ratchet
+    // re-uses generations receivers already consumed → every live message
+    // fails with SecretTreeError(TooDistantInThePast) on the other side.
+    // (Tried a 2s debounce here 2026-07; it wedged live channel messages
+    // from mobile senders exactly this way. Do not retry.)
     persist_mls_state(mls, crypto_store);
     let msg = HavenMessage::MlsChannelMessage {
         server_id: server_id.to_string(),
@@ -1659,6 +1666,8 @@ pub(crate) fn send_mls_broadcast_topic(
     let json = serde_json::to_string(envelope).map_err(|e| format!("serialize: {e}"))?;
     let ciphertext = mls.encrypt(&group_key, json.as_bytes()).map_err(|e| format!("encrypt: {e}"))?;
     let body_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
+    // MLS rule: persist on encrypt — send-side ratchet state must never be
+    // debounced (see send_mls_broadcast for the full why).
     persist_mls_state(mls, crypto_store);
     let msg = HavenMessage::MlsChannelMessage {
         server_id: server_id.to_string(),

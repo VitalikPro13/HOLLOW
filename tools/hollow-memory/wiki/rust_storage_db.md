@@ -2,11 +2,15 @@
 
 Source files: `rust/hollow_core/src/storage/messages.rs` (3154 lines), `rust/hollow_core/src/identity/native_identity.rs`, `rust/hollow_core/src/identity/keys.rs`
 
-The `MessageStore` is the sole local persistence layer. It wraps a single `rusqlite::Connection` to an encrypted SQLCipher database. The `PRAGMA key` is set as hex before any table creation. All tables are created in `MessageStore::open()` with incremental `ALTER TABLE ADD COLUMN` migrations that silently ignore already-existing columns via `.unwrap_or(())`.
+The `MessageStore` is the sole local persistence layer. It wraps a single `rusqlite::Connection` to an encrypted SQLCipher database. The `PRAGMA key` is set as hex before any table creation. All schema DDL lives in `MessageStore::init_schema()` with incremental `ALTER TABLE ADD COLUMN` migrations that silently ignore already-existing columns via `.unwrap_or(())`.
 
 ## MessageStore Initialization and Encryption
 
-`messages.rs:MessageStore::open(path, passphrase)` opens the SQLCipher DB and sets the encryption key using hex format: `PRAGMA key = "x'{hex_passphrase}'"`. All `CREATE TABLE` and migration `ALTER TABLE` statements execute sequentially in this constructor. Returns `MessageStore { conn }`.
+`messages.rs:MessageStore::open(path, passphrase)` opens the SQLCipher DB and sets the encryption key using hex format: `PRAGMA key = "x'{hex_passphrase}'"`. Returns `MessageStore { conn }`.
+
+**Schema-once gate (2026-07 perf):** the ~25 CREATE TABLE + ~40 ALTER + indexes + FTS triggers used to replay on EVERY open (~139 transient call sites, milliseconds per message). `open()` now runs `init_schema()` once per process per DB path — a static `Mutex<HashSet<String>>` memo PLUS a one-row `sqlite_master` probe for the `messages` table (the probe catches a wipe/test that deletes the DB file and re-opens the same path; the memo alone skipped DDL on the fresh file and broke 7 unit tests). A fresh process after an app update still self-heals new columns on first open. Subsequent opens are just key + pragmas.
+
+**Batched settings read:** `load_settings_with_prefix(prefix)` returns all `app_settings` rows in `[prefix, prefix||0xff)` via one indexed range query; FFI `loadSettingsWithPrefix` — startup hydration of `notif:*` and `seen:*` is 2 calls instead of one serial `loadSetting` per server/channel/DM.
 
 The passphrase is derived from the user's Ed25519 secret key (see identity section). The DB file lives at `{data_dir}/messages.db`.
 

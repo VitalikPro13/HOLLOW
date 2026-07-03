@@ -146,6 +146,13 @@ Future<void> _initCrashLogging() async {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Release builds: debugPrint is a real print on every platform, and the
+  // event dispatcher interpolates + prints per network event. Silence it —
+  // release diagnostics go through hollow_log!/logFromDart (hollow_debug.log).
+  if (kReleaseMode) {
+    debugPrint = (String? message, {int? wrapWidth}) {};
+  }
+
   registerRustLicenses();
 
   // Single-instance check — exit if another instance is running.

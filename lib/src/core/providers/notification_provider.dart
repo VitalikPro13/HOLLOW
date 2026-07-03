@@ -45,6 +45,10 @@ class NotificationSettingsNotifier
   NotificationSettingsState build() => const NotificationSettingsState();
 
   /// Load all notification settings from DB.
+  ///
+  /// One batched `notif:` prefix read — this used to issue a serial FFI
+  /// `loadSetting` per server, per channel, and per DM (hundreds of
+  /// round-trips sitting in front of the startup spinner).
   Future<void> loadAll(
       List<String> serverIds, Map<String, List<String>> channelIds,
       List<String> dmPeerIds) async {
@@ -52,16 +56,23 @@ class NotificationSettingsNotifier
     final channelLevels = <String, ChannelNotificationLevel>{};
     final dmEnabled = <String, bool>{};
 
+    final stored = <String, String>{};
+    try {
+      for (final e
+          in await storage_api.loadSettingsWithPrefix(prefix: 'notif:')) {
+        stored[e.key] = e.value;
+      }
+    } catch (_) {
+      // Store not open / transient FFI error — fall through with defaults.
+    }
+
     for (final sid in serverIds) {
-      final val = await storage_api.loadSetting(key: 'notif:$sid');
-      serverLevels[sid] = _parseServerLevel(val);
+      serverLevels[sid] = _parseServerLevel(stored['notif:$sid']);
     }
 
     for (final entry in channelIds.entries) {
       for (final cid in entry.value) {
-        final val = await storage_api.loadSetting(
-            key: 'notif:${entry.key}:$cid');
-        final level = _parseChannelLevel(val);
+        final level = _parseChannelLevel(stored['notif:${entry.key}:$cid']);
         if (level != ChannelNotificationLevel.inherit) {
           channelLevels['${entry.key}:$cid'] = level;
         }
@@ -69,8 +80,7 @@ class NotificationSettingsNotifier
     }
 
     for (final peerId in dmPeerIds) {
-      final val = await storage_api.loadSetting(key: 'notif:dm:$peerId');
-      dmEnabled[peerId] = val != 'false'; // Default true.
+      dmEnabled[peerId] = stored['notif:dm:$peerId'] != 'false'; // Default true.
     }
 
     state = NotificationSettingsState(

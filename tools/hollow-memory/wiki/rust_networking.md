@@ -236,71 +236,18 @@ Returned when all bytes received:
 
 ---
 
-## signaling.rs — Bootstrap Peer Discovery
+## HTTP Signaling — RETIRED (2026-07)
 
-File: `rust/hollow_core/src/node/signaling.rs`
+`node/signaling.rs` (HTTP register/heartbeat/bootstrap against the relay) was **deleted** in July 2026. Peer discovery is fully WS-native:
 
-### Purpose
+- **Join-time**: joining a WS room returns the authoritative `Members` snapshot and live `PeerJoined`/`PeerLeft` events.
+- **Periodic**: the swarm's 30s re-bootstrap timer sends `WsCommand::DiscoverPeers { room_code }` for the active DM room + every server room; the relay answers `discovered_peers` from its live room map (one map lookup, no fresh TLS handshake — the HTTP poll's handshake could stall under WS bursts and produced the perennial "[HOLLOW-SIGNALING] Bootstrap failed, non-fatal" noise).
 
-HTTP-based peer registration and discovery against the relay server. Peers register themselves when joining a room, send heartbeats to stay listed, and bootstrap by querying the relay for other registered peers. All requests are Ed25519-signed to prevent spoofing. The signaling URL is passed as a parameter from `spawn_node()` (constructed from the configurable relay domain, e.g. `https://relay.anonlisten.com`).
+The relay KEEPS its `/register`, `/unregister`, `/bootstrap/:room_code` HTTP endpoints for pre-2026-07 clients only; current clients never call them. The retired register heartbeat had registered an EMPTY address list anyway (a libp2p multiaddr leftover), so the HTTP path carried no unique information.
 
-### Constants
+### TURN credentials over WS (same change set)
 
-- `HEARTBEAT_INTERVAL` = 120 seconds — must be less than the relay's 3-minute stale threshold
-
-### Commands and Events
-
-**SignalingCmd** (swarm -> signaling task):
-- `Bootstrap { room_code }` — fetch peers for a room
-- `SetRoom { room_code }` — set active room for heartbeat registration
-- `Unregister { room_code }` — unregister from a room and stop heartbeat
-
-**SignalingEvent** (signaling task -> swarm):
-- `BootstrapPeers { peers: Vec<BootstrapPeer> }` — discovered peers with IDs and addresses
-- `Error { message }` — any failure
-
-**BootstrapPeer**: `peer_id: String`, `addresses: Vec<String>`
-
-### Background Task
-
-`signaling.rs:spawn_signaling_task()` — takes `NativeKeypair` + `peer_id_str`, returns `(Sender<SignalingCmd>, Receiver<SignalingEvent>)`. Spawns `signaling_loop()`.
-
-`signaling.rs:signaling_loop()`:
-- `reqwest::Client` for HTTP
-- Encodes public key as base64 protobuf (`keypair.public_key_protobuf()`)
-- Tracks `active_room: Option<String>` and `active_addrs: Vec<String>`
-- `tokio::select!` on command channel and 120s heartbeat timer
-- On `SetRoom` — stores room for heartbeat
-- On `Bootstrap` — calls `do_bootstrap()`
-- On `Unregister` — calls `do_unregister()`, clears `active_room`
-- On heartbeat tick — if `active_room` is Some, calls `do_register()` to re-register (keeps entry fresh)
-
-### HTTP Endpoints
-
-**POST /register** — `signaling.rs:do_register()`
-- Payload: `RegisterPayload { room_code, peer_id, addresses (max 5), timestamp, public_key (base64), signature (base64) }`
-- Signature payload: `"hollow-register:{room_code}:{peer_id}:{addresses_joined}:{timestamp}"`
-- 10-second HTTP timeout
-- Addresses are comma-joined for the signature string, capped at 5
-
-**POST /unregister** — `signaling.rs:do_unregister()`
-- Payload: `UnregisterPayload { room_code, peer_id, timestamp, public_key (base64), signature (base64) }`
-- Signature payload: `"hollow-unregister:{room_code}:{peer_id}:{timestamp}"`
-- 10-second HTTP timeout
-
-**GET /bootstrap/{room_code}** — `signaling.rs:do_bootstrap()`
-- URL-encodes the room_code via `urlencoding_encode()` (custom percent-encoding for path safety)
-- 10-second HTTP timeout
-- Response: `BootstrapResponse { peers: Vec<BootstrapPeerWire { peer_id, addresses }> }`
-- Maps wire type to `BootstrapPeer`
-
-### URL Encoding
-
-`signaling.rs:urlencoding_encode()` — manual percent-encoding. Preserves `A-Z a-z 0-9 - _ . ~`, percent-encodes everything else as `%XX`. No external dependency.
-
-### Integration with Room Discovery
-
-Signaling is the HTTP complement to the WS relay. The WS relay handles real-time room membership (`PeerJoined`/`PeerLeft`/`Members`), while signaling provides out-of-band bootstrap for peers that haven't joined the WS room yet. The heartbeat keeps the registration alive; the relay's server-side stale timeout (3 minutes) automatically removes dead registrations.
+TURN credentials also moved off HTTP: `WsCommand::GetTurnCredentials` → relay `get_turn_credentials` (guest sockets get an error; the credentials sit behind relay auth instead of an open farmable endpoint) → `ServerMsg::TurnCredentials { username, password, ttl, uris }` → `WsEvent::TurnCredentials` → `NetworkEvent::TurnCredentials` → Dart `iceConfigProvider.setTurnCredentials()`. Rust owns the refresh cadence: a request on every `WsEvent::Connected` plus a 50-minute `turn_refresh_timer` (credentials last 1h). This replaced the Dart HTTP fetch whose retry chain dead-ended on a single non-200 (calls silently degraded to STUN-only until app restart). The relay keeps HTTP `/turn-credentials` for old clients.
 
 ---
 
@@ -731,11 +678,11 @@ Error messages include the channel name for user-friendly display.
 
 ### Peer Discovery Flow
 
-1. Swarm sends `SignalingCmd::SetRoom` to start heartbeat registration
-2. Swarm sends `SignalingCmd::Bootstrap` to discover peers
-3. `signaling.rs:do_bootstrap()` returns `BootstrapPeers`
-4. Simultaneously, `ws_client.rs` receives `WsEvent::PeerJoined`/`WsEvent::RoomMembers` from the relay
-5. Both sources feed into the swarm's peer tracking (`ws_room_peers`, `synced_peers`)
+1. Joining a WS room returns the authoritative `Members` snapshot; live `PeerJoined`/`PeerLeft` events follow
+2. The swarm's 30s re-bootstrap timer sends `WsCommand::DiscoverPeers` for the active DM room + all server rooms
+3. The relay answers `discovered_peers` from its live room map; the swarm emits `PeerDiscovered` for peers not already tracked
+4. All sources feed the swarm's peer tracking (`ws_room_peers`, `synced_peers`)
+5. (HTTP signaling register/bootstrap RETIRED 2026-07 — see the HTTP Signaling section)
 
 ### Gossip Overlay Lifecycle
 

@@ -242,12 +242,19 @@ class StatusNotifier extends Notifier<StatusState> {
 
   Future<bool> refresh() async => _doFetch();
 
+  /// Raw JSON of the last applied feed — the file changes rarely (monthly),
+  /// so identical polls skip the state write entirely instead of rebuilding
+  /// the banner + home card every 60s.
+  String? _lastAppliedJson;
+
   Future<bool> _doFetch() async {
     try {
       final bustCache = DateTime.now().millisecondsSinceEpoch;
       final json = await updater_api.fetchVersionManifest(
           manifestUrl: '$kStatusUrl?t=$bustCache');
+      if (json == _lastAppliedJson && state.hasFetched) return true;
       final decoded = jsonDecode(json) as Map<String, dynamic>;
+      _lastAppliedJson = json;
       state = state.copyWith(
         status: SystemStatus.fromJson(decoded),
         hasFetched: true,
@@ -256,7 +263,10 @@ class StatusNotifier extends Notifier<StatusState> {
     } catch (_) {
       // Any failure (offline, 404, malformed) → stay healthy + silent. Never
       // surface an error as a banner.
-      state = state.copyWith(status: SystemStatus.healthy, hasFetched: true);
+      _lastAppliedJson = null;
+      if (!(state.hasFetched && identical(state.status, SystemStatus.healthy))) {
+        state = state.copyWith(status: SystemStatus.healthy, hasFetched: true);
+      }
       return false;
     }
   }

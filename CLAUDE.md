@@ -26,7 +26,7 @@ HOLLOW/
 │       ├── api/          # FFI layer (flutter_rust_bridge scans these)
 │       ├── node/         # swarm.rs (event-loop dispatcher) + focused modules: types, crypto_handler,
 │       │                 # sync_handler, message_ops, social, vault_ops, file_handler, voice_handler,
-│       │                 # gossip_relay, gossip, ws_client, ws_stream_transfer, signaling, file_transfer,
+│       │                 # gossip_relay, gossip, ws_client, ws_stream_transfer, file_transfer,
 │       │                 # recovery_pool, twitch, image_convert, link_preview, link_handler, crdt_store,
 │       │                 # test_harness (cfg(test))
 │       ├── crypto/       # Olm + MLS + persistence (store.rs = CryptoStore)
@@ -100,7 +100,8 @@ All UI uses custom Hollow widgets — no Material defaults: **HollowPressable** 
 - **CRITICAL — backward-compatible DB schema:** ALWAYS add `#[serde(default)]` to ANY new field on a persisted Rust struct — else old data fails to deserialize and silently vanishes (servers disappear).
 - **CRITICAL — flutter_webrtc native input selection (audio AND video) uses `sourceId`:** `{'optional': [{'sourceId': deviceId}], ...}` — `{'deviceId': ...}` is silently ignored.
 - **CRITICAL — server switching batches provider writes atomically:** `channelListProvider`, `channelLayoutProvider`, `selectedServerProvider`, `selectedChannelProvider` update in ONE synchronous block (canonical: `server_strip.dart:_selectServer`).
-- **CRITICAL — TURN ICE config:** map each TURN URI to its OWN `IceServer` entry (native `CreateIceServers` has one `uri` per struct).
+- **CRITICAL — TURN ICE config:** each TURN URI = its OWN `IceServer` entry (native has one `uri` per struct). Credentials arrive via the authed WS (`NetworkEvent::TurnCredentials` → `iceConfigProvider`) — never re-add a Dart HTTP fetch. HTTP signaling is RETIRED; WS `discover_peers` is discovery.
+- **CRITICAL — VAD/speaking state lives in `speaking_provider.dart`**, NEVER in CallState/VoiceChannelState (a flip rebuilt the shell 1-4x/sec); consumers select membership. MLS send-path encrypts persist IMMEDIATELY — never debounce (`feedback_mls_patterns`).
 - **CRITICAL — MLS epoch staleness:** sync requests use plaintext `HavenMessage`; CRDT broadcast falls back to plaintext on MLS failure. All 8 MLS rules in `feedback_mls_patterns`.
 - **CRITICAL — WS send failures trigger reconnection:** `send_command()` (ws_client.rs) returns `bool`; on false the main loop breaks, pushes the command to `pending_commands`, reconnects. Never silently discard send errors.
 - **CRITICAL — mobile selection providers cleared in `.then()`, not `dispose()`.** See `feedback_mobile_ui_patterns` for all mobile rules.

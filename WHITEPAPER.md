@@ -920,9 +920,9 @@ A further direct frame type carries an Olm-encrypted file header with inlined, e
 For peers behind symmetric NATs, the relay provides time-limited TURN credentials:
 
 - HMAC-SHA1 credentials with 1-hour TTL.
-- Generated via a `/turn-credentials` HTTP endpoint.
+- Delivered over the client's **authenticated relay WebSocket** (a `get_turn_credentials` request on the live connection). Only authenticated peers can obtain credentials — unauthenticated and guest connections are refused, so relay bandwidth cannot be farmed anonymously. A legacy HTTP endpoint remains only for older clients.
 - The TURN server (coturn) validates credentials against the same shared secret.
-- Clients auto-refresh credentials every 50 minutes.
+- Clients request fresh credentials on every relay (re)connection and refresh every 50 minutes, so retries inherit the connection's own reconnect machinery.
 
 ### 12.7 What the Relay Sees
 

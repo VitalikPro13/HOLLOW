@@ -867,6 +867,15 @@ Muted badge = bottom-LEFT, deafened badge = bottom-RIGHT (red box, white icon, `
 ### PiP drag bounds
 Both screens clamp the camera PiP to `dy: 0..(screenHeight - 260)` (was hard-coded 400 — PiP got stuck mid-screen on tall phones).
 
+### Drag-to-minimize (2026-07)
+Both call screens are wrapped in `MobileSheetDragToMinimize` (`mobile_sheet_drag.dart`): swipe down anywhere pulls the sheet with the finger (chat visible behind), release past 30% or a downward fling pops the route (status strip/pill remains), otherwise it springs back. Mechanism = Cupertino back-swipe vertically: `onVerticalDrag*` drives the enclosing route's `TransitionRoute.controller` (`// ignore: invalid_use_of_protected_member` — no public API), guarded on `route.isCurrent && animation.isCompleted`, with `navigator.didStart/StopUserGesture`. Zero paint cost at rest (routes stay opaque); the labeled Minimize chevron remains the accessible path. Descendant gestures (InteractiveViewer pinch, PiP pan, buttons) win the arena where present.
+
+### Speaking state + duration (2026-07 perf)
+VAD speaking flags live in `speaking_provider.dart` (`callSpeakingProvider` record, `vcSpeakingProvider` Set) — NOT in CallState/VoiceChannelState (a flip used to rebuild both whole call Scaffolds 1-4x/sec). The avatar clusters are wrapped in scoped `Consumer`s watching those providers. Call/VC duration renders via `CallDurationText` (`ui/components/call_duration_text.dart`), a self-ticking leaf Text — the old per-second `setState` rebuilt the entire screen (and kept ticking while backgrounded). `_statusText`'s active branch returns '' (the duration widget takes over).
+
+### Settings-tab relay stats gate (2026-07)
+`relayStatsProvider` is autoDispose + lifecycle-gated; `_MobileOnlineCounter` and `_AboutTab` watch it ONLY while `mobileTabProvider == 3` (all four tabs stay mounted, so an ungated watch would poll from launch). Leaving the tab drops the last listener → poll timer disposes; re-entering re-creates it (immediate fetch).
+
 ## Mobile UX Hardening (2026-06)
 
 One-pass fixes from the production-readiness audit:

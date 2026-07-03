@@ -399,6 +399,27 @@ pub fn load_setting(key: String) -> Result<Option<String>, String> {
     ms.load_setting(&key)
 }
 
+/// A single settings row for the batched prefix load.
+pub struct SettingEntry {
+    pub key: String,
+    pub value: String,
+}
+
+/// Load ALL settings whose key starts with `prefix` in ONE call — replaces
+/// the per-key startup scans (`notif:*`, `seen:*`) that cost one FFI
+/// round-trip per server/channel/DM.
+#[frb]
+pub fn load_settings_with_prefix(prefix: String) -> Result<Vec<SettingEntry>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    Ok(ms
+        .load_settings_with_prefix(&prefix)?
+        .into_iter()
+        .map(|(key, value)| SettingEntry { key, value })
+        .collect())
+}
+
 // ── Verified Peers (RAT Files) ──────────────────────────────────
 
 /// Mark a peer as identity-verified (fingerprint confirmed in person).

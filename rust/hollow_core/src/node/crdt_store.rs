@@ -7,9 +7,20 @@ use crate::storage::MessageStore;
 pub(crate) enum CrdtStoreCmd {
     InsertOp(CrdtOp),
     SaveState { server_id: String, state_json: String },
+    /// Like SaveState, but carries a lean state clone and defers the JSON
+    /// serialization to the actor thread at drain time — a burst of N CRDT
+    /// ops costs N cheap clones and exactly ONE serialize per server.
+    SaveStateSnapshot { server_id: String, state: Box<crate::crdt::server_state::ServerState> },
     SaveBlob { server_id: String, key: String, value: String },
     DeleteServer(String),
     PruneOps(usize),
+}
+
+/// A batched pending state save: either pre-serialized JSON (legacy path) or
+/// a snapshot serialized once at flush.
+enum PendingState {
+    Json(String),
+    Snapshot(Box<crate::crdt::server_state::ServerState>),
 }
 
 /// A fire-and-forget persistence actor for CRDT state.
@@ -38,7 +49,7 @@ impl CrdtStore {
                 }
             };
 
-            let mut pending_states: HashMap<String, String> = HashMap::new();
+            let mut pending_states: HashMap<String, PendingState> = HashMap::new();
             let mut pending_blobs: HashMap<(String, String), String> = HashMap::new();
 
             while let Some(cmd) = cmd_rx.blocking_recv() {
@@ -52,8 +63,19 @@ impl CrdtStore {
                     Self::process_cmd(&store, cmd, &mut pending_states, &mut pending_blobs);
                 }
 
-                // Flush batched state saves (one write per server)
-                for (sid, json) in pending_states.drain() {
+                // Flush batched state saves (one write per server; snapshots
+                // serialize HERE — once per drain, on this blocking thread)
+                for (sid, pending) in pending_states.drain() {
+                    let json = match pending {
+                        PendingState::Json(j) => j,
+                        PendingState::Snapshot(s) => match serde_json::to_string(&*s) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                hollow_log!("CrdtStore: failed to serialize state for {sid}: {e}");
+                                continue;
+                            }
+                        },
+                    };
                     if let Err(e) = store.save_server_state(&sid, &json) {
                         hollow_log!("CrdtStore: failed to save state for {sid}: {e}");
                     }
@@ -74,7 +96,7 @@ impl CrdtStore {
     fn process_cmd(
         store: &MessageStore,
         cmd: CrdtStoreCmd,
-        pending_states: &mut HashMap<String, String>,
+        pending_states: &mut HashMap<String, PendingState>,
         pending_blobs: &mut HashMap<(String, String), String>,
     ) {
         match cmd {
@@ -85,7 +107,10 @@ impl CrdtStore {
             }
             CrdtStoreCmd::SaveState { server_id, state_json } => {
                 // Keep only the latest state per server (batch)
-                pending_states.insert(server_id, state_json);
+                pending_states.insert(server_id, PendingState::Json(state_json));
+            }
+            CrdtStoreCmd::SaveStateSnapshot { server_id, state } => {
+                pending_states.insert(server_id, PendingState::Snapshot(state));
             }
             CrdtStoreCmd::SaveBlob { server_id, key, value } => {
                 pending_blobs.insert((server_id, key), value);
@@ -109,6 +134,17 @@ impl CrdtStore {
     /// Fire-and-forget: persist the latest server state JSON.
     pub fn save_state(&self, server_id: String, state_json: String) {
         let _ = self.cmd_tx.send(CrdtStoreCmd::SaveState { server_id, state_json });
+    }
+
+    /// Fire-and-forget: persist the latest server state from a lean snapshot,
+    /// serializing on the actor thread at drain time. Prefer this on per-op
+    /// paths — the event loop pays a cheap clone instead of a full JSON
+    /// serialize (which embeds the server avatar) per op.
+    pub fn save_state_snapshot(&self, server_id: String, state: &crate::crdt::server_state::ServerState) {
+        let _ = self.cmd_tx.send(CrdtStoreCmd::SaveStateSnapshot {
+            server_id,
+            state: Box::new(state.lean_snapshot()),
+        });
     }
 
     /// Fire-and-forget: persist a key-value blob for a server.

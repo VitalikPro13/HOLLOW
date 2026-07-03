@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -101,13 +102,22 @@ class LinkPreviewCard extends StatelessWidget {
     );
   }
 
+  /// Decoded-thumbnail cache keyed by the base64 payload. Decoding per build
+  /// minted a NEW byte buffer each time, so `MemoryImage` never matched
+  /// Flutter's image cache and the WebP was re-decoded on every rebuild.
+  /// A stable byte identity makes the ImageCache hit.
+  static final Map<String, Uint8List> _thumbBytesCache = {};
+
   Widget _buildThumbnail(HollowTheme hollow) {
     final b64 = preview.thumbWebpB64;
     if (b64 == null || b64.isEmpty) {
       return const SizedBox.shrink();
     }
     try {
-      final bytes = base64Decode(b64);
+      final bytes = _thumbBytesCache.putIfAbsent(b64, () {
+        if (_thumbBytesCache.length > 128) _thumbBytesCache.clear();
+        return base64Decode(b64);
+      });
       return ClipRRect(
         borderRadius: BorderRadius.circular(hollow.radiusSm),
         child: Image.memory(

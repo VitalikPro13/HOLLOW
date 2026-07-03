@@ -437,29 +437,14 @@ On `build()`, state is immediately set to STUN-only config (covers ~85-90% of pe
 }
 ```
 
-TURN credential fetch is kicked off asynchronously during `build()`.
+### TURN Credentials over the Relay WS (2026-07 — replaced the HTTP fetch)
 
-### TURN Credential Fetching
+The provider no longer fetches anything itself. TURN credentials arrive over the AUTHENTICATED relay WebSocket: Rust sends `WsCommand::GetTurnCredentials` on every `WsEvent::Connected` plus a 50-minute `turn_refresh_timer` (credentials last 1h, HMAC-SHA1 time-limited); the relay's `get_turn_credentials` text-message handler answers (guest sockets rejected); the result flows `WsEvent::TurnCredentials` → `NetworkEvent::TurnCredentials` → the event dispatcher → `iceConfigProvider.setTurnCredentials(username, password, uris)`.
 
-`_fetchTurnCredentials()` makes an HTTP GET to `https://relay.anonlisten.com/turn-credentials`:
-
-1. Uses `HttpClient` with 5-second connection timeout.
-2. Expects HTTP 200 with JSON body: `{ "username": "...", "password": "...", "uris": ["turn:...", ...] }`.
-3. **Critical:** Each TURN URI becomes a SEPARATE `iceServer` entry. This is required because `flutter_webrtc`'s native C++ `CreateIceServers` has a single `uri` field per `IceServer` struct — a list of URLs gets overwritten to only the last one.
-4. Final state includes STUN servers (own coturn + Cloudflare + Google) plus individual TURN entries with credentials.
-5. Logs to `hollow_debug.log` via `network_api.logFromDart()`.
-
-### 50-Minute Auto-Refresh Cycle
-
-TURN credentials from coturn last 1 hour (HMAC-SHA1 time-limited). After a successful fetch:
-- Cancels any existing timer.
-- Schedules `_fetchTurnCredentials()` again in 50 minutes (`_kRefreshInterval`).
-
-On fetch failure:
-- Cancels any existing timer.
-- Retries in 30 seconds.
-
-Timer is cancelled on provider dispose via `ref.onDispose()`.
+- **Why:** the old Dart HTTP fetch's retry chain dead-ended on a single non-200 (only success re-armed the 50-min timer, only *exceptions* armed the 30s retry) — one 503 during a relay restart silently degraded calls to STUN-only until app restart. WS delivery inherits the reconnect machinery for free, and the credentials sit behind relay auth instead of an open endpoint.
+- `setTurnCredentials()` rebuilds state as STUN servers + TURN entries. **Critical (unchanged):** each TURN URI becomes a SEPARATE `iceServer` entry — `flutter_webrtc`'s native `CreateIceServers` has a single `uri` field per struct.
+- Logs `[HOLLOW-ICE] TURN credentials OK (WS)` to `hollow_debug.log`.
+- The relay keeps HTTP `/turn-credentials` for pre-2026-07 clients.
 
 ### Consumption by WebRTC Services
 

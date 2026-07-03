@@ -91,11 +91,14 @@ pub fn create_channel(
 ) -> Result<String, String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::CreateChannel {
+        cmd_tx.send(node::NodeCommand::CreateChannel {
             server_id,
             name,
             category,
@@ -112,11 +115,14 @@ pub fn create_channel(
 pub fn remove_channel(server_id: String, channel_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::RemoveChannel {
+        cmd_tx.send(node::NodeCommand::RemoveChannel {
             server_id,
             channel_id,
         }),
@@ -272,11 +278,14 @@ pub fn get_server_setting(server_id: String, key: String) -> Result<String, Stri
 pub fn rename_server(server_id: String, new_name: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::RenameServer {
+        cmd_tx.send(node::NodeCommand::RenameServer {
             server_id,
             new_name,
         }),
@@ -291,11 +300,14 @@ pub fn rename_server(server_id: String, new_name: String) -> Result<(), String> 
 pub fn rename_channel(server_id: String, channel_id: String, new_name: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::RenameChannel {
+        cmd_tx.send(node::NodeCommand::RenameChannel {
             server_id,
             channel_id,
             new_name,
@@ -311,11 +323,14 @@ pub fn rename_channel(server_id: String, channel_id: String, new_name: String) -
 pub fn update_server_setting(server_id: String, key: String, value: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::UpdateServerSetting {
+        cmd_tx.send(node::NodeCommand::UpdateServerSetting {
             server_id,
             key,
             value,
@@ -419,11 +434,14 @@ pub fn get_my_permissions(server_id: String) -> Result<u32, String> {
 pub fn change_member_role(server_id: String, peer_id: String, new_role: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::ChangeRole {
+        cmd_tx.send(node::NodeCommand::ChangeRole {
             server_id,
             peer_id,
             new_role,
@@ -440,11 +458,14 @@ pub fn change_member_role(server_id: String, peer_id: String, new_role: String) 
 pub fn kick_member(server_id: String, peer_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::KickMember {
+        cmd_tx.send(node::NodeCommand::KickMember {
             server_id,
             peer_id,
         }),
@@ -459,11 +480,14 @@ pub fn kick_member(server_id: String, peer_id: String) -> Result<(), String> {
 pub fn set_nickname(server_id: String, peer_id: String, nickname: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::SetNickname {
+        cmd_tx.send(node::NodeCommand::SetNickname {
             server_id,
             peer_id,
             nickname,
@@ -478,11 +502,14 @@ pub fn set_nickname(server_id: String, peer_id: String, nickname: String) -> Res
 pub fn set_twitch_username(server_id: String, peer_id: String, twitch_username: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::SetTwitchUsername {
+        cmd_tx.send(node::NodeCommand::SetTwitchUsername {
             server_id,
             peer_id,
             twitch_username,
@@ -499,11 +526,14 @@ pub fn set_twitch_username(server_id: String, peer_id: String, twitch_username: 
 pub fn update_channel_layout(server_id: String, layout_json: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::UpdateChannelLayout {
+        cmd_tx.send(node::NodeCommand::UpdateChannelLayout {
             server_id,
             layout_json,
         }),
@@ -537,11 +567,14 @@ pub fn get_channel_layout(server_id: String) -> Result<String, String> {
 pub fn pin_message(server_id: String, channel_id: String, message_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::PinMessage {
+        cmd_tx.send(node::NodeCommand::PinMessage {
             server_id,
             channel_id,
             message_id,
@@ -557,11 +590,14 @@ pub fn pin_message(server_id: String, channel_id: String, message_id: String) ->
 pub fn unpin_message(server_id: String, channel_id: String, message_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::UnpinMessage {
+        cmd_tx.send(node::NodeCommand::UnpinMessage {
             server_id,
             channel_id,
             message_id,
@@ -593,11 +629,14 @@ pub fn get_pinned_messages(server_id: String, channel_id: String) -> Result<Vec<
 pub fn delete_server(server_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::DeleteServer {
+        cmd_tx.send(node::NodeCommand::DeleteServer {
             server_id,
         }),
     )
@@ -611,9 +650,12 @@ pub fn delete_server(server_id: String) -> Result<(), String> {
 pub fn create_label(server_id: String, name: String, color: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::CreateLabel { server_id, name, color }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::CreateLabel { server_id, name, color }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
@@ -623,9 +665,12 @@ pub fn create_label(server_id: String, name: String, color: String) -> Result<()
 pub fn delete_label(server_id: String, label_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::DeleteLabel { server_id, label_id }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::DeleteLabel { server_id, label_id }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
@@ -635,9 +680,12 @@ pub fn delete_label(server_id: String, label_id: String) -> Result<(), String> {
 pub fn update_label(server_id: String, label_id: String, name: String, color: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::UpdateLabel { server_id, label_id, name, color }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::UpdateLabel { server_id, label_id, name, color }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
@@ -647,9 +695,12 @@ pub fn update_label(server_id: String, label_id: String, name: String, color: St
 pub fn assign_label(server_id: String, label_id: String, peer_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::AssignLabel { server_id, label_id, peer_id }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::AssignLabel { server_id, label_id, peer_id }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
@@ -659,9 +710,12 @@ pub fn assign_label(server_id: String, label_id: String, peer_id: String) -> Res
 pub fn unassign_label(server_id: String, label_id: String, peer_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::UnassignLabel { server_id, label_id, peer_id }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::UnassignLabel { server_id, label_id, peer_id }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
@@ -687,11 +741,14 @@ pub fn get_server_labels(server_id: String) -> Result<Vec<LabelFfi>, String> {
 pub fn set_channel_visibility(server_id: String, channel_id: String, visibility: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::SetChannelVisibility {
+        cmd_tx.send(node::NodeCommand::SetChannelVisibility {
             server_id,
             channel_id,
             visibility,
@@ -707,11 +764,14 @@ pub fn set_channel_visibility(server_id: String, channel_id: String, visibility:
 pub fn set_channel_posting(server_id: String, channel_id: String, posting: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::SetChannelPosting {
+        cmd_tx.send(node::NodeCommand::SetChannelPosting {
             server_id,
             channel_id,
             posting,
@@ -727,11 +787,14 @@ pub fn set_channel_posting(server_id: String, channel_id: String, posting: Strin
 pub fn set_channel_public(server_id: String, channel_id: String, is_public: bool) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::SetChannelPublic {
+        cmd_tx.send(node::NodeCommand::SetChannelPublic {
             server_id,
             channel_id,
             is_public,
@@ -748,11 +811,14 @@ pub fn set_channel_public(server_id: String, channel_id: String, is_public: bool
 pub fn request_public_channels(server_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::RequestPublicChannels { server_id }),
+        cmd_tx.send(node::NodeCommand::RequestPublicChannels { server_id }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
 
@@ -768,11 +834,14 @@ pub fn request_public_channel_sync(
 ) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::RequestPublicChannelSync {
+        cmd_tx.send(node::NodeCommand::RequestPublicChannelSync {
             server_id,
             channel_id,
             before_timestamp,
@@ -788,11 +857,14 @@ pub fn request_public_channel_sync(
 pub fn leave_guest_room(server_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::LeaveGuestRoom { server_id }),
+        cmd_tx.send(node::NodeCommand::LeaveGuestRoom { server_id }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
 
@@ -804,11 +876,14 @@ pub fn leave_guest_room(server_id: String) -> Result<(), String> {
 pub fn ban_member(server_id: String, peer_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::BanMember {
+        cmd_tx.send(node::NodeCommand::BanMember {
             server_id,
             peer_id,
         }),
@@ -823,11 +898,14 @@ pub fn ban_member(server_id: String, peer_id: String) -> Result<(), String> {
 pub fn unban_member(server_id: String, peer_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::UnbanMember {
+        cmd_tx.send(node::NodeCommand::UnbanMember {
             server_id,
             peer_id,
         }),
@@ -858,11 +936,14 @@ pub fn get_banned_members(server_id: String) -> Result<Vec<String>, String> {
 pub fn change_role_permissions(server_id: String, role: String, permissions: u32) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::ChangeRolePermissions {
+        cmd_tx.send(node::NodeCommand::ChangeRolePermissions {
             server_id,
             role,
             permissions,
@@ -895,11 +976,14 @@ pub fn get_role_permissions(server_id: String, role: String) -> Result<u32, Stri
 pub fn leave_server(server_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::LeaveServer {
+        cmd_tx.send(node::NodeCommand::LeaveServer {
             server_id,
         }),
     )
@@ -913,11 +997,14 @@ pub fn leave_server(server_id: String) -> Result<(), String> {
 pub fn set_storage_pledge(server_id: String, pledge_bytes: u64) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::SetStoragePledge {
+        cmd_tx.send(node::NodeCommand::SetStoragePledge {
             server_id,
             pledge_bytes,
         }),
@@ -1031,7 +1118,10 @@ pub fn get_vault_file_statuses(server_id: String) -> Result<Vec<VaultFileStatusF
 pub fn initiate_recovery_pool(server_id: String) -> Result<String, String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     // Generate random 16-char hex token.
     let mut token_bytes = [0u8; 8];
@@ -1043,7 +1133,7 @@ pub fn initiate_recovery_pool(server_id: String) -> Result<String, String> {
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::InitiateRecoveryPool {
+        cmd_tx.send(node::NodeCommand::InitiateRecoveryPool {
             server_id,
             token,
         }),
@@ -1073,11 +1163,14 @@ pub fn join_recovery_pool(invite_link: String) -> Result<(), String> {
 
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::JoinRecoveryPool {
+        cmd_tx.send(node::NodeCommand::JoinRecoveryPool {
             server_id,
             token,
         }),
@@ -1092,11 +1185,14 @@ pub fn join_recovery_pool(invite_link: String) -> Result<(), String> {
 pub fn stop_recovery_pool(server_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::StopRecoveryPool {
+        cmd_tx.send(node::NodeCommand::StopRecoveryPool {
             server_id,
         }),
     )
@@ -1111,11 +1207,14 @@ pub fn stop_recovery_pool(server_id: String) -> Result<(), String> {
 pub fn delete_vault_content(server_id: String, content_id: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::DeleteVaultContent {
+        cmd_tx.send(node::NodeCommand::DeleteVaultContent {
             server_id,
             content_id,
         }),
@@ -1212,11 +1311,14 @@ pub fn vault_download_file(server_id: String, content_id: String) -> Result<Stri
     // Not in cache — send command to swarm for reconstruction
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
 
     let rt = get_runtime();
     rt.block_on(
-        state.cmd_tx.send(node::NodeCommand::VaultDownloadFile {
+        cmd_tx.send(node::NodeCommand::VaultDownloadFile {
             server_id,
             content_id,
         }),

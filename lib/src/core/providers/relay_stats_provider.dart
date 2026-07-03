@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 
@@ -58,7 +59,14 @@ class RelayStats {
   }
 }
 
-class RelayStatsNotifier extends Notifier<RelayStats> {
+/// Demand-driven (autoDispose): the 7s poll runs ONLY while something
+/// actually watches this provider — it used to start at app launch and run
+/// forever (all four mobile tabs stay mounted), making it the worst mobile
+/// battery drain in the app. The mobile Settings tab gates its watch on the
+/// tab being the active one; leaving the tab drops the last listener, which
+/// disposes the notifier and cancels the timer. Re-entering re-creates it
+/// (immediate fetch + fresh timer).
+class RelayStatsNotifier extends AutoDisposeNotifier<RelayStats> {
   Timer? _timer;
   final HttpClient _client = HttpClient();
 
@@ -77,6 +85,15 @@ class RelayStatsNotifier extends Notifier<RelayStats> {
   }
 
   Future<void> _fetch() async {
+    // Skip polls while the app is backgrounded/hidden (a watcher can stay
+    // attached through a suspend). `inactive` still polls — a visible but
+    // unfocused desktop window should keep updating.
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle == AppLifecycleState.paused ||
+        lifecycle == AppLifecycleState.hidden ||
+        lifecycle == AppLifecycleState.detached) {
+      return;
+    }
     try {
       final domain = ref.read(relayDomainProvider);
       final url = 'https://$domain/server-stats';
@@ -118,4 +135,5 @@ class RelayStatsNotifier extends Notifier<RelayStats> {
 }
 
 final relayStatsProvider =
-    NotifierProvider<RelayStatsNotifier, RelayStats>(RelayStatsNotifier.new);
+    NotifierProvider.autoDispose<RelayStatsNotifier, RelayStats>(
+        RelayStatsNotifier.new);

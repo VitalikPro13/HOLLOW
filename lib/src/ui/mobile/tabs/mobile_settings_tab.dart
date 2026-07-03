@@ -19,6 +19,7 @@ import 'package:hollow/src/core/providers/news_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/relay_stats_provider.dart';
+import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/ui/settings/storage_section.dart';
@@ -259,7 +260,12 @@ class _MobileOnlineCounter extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final relayStats = ref.watch(relayStatsProvider);
+    // Poll gate: all four mobile tabs stay mounted, so only WATCH the relay
+    // stats while the Settings tab is the visible one — relayStatsProvider is
+    // autoDispose, so dropping the watch stops its 7s HTTP poll entirely.
+    final onSettingsTab = ref.watch(mobileTabProvider) == 3;
+    final relayStats =
+        onSettingsTab ? ref.watch(relayStatsProvider) : const RelayStats();
     return Row(
       children: [
         Icon(LucideIcons.users, size: 13, color: hollow.textSecondary),
@@ -4095,7 +4101,11 @@ class _AboutTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final relayStats = ref.watch(relayStatsProvider);
+    // Poll gate — see _MobileOnlineCounter: watch only while Settings is the
+    // active tab so the autoDispose stats poll stops when the user leaves.
+    final onSettingsTab = ref.watch(mobileTabProvider) == 3;
+    final relayStats =
+        onSettingsTab ? ref.watch(relayStatsProvider) : const RelayStats();
     final newsState = ref.watch(newsProvider);
     final relayDomain = ref.watch(relayDomainProvider);
     // Single source of truth for the app version — same as desktop About

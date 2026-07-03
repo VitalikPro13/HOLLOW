@@ -844,6 +844,18 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await ref.read(profileProvider.notifier).loadAll();
     await ref.read(friendsProvider.notifier).loadAll();
 
+    // Theme mode, accent color, background, presets, local nicknames, strip
+    // layout: pure DB reads. These used to run AFTER fetchRelayStatus (up to
+    // 5s) + node start — a slow relay meant seconds of wrong theme and no
+    // background image on a fully-local render.
+    await ref.read(themeModeProvider.notifier).load();
+    await ref.read(accentHueProvider.notifier).load();
+    await ref.read(backgroundProvider.notifier).load();
+    await ref.read(accentPresetsProvider.notifier).load();
+    await ref.read(localNicknameProvider.notifier).loadAll();
+    setLocalNicknamesRef(ref.read(localNicknameProvider));
+    await ref.read(serverStripLayoutProvider.notifier).loadLayout();
+
     // The conversation/server list is now populated from the local DB — drop
     // the "Unlocking…" spinner. The remaining network phase runs behind the
     // already-visible shell (local-first render).
@@ -890,8 +902,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // correct toggle/status).
     ref.read(invisibleModeProvider.notifier).load();
 
-    // Load server strip layout (folders + ordering).
-    await ref.read(serverStripLayoutProvider.notifier).loadLayout();
+    // (theme/accent/background/nicknames/strip layout already loaded in the
+    // local-first phase above, before the network calls.)
 
     // Load server avatars.
     final serverIds = ref.read(serverListProvider).keys.toList();
@@ -899,14 +911,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     // (profiles + friends + DM previews already loaded above in the local-first
     // render phase, before the network calls.)
-
-    // Load theme mode, accent color, background, local nicknames.
-    await ref.read(themeModeProvider.notifier).load();
-    await ref.read(accentHueProvider.notifier).load();
-    await ref.read(backgroundProvider.notifier).load();
-    await ref.read(accentPresetsProvider.notifier).load();
-    await ref.read(localNicknameProvider.notifier).loadAll();
-    setLocalNicknamesRef(ref.read(localNicknameProvider));
 
     // Load share entries so hollow://share cards in chat show correct state.
     ref.read(shareTabProvider.notifier).loadAll();
@@ -1563,12 +1567,19 @@ class _HollowShellState extends ConsumerState<HollowShell>
     required bool helpPanelOpen,
   }) {
     // Check if viewing a voice channel with active screen share (full-bleed mode).
-    final vcState = ref.watch(voiceChannelProvider);
+    // Field-tuple select: the whole SHELL used to rebuild on ANY voice-channel
+    // state change (mute, deafen, per-peer audio/camera maps). Only these
+    // three facts matter here.
+    final vc = ref.watch(voiceChannelProvider.select((s) => (
+          s.currentChannelId,
+          s.isInVoiceChannel,
+          s.isScreenShareActive || s.isCameraActive,
+        )));
     final selectedChannel = selectedChannelId != null ? channels[selectedChannelId] : null;
     final vcScreenShareFullBleed = selectedChannel?.channelType == ChannelType.voice
-        && vcState.isInVoiceChannel
-        && vcState.currentChannelId == selectedChannelId
-        && (vcState.isScreenShareActive || vcState.isCameraActive);
+        && vc.$2
+        && vc.$1 == selectedChannelId
+        && vc.$3;
 
     return StartupRevealScope(
       controller: _revealController,
@@ -1670,12 +1681,19 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final splitState = ref.watch(splitViewProvider);
 
     // Check if viewing a voice channel with active screen share (full-bleed mode).
-    final vcState = ref.watch(voiceChannelProvider);
+    // Field-tuple select: the whole SHELL used to rebuild on ANY voice-channel
+    // state change (mute, deafen, per-peer audio/camera maps). Only these
+    // three facts matter here.
+    final vc = ref.watch(voiceChannelProvider.select((s) => (
+          s.currentChannelId,
+          s.isInVoiceChannel,
+          s.isScreenShareActive || s.isCameraActive,
+        )));
     final selectedChannel = selectedChannelId != null ? channels[selectedChannelId] : null;
     final vcScreenShareFullBleed = selectedChannel?.channelType == ChannelType.voice
-        && vcState.isInVoiceChannel
-        && vcState.currentChannelId == selectedChannelId
-        && (vcState.isScreenShareActive || vcState.isCameraActive);
+        && vc.$2
+        && vc.$1 == selectedChannelId
+        && vc.$3;
 
     // Handle pending migration: when the left pane was closed in split mode,
     // the right pane's context needs to be applied to global providers.

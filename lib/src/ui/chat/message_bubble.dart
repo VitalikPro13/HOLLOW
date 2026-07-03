@@ -11,6 +11,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/file_attachment_widget.dart';
 import 'package:hollow/src/ui/chat/hollow_link_card.dart';
+import 'package:hollow/src/ui/chat/bubble_perf.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/link_preview_card.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
@@ -106,7 +107,7 @@ class MessageBubble extends ConsumerWidget {
               ],
             ),
           ),
-          if (replyToImagePath != null && File(replyToImagePath!).existsSync())
+          if (replyToImagePath != null && cachedFileExists(replyToImagePath!))
             Padding(
               padding: const EdgeInsets.only(left: HollowSpacing.sm),
               child: ClipRRect(
@@ -175,8 +176,11 @@ class MessageBubble extends ConsumerWidget {
           )
         : null;
 
-    final textForLinks = message.text.replaceAll(RegExp(r'```[\s\S]*?```'), '');
-    final hollowLinks = extractHollowLinks(textForLinks);
+    // Cheap contains() gate + hoisted regex — no per-row RegExp compile or
+    // full-text scan for the overwhelmingly common no-link case.
+    final hollowLinks = message.text.contains('hollow://')
+        ? extractHollowLinks(message.text.replaceAll(codeBlockRegex, ''))
+        : const <HollowLink>[];
     final hollowLinkWidgets = hollowLinks.isNotEmpty
         ? Column(
             crossAxisAlignment: CrossAxisAlignment.start,

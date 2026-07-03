@@ -8,7 +8,6 @@ use crate::crypto::MlsManager;
 use super::crypto_handler::{
     peer_is_reachable, send_mls_broadcast, send_message_to_peer, send_raw_to_peer,
 };
-use super::signaling::SignalingCmd;
 use super::types::*;
 
 /// The concrete, ONLINE device peer_ids to target when we want to reach a friend
@@ -56,7 +55,6 @@ pub(crate) async fn handle_send_friend_request(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     pending_friend_requests: &mut HashMap<String, i64>,
     pending_friend_removals: &mut std::collections::HashSet<String>,
     local_peer_str: &str,
@@ -109,12 +107,6 @@ pub(crate) async fn handle_send_friend_request(
     // f(masters)); a nickname-resolved device id would otherwise diverge the room.
     let local_peer = local_peer_str.to_string();
     let room = dm_room_code(&local_peer, &master);
-    let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
-        room_code: room.clone(),
-    }).await;
-    let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
-        room_code: room.clone(),
-    }).await;
     // Join WS relay room for this DM.
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
         room_code: room,
@@ -168,7 +160,6 @@ pub(crate) async fn handle_accept_friend_request(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     local_peer_str: &str,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
@@ -243,12 +234,6 @@ pub(crate) async fn handle_accept_friend_request(
     // diverge the room per-side).
     let local_peer = local_peer_str.to_string();
     let room = dm_room_code(&local_peer, &master);
-    let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
-        room_code: room.clone(),
-    }).await;
-    let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
-        room_code: room.clone(),
-    }).await;
     // Join WS relay room for this DM.
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
         room_code: room,

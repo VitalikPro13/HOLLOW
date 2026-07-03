@@ -12,13 +12,7 @@ use super::crypto_handler::{
     peer_is_reachable, send_message_to_peer, send_mls_broadcast,
     persist_mls_state, send_encrypted_message, send_raw_to_identity, online_devices_for,
 };
-use super::signaling::SignalingCmd;
 use super::types::*;
-
-/// Serialize ServerState for persistence.
-fn serialize_state_lean(state: &ServerState) -> Result<String, serde_json::Error> {
-    serde_json::to_string(state)
-}
 
 /// Multi-device (Step 6): fan pre-serialized bytes out to EVERY online device of
 /// EVERY server member except our own identity. Members are master-keyed and the
@@ -137,9 +131,7 @@ pub(crate) async fn handle_create_server(
 
     // Persist
     crdt_store.insert_op(op.clone());
-    if let Ok(json) = serialize_state_lean(&mut state) {
-        crdt_store.save_state(server_id.clone(), json);
-    }
+    crdt_store.save_state_snapshot(server_id.clone(), &state);
 
     server_states.insert(server_id.clone(), state);
 
@@ -159,9 +151,7 @@ pub(crate) async fn handle_create_server(
 
         // Re-persist with pledge included
         crdt_store.insert_op(pledge_op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
     }
 
     // Create MLS group for this server (owner is sole member).
@@ -236,9 +226,7 @@ pub(crate) async fn handle_create_channel(
 
         // Persist
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::ChannelAdded {
             server_id: server_id.clone(),
@@ -324,9 +312,7 @@ pub(crate) async fn handle_remove_channel(
 
         // Persist
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::ChannelRemoved {
             server_id: server_id.clone(),
@@ -396,9 +382,7 @@ pub(crate) async fn handle_rename_server(
 
         // Persist
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::ServerUpdated {
             server_id: server_id.clone(),
@@ -469,9 +453,7 @@ pub(crate) async fn handle_rename_channel(
 
         // Persist
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::ChannelRenamed {
             server_id: server_id.clone(),
@@ -550,9 +532,7 @@ pub(crate) async fn handle_update_server_setting(
 
         // Persist
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
         let _ = event_tx.send(NetworkEvent::ServerUpdated {
             server_id: server_id.clone(),
         }).await;
@@ -594,7 +574,6 @@ pub(crate) async fn handle_delete_server(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     local_device_id: &str,
@@ -633,9 +612,7 @@ pub(crate) async fn handle_delete_server(
     // Persist the tombstone shell + the op (op_log is skip_serializing → the op MUST be
     // persisted via insert_op or the owner stops serving it after restart).
     crdt_store.insert_op(op.clone());
-    if let Ok(json) = serialize_state_lean(state) {
-        crdt_store.save_state(server_id.clone(), json);
-    }
+    crdt_store.save_state_snapshot(server_id.clone(), state);
 
     // Fan the tombstone op to remaining members (MLS-first, plaintext fallback) AND to
     // our OWN siblings (the master-keyed member broadcast excludes our identity).
@@ -664,7 +641,6 @@ pub(crate) async fn handle_delete_server(
         mls_mgr.remove_group(&server_id);
         persist_mls_state(mls_mgr, crypto_store);
     }
-    let _ = sig_cmd_tx;
 
     let _ = event_tx.send(NetworkEvent::ServerDeleted {
         server_id,
@@ -679,7 +655,6 @@ pub(crate) async fn handle_join_server(
     mls: &Option<MlsManager>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     cmd_tx: &mpsc::Sender<NodeCommand>,
     server_id: String,
     twitch_proof_json: Option<String>,
@@ -692,14 +667,7 @@ pub(crate) async fn handle_join_server(
         nsfw_confirmed,
     });
 
-    // Join the signaling room with room_code = server_id.
 
-    let _ = sig_cmd_tx.send(SignalingCmd::SetRoom {
-        room_code: server_id.clone(),
-    }).await;
-    let _ = sig_cmd_tx.send(SignalingCmd::Bootstrap {
-        room_code: server_id.clone(),
-    }).await;
 
     // Generate MLS KeyPackage to send alongside join request.
     let _mls_kp_b64 = mls.as_ref().and_then(|m| {
@@ -784,9 +752,7 @@ pub(crate) async fn handle_change_role(
 
         // Persist
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::RoleChanged {
             server_id: server_id.clone(),
@@ -855,9 +821,7 @@ pub(crate) async fn handle_kick_member(
 
         // Persist
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::MemberLeft {
             server_id: server_id.clone(),
@@ -1086,7 +1050,6 @@ pub(crate) async fn handle_leave_server(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
-    sig_cmd_tx: &mpsc::Sender<SignalingCmd>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     local_device_id: &str,
@@ -1121,9 +1084,7 @@ pub(crate) async fn handle_leave_server(
 
         // Persist state (with us removed) + op.
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         // Broadcast CRDT op to remaining members (per-device fan-out).
         if let Ok(op_json) = serde_json::to_string(&op) {
@@ -1191,10 +1152,6 @@ pub(crate) async fn handle_leave_server(
     // Remove server from local state.
     server_states.remove(&server_id);
 
-    // Unregister from signaling room.
-    let _ = sig_cmd_tx.send(SignalingCmd::Unregister {
-        room_code: server_id.clone(),
-    }).await;
 
     // Leave the WS relay room.
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
@@ -1252,9 +1209,7 @@ pub(crate) async fn handle_ban_member(
 
         // Persist
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::MemberLeft {
             server_id: server_id.clone(),
@@ -1365,9 +1320,7 @@ pub(crate) async fn handle_unban_member(
 
         // Persist
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::ServerUpdated {
             server_id: server_id.clone(),
@@ -1440,9 +1393,7 @@ pub(crate) async fn handle_label_op(
         let _ = state.apply_op(&op);
 
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::ServerUpdated {
             server_id: server_id.clone(),
@@ -1525,9 +1476,7 @@ pub(crate) async fn handle_set_channel_visibility(
         }
 
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::ServerUpdated {
             server_id: server_id.clone(),
@@ -1595,9 +1544,7 @@ pub(crate) async fn handle_set_channel_posting(
         let _ = state.apply_op(&op);
 
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::ServerUpdated {
             server_id: server_id.clone(),
@@ -1665,9 +1612,7 @@ pub(crate) async fn handle_set_channel_public(
         let _ = state.apply_op(&op);
 
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::ServerUpdated {
             server_id: server_id.clone(),
@@ -1765,9 +1710,7 @@ pub(crate) async fn handle_change_role_permissions(
 
         // Persist
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::ServerUpdated {
             server_id: server_id.clone(),
@@ -1835,9 +1778,7 @@ pub(crate) async fn handle_set_nickname(
 
         // Persist
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         // Emit event so Dart refreshes member list
         let _ = event_tx.send(NetworkEvent::MemberJoined {
@@ -1889,9 +1830,7 @@ pub(crate) async fn handle_set_twitch_username(
         let _ = state.apply_op(&op);
 
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::MemberJoined {
             server_id: server_id.clone(),
@@ -1988,11 +1927,8 @@ pub(crate) async fn handle_update_channel_layout(
         hollow_log!("[HOLLOW-CRDT] After apply_op, channel_layout has {} items", state.channel_layout.len());
 
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            let has_layout = json.contains("channel_layout");
-            hollow_log!("[HOLLOW-CRDT] Persisting state, json contains channel_layout={has_layout}, json_len={}", json.len());
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        hollow_log!("[HOLLOW-CRDT] Persisting state, channel_layout items={}", state.channel_layout.len());
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::ServerUpdated {
             server_id: server_id.clone(),
@@ -2043,9 +1979,7 @@ pub(crate) async fn handle_pin_message(
         let _ = state.apply_op(&op);
 
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::MessagePinned {
             server_id: server_id.clone(),
@@ -2098,9 +2032,7 @@ pub(crate) async fn handle_unpin_message(
         let _ = state.apply_op(&op);
 
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::MessageUnpinned {
             server_id: server_id.clone(),
@@ -2147,9 +2079,7 @@ pub(crate) async fn handle_set_storage_pledge(
         let _ = state.apply_op(&op);
 
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(server_id.clone(), json);
-        }
+        crdt_store.save_state_snapshot(server_id.clone(), state);
 
         let _ = event_tx.send(NetworkEvent::ServerUpdated {
             server_id: server_id.clone(),
@@ -2427,9 +2357,7 @@ pub(crate) async fn handle_envelope_crdt_op(
     let _ = state.apply_op(&op);
     if state.op_log.len() > was_len {
         crdt_store.insert_op(op.clone());
-        if let Ok(json) = serialize_state_lean(state) {
-            crdt_store.save_state(sid.clone(), json);
-        }
+        crdt_store.save_state_snapshot(sid.clone(), state);
         match &op.payload {
             CrdtPayload::ChannelAdded { channel_id, name, channel_type, .. } => {
                 let _ = event_tx.send(NetworkEvent::ChannelAdded {
@@ -2547,9 +2475,7 @@ pub(crate) async fn handle_envelope_server_delete(
             let op = state.create_op(CrdtPayload::ServerDeleted { deleted_at: now_ms });
             let _ = state.apply_op(&op);
             crdt_store.insert_op(op.clone());
-            if let Ok(json) = serialize_state_lean(state) {
-                crdt_store.save_state(sid.clone(), json);
-            }
+            crdt_store.save_state_snapshot(sid.clone(), state);
             if let Some(mls_mgr_ref) = mls {
                 mls_mgr_ref.remove_group(&sid);
                 persist_mls_state(mls_mgr_ref, crypto_store);
@@ -2667,9 +2593,7 @@ pub(crate) async fn handle_envelope_sync_resp(
             }
             if let Ok(applied) = crate::crdt::sync::merge_ops(state, &incoming_ops) {
                 if applied > 0 {
-                    if let Ok(json) = serialize_state_lean(state) {
-                        crdt_store.save_state(sid.clone(), json);
-                    }
+                    crdt_store.save_state_snapshot(sid.clone(), state);
                     // Reconcile a deletion that happened while offline (UI hides the
                     // tombstoned server; the shell is retained to relay onward).
                     if state.is_deleted() {
@@ -2862,8 +2786,25 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     db_passphrase: &str,
 ) {
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        // One transaction for the whole batch (up to 200 items) — the per-item
+        // auto-commit made this handler fsync hundreds of times per sync page.
+        // Same pattern as its plaintext twin in swarm.rs (ChannelSyncBatch).
+        let _ = store.begin_transaction();
+        let mut pk_cache: HashMap<String, Vec<u8>> = HashMap::new();
         let mut new_count = 0u32;
         for msg in &messages {
+            // Verify signature once per item (cached pubkey parse). Skip edited
+            // messages — the stored signature covers the original text.
+            let mut sig_verified = false;
+            if msg.sig.is_some() && msg.edited_at.is_none() {
+                let payload = super::crypto_handler::message_signing_payload(
+                    "ch", &format!("{sid}:{cid}"), &msg.s, msg.ts, &msg.t,
+                );
+                sig_verified = super::crypto_handler::verify_message_signature_cached(
+                    &msg.s, msg.sig.as_deref(), msg.pk.as_deref(), &payload, &mut pk_cache,
+                );
+            }
+
             // Multi-device: a message authored by ANY of our own devices is ours.
             let is_mine = super::resolver::same_identity(&msg.s, local_peer);
             let already_exists = msg.mid.as_ref()
@@ -2899,39 +2840,32 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
                         public_key: msg.pk.clone(),
                     }).await;
                 }
-            } else if msg.sig.is_some() && msg.edited_at.is_none() {
+            } else if sig_verified {
                 // Multi-device self-heal: the row already exists but may have been
                 // stored under a sender DEVICE id (pre device→master resolve fix)
                 // with signature material that no longer verifies on this device —
-                // the "12D3KooW… + unverified signature" bubble. If THIS synced copy's
-                // signature verifies (proving authentic sender + text) and our stored
-                // row is attributed to a different sender, repair it to the verified
-                // one. INSERT OR IGNORE blocked re-inserting the good copy, so this
-                // UPDATE is the only path to converge. Safe: verify_message_signature
-                // also binds the PeerId to the pubkey, so this can only ever replace an
-                // attribution with a cryptographically authentic one (no forgery).
+                // the "12D3KooW… + unverified signature" bubble. THIS synced copy's
+                // signature verified above (proving authentic sender + text), so if
+                // our stored row is attributed to a different sender, repair it to
+                // the verified one. INSERT OR IGNORE blocked re-inserting the good
+                // copy, so this UPDATE is the only path to converge. Safe: the
+                // verify also binds the PeerId to the pubkey, so this can only ever
+                // replace an attribution with a cryptographically authentic one.
                 if let Some(mid) = &msg.mid {
                     let stored_sender = store.get_channel_message_sender(mid);
                     if stored_sender.as_deref() != Some(msg.s.as_str()) {
-                        let payload = super::crypto_handler::message_signing_payload(
-                            "ch", &format!("{sid}:{cid}"), &msg.s, msg.ts, &msg.t,
-                        );
-                        if super::crypto_handler::verify_message_signature(
-                            &msg.s, msg.sig.as_deref(), msg.pk.as_deref(), &payload,
+                        if let Ok(true) = store.repair_channel_message_sender(
+                            mid, &msg.s, is_mine,
+                            msg.sig.as_deref(), msg.pk.as_deref(),
                         ) {
-                            if let Ok(true) = store.repair_channel_message_sender(
-                                mid, &msg.s, is_mine,
-                                msg.sig.as_deref(), msg.pk.as_deref(),
-                            ) {
-                                // The DB row is now master-keyed + verifiable. We don't
-                                // fake an edit event (that would mark it "(edited)" and
-                                // wouldn't move the in-memory senderId anyway); the
-                                // corrected sender renders on the next channel open /
-                                // loadHistory, which is when this sync runs.
-                                hollow_log!(
-                                    "[HOLLOW-SYNC] Repaired channel msg {mid} sender {stored_sender:?} → {} (verified)", msg.s
-                                );
-                            }
+                            // The DB row is now master-keyed + verifiable. We don't
+                            // fake an edit event (that would mark it "(edited)" and
+                            // wouldn't move the in-memory senderId anyway); the
+                            // corrected sender renders on the next channel open /
+                            // loadHistory, which is when this sync runs.
+                            hollow_log!(
+                                "[HOLLOW-SYNC] Repaired channel msg {mid} sender {stored_sender:?} → {} (verified)", msg.s
+                            );
                         }
                     }
                 }
@@ -2975,6 +2909,7 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
                 }
             }
         }
+        let _ = store.commit_transaction();
         if has_more == Some(true) {
             let sender_ts = store.get_per_sender_timestamps(&sid, &cid)
                 .unwrap_or_default();

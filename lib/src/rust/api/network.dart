@@ -1270,6 +1270,14 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String fileId,
     required String error,
   }) = NetworkEvent_FileFailed;
+
+  /// Time-limited TURN credentials from the relay (over the authed WS).
+  const factory NetworkEvent.turnCredentials({
+    required String username,
+    required String password,
+    required BigInt ttl,
+    required List<String> uris,
+  }) = NetworkEvent_TurnCredentials;
   const factory NetworkEvent.linkCodeClaimed({required String code}) =
       NetworkEvent_LinkCodeClaimed;
   const factory NetworkEvent.linkCodeError({

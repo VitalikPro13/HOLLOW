@@ -144,6 +144,47 @@ pub struct ServerState {
 }
 
 impl ServerState {
+    /// A serialization-only clone: everything the persisted JSON contains,
+    /// with the heavy in-memory-only fields (`op_log`, dedup set, hlc) left
+    /// empty. `op_log` is `skip_serializing` and `hlc`/`op_log_dedup` are
+    /// `skip`, so JSON produced from this snapshot is identical to
+    /// serializing `self` — but cloning skips up to 1000 op-log entries.
+    /// Used by CrdtStore::save_state_snapshot to move the JSON serialization
+    /// off the event loop (a burst of N ops then serializes ONCE per drain).
+    /// Exhaustive destructuring on purpose: adding a ServerState field breaks
+    /// this method at compile time, forcing a decision on whether it persists
+    /// (guards the "field silently missing from saved state" trap).
+    pub fn lean_snapshot(&self) -> ServerState {
+        let ServerState {
+            server_id, name, channels, members, roles, nicknames,
+            twitch_usernames, pinned_messages, channel_layout, storage_pledges,
+            settings, role_permissions, banned_members, labels,
+            label_assignments, deleted,
+            op_log: _, hlc: _, op_log_dedup: _,
+        } = self;
+        ServerState {
+            server_id: server_id.clone(),
+            name: name.clone(),
+            channels: channels.clone(),
+            members: members.clone(),
+            roles: roles.clone(),
+            nicknames: nicknames.clone(),
+            twitch_usernames: twitch_usernames.clone(),
+            pinned_messages: pinned_messages.clone(),
+            channel_layout: channel_layout.clone(),
+            storage_pledges: storage_pledges.clone(),
+            settings: settings.clone(),
+            role_permissions: role_permissions.clone(),
+            banned_members: banned_members.clone(),
+            labels: labels.clone(),
+            label_assignments: label_assignments.clone(),
+            deleted: *deleted,
+            op_log: Vec::new(),
+            hlc: None,
+            op_log_dedup: HashSet::new(),
+        }
+    }
+
     /// Create a new server. The creator becomes the Owner.
     pub fn new(server_id: String, name: String, creator_peer_id: String) -> Self {
         let mut hlc = Hlc::new(creator_peer_id.clone());
@@ -591,6 +632,11 @@ impl ServerState {
                 });
                 let remote = AdminLwwReg::new(false, op.hlc.clone(), priority);
                 entry.merge(&remote);
+                // Prune unbanned members to prevent unbounded growth. Only this
+                // arm can flip a register to false, so the sweep lives here
+                // instead of running on every op. LWW-aware: a newer ban wins
+                // the merge above and survives the retain.
+                self.banned_members.retain(|_, reg| *reg.read());
             }
 
             CrdtPayload::LabelCreated { label_id, name, color } => {
@@ -654,9 +700,6 @@ impl ServerState {
                 self.op_log_dedup.insert((existing.author.clone(), existing.hlc.clone()));
             }
         }
-
-        // Prune unbanned members to prevent unbounded growth.
-        self.banned_members.retain(|_, reg| *reg.read());
 
         Ok(())
     }

@@ -143,6 +143,47 @@ impl MessageStore {
              PRAGMA busy_timeout = 4000;"
         )).map_err(|e| format!("Failed to set performance PRAGMAs: {e}"))?;
 
+        // Schema DDL (~25 CREATE TABLE + ~40 ALTER + indexes + FTS triggers)
+        // used to replay on EVERY open — real per-call milliseconds on the hot
+        // per-message/per-chunk paths (~139 transient call sites). Run it once
+        // per process per DB path instead. `IF NOT EXISTS` semantics are
+        // unchanged, and a fresh process after an app update still self-heals
+        // new columns/tables on its first open. The mutex also serializes the
+        // first-open DDL against concurrent opens on a brand-new DB.
+        //
+        // The path memo alone is NOT enough: a wipe/reset (and the unit tests)
+        // can delete the DB file and re-open the SAME path within one process
+        // — the fresh file has no tables. Pair the memo with a one-row
+        // sqlite_master probe (microseconds) so a schemaless file always gets
+        // the DDL regardless of the memo.
+        {
+            use std::sync::{Mutex as StdMutex, OnceLock};
+            static SCHEMA_DONE: OnceLock<StdMutex<std::collections::HashSet<String>>> =
+                OnceLock::new();
+            let done = SCHEMA_DONE
+                .get_or_init(|| StdMutex::new(std::collections::HashSet::new()));
+            let mut ready = done
+                .lock()
+                .map_err(|e| format!("Schema gate lock poisoned: {e}"))?;
+            let has_core_table: bool = conn
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages' LIMIT 1",
+                    [],
+                    |_| Ok(()),
+                )
+                .is_ok();
+            if !ready.contains(path) || !has_core_table {
+                Self::init_schema(&conn)?;
+                ready.insert(path.to_string());
+            }
+        }
+
+        Ok(MessageStore { conn })
+    }
+
+    /// All schema DDL + idempotent data migrations, previously inline in
+    /// `open()`. Runs once per process per DB path — see the gate in `open()`.
+    fn init_schema(conn: &Connection) -> Result<(), String> {
         // Create messages table if it doesn't exist.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS messages (
@@ -769,7 +810,7 @@ impl MessageStore {
         )
         .map_err(|e| format!("Failed to create device_labels table: {e}"))?;
 
-        Ok(MessageStore { conn })
+        Ok(())
     }
 
     /// One-time storage hygiene, run ONCE at node startup while the DB is held by
@@ -1399,12 +1440,20 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Load all CRDT ops for a server, ordered by HLC.
+    /// Load CRDT ops for a server, ordered by HLC — bounded to the NEWEST 1000
+    /// (matches ServerState::MAX_OP_LOG). The DB table only prunes on the
+    /// 30-min rebalance timer, so an old server could hold far more rows than
+    /// the in-memory log would ever keep; loading them all at boot was O(all
+    /// history) JSON parsing per server for ops the compactor would discard.
     pub fn load_ops_for_server(&self, server_id: &str) -> Result<Vec<CrdtOp>, String> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT op_json FROM crdt_ops WHERE server_id = ?1 ORDER BY hlc_ms, hlc_counter, author",
+                "SELECT op_json FROM (
+                     SELECT op_json, hlc_ms, hlc_counter, author FROM crdt_ops
+                     WHERE server_id = ?1
+                     ORDER BY hlc_ms DESC, hlc_counter DESC, author DESC LIMIT 1000
+                 ) ORDER BY hlc_ms, hlc_counter, author",
             )
             .map_err(|e| format!("Failed to prepare crdt_ops query: {e}"))?;
         let rows = stmt
@@ -1844,7 +1893,9 @@ impl MessageStore {
             param_values.push(Box::new(format!("%{pattern}%")));
             param_idx += 1;
         }
-        mention_clauses.push("reply_to IS NOT NULL".to_string());
+        // Any reply counts as a mention — parity with the live path
+        // (event_provider.dart treats replyToMid != null as a mention).
+        mention_clauses.push("reply_to_mid IS NOT NULL".to_string());
 
         let mention_expr = mention_clauses.join(" OR ");
         let sql = format!(
@@ -3471,6 +3522,28 @@ impl MessageStore {
         Ok(())
     }
 
+    /// Load ALL settings whose key starts with `prefix` in one query.
+    /// Startup used to issue one `load_setting` FFI round-trip per
+    /// server/channel/DM (~hundreds, serial) for the `notif:`/`seen:`
+    /// namespaces — this replaces that with a single indexed range read.
+    pub fn load_settings_with_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT key, value FROM app_settings WHERE key >= ?1 AND key < ?1 || x'ff'",
+            )
+            .map_err(|e| format!("Failed to prepare settings prefix query: {e}"))?;
+        let rows = stmt
+            .query_map(params![prefix], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("Failed to query settings by prefix: {e}"))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     /// Load a setting by key. Returns None if not set.
     pub fn load_setting(&self, key: &str) -> Result<Option<String>, String> {
         let mut stmt = self
@@ -3629,7 +3702,7 @@ impl MessageStore {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        self.conn
+        let inserted = self.conn
             .execute(
                 "INSERT OR IGNORE INTO file_chunks (file_id, chunk_index, received_at)
                  VALUES (?1, ?2, ?3)",
@@ -3637,15 +3710,18 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to insert file chunk: {e}"))?;
 
-        // Update the counter on the files table.
-        self.conn
-            .execute(
-                "UPDATE files SET chunks_received = (
-                     SELECT COUNT(*) FROM file_chunks WHERE file_id = ?1
-                 ) WHERE file_id = ?1",
-                params![file_id],
-            )
-            .map_err(|e| format!("Failed to update chunks_received: {e}"))?;
+        // Increment the counter only when the chunk row was actually new —
+        // a full `SELECT COUNT(*)` recount here made receiving a file O(n²)
+        // in its chunk count. A duplicate chunk (retry/re-send) is a no-op.
+        if inserted > 0 {
+            self.conn
+                .execute(
+                    "UPDATE files SET chunks_received = chunks_received + 1
+                     WHERE file_id = ?1",
+                    params![file_id],
+                )
+                .map_err(|e| format!("Failed to update chunks_received: {e}"))?;
+        }
 
         // Return current count.
         let count: u32 = self

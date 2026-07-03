@@ -32,9 +32,12 @@ pub struct ShareLinkInfo {
 pub fn share_create_from_file(source_path: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::ShareCreate { source_path }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::ShareCreate { source_path }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
@@ -46,9 +49,12 @@ pub fn share_create_from_file(source_path: String) -> Result<(), String> {
 pub fn share_open_link(link: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::ShareOpenLink { link, server_id: None, context_type: None }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::ShareOpenLink { link, server_id: None, context_type: None }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
@@ -60,9 +66,12 @@ pub fn share_open_link(link: String) -> Result<(), String> {
 pub fn share_start_download(root_hash: String, save_dir: String, link: String, sequential: bool) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::ShareStart { root_hash, save_dir, link, sequential }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::ShareStart { root_hash, save_dir, link, sequential }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
@@ -73,9 +82,12 @@ pub fn share_start_download(root_hash: String, save_dir: String, link: String, s
 pub fn share_cancel(root_hash: String) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::ShareCancel { root_hash }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::ShareCancel { root_hash }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
@@ -85,9 +97,12 @@ pub fn share_cancel(root_hash: String) -> Result<(), String> {
 pub fn share_set_seeding(root_hash: String, seeding: bool) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::ShareSetSeeding { root_hash, seeding }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::ShareSetSeeding { root_hash, seeding }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
@@ -98,9 +113,12 @@ pub fn share_set_seeding(root_hash: String, seeding: bool) -> Result<(), String>
 pub fn share_remove(root_hash: String, delete_file: bool) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::ShareRemove { root_hash, delete_file }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::ShareRemove { root_hash, delete_file }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
@@ -128,9 +146,12 @@ pub fn share_start_from_ref(root_hash: String, key_hex: String, save_dir: String
     let link = node::share_handler::encode_link(&root, &key);
     let node_lock = get_node();
     let guard = node_lock.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::ShareOpenLink { link: link.clone(), server_id, context_type }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::ShareOpenLink { link: link.clone(), server_id, context_type }))
         .map_err(|e| format!("Failed to send open command: {e}"))?;
     Ok(())
 }
@@ -140,9 +161,12 @@ pub fn share_start_from_ref(root_hash: String, key_hex: String, save_dir: String
 pub fn share_list() -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let state = guard.as_ref().ok_or("Node is not running")?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
     let rt = get_runtime();
-    rt.block_on(state.cmd_tx.send(node::NodeCommand::ShareList))
+    rt.block_on(cmd_tx.send(node::NodeCommand::ShareList))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }

@@ -6,10 +6,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_avatars.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -34,14 +37,11 @@ class MobileVoiceChannelRoute extends ConsumerStatefulWidget {
 
 class _MobileVoiceChannelRouteState
     extends ConsumerState<MobileVoiceChannelRoute> {
-  Timer? _durationTimer;
-  Duration _duration = Duration.zero;
   Offset _pipOffset = const Offset(12, 12);
   bool _wakelockOn = false;
 
   @override
   void dispose() {
-    _durationTimer?.cancel();
     if (_wakelockOn) {
       unawaited(WakelockPlus.disable().catchError((_) {}));
     }
@@ -58,22 +58,8 @@ class _MobileVoiceChannelRouteState
     unawaited(WakelockPlus.toggle(enable: videoShown).catchError((_) {}));
   }
 
-  void _startTimer(DateTime joinedAt) {
-    _durationTimer?.cancel();
-    _duration = DateTime.now().difference(joinedAt);
-    _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      setState(() {
-        _duration = DateTime.now().difference(joinedAt);
-      });
-    });
-  }
-
-  String get _formattedDuration {
-    final mins = _duration.inMinutes.toString().padLeft(2, '0');
-    final secs = (_duration.inSeconds % 60).toString().padLeft(2, '0');
-    return '$mins:$secs';
-  }
+  // Session duration is rendered by CallDurationText (self-ticking leaf) —
+  // the old per-second setState rebuilt this ENTIRE Scaffold every second.
 
   bool _hasVideo(VoiceChannelState vcState) {
     if (vcState.focusedScreenSharePeerId != null) return true;
@@ -104,13 +90,6 @@ class _MobileVoiceChannelRouteState
       }
     });
 
-    // Start timer when joined.
-    if (vcState.joinedAt != null && _durationTimer == null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _startTimer(vcState.joinedAt!);
-      });
-    }
-
     final notInChannel = vcState.currentServerId != widget.serverId ||
         vcState.currentChannelId != widget.channelId;
 
@@ -132,29 +111,31 @@ class _MobileVoiceChannelRouteState
     final hasVideo = _hasVideo(vcState);
     _syncWakelock(hasVideo);
 
-    return Scaffold(
-      backgroundColor: hollow.background,
-      body: SafeArea(
-        child: Column(
-          children: [
-            _buildTopBar(hollow),
-            // System-status notice, at the top under the channel name (divider
-            // below) — surfaces maintenance/outage while you're in a call.
-            const SystemStatusBanner(),
-            Expanded(
-              child: hasVideo
-                  ? _buildVideoView(hollow, vcState, localPeerId)
-                  : _buildAudioView(hollow, vcState, localPeerId),
-            ),
-            _buildControls(hollow, vcState),
-            const SizedBox(height: HollowSpacing.lg),
-          ],
+    return MobileSheetDragToMinimize(
+      child: Scaffold(
+        backgroundColor: hollow.background,
+        body: SafeArea(
+          child: Column(
+            children: [
+              _buildTopBar(hollow, vcState.joinedAt),
+              // System-status notice, at the top under the channel name (divider
+              // below) — surfaces maintenance/outage while you're in a call.
+              const SystemStatusBanner(),
+              Expanded(
+                child: hasVideo
+                    ? _buildVideoView(hollow, vcState, localPeerId)
+                    : _buildAudioView(hollow, vcState, localPeerId),
+              ),
+              _buildControls(hollow, vcState),
+              const SizedBox(height: HollowSpacing.lg),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Widget _buildTopBar(HollowTheme hollow) {
+  Widget _buildTopBar(HollowTheme hollow, DateTime? joinedAt) {
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.md,
@@ -184,8 +165,8 @@ class _MobileVoiceChannelRouteState
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),
-                Text(
-                  _formattedDuration,
+                CallDurationText(
+                  startedAt: joinedAt ?? DateTime.now(),
                   style: HollowTypography.caption.copyWith(
                     color: hollow.success,
                     fontFeatures: const [FontFeature.tabularFigures()],
@@ -207,11 +188,9 @@ class _MobileVoiceChannelRouteState
       participants.insert(0, localPeerId);
     }
 
-    final speakingSet = <String>{};
     final mutedSet = <String>{};
     final deafenedSet = <String>{};
     for (final p in participants) {
-      if (vcState.isSpeaking(p)) speakingSet.add(p);
       if (p == localPeerId) {
         if (vcState.isMuted) mutedSet.add(p);
         if (vcState.isDeafened) deafenedSet.add(p);
@@ -222,13 +201,18 @@ class _MobileVoiceChannelRouteState
       }
     }
 
+    // Speaking state via a scoped Consumer: VAD flips rebuild ONLY the avatar
+    // cluster, never this whole voice-channel Scaffold.
     return Center(
-      child: MobileClusteredAvatars(
-        participants: participants,
-        speakingSet: speakingSet,
-        mutedSet: mutedSet,
-        deafenedSet: deafenedSet,
-      ),
+      child: Consumer(builder: (context, ref, _) {
+        final speakingSet = ref.watch(vcSpeakingProvider);
+        return MobileClusteredAvatars(
+          participants: participants,
+          speakingSet: speakingSet,
+          mutedSet: mutedSet,
+          deafenedSet: deafenedSet,
+        );
+      }),
     );
   }
 

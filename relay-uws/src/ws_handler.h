@@ -1,8 +1,9 @@
 #pragma once
 #include <App.h>
 #include "state.h"
+#include "config.h"
 
-void setup_ws_handler(uWS::SSLApp& app, RelayState& state);
+void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config);
 
 // Evict offline-buffer entries older than OFFLINE_BUFFER_TTL_SECS. Called
 // periodically from main's timer loop.

@@ -7,6 +7,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -388,7 +389,10 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     final peerProfile =
         ref.watch(profileProvider.select((p) => p[peerId]));
     final name = isLocal ? 'You' : displayNameForPeer(peerProfile, peerId);
-    final isSpeaking = vcState.isSpeaking(peerId);
+    // Membership-select: this tile only rebuilds when ITS peer's speaking bit
+    // flips, not on every VAD change in the channel.
+    final isSpeaking =
+        ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
 
     return GestureDetector(
       onTap: canTap

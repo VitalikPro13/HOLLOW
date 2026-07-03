@@ -233,6 +233,10 @@ pub(crate) enum NetworkEvent {
         file_id: String,
         error: String,
     },
+    /// Time-limited TURN credentials from the relay (over the authed WS).
+    /// Dart's iceConfigProvider consumes these; Rust owns the refresh cadence
+    /// (on connect + 50-min interval).
+    TurnCredentials { username: String, password: String, ttl: u64, uris: Vec<String> },
     // -- Multi-device link snapshot events (Step 4) --
     /// (Populated device) Our link code was successfully claimed on the relay —
     /// show it (with countdown) for the empty device to enter.
@@ -469,6 +473,39 @@ pub(crate) struct SendFilePayload {
     pub share_ref: Option<ShareRef>,
 }
 
+/// Internal re-entry payload: an image SendFile whose WebP/GIF conversion ran
+/// off the event loop (spawn_blocking). Carries the converted bytes plus the
+/// original request context so `finish_send_file` can resume at the store/send
+/// steps. Never constructed from FFI.
+pub(crate) struct SendFileConvertedPayload {
+    pub peer_id: Option<String>,
+    pub server_id: Option<String>,
+    pub channel_id: Option<String>,
+    pub message_id: String,
+    pub message_text: String,
+    pub vthumb: Option<VideoThumbRef>,
+    pub share_ref: Option<ShareRef>,
+    pub original_name: String,
+    pub is_image: bool,
+    pub final_data: Vec<u8>,
+    pub final_ext: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+/// Internal re-entry payload: erasure coding + local shard writes for a vault
+/// upload ran off the event loop; resume at shard distribution / manifest
+/// broadcast. Never constructed from FFI.
+pub(crate) struct VaultUploadPreparedPayload {
+    pub server_id: String,
+    pub channel_id: String,
+    pub content_id: String,
+    pub message_id: String,
+    pub plan: crate::vault::pipeline::UploadPlan,
+    /// Some((online, needed)) when the upload guard fell back to replication.
+    pub fallback_info: Option<(usize, usize)>,
+}
+
 pub(crate) struct VaultUploadFilePayload {
     pub server_id: String,
     pub channel_id: String,
@@ -599,6 +636,8 @@ pub(crate) enum NodeCommand {
     SetStoragePledge { server_id: String, pledge_bytes: u64 },
     // -- File sharing (Phase 3.5) --
     SendFile(Box<SendFilePayload>),
+    /// Internal: image conversion finished off-loop; resume the send.
+    SendFileConverted(Box<SendFileConvertedPayload>),
     RequestFile {
         file_id: String,
         peer_id: String,
@@ -607,6 +646,8 @@ pub(crate) enum NodeCommand {
     // -- Vault shard distribution (Phase 4) --
     VaultDownloadFile { server_id: String, content_id: String },
     VaultUploadFile(Box<VaultUploadFilePayload>),
+    /// Internal: erasure coding finished off-loop; resume the upload.
+    VaultUploadPrepared(Box<VaultUploadPreparedPayload>),
     DeleteVaultContent { server_id: String, content_id: String },
     RequestShardFromPeer {
         server_id: String,

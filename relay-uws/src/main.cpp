@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "[main] TLS session resumption enabled (cache: 20k)\n");
     }
 
-    setup_ws_handler(app, state);
+    setup_ws_handler(app, state, config);
     setup_http_handlers(app, state, config);
 
     app.listen(config.port, [&](auto* listen_socket) {

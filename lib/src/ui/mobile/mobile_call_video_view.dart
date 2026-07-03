@@ -6,13 +6,16 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_avatars.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
@@ -30,8 +33,6 @@ class MobileCallScreen extends ConsumerStatefulWidget {
 }
 
 class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
-  Timer? _durationTimer;
-  Duration _duration = Duration.zero;
   Offset _pipOffset = const Offset(12, 12);
   bool _wakelockOn = false;
 
@@ -41,7 +42,6 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
 
   @override
   void dispose() {
-    _durationTimer?.cancel();
     if (_wakelockOn) {
       unawaited(WakelockPlus.disable().catchError((_) {}));
     }
@@ -58,22 +58,9 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
   // Earpiece proximity (blank-on-ear-hold) is handled globally by
   // CallProximityController so it works from any screen, not just here.
 
-  void _startTimer(DateTime startedAt) {
-    _durationTimer?.cancel();
-    _duration = DateTime.now().difference(startedAt);
-    _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      setState(() {
-        _duration = DateTime.now().difference(startedAt);
-      });
-    });
-  }
-
-  String _formatDuration(Duration d) {
-    final minutes = d.inMinutes.toString().padLeft(2, '0');
-    final seconds = (d.inSeconds % 60).toString().padLeft(2, '0');
-    return '$minutes:$seconds';
-  }
+  // Call duration is rendered by CallDurationText (self-ticking leaf) —
+  // the old per-second setState rebuilt this ENTIRE Scaffold, re-running
+  // renderer probing and video tiles once a second for the whole call.
 
   String _statusText(CallState call) {
     switch (call.status) {
@@ -84,7 +71,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
       case CallStatus.connecting:
         return 'Connecting...';
       case CallStatus.active:
-        return _formatDuration(_duration);
+        return ''; // active shows CallDurationText instead
       case CallStatus.idle:
         return 'Ended';
     }
@@ -129,34 +116,29 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
       }
     });
 
-    if (call.status == CallStatus.active && call.startedAt != null) {
-      if (_durationTimer == null) _startTimer(call.startedAt!);
-    } else if (call.status != CallStatus.active) {
-      _durationTimer?.cancel();
-      _durationTimer = null;
-    }
-
     final showVideo = _hasRealVideo(call);
     _syncWakelock(showVideo);
 
-    return Scaffold(
-      backgroundColor: hollow.background,
-      body: SafeArea(
-        child: Column(
-          children: [
-            _buildTopBar(hollow, call),
-            // System-status notice, at the top under the participant name — a
-            // call is exactly when "relay restarting in 2 min" matters most.
-            // Top-anchored here (divider below) since it follows the name row.
-            const SystemStatusBanner(),
-            Expanded(
-              child: showVideo
-                  ? _buildVideoView(hollow, call)
-                  : _buildAudioView(hollow, call, localPeerId),
-            ),
-            _buildControls(hollow, call),
-            const SizedBox(height: HollowSpacing.lg),
-          ],
+    return MobileSheetDragToMinimize(
+      child: Scaffold(
+        backgroundColor: hollow.background,
+        body: SafeArea(
+          child: Column(
+            children: [
+              _buildTopBar(hollow, call),
+              // System-status notice, at the top under the participant name — a
+              // call is exactly when "relay restarting in 2 min" matters most.
+              // Top-anchored here (divider below) since it follows the name row.
+              const SystemStatusBanner(),
+              Expanded(
+                child: showVideo
+                    ? _buildVideoView(hollow, call)
+                    : _buildAudioView(hollow, call, localPeerId),
+              ),
+              _buildControls(hollow, call),
+              const SizedBox(height: HollowSpacing.lg),
+            ],
+          ),
         ),
       ),
     );
@@ -194,15 +176,22 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),
-                Text(
-                  _statusText(call),
-                  style: HollowTypography.caption.copyWith(
-                    color: call.status == CallStatus.active
-                        ? hollow.textSecondary
-                        : hollow.accent,
-                    fontFeatures: [const FontFeature.tabularFigures()],
+                if (call.status == CallStatus.active && call.startedAt != null)
+                  CallDurationText(
+                    startedAt: call.startedAt!,
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                      fontFeatures: [const FontFeature.tabularFigures()],
+                    ),
+                  )
+                else
+                  Text(
+                    _statusText(call),
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.accent,
+                      fontFeatures: [const FontFeature.tabularFigures()],
+                    ),
                   ),
-                ),
               ],
             ),
           ),
@@ -213,22 +202,27 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
 
   Widget _buildAudioView(
       HollowTheme hollow, CallState call, String localPeerId) {
+    // Speaking state via a scoped Consumer: VAD flips rebuild ONLY the avatar
+    // cluster, never this whole call Scaffold.
     return Center(
-      child: MobileClusteredAvatars(
-        participants: [localPeerId, widget.peerId],
-        speakingSet: {
-          if (call.isLocalSpeaking) localPeerId,
-          if (call.isRemoteSpeaking) widget.peerId,
-        },
-        mutedSet: {
-          if (call.isMuted) localPeerId,
-          if (call.remoteMuted) widget.peerId,
-        },
-        deafenedSet: {
-          if (call.isDeafened) localPeerId,
-          if (call.remoteDeafened) widget.peerId,
-        },
-      ),
+      child: Consumer(builder: (context, ref, _) {
+        final speaking = ref.watch(callSpeakingProvider);
+        return MobileClusteredAvatars(
+          participants: [localPeerId, widget.peerId],
+          speakingSet: {
+            if (speaking.local) localPeerId,
+            if (speaking.remote) widget.peerId,
+          },
+          mutedSet: {
+            if (call.isMuted) localPeerId,
+            if (call.remoteMuted) widget.peerId,
+          },
+          deafenedSet: {
+            if (call.isDeafened) localPeerId,
+            if (call.remoteDeafened) widget.peerId,
+          },
+        );
+      }),
     );
   }
 

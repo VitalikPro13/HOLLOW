@@ -388,8 +388,11 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     final thumbPath = _resolveThumbnailImagePath();
     final canPlay = _canPlay();
 
-    final allTransfers = ref.watch(fileTransferProvider);
-    final transfer = allTransfers[widget.attachment.fileId];
+    // Per-file select: fileTransferProvider replaces its whole map on EVERY
+    // chunk event — an unrelated download used to rebuild every visible
+    // video thumbnail continuously.
+    final transfer = ref.watch(
+        fileTransferProvider.select((t) => t[widget.attachment.fileId]));
     final isShareBacked = transfer?.shareRootHash != null;
     final isDownloading = transfer != null &&
         !transfer.isComplete &&
@@ -525,20 +528,18 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   Widget _buildPreparing(HollowTheme hollow) {
     final thumbPath = _resolveThumbnailImagePath();
 
-    // Watch the matching file transfer state for vault phase text.
+    // Watch ONLY the derived phase string — per-chunk map replacements in
+    // fileTransferProvider then no-op unless the phase text itself changes.
     final vthumb = _vthumb;
-    final allTransfers = ref.watch(fileTransferProvider);
-    FileTransferState? transfer;
-    if (vthumb != null) {
-      for (final s in allTransfers.values) {
+    final phase = ref.watch(fileTransferProvider.select((t) {
+      if (vthumb == null) return 'Loading...';
+      for (final s in t.values) {
         if (s.contentId == vthumb.cid) {
-          transfer = s;
-          break;
+          return s.vaultPhase ?? 'Preparing video...';
         }
       }
-    }
-    final phase = transfer?.vaultPhase ??
-        (vthumb != null ? 'Preparing video...' : 'Loading...');
+      return 'Preparing video...';
+    }));
 
     return Stack(
       fit: StackFit.expand,

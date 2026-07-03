@@ -1659,16 +1659,26 @@ pub(crate) async fn handle_envelope_channel_message(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let signing_payload = message_signing_payload(
-        "ch", &format!("{}:{}", sid, cid),
-        &sender_peer_id, ts, &text,
-    );
-    verify_message_signature(
-        &sender_peer_id,
-        sig.as_deref(),
-        pk.as_deref(),
-        &signing_payload,
-    );
+    // SECURITY: a present-but-invalid signature is rejected — mirrors the
+    // direct (non-MLS) twin in swarm.rs; unsigned legacy messages are
+    // tolerated. This verify's result was previously discarded.
+    if sig.is_some() {
+        let signing_payload = message_signing_payload(
+            "ch", &format!("{}:{}", sid, cid),
+            &sender_peer_id, ts, &text,
+        );
+        if !verify_message_signature(
+            &sender_peer_id,
+            sig.as_deref(),
+            pk.as_deref(),
+            &signing_payload,
+        ) {
+            hollow_log!(
+                "[HOLLOW-SECURITY] REJECTED ChannelMessage (MLS) from {sender_peer_id} — signature verification FAILED"
+            );
+            return;
+        }
+    }
 
     // Multi-device: a message from ANY of our own devices is ours.
     let is_mine = super::resolver::same_identity(&sender_peer_id, local_peer);

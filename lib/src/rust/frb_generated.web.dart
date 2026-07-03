@@ -240,6 +240,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ServerFfi> dco_decode_list_server_ffi(dynamic raw);
 
   @protected
+  List<SettingEntry> dco_decode_list_setting_entry(dynamic raw);
+
+  @protected
   List<ShareEntry> dco_decode_list_share_entry(dynamic raw);
 
   @protected
@@ -332,6 +335,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ServerFfi dco_decode_server_ffi(dynamic raw);
+
+  @protected
+  SettingEntry dco_decode_setting_entry(dynamic raw);
 
   @protected
   ShardImportResultFfi dco_decode_shard_import_result_ffi(dynamic raw);
@@ -657,6 +663,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ServerFfi> sse_decode_list_server_ffi(SseDeserializer deserializer);
 
   @protected
+  List<SettingEntry> sse_decode_list_setting_entry(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<ShareEntry> sse_decode_list_share_entry(SseDeserializer deserializer);
 
   @protected
@@ -779,6 +790,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ServerFfi sse_decode_server_ffi(SseDeserializer deserializer);
+
+  @protected
+  SettingEntry sse_decode_setting_entry(SseDeserializer deserializer);
 
   @protected
   ShardImportResultFfi sse_decode_shard_import_result_ffi(
@@ -1211,6 +1225,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_setting_entry(
+    List<SettingEntry> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_share_entry(
     List<ShareEntry> self,
     SseSerializer serializer,
@@ -1368,6 +1388,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_server_ffi(ServerFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_setting_entry(SettingEntry self, SseSerializer serializer);
 
   @protected
   void sse_encode_shard_import_result_ffi(

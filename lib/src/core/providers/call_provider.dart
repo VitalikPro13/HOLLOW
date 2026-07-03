@@ -14,6 +14,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
@@ -50,8 +51,9 @@ class CallState {
   final bool isScreenSharing;
   final bool remoteScreenSharing;
   final String sframeKey; // hex-encoded 32-byte SFrame key for E2EE
-  final bool isLocalSpeaking;
-  final bool isRemoteSpeaking;
+  // NOTE: speaking (VAD) state deliberately lives in callSpeakingProvider,
+  // NOT here — it flips 1-4x/sec while talking and a copyWith here rebuilt
+  // every callProvider watcher (shell, panes, video subtrees) per flip.
 
   /// Mobile audio route: true = loudspeaker, false = earpiece.
   final bool isSpeakerOn;
@@ -88,8 +90,6 @@ class CallState {
     this.isScreenSharing = false,
     this.remoteScreenSharing = false,
     this.sframeKey = '',
-    this.isLocalSpeaking = false,
-    this.isRemoteSpeaking = false,
     this.isSpeakerOn = false,
     this.isDeafened = false,
     this.remoteMuted = false,
@@ -112,8 +112,6 @@ class CallState {
     bool? isScreenSharing,
     bool? remoteScreenSharing,
     String? sframeKey,
-    bool? isLocalSpeaking,
-    bool? isRemoteSpeaking,
     bool? isSpeakerOn,
     bool? isDeafened,
     bool? remoteMuted,
@@ -137,8 +135,6 @@ class CallState {
         isScreenSharing: isScreenSharing ?? this.isScreenSharing,
         remoteScreenSharing: remoteScreenSharing ?? this.remoteScreenSharing,
         sframeKey: sframeKey ?? this.sframeKey,
-        isLocalSpeaking: isLocalSpeaking ?? this.isLocalSpeaking,
-        isRemoteSpeaking: isRemoteSpeaking ?? this.isRemoteSpeaking,
         isSpeakerOn: isSpeakerOn ?? this.isSpeakerOn,
         isDeafened: isDeafened ?? this.isDeafened,
         remoteMuted: remoteMuted ?? this.remoteMuted,
@@ -246,14 +242,15 @@ class CallNotifier extends Notifier<CallState> {
         // calls on the loudspeaker.
         _setSpeakerRoute(state.isVideoCall);
 
-        // Start VAD for speaking indicators.
+        // Start VAD for speaking indicators. Writes go to the dedicated
+        // callSpeakingProvider (NOT CallState) so a flip only rebuilds the
+        // avatar glow, never every callProvider watcher. No status gate:
+        // stopVad() emits (false, false), which resets the provider on hangup.
         _voiceService!.onSpeakingChanged = (localSpeaking, remoteSpeaking) {
-          if (state.status == CallStatus.active) {
-            state = state.copyWith(
-              isLocalSpeaking: localSpeaking,
-              isRemoteSpeaking: remoteSpeaking,
-            );
-          }
+          ref.read(callSpeakingProvider.notifier).set(
+                local: localSpeaking,
+                remote: remoteSpeaking,
+              );
         };
         _voiceService!.startVad();
 

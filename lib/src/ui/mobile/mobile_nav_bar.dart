@@ -19,15 +19,18 @@ class MobileNavBar extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final currentTab = ref.watch(mobileTabProvider);
     final pendingFriends = ref.watch(pendingFriendCountProvider);
-    final unread = ref.watch(unreadProvider);
-
-    int totalUnread = 0;
-    for (final count in unread.dmUnreadCounts.values) {
-      totalUnread += count;
-    }
-    for (final count in unread.channelUnreadCounts.values) {
-      totalUnread += count;
-    }
+    // Select the derived SUM — the always-mounted nav bar then only rebuilds
+    // when the total actually changes, not on every unread-state mutation.
+    final totalUnread = ref.watch(unreadProvider.select((u) {
+      int total = 0;
+      for (final count in u.dmUnreadCounts.values) {
+        total += count;
+      }
+      for (final count in u.channelUnreadCounts.values) {
+        total += count;
+      }
+      return total;
+    }));
 
     return Container(
       decoration: BoxDecoration(
