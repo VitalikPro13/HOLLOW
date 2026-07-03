@@ -220,7 +220,11 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
     await Firebase.initializeApp();
   } catch (_) {}
 
-  await _pushLog('Handler started, data=${message.data}');
+  // PRIVACY: log only whitelisted routing keys, never the whole payload map —
+  // if the sidecar ever adds a content/preview field it must not hit the log.
+  await _pushLog(
+      'Handler started, type=${message.data['type']} sender=${message.data['sender']} '
+      'server=${message.data['server']} channel=${message.data['channel']}');
 
   // Channel pushes carry type=channel_wake + server/channel ids — a separate
   // pipeline (server-room fetch, MLS decrypt, per-channel banner).

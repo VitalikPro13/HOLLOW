@@ -1616,7 +1616,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   }
 }
 
-/// Passphrase prompt shared by App Lock (Security category) and Account
+/// Passphrase prompt shared by App Lock (Security category) and Identity
 /// Backup (Backup category). Returns the entered passphrase, or null if
 /// cancelled. When [confirm] is true a second field must match.
 Future<String?> askPassphraseDialog(BuildContext context, String title,
@@ -2165,7 +2165,7 @@ class _SecurityTabState extends State<_SecurityTab> {
                 const SizedBox(width: HollowSpacing.xs),
                 Expanded(
                   child: Text(
-                    'Anyone with these words can access your account. Never share them.',
+                    'Anyone with these words can access your identity. Never share them.',
                     style: HollowTypography.caption.copyWith(
                       color: hollow.warning,
                       fontSize: 11,
@@ -2313,7 +2313,7 @@ class _DevicesCategoryState extends ConsumerState<_DevicesCategory> {
             title: 'Link a Device',
             children: [
               Text(
-                'Link another device to this account. Show a code here, then '
+                'Link another device to this identity. Show a code here, then '
                 'enter it on your other (empty) device to copy your messages, '
                 'friends and profile across. Keep both devices online during '
                 'the transfer.',
@@ -2355,8 +2355,8 @@ class _DevicesCategoryState extends ConsumerState<_DevicesCategory> {
   }
 }
 
-/// Backup category — account backup export + proof verification. Split out of
-/// the old Security tab.
+/// Backup category — identity backup export. Split out of the old Security
+/// tab (proof verification lives in the Security category).
 class _BackupCategory extends StatefulWidget {
   const _BackupCategory();
   @override
@@ -2436,7 +2436,7 @@ class _BackupCategoryState extends State<_BackupCategory> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _SettingsCard(
-            title: 'Account Backup',
+            title: 'Identity Backup',
             children: [
               Text(
                 'Exports your identity, profile, servers, friends, and messages.',
@@ -3299,7 +3299,7 @@ class _DevicesSectionState extends ConsumerState<_DevicesSection> {
 
     if (devices.length <= 1) {
       return Text(
-        'Only this device is linked to your account. Link another below to sync '
+        'Only this device is linked to your identity. Link another below to sync '
         'your messages, friends and profile across devices.',
         style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
       );
@@ -3313,7 +3313,7 @@ class _DevicesSectionState extends ConsumerState<_DevicesSection> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          'Devices linked to your account. Remove a device you no longer use or '
+          'Devices linked to your identity. Remove a device you no longer use or '
           'have lost — it can no longer read your messages once removed.',
           style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
         ),
@@ -3424,7 +3424,7 @@ class _DeviceRow extends ConsumerWidget {
         title: 'Remove this device?',
         content: Text(
           'This permanently removes "${device.label.isNotEmpty ? device.label : shortenPeerId(device.peerId)}" '
-          'from your account. It will stop receiving your messages and is removed '
+          'from your identity. It will stop receiving your messages and is removed '
           'from your servers. This cannot be undone from the removed device.',
           style: HollowTypography.body
               .copyWith(color: HollowTheme.of(ctx).textSecondary),

@@ -56,7 +56,9 @@ pub(crate) fn handle_claim_link_code(
 ) {
     let _ = ws_cmd_tx.send(WsCommand::ClaimLinkCode { code: code.to_string() });
     let _ = ws_cmd_tx.send(WsCommand::JoinRoom { room_code: link_room(code) });
-    hollow_log!("[HOLLOW-LINK] Claimed link code {code}, joined {}", link_room(code));
+    // PRIVACY: the code is the passphrase to the identity snapshot — log only
+    // its length, never the value (hollow_debug.log gets shared for diagnostics).
+    hollow_log!("[HOLLOW-LINK] Claimed link code ({} chars), joined link room", code.len());
 }
 
 /// (Populated device) Release the link code + leave its room (cancel / expired).
@@ -77,7 +79,8 @@ pub(crate) fn handle_resolve_link_code(
 ) {
     let _ = ws_cmd_tx.send(WsCommand::JoinRoom { room_code: link_room(code) });
     let _ = ws_cmd_tx.send(WsCommand::ResolveLinkCode { code: code.to_string() });
-    hollow_log!("[HOLLOW-LINK] Resolving link code {code}, joined {}", link_room(code));
+    // PRIVACY: see handle_claim_link_code — never log the code value.
+    hollow_log!("[HOLLOW-LINK] Resolving link code ({} chars), joined link room", code.len());
 }
 
 /// (Empty device) The relay resolved the code to the populated peer. Send a snapshot

@@ -178,6 +178,10 @@ iOS content resolution happens in the NSE.
    messages" subtitle. Image/sentinel texts → "📷 Image".
 6. Sample `task_vm_info.phys_footprint`, log to `<AppGroup>/push_diag/nse_metrics.log`
    (capped 64KB). Deliver. `serviceExtensionTimeWillExpire` delivers best attempt.
+   **PRIVACY (2026-07-02):** the fetch-ok log lines log only `jsonLen=` — never the
+   decrypted JSON itself (it contains message plaintext and used to be logged as a
+   160-char prefix). Same rule Dart-side: `_firebaseBackgroundHandler` logs only
+   whitelisted routing keys (type/sender/server/channel), never the whole payload map.
 
 ### Rust C-ABI — push_enrich.rs
 - `hollow_push_fetch_and_decrypt(...) -> *mut c_char` (JSON; free with
@@ -216,11 +220,11 @@ NSE measured footprint **~3MB vs the 24MB cap** — the whole networking+SQLCiph
 vodozemac stack fits (phys_footprint counts touched pages + dead-strip).
 
 ### Diagnostics
-Security settings tab (iOS) → "Export Push Diagnostics"
-(`lib/src/ui/mobile/tabs/mobile_settings_tab.dart`) bundles
-`push_diag/nse_metrics.log` + `app_active.txt` + `push_debug.log` +
-`hollow_debug.log` via `FilePicker.saveFile(bytes:)`. There's no debugger on
-TestFlight, so this is how NSE footprint + fetch success are read off-device.
+The "Export Push Diagnostics" button was REMOVED from mobile settings (2026-07-02,
+HOLLOW_PLAN 1976) — the NSE still writes `push_diag/nse_metrics.log` (now
+content-free, lengths only) and the Dart side writes `push_debug.log`; to read them
+off-device, pull the App Group container manually (Xcode Devices & Simulators or
+Finder file sharing).
 
 ### Other iOS facts
 - Classic non-UIScene AppDelegate (`register(with: self)`); firebase pinned below

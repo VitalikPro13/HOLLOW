@@ -51,6 +51,7 @@ import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/pinned_provider.dart';
+import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
@@ -130,6 +131,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       // Dismiss this peer's notification (and the group summary if it was the
       // last one) — a bare cancel() would leave an empty "Hollow" group header.
       dismissPeerNotification(widget.peerId!);
+      // Also drop any pending in-app card for this DM — the user is here now;
+      // a lingering card would replay in the next chat they open. Post-frame:
+      // the card dismissal writes provider state, which is not allowed while
+      // the tree is building (this route is pushed during a tap-handler frame).
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ref.read(systemNotificationProvider.notifier).dismissDm(widget.peerId!);
+      });
       ref.read(chatProvider.notifier).loadHistory(widget.peerId!).then((_) {
         if (mounted) {
           setState(() {});
@@ -145,6 +154,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       // Opening the channel: clear its accumulated push lines + dismiss the
       // OS banner (and the channel group summary if it was the last one).
       dismissChannelNotification(widget.serverId!, widget.channelId!);
+      // Also drop any pending in-app card for this channel (see DM branch —
+      // post-frame because it writes provider state during build).
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ref
+            .read(systemNotificationProvider.notifier)
+            .dismissChannel(widget.serverId!, widget.channelId!);
+      });
       // Load FRESH channel + layout state for this server into the providers the
       // chat UI reads. On mobile the Chats tab often has NO selected server, so
       // `channelListProvider` can be empty/stale — without this, a re-opened chat

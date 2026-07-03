@@ -140,7 +140,7 @@ class EventStreamNotifier extends Notifier<bool> {
       if (overlay != null) {
         HollowToast.show(
           overlay.context,
-          'This device was removed from your account. Resetting…',
+          'This device was removed from your identity. Resetting…',
           type: HollowToastType.error,
           overlayState: overlay,
         );

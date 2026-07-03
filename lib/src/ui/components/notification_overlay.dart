@@ -30,6 +30,34 @@ class NotificationOverlay extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final cards = ref.watch(systemNotificationProvider);
 
+    // Opening a conversation retires its pending card — the user is reading
+    // it now; keeping the card up (or letting it replay) is redundant noise.
+    // Channel selection is written as part of the atomic server-switch batch
+    // (server + channel providers update in sequence), so read the settled
+    // pair post-frame instead of trusting the mid-batch listener value.
+    ref.listen<String?>(selectedPeerProvider, (_, peerId) {
+      if (peerId == null) return;
+      // Post-frame: selection can be written during a build/init frame (e.g.
+      // notification-tap navigation), and dismissing the card writes provider
+      // state — not allowed while the tree is building.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted) return;
+        ref.read(systemNotificationProvider.notifier).dismissDm(peerId);
+      });
+    });
+    ref.listen<String?>(selectedChannelProvider, (_, _) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted) return;
+        final serverId = ref.read(selectedServerProvider);
+        final channelId = ref.read(selectedChannelProvider);
+        if (serverId != null && channelId != null) {
+          ref
+              .read(systemNotificationProvider.notifier)
+              .dismissChannel(serverId, channelId);
+        }
+      });
+    });
+
     if (cards.isEmpty) return const SizedBox.shrink();
 
     // Stack cards from bottom, each card ~100px tall + 4px gap.

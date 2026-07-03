@@ -52,6 +52,14 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
   // Drives the 5s countdown ring (and the auto-dismiss when it completes).
   late final AnimationController _countdown;
   static const int _countdownSeconds = 5;
+
+  /// A card only surfaces here if its newest message is at most this old.
+  /// Cards can be created while NO banner is mounted (user sitting on a main
+  /// tab — there is deliberately no banner outside chat routes), so without
+  /// this window an old notification would replay the moment the user enters
+  /// any chat. Unread badges already carry the stale signal.
+  static const Duration _freshnessWindow = Duration(seconds: 10);
+
   NotificationCard? _currentCard;
   int _lastMessageCount = 0;
 
@@ -82,6 +90,16 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
 
   @override
   void dispose() {
+    // The banner leaves with its route. If a card is still on screen the user
+    // has seen it — drop it from the provider so it doesn't replay in the
+    // next chat they open. (Post-frame: providers must not be mutated while
+    // the tree is locked for dismantling.)
+    final shownKey = _currentCard?.sourceKey;
+    if (shownKey != null) {
+      final notifier = ref.read(systemNotificationProvider.notifier);
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => notifier.dismissCard(shownKey));
+    }
     _controller.dispose();
     _countdown.dispose();
     super.dispose();
@@ -159,12 +177,38 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
     final hollow = HollowTheme.of(context);
     final cards = ref.watch(systemNotificationProvider);
 
-    // Pick the newest card that's NOT the conversation we're currently reading.
+    // Pick the newest FRESH card that's NOT the conversation we're currently
+    // reading (cards are appended in arrival order — iterate newest-first).
+    // Stale cards (queued while no banner was mounted, or left behind by a
+    // popped route) are pruned instead of shown.
+    final now = DateTime.now();
     NotificationCard? relevantCard;
-    for (final card in cards) {
-      if (_isCurrentConversation(card)) continue;
-      relevantCard = card;
-      break;
+    final staleKeys = <String>[];
+    for (final card in cards.reversed) {
+      if (_isCurrentConversation(card)) {
+        // The user is reading this conversation — the card must never show,
+        // here or after they leave. Drop it instead of just skipping it.
+        staleKeys.add(card.sourceKey);
+        continue;
+      }
+      final lastMessageAt =
+          card.messages.isNotEmpty ? card.messages.last.timestamp : card.createdAt;
+      if (now.difference(lastMessageAt) > _freshnessWindow) {
+        // Don't prune the card we're actively displaying — _dismiss owns it.
+        if (card.sourceKey != _currentCard?.sourceKey) {
+          staleKeys.add(card.sourceKey);
+        }
+        continue;
+      }
+      relevantCard ??= card;
+    }
+    if (staleKeys.isNotEmpty) {
+      final notifier = ref.read(systemNotificationProvider.notifier);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        for (final key in staleKeys) {
+          notifier.dismissCard(key);
+        }
+      });
     }
 
     if (relevantCard != null) {

@@ -373,9 +373,9 @@ The old `_SecurityTab` (which held App Lock, Device Protection, Recovery Phrase,
 
 - **`_SecurityTab`** (Security category) — now just **App Lock + Device Protection + Recovery Phrase + Verify a Proof** (the proof verifier moved here, at the bottom, per 2026-06-21 feedback). Still a `StatefulWidget`.
 - **`_DevicesCategory`** (`ConsumerStatefulWidget`) — Your Devices card (`_DevicesSection`), Link a Device card (`showDeviceLinkDialog`), Maintenance card (`_resetDeviceLists` → `network_api.resetDeviceLists()`). Each in a `_SettingsCard`.
-- **`_BackupCategory`** (`StatefulWidget`) — Account Backup card only (`_includeVault`/`_includeFiles` checkboxes + `_exportBackup`).
+- **`_BackupCategory`** (`StatefulWidget`) — "Identity Backup" card only (`_includeVault`/`_includeFiles` checkboxes + `_exportBackup`). Renamed from "Account Backup" 2026-07-02: ALL user-facing "account" copy is now "identity" (welcome dialog "Create New Identity", device-list strings, help lessons; Twitch-account references untouched).
 
-The passphrase prompt is now a **top-level** `askPassphraseDialog(context, title, {confirm, buttonLabel})` shared by App Lock and Account Backup (was a private method on `_SecurityTabState`).
+The passphrase prompt is now a **top-level** `askPassphraseDialog(context, title, {confirm, buttonLabel})` shared by App Lock and Identity Backup (was a private method on `_SecurityTabState`).
 
 ### Security category (`_SecurityTab`)
 
@@ -427,7 +427,7 @@ Only shown when `!_hasPassword && _osKeychainAvailable`. Standalone device-level
 - **Revealed state**: `_buildWordGrid()` — splits mnemonic into words, renders in 4 columns x 6 rows. Each word: `RichText` with number prefix (e.g. "01. ") in dim mono + word in normal mono (11px).
 - **Reveal/Hide button**: Ghost button with eye/eyeOff icon, toggles `_revealed`.
 - **Copy button** (only shown when revealed): Ghost button with copy icon, copies mnemonic to clipboard, shows success toast.
-- **Warning**: AlertTriangle icon (warning color) + "Anyone with these words can access your account. Never share them." (11px caption, warning color).
+- **Warning**: AlertTriangle icon (warning color) + "Anyone with these words can access your identity. Never share them." (11px caption, warning color).
 
 ### YOUR DEVICES Section (`_DevicesSection` / `_DeviceRow`)
 

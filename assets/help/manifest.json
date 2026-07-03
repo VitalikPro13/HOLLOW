@@ -12,13 +12,13 @@
           "title": "What Hollow is",
           "sections": [
             {
-              "text": "Hollow is a chat app: direct messages, servers, voice and video calls, file sharing. The part that makes it different is what's underneath. There is no company server in the middle holding your messages or your account."
+              "text": "Hollow is a chat app: direct messages, servers, voice and video calls, file sharing. The part that makes it different is what's underneath. There is no company server in the middle holding your messages or your identity."
             },
             {
               "text": "Instead, the people in a space host it together, and everything is end-to-end encrypted by default. That means the only infrastructure Hollow runs is a relay that passes encrypted traffic between people. It can't read any of it. It just moves sealed envelopes around."
             },
             {
-              "text": "This guide walks through the parts that work a little differently than what you're used to, starting with the most important one: how your account works."
+              "text": "This guide walks through the parts that work a little differently than what you're used to, starting with the most important one: how your identity works."
             }
           ]
         },
@@ -33,7 +33,7 @@
               "text": "1. No central server! Members collectively host their servers. There's no company database with your chats in it. If everyone in a space is offline, the space is asleep until someone comes back."
             },
             {
-              "text": "2. Your account is a recovery phrase, not an email and password! You hold it and nobody can reset it, lock you out of it, or hand it to anyone else."
+              "text": "2. Your identity is a recovery phrase, not an email and password! You hold it and nobody can reset it, lock you out of it, or hand it to anyone else."
             },
             {
               "text": "3. Everything is encrypted by default! DMs, servers, and calls. Even the relay that connects you only ever sees encrypted noise.\n\nThe trade is straightforward: more privacy and more ownership, in exchange for understanding a couple of new ideas. The rest of this guide covers them."
@@ -49,13 +49,13 @@
       "lessons": [
         {
           "id": "1.1",
-          "title": "Your recovery phrase is your account",
+          "title": "Your recovery phrase is your identity",
           "sections": [
             {
               "text": "This is the most important thing to understand about Hollow, so it goes first."
             },
             {
-              "text": "When you created your identity, Hollow gave you a 24-word recovery phrase, the same idea as a crypto wallet. That phrase isn't a backup or a \"forgot password\" fallback. It literally is your account and represents the uniquely generated peer ID. Your identity is an Ed25519 key (a cryptographic keypair), and those 24 words are that key written in a form you can read and store. Write them down on paper and keep them somewhere safe. Do not make a screenshot or sync it to the cloud to not impose any security risks to your identity. If you ever need to see the phrase again, it's under Settings ==> Security."
+              "text": "When you created your identity, Hollow gave you a 24-word recovery phrase, the same idea as a crypto wallet. That phrase isn't a backup or a \"forgot password\" fallback. It literally is your identity and represents the uniquely generated peer ID. Your identity is an Ed25519 key (a cryptographic keypair), and those 24 words are that key written in a form you can read and store. Write them down on paper and keep them somewhere safe. Do not make a screenshot or sync it to the cloud to not impose any security risks to your identity. If you ever need to see the phrase again, it's under Settings ==> Security."
             }
           ]
         },
@@ -64,16 +64,16 @@
           "title": "Backing up and protecting your identity",
           "sections": [
             {
-              "text": "Since your recovery phrase is your account, backing it up is important!"
+              "text": "Since your recovery phrase is your identity, backing it up is important!"
             },
             {
-              "text": "If your 24-word phrase is secured, you should also use the .hollow export feature. It allows for exporting of your entire identity plus your data into a single `.hollow` file, and import it on a fresh install. This is the easy way to move to a new machine or keep a full snapshot. Treat that file like the phrase: anyone who has it has you. To preserve the entire account, the .hollow export is the recommended way and easily replaces the traditional \"login\" approach."
+              "text": "If your 24-word phrase is secured, you should also use the .hollow export feature. It allows for exporting of your entire identity plus your data into a single `.hollow` file, and import it on a fresh install. This is the easy way to move to a new machine or keep a full snapshot. Treat that file like the phrase: anyone who has it has you. To preserve your entire identity, the .hollow export is the recommended way and easily replaces the traditional \"login\" approach."
             },
             {
               "text": "To stop someone who gets onto your device from opening your identity, Hollow offers at-rest protection functionality such as two locks under Settings ==> Security: a password (which you set and remember), or your operating system's keychain (Windows Credential Manager, macOS Keychain), which unlocks silently when you log in. Both are optional and off by default."
             },
             {
-              "text": "Whatever you choose, the rule is the same one from the last lesson: keep your phrase and always make backups. The locks protect the app on your device. The phrase is what brings your account back if the device/protection password is gone."
+              "text": "Whatever you choose, the rule is the same one from the last lesson: keep your phrase and always make backups. The locks protect the app on your device. The phrase is what brings your identity back if the device/protection password is gone."
             }
           ]
         },
@@ -88,7 +88,7 @@
               "text": "You can edit it from Settings ==> Profile in the app. Set a display name so people see something friendlier than a peer ID, add an avatar, and optionally a banner (they support animation). Changes sync out to the people you talk to."
             },
             {
-              "text": "Keep in mind the split. Your recovery phrase is private and is your account, while your profile is public and is just how you present yourself. Changing your profile never changes your identity, and sharing your profile never exposes your key."
+              "text": "Keep in mind the split. Your recovery phrase is private and is your identity, while your profile is public and is just how you present yourself. Changing your profile never changes your identity, and sharing your profile never exposes your key."
             }
           ]
         },
@@ -194,7 +194,7 @@
               "text": "System tab is where you can customize the client itself: switch between light/dark modes, change the main color or set a background, disable animations, appear invisible or have the app minimized to tray on close, auto-download for file threshold, cache size limit, image quality, voice & video settings, custom ringtone and keyboard shortcuts."
             },
             {
-              "text": "Security tab lets you set an App Lock to protect your identity or enable the device protection (same but against someone copying your identity), security phrase, account backup and a signature verification tool."
+              "text": "Security tab lets you set an App Lock to protect your identity or enable the device protection (same but against someone copying your identity), security phrase, identity backup and a signature verification tool."
             },
 			{
               "text": "Updates shows the current app version and whether there is a new update. It gets checked on every app launch, so you'll see a little update icon below the news block on Home tab."
@@ -492,10 +492,10 @@
           "title": "No resets, by design",
           "sections": [
             {
-              "text": "As from the lessons 1.1 and 1.2, there is simply no way to reset a password or get your account back in case of it being lost. We can't email you, verify your identity or do anything at all because we store nothing."
+              "text": "As from the lessons 1.1 and 1.2, there is simply no way to reset a password or get your identity back in case of it being lost. We can't email you, verify your identity or do anything at all because we store nothing."
             },
             {
-              "text": "Your identity is your responsibility: your security phrase, your data and what you do. We recommend to always export your identity using the Account Backup under Settings ==> Security to keep all your messages, friends, and servers intact. This is the easiest way to have all your data with you."
+              "text": "Your identity is your responsibility: your security phrase, your data and what you do. We recommend to always export your identity using the Identity Backup under Settings ==> Backup to keep all your messages, friends, and servers intact. This is the easiest way to have all your data with you."
             }
           ]
         }

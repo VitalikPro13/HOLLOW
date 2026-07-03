@@ -187,7 +187,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
         // Subtitle
         Text(
-          'Choose how to set up your account',
+          'Choose how to set up your identity',
           style: HollowTypography.body.copyWith(
             color: hollow.textSecondary,
           ),
@@ -198,7 +198,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
         // Option cards
         _OptionCard(
           icon: LucideIcons.userPlus,
-          title: 'Create New Account',
+          title: 'Create New Identity',
           subtitle: 'Generate a new identity with a fresh recovery phrase',
           hollow: hollow,
           onTap: () => Navigator.of(context).pop((action: 'create_new', relayDomain: _relayDomain)),

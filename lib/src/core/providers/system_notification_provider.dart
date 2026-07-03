@@ -163,11 +163,10 @@ class SystemNotificationNotifier
     final isFocused = isHidden ? false : await _isWindowFocused();
 
     // event_provider already guarantees we're NOT viewing this exact chat
-    // (focused + selected + at-bottom). So:
+    // (focused + selected + at-bottom). Exactly ONE surface per message:
     //  • Native OS toast when the window is hidden (tray) OR unfocused.
-    //  • In-app card whenever the window is VISIBLE (focused-but-other-chat OR
-    //    unfocused) — this is the case that was broken: a card never showed
-    //    while the app was focused on a different conversation.
+    //  • In-app card only when visible AND focused (focused-but-other-chat) —
+    //    showing both toast and card for the same message was redundant noise.
     if (isHidden || !isFocused) {
       final avatar = await _avatarFor(fromPeerId);
       DesktopNotificationService.instance.showDm(
@@ -176,9 +175,7 @@ class SystemNotificationNotifier
         body: text,
         avatarBytes: avatar,
       );
-    }
-
-    if (!isHidden) {
+    } else {
       _addMessage(
         sourceKey: fromPeerId,
         title: senderName,
@@ -266,6 +263,8 @@ class SystemNotificationNotifier
     final isHidden = await _isWindowHidden();
     final isFocused = isHidden ? false : await _isWindowFocused();
 
+    // One surface per message (see notifyDm): toast when hidden/unfocused,
+    // in-app card only when visible and focused on another conversation.
     if (isHidden || !isFocused) {
       // Native OS toast — channel line carries the sender name (multiple people
       // post in a channel, unlike a DM). Use the SENDER's avatar (a real peer id;
@@ -278,10 +277,7 @@ class SystemNotificationNotifier
         body: '$senderName: $text',
         avatarBytes: avatar,
       );
-    }
-
-    if (!isHidden) {
-      // Window visible (focused-on-other-chat OR unfocused) — show in-app card.
+    } else {
       _addMessage(
         sourceKey: sourceKey,
         title: '$serverName > #$resolvedChannelName',
@@ -303,6 +299,15 @@ class SystemNotificationNotifier
   void dismissCard(String sourceKey) {
     state = state.where((c) => c.sourceKey != sourceKey).toList();
   }
+
+  /// Dismiss the pending card for a DM the user just opened. Chat-open must
+  /// clear its in-app card the same way it clears the OS notification —
+  /// otherwise the card lingers and replays later (and occupies the card cap).
+  void dismissDm(String peerId) => dismissCard(peerId);
+
+  /// Dismiss the pending card for a channel the user just opened.
+  void dismissChannel(String serverId, String channelId) =>
+      dismissCard('$serverId:$channelId');
 
   /// Dismiss all cards.
   void dismissAll() {
@@ -328,7 +333,9 @@ class SystemNotificationNotifier
     if (existingIndex >= 0) {
       cards[existingIndex] = cards[existingIndex].withMessage(message);
     } else {
-      if (cards.length >= 3) return;
+      // At capacity: evict the OLDEST card, never silently drop the newest —
+      // stale cards must not starve fresh notifications.
+      if (cards.length >= 3) cards.removeAt(0);
       cards.add(NotificationCard(
         sourceKey: sourceKey,
         title: title,

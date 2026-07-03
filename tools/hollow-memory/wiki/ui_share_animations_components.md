@@ -858,7 +858,7 @@ File: `lib/src/ui/components/notification_overlay.dart`
 
 `ConsumerWidget`. Bottom-right notification card stack showing up to 3 cards. Desktop-only (mobile's in-app banner is `MobileInChatBanner`).
 
-**Data:** Watches `systemNotificationProvider`. Cards are populated by `notifyDm`/`notifyChannel` whenever the desktop window is VISIBLE (focused-on-another-chat OR unfocused); a native OS toast additionally fires when hidden/unfocused. See the System Notification Provider wiki entry.
+**Data:** Watches `systemNotificationProvider`. One surface per message (UX audit 2026-07-02): `notifyDm`/`notifyChannel` add a card ONLY when the window is visible AND focused (on another conversation); the native OS toast fires when hidden OR unfocused — never both. The provider's 3-card cap evicts the OLDEST card instead of dropping the newest. The overlay also `ref.listen`s `selectedPeerProvider`/`selectedChannelProvider` and dismisses the matching card when the user opens that conversation (post-frame — selection is written mid-batch during the atomic server switch, and provider writes during a build frame throw). See the System Notification Provider wiki entry.
 
 **Layout:** Stack with `AnimatedPositioned` cards. Cards stacked vertically from bottom (newest at bottom, oldest at top). Card height ~100px + 4px gap. Positioned at right: `HollowSpacing.lg`, bottom: `HollowSpacing.lg + (cards.length - 1 - i) * (cardHeight + gap)`.
 

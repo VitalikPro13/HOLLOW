@@ -1972,8 +1972,10 @@ Max Amplitude: -1 dB
 Look-ahead Time: 7ms
 Release time: 100ms
 
-- [ ] Local notifications on both desktop/mobile implementation is a bit weird and too much in terms of showing itself. For example, on the phone, when you're not looking into a specific server channel chat but you're in DMs, and then you enter that server channel chat - it shows the local notification card above. This and the entire system needs to be investigated in order ot be useful and fix such bugs (proper UX little audit with it)
-- [ ] Add Verify a Proof (desktop thing from Settings->Security tab) to mobile in same tab; rename "Export account & verify proofs" to "Export identity" in Archive card + find all instances of "account" words and rename them to "identity"; remove Push Diagnostics completely from mobile (currently seen on iOS UI) and strip any sensitive logging on both desktop/mobile (messages etc.)
+- [x] Local notifications on both desktop/mobile implementation is a bit weird and too much in terms of showing itself. For example, on the phone, when you're not looking into a specific server channel chat but you're in DMs, and then you enter that server channel chat - it shows the local notification card above. This and the entire system needs to be investigated in order ot be useful and fix such bugs (proper UX little audit with it)
+- [x] Add Verify a Proof (desktop thing from Settings->Security tab) to mobile in same tab; rename "Export account & verify proofs" to "Export identity" in Archive card + find all instances of "account" words and rename them to "identity"; remove Push Diagnostics completely from mobile (currently seen on iOS UI) and strip any sensitive logging on both desktop/mobile (messages etc.)
+
+- [ ] Fix blinking avatar during active call on mobile; make the call sheet movable; we recently did like Rust threading optimization and now I wonder if it was actually good or there is something that could be optimized further not only during WebRTC stuff like data channels or calls, but most importantly - in the app logic itself.
 
 - [ ] Get Linux out of Experimental phase, please
 

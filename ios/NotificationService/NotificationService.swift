@@ -110,7 +110,8 @@ class NotificationService: UNNotificationServiceExtension {
       let json = String(cString: cstr)
       let elapsed = Int(Date().timeIntervalSince(started) * 1000)
       let footMB = currentFootprintMB()
-      log(container, "fetch ok in \(elapsed)ms, footprint=\(footMB)MB, json=\(json.prefix(160))")
+      // PRIVACY: never log the decrypted JSON — it contains message plaintext.
+      log(container, "fetch ok in \(elapsed)ms, footprint=\(footMB)MB, jsonLen=\(json.count)")
       if let banner = bannerContent(fromJSON: json) {
         content.body = banner.body
         if let subtitle = banner.subtitle {
@@ -187,7 +188,8 @@ class NotificationService: UNNotificationServiceExtension {
       defer { hollow_push_string_free(cstr) }
       let json = String(cString: cstr)
       let elapsed = Int(Date().timeIntervalSince(started) * 1000)
-      log(container, "channel fetch ok in \(elapsed)ms, footprint=\(currentFootprintMB())MB, json=\(json.prefix(160))")
+      // PRIVACY: never log the decrypted JSON — it contains message plaintext.
+      log(container, "channel fetch ok in \(elapsed)ms, footprint=\(currentFootprintMB())MB, jsonLen=\(json.count)")
       if let banner = channelBannerContent(fromJSON: json, channel: channel) {
         content.title = banner.title
         content.body = banner.body

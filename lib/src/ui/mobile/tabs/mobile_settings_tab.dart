@@ -191,7 +191,7 @@ class MobileSettingsTab extends ConsumerWidget {
         _SettingsNavTile(
           icon: LucideIcons.shieldCheck,
           title: 'Security',
-          subtitle: 'App lock & recovery phrase',
+          subtitle: 'App lock, recovery phrase & proofs',
           onTap: () => _push(context, 'Security',
               const _SecurityTab(key: ValueKey('security'))),
         ),
@@ -207,7 +207,7 @@ class MobileSettingsTab extends ConsumerWidget {
         _SettingsNavTile(
           icon: LucideIcons.archive,
           title: 'Backup',
-          subtitle: 'Export account & verify proofs',
+          subtitle: 'Export identity',
           onTap: () => _push(context, 'Backup',
               const _BackupTab(key: ValueKey('backup'))),
         ),
@@ -1418,7 +1418,7 @@ class _DevicesTab extends ConsumerWidget {
         _SectionLabel(label: 'Link a Device'),
         const SizedBox(height: HollowSpacing.sm),
         Text(
-          'Link another device to this account. Show a code here, then enter it '
+          'Link another device to this identity. Show a code here, then enter it '
           'on your other (empty) device to copy your messages, friends and '
           'profile across. Keep both devices online during the transfer.',
           style: HollowTypography.body
@@ -1451,7 +1451,7 @@ class _BackupTab extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        _SectionLabel(label: 'Account Backup'),
+        _SectionLabel(label: 'Identity Backup'),
         const SizedBox(height: HollowSpacing.sm),
         Text(
           'Export an encrypted backup of your identity and messages. '
@@ -1462,12 +1462,6 @@ class _BackupTab extends StatelessWidget {
         ),
         const SizedBox(height: HollowSpacing.sm),
         const _BackupExportButton(),
-        if (Platform.isIOS) ...[
-          const SizedBox(height: HollowSpacing.xl),
-          _SectionLabel(label: 'Push Diagnostics'),
-          const SizedBox(height: HollowSpacing.sm),
-          const _ExportPushDiagnosticsButton(),
-        ],
       ],
     );
   }
@@ -2756,6 +2750,12 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         const SizedBox(height: HollowSpacing.sm),
         _RecoveryPhraseButton(),
         const SizedBox(height: HollowSpacing.xl),
+
+        // Verify a Proof — same placement as the desktop Security tab.
+        _SectionLabel(label: 'Verify a Proof'),
+        const SizedBox(height: HollowSpacing.sm),
+        const _VerifyProofSection(),
+        const SizedBox(height: HollowSpacing.xl),
       ],
     );
   }
@@ -3326,7 +3326,7 @@ class _DevicesSectionMobileState extends ConsumerState<_DevicesSectionMobile> {
 
     if (devices.length <= 1) {
       return Text(
-        'Only this device is linked to your account. Link another below to sync '
+        'Only this device is linked to your identity. Link another below to sync '
         'your messages, friends and profile across devices.',
         style: HollowTypography.body.copyWith(color: hollow.textSecondary, fontSize: 12),
       );
@@ -3341,7 +3341,7 @@ class _DevicesSectionMobileState extends ConsumerState<_DevicesSectionMobile> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          'Devices linked to your account. Remove a device you no longer use or '
+          'Devices linked to your identity. Remove a device you no longer use or '
           'have lost — it can no longer read your messages once removed.',
           style: HollowTypography.body.copyWith(color: hollow.textSecondary, fontSize: 12),
         ),
@@ -3450,7 +3450,7 @@ class _DeviceRowMobile extends ConsumerWidget {
       builder: (ctx) => HollowDialog(
         title: 'Remove this device?',
         content: Text(
-          'This permanently removes "$name" from your account. It will stop '
+          'This permanently removes "$name" from your identity. It will stop '
           'receiving your messages and is removed from your servers. This cannot '
           'be undone from the removed device.',
           style: HollowTypography.body.copyWith(color: HollowTheme.of(ctx).textSecondary),
@@ -3646,70 +3646,443 @@ class _ResetDeviceListButton extends StatelessWidget {
   }
 }
 
-class _ExportPushDiagnosticsButton extends StatelessWidget {
-  const _ExportPushDiagnosticsButton();
+/// Verify a Proof — paste or import a proof JSON and verify it using the same
+/// Ed25519 verification as the Message Proof dialog. Mobile port of the
+/// desktop Security-tab section (user_settings_dialog.dart).
+class _VerifyProofSection extends StatefulWidget {
+  const _VerifyProofSection();
 
   @override
-  Widget build(BuildContext context) {
-    return HollowButton.outline(
-      onPressed: () => _export(context),
-      expand: true,
-      icon: const Icon(LucideIcons.fileText, size: 16),
-      child: const Text('Export Push Diagnostics'),
-    );
+  State<_VerifyProofSection> createState() => _VerifyProofSectionState();
+}
+
+class _VerifyProofSectionState extends State<_VerifyProofSection> {
+  final _controller = TextEditingController();
+  final _resultKey = GlobalKey();
+  _ProofResult? _result;
+  bool _verifying = false;
+
+  void _scrollToResult() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _resultKey.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(ctx,
+            duration: const Duration(milliseconds: 200));
+      }
+    });
   }
 
-  Future<void> _export(BuildContext context) async {
-    final buf = StringBuffer();
-    buf.writeln('=== Hollow Push Diagnostics ===');
-    buf.writeln('Exported: ${DateTime.now().toIso8601String()}');
-    buf.writeln('Data dir: $hollowDataDir');
-    buf.writeln();
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
-    // App Group container = parent of the (migrated) data dir.
-    final container = Directory(hollowDataDir).parent.path;
-
-    void appendFile(String label, String path) {
-      buf.writeln('----- $label ($path) -----');
-      try {
-        final f = File(path);
-        if (f.existsSync()) {
-          buf.writeln(f.readAsStringSync());
-        } else {
-          buf.writeln('(not found)');
-        }
-      } catch (e) {
-        buf.writeln('(read error: $e)');
-      }
-      buf.writeln();
-    }
-
-    appendFile('NSE metrics', '$container/push_diag/nse_metrics.log');
-    appendFile('App active heartbeat', '$container/push_diag/app_active.txt');
-    appendFile('Dart push log', '$hollowDataDir/push_debug.log');
-    appendFile('Hollow debug log (tail)', '$hollowDataDir/hollow_debug.log');
-
-    final bytes = Uint8List.fromList(utf8.encode(buf.toString()));
+  Future<void> _importFile() async {
     try {
-      final saved = await FilePicker.platform.saveFile(
-        dialogTitle: 'Export Push Diagnostics',
-        fileName: 'hollow_push_diag.txt',
-        bytes: bytes, // required on iOS/Android
+      final result = await FilePicker.platform.pickFiles(
+        dialogTitle: 'Import Proof JSON',
+        type: FileType.custom,
+        allowedExtensions: ['json'],
+        withData: true, // mobile pickers may not expose a filesystem path
       );
-      if (context.mounted) {
-        HollowToast.show(
-          context,
-          saved == null ? 'Export cancelled' : 'Diagnostics exported',
-          type: saved == null ? HollowToastType.info : HollowToastType.success,
-        );
+      if (result == null || result.files.isEmpty) return;
+      final file = result.files.single;
+      final String content;
+      if (file.bytes != null) {
+        content = utf8.decode(file.bytes!);
+      } else if (file.path != null) {
+        content = await File(file.path!).readAsString();
+      } else {
+        return;
       }
+      _controller.text = content;
+      _verify(content);
     } catch (e) {
-      if (context.mounted) {
-        HollowToast.show(context, 'Export failed: $e',
+      if (mounted) {
+        HollowToast.show(context, 'Failed to read file: $e',
             type: HollowToastType.error);
       }
     }
   }
+
+  Future<void> _verify(String jsonStr) async {
+    setState(() {
+      _verifying = true;
+      _result = null;
+    });
+
+    void fail(String error) {
+      setState(() {
+        _verifying = false;
+        _result = _ProofResult(valid: false, error: error);
+      });
+      _scrollToResult();
+    }
+
+    try {
+      final map = json.decode(jsonStr) as Map<String, dynamic>;
+
+      // Extract fields from the proof JSON.
+      final message = map['message'] as Map<String, dynamic>?;
+      final sender = map['sender'] as Map<String, dynamic>?;
+      final ctx = map['context'] as Map<String, dynamic>?;
+      final sig = map['signature'] as Map<String, dynamic>?;
+
+      if (message == null || sender == null || sig == null) {
+        fail('Invalid proof format — missing required fields.');
+        return;
+      }
+
+      // Validate envelope fields that must have exact expected values.
+      final version = map['version'];
+      final protocol = map['protocol'] as String?;
+      final algorithm = sig['algorithm'] as String?;
+
+      if (version != 1) {
+        fail('Unknown proof version: $version (expected 1).');
+        return;
+      }
+      if (protocol != 'hollow-proof-v1') {
+        fail('Unknown protocol: "$protocol" (expected "hollow-proof-v1").');
+        return;
+      }
+      if (algorithm != 'Ed25519') {
+        fail('Unknown algorithm: "$algorithm" (expected "Ed25519").');
+        return;
+      }
+
+      final text = message['text'] as String? ?? '';
+      final timestampMs = message['timestamp_ms'] as int? ?? 0;
+      final messageId = message['message_id'] as String?;
+      final peerId = sender['peer_id'] as String? ?? '';
+      final publicKeyB64 = sender['public_key_base64'] as String? ?? '';
+      final signatureB64 = sig['signature_base64'] as String? ?? '';
+      final canonicalPayload = sig['canonical_payload'] as String? ?? '';
+      final contextType = ctx?['type'] as String? ?? '';
+      final contextId = ctx?['id'] as String? ?? '';
+
+      if (peerId.isEmpty ||
+          publicKeyB64.isEmpty ||
+          signatureB64.isEmpty ||
+          canonicalPayload.isEmpty) {
+        fail('Proof is missing signature or public key data.');
+        return;
+      }
+
+      // Reconstruct the canonical payload from the individual JSON fields
+      // and verify it matches the embedded one. This catches field tampering
+      // (e.g. changing message text while keeping the old canonical_payload).
+      // Map human-readable context type back to the canonical short form
+      // used in the signing payload ('dm'/'ch'/'dm-delete'/'ch-delete').
+      final msgType = contextType == 'direct_message'
+          ? 'dm'
+          : contextType == 'channel'
+              ? 'ch'
+              : contextType; // pass through delete types as-is
+      final reconstructed =
+          'hollow-msg:$msgType:$contextId:$peerId:$timestampMs:$text';
+      if (reconstructed != canonicalPayload) {
+        fail('Payload mismatch — the message fields do not match the '
+            'canonical payload. The proof JSON may have been tampered with.\n\n'
+            'Expected: $canonicalPayload\n'
+            'Got: $reconstructed');
+        return;
+      }
+
+      final isValid = await network_api.verifyMessageProof(
+        senderPeerId: peerId,
+        signatureB64: signatureB64,
+        publicKeyB64: publicKeyB64,
+        canonicalPayload: canonicalPayload,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _verifying = false;
+        _result = _ProofResult(
+          valid: isValid,
+          text: text,
+          timestampMs: timestampMs,
+          messageId: messageId,
+          senderPeerId: peerId,
+          contextType: contextType,
+          contextId: contextId,
+        );
+      });
+      _scrollToResult();
+    } on FormatException {
+      if (!mounted) return;
+      fail('Invalid JSON format.');
+    } catch (e) {
+      if (!mounted) return;
+      fail('Verification failed: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Paste a proof JSON or import a .json file to verify '
+          'that a message was authentically signed by its sender.',
+          style: HollowTypography.body.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 12,
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.md),
+
+        // Input area
+        Container(
+          width: double.infinity,
+          height: 120,
+          decoration: BoxDecoration(
+            color: hollow.background,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            border: Border.all(color: hollow.border),
+          ),
+          child: TextField(
+            controller: _controller,
+            maxLines: null,
+            expands: true,
+            style: HollowTypography.mono.copyWith(
+              color: hollow.textPrimary,
+              fontSize: 11,
+            ),
+            decoration: InputDecoration(
+              hintText: '{"version":1,"protocol":"hollow-proof-v1",...}',
+              hintStyle: HollowTypography.mono.copyWith(
+                color: hollow.textSecondary.withValues(alpha: 0.4),
+                fontSize: 11,
+              ),
+              contentPadding: const EdgeInsets.all(HollowSpacing.sm),
+              border: InputBorder.none,
+            ),
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.md),
+
+        // Buttons
+        Row(
+          children: [
+            HollowButton.ghost(
+              onPressed: _importFile,
+              icon: const Icon(LucideIcons.fileUp, size: 16),
+              child: const Text('Import File'),
+            ),
+            const SizedBox(width: HollowSpacing.sm),
+            HollowButton.filled(
+              onPressed: _verifying
+                  ? null
+                  : () {
+                      final text = _controller.text.trim();
+                      if (text.isEmpty) {
+                        HollowToast.show(context, 'Paste a proof JSON first',
+                            type: HollowToastType.info);
+                        return;
+                      }
+                      _verify(text);
+                    },
+              icon: const Icon(LucideIcons.shieldCheck, size: 16),
+              child: Text(_verifying ? 'Verifying...' : 'Verify'),
+            ),
+          ],
+        ),
+
+        // Result
+        if (_result != null) ...[
+          const SizedBox(height: HollowSpacing.lg),
+          KeyedSubtree(key: _resultKey, child: _buildResult(hollow)),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildResult(HollowTheme hollow) {
+    final r = _result!;
+
+    if (r.error != null) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(HollowSpacing.md),
+        decoration: BoxDecoration(
+          color: hollow.error.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
+          border: Border.all(color: hollow.error.withValues(alpha: 0.3)),
+        ),
+        child: Row(
+          children: [
+            Icon(LucideIcons.shieldAlert, size: 16, color: hollow.error),
+            const SizedBox(width: HollowSpacing.sm),
+            Expanded(
+              child: Text(
+                r.error!,
+                style: HollowTypography.body.copyWith(
+                  color: hollow.error,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final bgColor = r.valid
+        ? hollow.accent.withValues(alpha: 0.08)
+        : hollow.error.withValues(alpha: 0.08);
+    final borderColor = r.valid
+        ? hollow.accent.withValues(alpha: 0.3)
+        : hollow.error.withValues(alpha: 0.3);
+    final statusColor = r.valid ? hollow.accent : hollow.error;
+    final statusIcon =
+        r.valid ? LucideIcons.shieldCheck : LucideIcons.shieldAlert;
+    final statusText = r.valid ? 'VERIFIED' : 'INVALID SIGNATURE';
+
+    final timestamp = r.timestampMs != null && r.timestampMs! > 0
+        ? DateTime.fromMillisecondsSinceEpoch(r.timestampMs!)
+        : null;
+    final contextLabel = r.contextType == 'direct_message'
+        ? 'Direct Message'
+        : r.contextType == 'channel'
+            ? 'Channel'
+            : r.contextType ?? '';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(HollowSpacing.md),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        border: Border.all(color: borderColor),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Status badge
+          Row(
+            children: [
+              Icon(statusIcon, size: 16, color: statusColor),
+              const SizedBox(width: HollowSpacing.sm),
+              Text(
+                statusText,
+                style: HollowTypography.label.copyWith(
+                  color: statusColor,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.md),
+
+          // Message text
+          if (r.text != null && r.text!.isNotEmpty) ...[
+            Text(
+              'MESSAGE',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+                fontSize: 10,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(HollowSpacing.sm),
+              decoration: BoxDecoration(
+                color: hollow.surface.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+              ),
+              child: Text(
+                r.text!.length > 300
+                    ? '${r.text!.substring(0, 300)}...'
+                    : r.text!,
+                style: HollowTypography.body.copyWith(
+                  color: hollow.textPrimary,
+                  fontSize: 13,
+                ),
+                maxLines: 4,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(height: HollowSpacing.sm),
+          ],
+
+          // Sender
+          if (r.senderPeerId != null) ...[
+            Text(
+              'SENDER',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+                fontSize: 10,
+              ),
+            ),
+            const SizedBox(height: 2),
+            SelectableText(
+              r.senderPeerId!,
+              style: HollowTypography.mono.copyWith(
+                color: hollow.textPrimary,
+                fontSize: 11,
+              ),
+              maxLines: 1,
+            ),
+            const SizedBox(height: HollowSpacing.sm),
+          ],
+
+          // Context + Timestamp
+          Row(
+            children: [
+              if (contextLabel.isNotEmpty) ...[
+                Text(
+                  contextLabel,
+                  style: HollowTypography.bodySmall
+                      .copyWith(color: hollow.textSecondary),
+                ),
+                const SizedBox(width: HollowSpacing.md),
+              ],
+              if (timestamp != null)
+                Text(
+                  timestamp.toUtc().toIso8601String(),
+                  style: HollowTypography.bodySmall
+                      .copyWith(color: hollow.textSecondary),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ProofResult {
+  final bool valid;
+  final String? error;
+  final String? text;
+  final int? timestampMs;
+  final String? messageId;
+  final String? senderPeerId;
+  final String? contextType;
+  final String? contextId;
+
+  const _ProofResult({
+    required this.valid,
+    this.error,
+    this.text,
+    this.timestampMs,
+    this.messageId,
+    this.senderPeerId,
+    this.contextType,
+    this.contextId,
+  });
 }
 
 // ─────────────────────────────────────────────────

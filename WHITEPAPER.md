@@ -1038,6 +1038,8 @@ iOS does not run the app's background handler when the app is force-killed — A
 
 The NSE opens the same shared SQLCipher database as the app (§2.4), which is why that database uses rollback-journal mode on iOS. The NSE's measured memory footprint (~3 MB) sits comfortably within Apple's 24 MB extension limit even with the full networking and cryptography stack linked in. To keep the NSE outside the protocol's source of truth, its decryption is designed so that a buggy extension can at worst show a wrong or missing banner — never corrupt the canonical message ratchet.
 
+The same logging discipline applied to the relay (§12) applies to the extension: its diagnostic log records only timings, memory footprint, and payload *lengths* — decrypted content is rendered into the notification banner and nowhere else. Client-side diagnostic logs across platforms follow the same rule for message bodies and secrets (device-link pairing codes are logged by length only).
+
 ### 13.6 Push Under Multi-Device
 
 The push path is the most cross-cutting place where the device/master split (§3) surfaces, because every layer it touches is keyed differently: the relay's push token and offline buffer are keyed by the **device** peer ID a socket authenticated with, while a person's display identity, conversation key, and database rows are keyed by the **master**.
