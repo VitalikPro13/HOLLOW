@@ -129,8 +129,8 @@ pub enum NetworkEvent {
     PeerDisconnected { peer_id: String },
     RoomCleared,
     Listening { address: String },
-    MessageReceived { from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, is_own: bool },
-    ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String> },
+    MessageReceived { from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, is_own: bool, duplicate: bool },
+    ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, duplicate: bool },
     MessageSent { to_peer: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     ChannelMessageSent { server_id: String, channel_id: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     MessageSendFailed { to_peer: String, error: String },
@@ -678,11 +678,11 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::RoomCleared => NetworkEvent::RoomCleared,
         node::NetworkEvent::Listening { address } => NetworkEvent::Listening { address },
-        node::NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, is_own } => {
-            NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, is_own }
+        node::NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, is_own, duplicate } => {
+            NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, is_own, duplicate }
         }
-        node::NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key } => {
-            NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key }
+        node::NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, duplicate } => {
+            NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, duplicate }
         }
         node::NetworkEvent::MessageSent { to_peer, message_id, timestamp, signature, public_key } => {
             NetworkEvent::MessageSent { to_peer, message_id, timestamp, signature, public_key }
@@ -2085,6 +2085,66 @@ pub struct FetchedMessage {
     pub server_id: Option<String>,
     /// Set for channel messages (channel wake): owning channel.
     pub channel_id: Option<String>,
+}
+
+/// Nudge the LIVE full node to (re)join the DM room for `sender_peer_id` so
+/// the relay replays that room's buffered offline DMs to it (Android push
+/// path). The FCM background isolate shares its process with the still-
+/// running full node, so `start_fetch_node` refuses to start — but the live
+/// node itself can collect the buffered ciphertext: joining the DM room
+/// triggers the relay replay, and if the WS is a doze-killed zombie the
+/// queued JoinRoom rides the reconnect (send failure → pending_commands →
+/// reconnect). The live receive path then decrypts, persists, and emits
+/// MessageReceived — the MAIN isolate (alive, since the node is) shows the
+/// content notification through the normal routing (mute + dedup respected).
+///
+/// Returns Ok(true) when a live node accepted the command, Ok(false) when no
+/// node is running (caller should use the fetch node instead).
+#[frb]
+pub fn nudge_live_dm_fetch(sender_peer_id: String) -> Result<bool, String> {
+    crate::log::init();
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let Some(state) = guard.as_ref() else {
+        return Ok(false);
+    };
+    // The live node runs in this process, so the identity is loaded/unlocked
+    // and the resolver is warm. dm_room_code is PURE — resolve to masters
+    // first (the push `sender` is a DEVICE id).
+    let local_master = match identity::load_existing_identity()? {
+        Some(id) => id.peer_id,
+        None => return Ok(false),
+    };
+    let sender_master = crate::node::resolver::resolve(&sender_peer_id);
+    let room = crate::node::types::dm_room_code(&local_master, &sender_master);
+    hollow_log!(
+        "[HOLLOW-PUSH] nudge_live_dm_fetch: joining DM room for sender master {sender_master}"
+    );
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::JoinRoom { room_code: room }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(true)
+}
+
+/// Channel-wake sibling of [`nudge_live_dm_fetch`]: ask the LIVE full node to
+/// (re)join an arbitrary relay room (the server room for a channel push) so
+/// the relay replays that room's buffered ciphertext to it. Same rationale:
+/// on Android the backgrounded app keeps the full node registered, so the
+/// fetch node refuses to start; the queued JoinRoom rides the WS reconnect if
+/// the socket is a doze-killed zombie. Returns Ok(false) when no node runs.
+#[frb]
+pub fn nudge_live_room_join(room_code: String) -> Result<bool, String> {
+    crate::log::init();
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let Some(state) = guard.as_ref() else {
+        return Ok(false);
+    };
+    hollow_log!("[HOLLOW-PUSH] nudge_live_room_join: joining room {room_code}");
+    let rt = get_runtime();
+    rt.block_on(state.cmd_tx.send(node::NodeCommand::JoinRoom { room_code }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(true)
 }
 
 /// Start a lightweight invisible fetch node to receive buffered messages.

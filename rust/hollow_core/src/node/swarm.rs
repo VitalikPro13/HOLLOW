@@ -2506,13 +2506,17 @@ async fn run_event_loop(
                                             // from another (possibly-offline) device.
                                             let multi_device =
                                                 !super::resolver::devices_for(&master_peer_str).is_empty();
-                                            let since = if multi_device {
+                                            // Lookback overlap — mid-deduped
+                                            // on receipt (watermark-gap heal).
+                                            let since = (if multi_device {
                                                 store.get_latest_dm_timestamp_any(&convo)
                                             } else {
                                                 store.get_latest_dm_timestamp(&convo)
                                             }
                                             .unwrap_or(None)
-                                            .unwrap_or(0);
+                                            .unwrap_or(0)
+                                                - crate::storage::messages::SYNC_LOOKBACK_MS)
+                                                .max(0);
                                             send_message_to_peer(
                                                 &ws_cmd_tx, &ws_room_peers,
                                                 &peer_id, HavenMessage::DmSyncRequest {
@@ -2982,13 +2986,17 @@ async fn run_event_loop(
                                             // high-water iff we have a sibling.
                                             let multi_device =
                                                 !super::resolver::devices_for(&master_peer_str).is_empty();
-                                            let since = if multi_device {
+                                            // Lookback overlap — mid-deduped
+                                            // on receipt (watermark-gap heal).
+                                            let since = (if multi_device {
                                                 store.get_latest_dm_timestamp_any(&convo)
                                             } else {
                                                 store.get_latest_dm_timestamp(&convo)
                                             }
                                             .unwrap_or(None)
-                                            .unwrap_or(0);
+                                            .unwrap_or(0)
+                                                - crate::storage::messages::SYNC_LOOKBACK_MS)
+                                                .max(0);
                                             send_message_to_peer(
                                                 &ws_cmd_tx, &ws_room_peers,
                                                 pid_str, HavenMessage::DmSyncRequest {
@@ -4489,13 +4497,17 @@ fn request_dm_resync_after_rekey(
         // cross-direction high-water mark (mirrors the PeerJoined DM-sync) so a
         // friend also re-serves messages we sent from another device.
         let multi_device = !super::resolver::devices_for(master_peer_str).is_empty();
-        let since = if multi_device {
+        // Lookback overlap — a high-watermark skips messages missed while a
+        // newer one arrived; the overlap is mid-deduplicated on receipt.
+        let since = (if multi_device {
             store.get_latest_dm_timestamp_any(&convo)
         } else {
             store.get_latest_dm_timestamp(&convo)
         }
         .unwrap_or(None)
-        .unwrap_or(0);
+        .unwrap_or(0)
+            - crate::storage::messages::SYNC_LOOKBACK_MS)
+            .max(0);
         hollow_log!("[HOLLOW-SYNC] Post-rekey DM resync from {peer_str} since {since} (both={multi_device})");
         send_message_to_peer(
             ws_cmd_tx, ws_room_peers,
@@ -5094,17 +5106,27 @@ async fn handle_incoming_request(
                     let is_mine = super::resolver::same_identity(&sender_master, &local_peer_str);
 
                     // Persist channel message using sender's timestamp.
-                    // INSERT OR IGNORE deduplicates via UNIQUE(server_id, channel_id, sender_id, timestamp, text).
+                    // Dedup by message_id (replays); the content UNIQUE index
+                    // is legacy-only now (WHERE message_id IS NULL) — it used
+                    // to swallow DISTINCT identical-text messages landing in
+                    // the same millisecond, dropping the second message.
                     let mut is_new = true;
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                        match store.insert_channel_message(
-                            &sid, &cid, &sender_master, &msg_text, is_mine, ts,
-                            sig.as_deref(), pk.as_deref(), mid.as_deref(),
-                            reply_to.as_deref(), file_id.as_deref(), order_us,
-                        ) {
-                            Ok(0) => { is_new = false; } // INSERT OR IGNORE skipped — duplicate
-                            Ok(_) => {}
-                            Err(_) => { is_new = false; }
+                        let already = mid.as_deref()
+                            .map(|m| store.channel_message_exists(m))
+                            .unwrap_or(false);
+                        if already {
+                            is_new = false;
+                        } else {
+                            match store.insert_channel_message(
+                                &sid, &cid, &sender_master, &msg_text, is_mine, ts,
+                                sig.as_deref(), pk.as_deref(), mid.as_deref(),
+                                reply_to.as_deref(), file_id.as_deref(), order_us,
+                            ) {
+                                Ok(0) => { is_new = false; } // Duplicate (legacy no-mid row)
+                                Ok(_) => {}
+                                Err(_) => { is_new = false; }
+                            }
                         }
                         // Persist link preview for this message if present (Phase 6.75).
                         if is_new {
@@ -5116,23 +5138,26 @@ async fn handle_incoming_request(
                         }
                     }
 
-                    // Only emit event if this is a genuinely new message.
-                    if is_new {
-                        let _ = event_tx
-                            .send(NetworkEvent::ChannelMessageReceived {
-                                server_id: sid,
-                                channel_id: cid,
-                                from_peer: sender_master,
-                                text: msg_text,
-                                timestamp: ts,
-                                message_id: mid.unwrap_or_default(),
-                                reply_to_mid: reply_to.unwrap_or_default(),
-                                link_preview,
-                                signature: sig,
-                                public_key: pk,
-                            })
-                            .await;
-                    }
+                    // ALWAYS emit — a ChannelSyncBatch racing this live message
+                    // (channel-open fires requestChannelSync) inserts the row
+                    // first without emitting; suppressing the live event too
+                    // left the open pane stale. Dart dedups by message_id and
+                    // skips unread/notifications when `duplicate`.
+                    let _ = event_tx
+                        .send(NetworkEvent::ChannelMessageReceived {
+                            server_id: sid,
+                            channel_id: cid,
+                            from_peer: sender_master,
+                            text: msg_text,
+                            timestamp: ts,
+                            message_id: mid.unwrap_or_default(),
+                            reply_to_mid: reply_to.unwrap_or_default(),
+                            link_preview,
+                            signature: sig,
+                            public_key: pk,
+                            duplicate: !is_new,
+                        })
+                        .await;
                 }
                 Ok(MessageEnvelope::ChannelSyncBatch { sid, cid, messages, total, has_more, .. }) => {
                     hollow_log!("[HOLLOW-SYNC] Received {} sync messages for {cid} in {sid} (total: {total}, has_more: {has_more:?})", messages.len());
@@ -5356,14 +5381,27 @@ async fn handle_incoming_request(
                     let mut is_new = true;
                     {
                         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                            match store.insert(
-                                &convo_peer, &msg_text, is_own_device, ts,
-                                sig.as_deref(), pk.as_deref(), mid.as_deref(),
-                                reply_to.as_deref(), file_id.as_deref(), order_us,
-                            ) {
-                                Ok(0) => { is_new = false; } // Duplicate
-                                Ok(_) => {}
-                                Err(_) => { is_new = false; }
+                            // Dedup by message_id (replays: reconnect resend,
+                            // pending drain, relay buffer). The content UNIQUE
+                            // index is legacy-only now (WHERE message_id IS
+                            // NULL) — it used to swallow DISTINCT identical-text
+                            // messages landing in the same millisecond, dropping
+                            // the second message and its MessageReceived event.
+                            let already = mid.as_deref()
+                                .map(|m| store.dm_message_exists(m))
+                                .unwrap_or(false);
+                            if already {
+                                is_new = false;
+                            } else {
+                                match store.insert(
+                                    &convo_peer, &msg_text, is_own_device, ts,
+                                    sig.as_deref(), pk.as_deref(), mid.as_deref(),
+                                    reply_to.as_deref(), file_id.as_deref(), order_us,
+                                ) {
+                                    Ok(0) => { is_new = false; } // Duplicate (legacy no-mid row)
+                                    Ok(_) => {}
+                                    Err(_) => { is_new = false; }
+                                }
                             }
                             // Persist link preview for this message if present (Phase 6.75).
                             if is_new {
@@ -5376,23 +5414,29 @@ async fn handle_incoming_request(
                         }
                     }
 
-                    // Only emit event if this is a genuinely new message.
-                    if is_new {
-                        let _ = event_tx
-                            .send(NetworkEvent::MessageReceived {
-                                from_peer: convo_peer.to_string(),
-                                text: msg_text,
-                                timestamp: ts,
-                                message_id: mid.unwrap_or_default(),
-                                reply_to_mid: reply_to.unwrap_or_default(),
-                                link_preview,
-                                signature: sig,
-                                public_key: pk,
-                                // Sibling echo of our OWN send → render outgoing.
-                                is_own: is_own_device,
-                            })
-                            .await;
-                    }
+                    // ALWAYS emit — even when the row already existed. A sync
+                    // batch racing this live delivery (chat-open triggers
+                    // DmSyncRequest) inserts the row first WITHOUT emitting
+                    // per-message events; suppressing the live event too left
+                    // an OPEN chat stale until re-entry (typing animated,
+                    // messages never appeared). The in-memory list dedups by
+                    // message_id, and Dart skips unread/notifications when
+                    // `duplicate` — so replays can't double-count.
+                    let _ = event_tx
+                        .send(NetworkEvent::MessageReceived {
+                            from_peer: convo_peer.to_string(),
+                            text: msg_text,
+                            timestamp: ts,
+                            message_id: mid.unwrap_or_default(),
+                            reply_to_mid: reply_to.unwrap_or_default(),
+                            link_preview,
+                            signature: sig,
+                            public_key: pk,
+                            // Sibling echo of our OWN send → render outgoing.
+                            is_own: is_own_device,
+                            duplicate: !is_new,
+                        })
+                        .await;
                 }
                 Ok(MessageEnvelope::DmSyncBatch { messages, has_more }) => {
                     hollow_log!("[HOLLOW-SYNC] Received {} DM sync messages from {peer_str} (has_more: {has_more:?})", messages.len());
@@ -6915,6 +6959,7 @@ async fn handle_incoming_request(
                             signature: None,
                             public_key: None,
                             is_own: false,
+                            duplicate: false,
                         })
                         .await;
                 }

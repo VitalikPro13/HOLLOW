@@ -62,10 +62,12 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     ref.read(selectedServerProvider.notifier).state = null;
     Navigator.of(context, rootNavigator: true).push(
       hollowMobileRoute(
+        settings: const RouteSettings(name: MobileChatRoute.routeName),
         builder: (_) => MobileChatRoute(peerId: peerId),
       ),
     ).then((_) {
-      if (mounted) {
+      // Guarded: a notification tap may have replaced this chat already.
+      if (mounted && ref.read(selectedPeerProvider) == peerId) {
         ref.read(selectedPeerProvider.notifier).state = null;
       }
     });
@@ -119,6 +121,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     ref.read(selectedChannelProvider.notifier).state = channel.channelId;
     Navigator.of(context, rootNavigator: true).push(
       hollowMobileRoute(
+        settings: const RouteSettings(name: MobileChatRoute.routeName),
         builder: (_) => MobileChatRoute(
           serverId: serverId,
           channelId: channel.channelId,
@@ -126,7 +129,8 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
         ),
       ),
     ).then((_) {
-      if (mounted) {
+      // Guarded: a notification tap may have replaced this chat already.
+      if (mounted && ref.read(selectedChannelProvider) == channel.channelId) {
         ref.read(selectedServerProvider.notifier).state = null;
         ref.read(selectedChannelProvider.notifier).state = null;
       }
@@ -154,6 +158,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       ref.read(selectedChannelProvider.notifier).state = channel.channelId;
       nav.push(
         hollowMobileRoute(
+          settings: const RouteSettings(name: MobileChatRoute.routeName),
           builder: (_) => MobileChatRoute(
             serverId: serverId,
             channelId: channel.channelId,
@@ -161,7 +166,8 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
           ),
         ),
       ).then((_) {
-        if (mounted) {
+        // Guarded: a notification tap may have replaced this chat already.
+        if (mounted && ref.read(selectedChannelProvider) == channel.channelId) {
           ref.read(selectedServerProvider.notifier).state = null;
           ref.read(selectedChannelProvider.notifier).state = null;
         }
@@ -214,6 +220,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     ref.read(selectedChannelProvider.notifier).state = channel.channelId;
     nav.push(
       hollowMobileRoute(
+        settings: const RouteSettings(name: MobileChatRoute.routeName),
         builder: (_) => MobileChatRoute(
           serverId: serverId,
           channelId: channel.channelId,
@@ -221,7 +228,8 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
         ),
       ),
     ).then((_) {
-      if (mounted) {
+      // Guarded: a notification tap may have replaced this chat already.
+      if (mounted && ref.read(selectedChannelProvider) == channel.channelId) {
         ref.read(selectedServerProvider.notifier).state = null;
         ref.read(selectedChannelProvider.notifier).state = null;
       }

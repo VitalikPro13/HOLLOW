@@ -710,3 +710,10 @@ Two formats detected by `encryption::detect_format()`:
 **Dart bootstrap flow:** `_bootstrap()` in `hollow_shell.dart` calls `_unlockIdentity()` before `identityProvider.load()`. Silent unlock for plaintext/keychain/flags=0x03. Full-screen password dialog for flags=0x01. Full-screen recovery dialog for keychain failure (flags=0x02 on different machine).
 
 **Settings UI:** Security tab in `user_settings_dialog.dart` has "APP LOCK" section (password + "Ask for password on launch" toggle) and "DEVICE PROTECTION" section (standalone keychain, hidden when password is active).
+
+## Dedup indexes, unread counts, sync lookback (2026-07-03)
+
+- **Content UNIQUE indexes are LEGACY-ONLY:** `idx_messages_dedup_legacy` + `idx_channel_msgs_unique_legacy` are partial (`WHERE message_id IS NULL`). The old full-table versions dropped DISTINCT identical-text same-millisecond messages via INSERT OR IGNORE. Rows with a mid dedup via `dm_message_exists`/`channel_message_exists` pre-checks at every insert site. The channel migration cleanup DELETE is scoped to `message_id IS NULL`.
+- **Unread counts are millisecond-granular:** `count_unread_dm` / `count_unread_channel` / `count_unread_channel_with_mentions` count rows with `timestamp >` the seen row's timestamp (seen resolved by message_id; missing seen → 0). Never rowid (backfill rows have higher rowids), never the full order_us tuple (Dart marks seen from a ms-sorted `.last`). Regression test: `unread_counts_are_millisecond_granular`.
+- **`SYNC_LOOKBACK_MS` (30 min):** `get_per_sender_timestamps` subtracts it (channels), and the 4 DM sync request sites subtract it from `get_latest_dm_timestamp[_any]` — a plain high-watermark permanently skipped messages missed while a newer one arrived. Overlap is mid-deduped on receipt.
+- **`reconcile_dm_by_timestamp`** only matches rows with NULL mid OR (different mid AND different TEXT) — identical-text same-ms rows are distinct messages; grafting merged them permanently.

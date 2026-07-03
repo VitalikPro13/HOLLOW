@@ -306,10 +306,14 @@ class _FriendRow extends ConsumerWidget {
         ref.read(selectedPeerProvider.notifier).state = peerId;
         Navigator.of(context, rootNavigator: true).push(
           hollowMobileRoute(
+            settings: const RouteSettings(name: MobileChatRoute.routeName),
             builder: (_) => MobileChatRoute(peerId: peerId),
           ),
         ).then((_) {
-          ref.read(selectedPeerProvider.notifier).state = null;
+          // Guarded: a notification tap may have replaced this chat already.
+          if (ref.read(selectedPeerProvider) == peerId) {
+            ref.read(selectedPeerProvider.notifier).state = null;
+          }
         });
       },
       onLongPress: () => _showActions(context, ref),
@@ -414,9 +418,16 @@ class _FriendRow extends ConsumerWidget {
                 Navigator.pop(context);
                 ref.read(selectedPeerProvider.notifier).state = peerId;
                 Navigator.of(context, rootNavigator: true).push(
-                  hollowMobileRoute(builder: (_) => MobileChatRoute(peerId: peerId)),
+                  hollowMobileRoute(
+                    settings:
+                        const RouteSettings(name: MobileChatRoute.routeName),
+                    builder: (_) => MobileChatRoute(peerId: peerId),
+                  ),
                 ).then((_) {
-                  ref.read(selectedPeerProvider.notifier).state = null;
+                  // Guarded: a notification tap may have replaced this chat.
+                  if (ref.read(selectedPeerProvider) == peerId) {
+                    ref.read(selectedPeerProvider.notifier).state = null;
+                  }
                 });
               },
             ),

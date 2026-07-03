@@ -9,6 +9,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/frb_generated.dart';
 
 /// Tracks whether `RustLib.init()` has run in THIS isolate. Android reuses the
@@ -279,7 +280,38 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
   // Tier 2: fetch + decrypt the message content BEFORE showing the banner so the
   // user sees a correct, populated notification on its first appearance.
   bool contentShown = false;
-  if (rustReady) {
+
+  // Android keeps the FULL node registered while backgrounded (the process
+  // survives), so `startFetchNode` refuses to start ("Full node is running")
+  // and EVERY backgrounded DM push used to degrade to the "Sent you a
+  // message" placeholder. Nudge the LIVE node instead: it (re)joins the DM
+  // room (the relay replays the buffered ciphertext on join; a doze-killed
+  // WS reconnects via the queued command), decrypts, persists, and the MAIN
+  // isolate — alive, since the node is — posts the real content notification
+  // through the normal routing (mute + message-id dedup respected). This
+  // handler then only confirms delivery and stays silent; the placeholder
+  // remains the timeout fallback.
+  bool liveNodeHandled = false;
+  if (rustReady && Platform.isAndroid) {
+    try {
+      if (await network_api.nudgeLiveDmFetch(senderPeerId: sender)) {
+        await _pushLog('Live node running — nudged DM room join, waiting for arrival');
+        final arrived = await _waitForLiveDmArrival(personKey);
+        await _pushLog(arrived
+            ? 'Live node delivered the DM — main isolate owns the banner'
+            : 'Live node did not deliver in time — falling back');
+        // The fetch node cannot run while the full node is registered, so
+        // this path is terminal either way; on timeout the generic fallback
+        // below still fires (same as before this fix).
+        liveNodeHandled = true;
+        contentShown = arrived;
+      }
+    } catch (e) {
+      await _pushLog('Live-node nudge FAILED: $e');
+    }
+  }
+
+  if (rustReady && !liveNodeHandled) {
     try {
       await _pushLog('Starting fetch for $sender...');
       // The relay replays buffered offline messages immediately on join, so the
@@ -433,6 +465,93 @@ Future<bool> _initRustForBackground() async {
   }
 }
 
+/// Android nudge path: the live full node was asked to (re)join the DM room —
+/// wait for the decrypted message row to land in SQLCipher. The message store
+/// global is process-wide (the main isolate already opened it), so this reads
+/// the same DB the live node writes. Returns true when a friend message from
+/// [masterId] arrived (either newly during the wait, or already in the last
+/// ~60s — the live node may have beaten the push wake to it, in which case
+/// the main isolate has already posted the content notification).
+Future<bool> _waitForLiveDmArrival(String masterId) async {
+  try {
+    await storage_api.openMessageStore();
+  } catch (_) {}
+
+  int baselineId = 0;
+  try {
+    final recent = await storage_api.loadMessages(peerId: masterId, limit: 3);
+    if (recent.isNotEmpty) {
+      baselineId = recent
+          .map((m) => m.id.toInt())
+          .reduce((a, b) => a > b ? a : b);
+      // Already-arrived: the live socket survived and delivered before this
+      // handler ran (sender clocks are close enough for a 60s window).
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if (recent.any(
+          (m) => !m.isMine && nowMs - m.timestamp.toInt() < 60 * 1000)) {
+        return true;
+      }
+    }
+  } catch (e) {
+    await _pushLog('Baseline DB read failed: $e');
+  }
+
+  // Poll for a NEW friend row. 10s stays well inside the FCM background
+  // window and covers a WS reconnect + relay replay round-trip.
+  final deadline = DateTime.now().add(const Duration(seconds: 10));
+  while (DateTime.now().isBefore(deadline)) {
+    await Future.delayed(const Duration(milliseconds: 500));
+    try {
+      final msgs = await storage_api.loadMessages(peerId: masterId, limit: 5);
+      if (msgs.any((m) => !m.isMine && m.id.toInt() > baselineId)) {
+        return true;
+      }
+    } catch (_) {}
+  }
+  return false;
+}
+
+/// Channel-wake sibling of [_waitForLiveDmArrival]: the live node was nudged
+/// to rejoin the server room — wait for a decrypted channel row to land in
+/// SQLCipher. Watches the channel from the push payload (the replay may span
+/// several channels, but the triggering one is what this wake is for).
+Future<bool> _waitForLiveChannelArrival(String serverId, String channelId) async {
+  try {
+    await storage_api.openMessageStore();
+  } catch (_) {}
+
+  int baselineId = 0;
+  try {
+    final recent = await storage_api.loadChannelMessages(
+        serverId: serverId, channelId: channelId, limit: 3);
+    if (recent.isNotEmpty) {
+      baselineId =
+          recent.map((m) => m.id.toInt()).reduce((a, b) => a > b ? a : b);
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      // Already-arrived: the live socket beat the push wake to it.
+      if (recent.any(
+          (m) => !m.isMine && nowMs - m.timestamp.toInt() < 60 * 1000)) {
+        return true;
+      }
+    }
+  } catch (e) {
+    await _pushLog('channel_wake: baseline DB read failed: $e');
+  }
+
+  final deadline = DateTime.now().add(const Duration(seconds: 10));
+  while (DateTime.now().isBefore(deadline)) {
+    await Future.delayed(const Duration(milliseconds: 500));
+    try {
+      final msgs = await storage_api.loadChannelMessages(
+          serverId: serverId, channelId: channelId, limit: 5);
+      if (msgs.any((m) => !m.isMine && m.id.toInt() > baselineId)) {
+        return true;
+      }
+    } catch (_) {}
+  }
+  return false;
+}
+
 // ── Channel push (channel_wake) ────────────────────────────────────────────
 // Payload: {type: channel_wake, sender, server, channel, mention: '1'/'0'}.
 // The relay already filtered against the registered push prefs; we re-check
@@ -476,11 +595,36 @@ Future<void> _handleChannelWake(RemoteMessage message) async {
     return;
   }
 
+  // Android + full node still registered (backgrounded app): the fetch node
+  // cannot start — nudge the LIVE node to rejoin the server room instead (the
+  // relay replays the buffered channel ciphertext on join; a doze-killed WS
+  // reconnects via the queued command). The MAIN isolate then posts the real
+  // per-channel notification through the normal routing (prefs + mention
+  // filtering respected). Mirrors the DM nudge path.
+  bool liveNodeHandled = false;
+  if (rustReady && Platform.isAndroid) {
+    try {
+      if (await network_api.nudgeLiveRoomJoin(roomCode: server)) {
+        await _pushLog('channel_wake: live node running — nudged server room join');
+        final arrived = await _waitForLiveChannelArrival(server, channel);
+        await _pushLog(arrived
+            ? 'channel_wake: live node delivered — main isolate owns the banner'
+            : 'channel_wake: live node did not deliver in time — fallback');
+        liveNodeHandled = true;
+        if (arrived) return;
+        // Timeout: fall through to the generic fallback below (the fetch
+        // node cannot run while the full node is registered).
+      }
+    } catch (e) {
+      await _pushLog('channel_wake: live-node nudge FAILED: $e');
+    }
+  }
+
   // Tier 2: fetch the buffered channel ciphertext + decrypt (MLS / public).
   // The relay replays the whole server-room buffer, so one wake often yields
   // messages for SEVERAL channels — group and post per channel.
   final byChannel = <String, List<network_api.FetchedMessage>>{};
-  if (rustReady) {
+  if (rustReady && !liveNodeHandled) {
     try {
       final messages = await network_api.startFetchNode(
         senderPeerId: sender.isEmpty ? server : sender,

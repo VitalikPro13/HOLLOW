@@ -1414,8 +1414,20 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // arrive and messages only appear on the next ChannelSyncRequest (tab-switch).
     ref.listen<String?>(selectedChannelProvider, (prev, next) {
       if (next == null || next == prev) return;
-      final serverId = ref.read(selectedServerProvider);
-      if (serverId != null) _subscribeActiveChannel(serverId, next);
+      // The selection batch writes selectedChannel BEFORE selectedServer
+      // (canonical _selectServer order) and this callback fires on the
+      // channel write — reading the server here returns the OLD server on a
+      // cross-server switch, subscribing the new channel under the WRONG
+      // relay room (live topic broadcasts then never arrive until a later
+      // resubscribe). Defer the read one microtask so the batch settles.
+      Future.microtask(() {
+        if (!mounted) return;
+        final serverId = ref.read(selectedServerProvider);
+        final channelId = ref.read(selectedChannelProvider);
+        if (serverId != null && channelId != null) {
+          _subscribeActiveChannel(serverId, channelId);
+        }
+      });
     });
 
     // Channel-visibility eviction: when the channel you're viewing stops being

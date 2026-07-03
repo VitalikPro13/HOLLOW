@@ -385,6 +385,33 @@ Future<void> declineLinkPush({required String targetPeer}) =>
 Future<PushProfile?> getPushProfile({required String peerId}) =>
     RustLib.instance.api.crateApiNetworkGetPushProfile(peerId: peerId);
 
+/// Nudge the LIVE full node to (re)join the DM room for `sender_peer_id` so
+/// the relay replays that room's buffered offline DMs to it (Android push
+/// path). The FCM background isolate shares its process with the still-
+/// running full node, so `start_fetch_node` refuses to start — but the live
+/// node itself can collect the buffered ciphertext: joining the DM room
+/// triggers the relay replay, and if the WS is a doze-killed zombie the
+/// queued JoinRoom rides the reconnect (send failure → pending_commands →
+/// reconnect). The live receive path then decrypts, persists, and emits
+/// MessageReceived — the MAIN isolate (alive, since the node is) shows the
+/// content notification through the normal routing (mute + dedup respected).
+///
+/// Returns Ok(true) when a live node accepted the command, Ok(false) when no
+/// node is running (caller should use the fetch node instead).
+Future<bool> nudgeLiveDmFetch({required String senderPeerId}) => RustLib
+    .instance
+    .api
+    .crateApiNetworkNudgeLiveDmFetch(senderPeerId: senderPeerId);
+
+/// Channel-wake sibling of [`nudge_live_dm_fetch`]: ask the LIVE full node to
+/// (re)join an arbitrary relay room (the server room for a channel push) so
+/// the relay replays that room's buffered ciphertext to it. Same rationale:
+/// on Android the backgrounded app keeps the full node registered, so the
+/// fetch node refuses to start; the queued JoinRoom rides the WS reconnect if
+/// the socket is a doze-killed zombie. Returns Ok(false) when no node runs.
+Future<bool> nudgeLiveRoomJoin({required String roomCode}) =>
+    RustLib.instance.api.crateApiNetworkNudgeLiveRoomJoin(roomCode: roomCode);
+
 /// Start a lightweight invisible fetch node to receive buffered messages.
 ///
 /// DM wake (`server_room` = None): joins only the DM room for sender_peer_id
@@ -1005,6 +1032,7 @@ sealed class NetworkEvent with _$NetworkEvent {
     String? signature,
     String? publicKey,
     required bool isOwn,
+    required bool duplicate,
   }) = NetworkEvent_MessageReceived;
   const factory NetworkEvent.channelMessageReceived({
     required String serverId,
@@ -1017,6 +1045,7 @@ sealed class NetworkEvent with _$NetworkEvent {
     LinkPreviewRef? linkPreview,
     String? signature,
     String? publicKey,
+    required bool duplicate,
   }) = NetworkEvent_ChannelMessageReceived;
   const factory NetworkEvent.messageSent({
     required String toPeer,

@@ -123,8 +123,17 @@ pub(crate) enum NetworkEvent {
         /// as an OUTGOING bubble (isMe=true), not incoming — otherwise a sibling
         /// shows our own sent message as if the friend sent it to us. False for a
         /// normal DM from a friend (the overwhelmingly common case).
-        is_own: bool },
-    ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String> },
+        is_own: bool,
+        /// True when the message row ALREADY existed in the DB (a sync batch,
+        /// pending-drain or fetch-node insert beat this live delivery). The
+        /// event is still emitted so an OPEN chat renders it (the in-memory
+        /// list dedups by message_id) — suppressing it entirely left the pane
+        /// stale until re-entry. Dart must SKIP unread increments and
+        /// notifications when true (replays would double-count/re-notify).
+        duplicate: bool },
+    ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>,
+        /// Same contract as [`NetworkEvent::MessageReceived::duplicate`].
+        duplicate: bool },
     MessageSent { to_peer: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     ChannelMessageSent { server_id: String, channel_id: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     MessageSendFailed { to_peer: String, error: String },

@@ -348,7 +348,7 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_Listening(:final address):
         debugPrint('[HOLLOW] Listening: $address');
 
-      case NetworkEvent_MessageReceived(:final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final isOwn):
+      case NetworkEvent_MessageReceived(:final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final isOwn, :final duplicate):
         // MULTI-DEVICE: unread counts, the "seen" pointer, mute settings, and
         // notifications all key on the MASTER identity (a conversation is with a
         // person, not a device). NOTE: since the Rust `convo_peer` work, the main
@@ -379,6 +379,12 @@ class EventStreamNotifier extends Notifier<bool> {
           break;
         }
         ref.read(typingProvider.notifier).clearTyping(fromPeer, fromPeer);
+        // A duplicate delivery (the row already existed in the DB — a sync
+        // batch or fetch-node insert beat the live message): the append above
+        // keeps an OPEN chat current (in-memory dedup by message_id makes it
+        // idempotent), but unread/notifications must NOT re-fire — a replay
+        // would double-count the pill and re-toast an already-seen message.
+        if (duplicate) break;
         // Track unread DM — only if not muted.
         // Window must be visible AND viewing this DM to count as "viewing".
         // "Active" = desktop focused (alt-tabbed away ≠ reading) / mobile
@@ -411,7 +417,7 @@ class EventStreamNotifier extends Notifier<bool> {
         }
 
       case NetworkEvent_ChannelMessageReceived(
-            :final serverId, :final channelId, :final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey):
+            :final serverId, :final channelId, :final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final duplicate):
         ref.read(channelChatProvider.notifier).receiveMessage(
               serverId, channelId, fromPeer, text, timestamp, messageId, replyToMid,
               linkPreview: linkPreview,
@@ -419,6 +425,10 @@ class EventStreamNotifier extends Notifier<bool> {
               publicKey: publicKey,
             );
         ref.read(typingProvider.notifier).clearTyping('$serverId:$channelId', fromPeer);
+        // Duplicate delivery (row already in DB via a sync batch) — the append
+        // above keeps an open pane current; unread/notifications must not
+        // re-fire. See the DM case.
+        if (duplicate) break;
         // Track unread channel message — only if not muted.
         // Must be visible, viewing this channel, AND scrolled to bottom. Also
         // require the app to be active (desktop focused / mobile foreground) —
@@ -684,16 +694,23 @@ class EventStreamNotifier extends Notifier<bool> {
         // Files are now downloaded on-demand when visible in viewport.
         // See channel_chat_pane.dart _requestViewportFiles().
 
-        // Recompute unread counts from DB after sync — respects notification levels.
-        debugPrint('[HOLLOW] Triggering recomputeServerUnread for $serverId (newMsgCount=$newMessageCount)');
-        crdt_api.getServerChannels(serverId: serverId).then((channels) {
-          final channelIds = channels.map((c) => c.channelId).toList();
-          debugPrint('[HOLLOW] recomputeServerUnread: ${channelIds.length} channels for $serverId');
-          ref.read(unreadProvider.notifier).recomputeServerUnread(
-              serverId, channelIds);
-        }).catchError((e) {
-          debugPrint('[HOLLOW] recomputeServerUnread failed: $e');
-        });
+        // Recompute unread counts from DB after sync — respects notification
+        // levels. ONLY when the sync actually inserted something: every
+        // channel-open fires a sync request, and an unconditional server-wide
+        // recount on the resulting no-op completion kept resurrecting stale
+        // counts for channels the user never touched (the "ghost unread on a
+        // sibling channel" cycle).
+        if (newMessageCount > 0) {
+          debugPrint('[HOLLOW] Triggering recomputeServerUnread for $serverId (newMsgCount=$newMessageCount)');
+          crdt_api.getServerChannels(serverId: serverId).then((channels) {
+            final channelIds = channels.map((c) => c.channelId).toList();
+            debugPrint('[HOLLOW] recomputeServerUnread: ${channelIds.length} channels for $serverId');
+            ref.read(unreadProvider.notifier).recomputeServerUnread(
+                serverId, channelIds);
+          }).catchError((e) {
+            debugPrint('[HOLLOW] recomputeServerUnread failed: $e');
+          });
+        }
 
       case NetworkEvent_MessageSyncFailed(:final serverId, :final error):
         debugPrint('[HOLLOW] Message sync failed for $serverId: $error');

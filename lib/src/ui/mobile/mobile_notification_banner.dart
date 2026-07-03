@@ -5,6 +5,7 @@ import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -137,29 +138,79 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
     _countdown.stop();
     ref.read(systemNotificationProvider.notifier).dismissCard(card.sourceKey);
 
+    // This banner only ever shows INSIDE a chat route, so a plain push would
+    // stack the new chat on top of the current one (and ping-ponging between
+    // two conversations via banners grew the stack unboundedly). Instead:
+    // write the new selection FIRST (so the popped route's guarded cleanup
+    // no-ops), then pop every chat route off the top, then push the new one.
+    //
+    // The container is captured now — this banner dies with the route it sits
+    // in, so `ref` is unusable by the time the pushed route pops.
+    final nav = Navigator.of(context, rootNavigator: true);
+    final container = ProviderScope.containerOf(context, listen: false);
+
     if (card.isDm && card.peerId != null) {
-      ref.read(selectedPeerProvider.notifier).state = card.peerId;
-      ref.read(selectedServerProvider.notifier).state = null;
-      ref.read(unreadProvider.notifier).markDmSeen(card.peerId!, null);
-      Navigator.of(context, rootNavigator: true).push(hollowMobileRoute(
-        builder: (_) => MobileChatRoute(peerId: card.peerId!),
-      ));
+      final peerId = card.peerId!;
+      if (peerId != widget.currentPeerId) {
+        ref.read(selectedPeerProvider.notifier).state = peerId;
+        ref.read(selectedServerProvider.notifier).state = null;
+        ref.read(unreadProvider.notifier).markDmSeen(peerId, null);
+        nav.popUntil(
+            (r) => r.settings.name != MobileChatRoute.routeName || r.isFirst);
+        nav
+            .push(hollowMobileRoute(
+          settings: const RouteSettings(name: MobileChatRoute.routeName),
+          builder: (_) => MobileChatRoute(peerId: peerId),
+        ))
+            .then((_) {
+          // Guarded: only clear if this chat is still the selected one — a
+          // later banner tap may have replaced it already.
+          if (container.read(selectedPeerProvider) == peerId) {
+            container.read(selectedPeerProvider.notifier).state = null;
+          }
+        });
+      }
     } else if (card.serverId != null && card.channelId != null) {
-      ChannelListNotifier.fetchChannels(card.serverId!).then((channels) async {
-        final layout = await ChannelLayoutNotifier.fetchLayout(card.serverId!);
-        if (!mounted) return;
-        ref.read(channelListProvider.notifier).setChannels(channels);
-        ref.read(channelLayoutProvider.notifier).setLayout(layout);
-        ref.read(selectedChannelProvider.notifier).state = card.channelId;
-        ref.read(selectedServerProvider.notifier).state = card.serverId;
-        ref.read(selectedPeerProvider.notifier).state = null;
-        Navigator.of(context, rootNavigator: true).push(hollowMobileRoute(
-          builder: (_) => MobileChatRoute(
-            serverId: card.serverId!,
-            channelId: card.channelId!,
-          ),
-        ));
-      });
+      final serverId = card.serverId!;
+      final channelId = card.channelId!;
+      final alreadyHere = serverId == widget.currentServerId &&
+          channelId == widget.currentChannelId;
+      if (!alreadyHere) {
+        ChannelListNotifier.fetchChannels(serverId).then((channels) async {
+          final layout = await ChannelLayoutNotifier.fetchLayout(serverId);
+          if (!mounted) return;
+          ref.read(channelListProvider.notifier).setChannels(channels);
+          ref.read(channelLayoutProvider.notifier).setLayout(layout);
+          ref.read(selectedChannelProvider.notifier).state = channelId;
+          ref.read(selectedServerProvider.notifier).state = serverId;
+          ref.read(selectedPeerProvider.notifier).state = null;
+          // Subscribe the relay topic — without this the freshly opened
+          // channel receives NO live topic broadcasts (the relay only routes
+          // a topic message to subscribed sockets).
+          try {
+            network_api.subscribeChannels(
+                serverId: serverId, channelIds: [channelId]);
+          } catch (_) {}
+          final channelName = channels[channelId]?.name ?? '';
+          nav.popUntil(
+              (r) => r.settings.name != MobileChatRoute.routeName || r.isFirst);
+          nav
+              .push(hollowMobileRoute(
+            settings: const RouteSettings(name: MobileChatRoute.routeName),
+            builder: (_) => MobileChatRoute(
+              serverId: serverId,
+              channelId: channelId,
+              channelName: channelName.isNotEmpty ? channelName : 'channel',
+            ),
+          ))
+              .then((_) {
+            if (container.read(selectedChannelProvider) == channelId) {
+              container.read(selectedServerProvider.notifier).state = null;
+              container.read(selectedChannelProvider.notifier).state = null;
+            }
+          });
+        });
+      }
     }
 
     _currentCard = null;

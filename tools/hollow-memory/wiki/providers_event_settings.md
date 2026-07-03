@@ -1118,3 +1118,9 @@ Providers managing the Public Channel Browser panel — a first-class shell pane
 ### Startup
 
 `autoJoinGuestRooms(ref)` -- called from `node_provider.dart` after `eventStreamProvider.start()`. Joins WS rooms for all saved servers with `realtime` or `onLaunch` fetch mode.
+
+## Duplicate-aware receive events + gated unread recompute (2026-07-03)
+
+`MessageReceived`/`ChannelMessageReceived` ALWAYS emit from Rust, carrying `duplicate: bool` (true = the row already existed — a sync batch/pending-drain/fetch insert beat the live delivery). event_provider appends to the chat provider unconditionally (in-memory mid dedup = idempotent) then `if (duplicate) break;` BEFORE unread increments + notifications — replays must not double-count or re-toast. Never gate the emission itself on is_new (that left open panes stale while typing kept animating).
+
+`MessageSyncCompleted` → `recomputeServerUnread` only when `newMessageCount > 0`: every channel-open fires a sync, and unconditional server-wide recounts on no-op completions re-materialized stale sibling-channel badges.

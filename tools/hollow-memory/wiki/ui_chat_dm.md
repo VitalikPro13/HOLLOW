@@ -534,3 +534,12 @@ The desktop `IncomingCallOverlay` (`lib/src/ui/dialogs/incoming_call_dialog.dart
 ### VAD (Voice Activity Detection)
 
 `VoiceService` polls WebRTC stats every 200ms via `_vadTimer`. Local audio: checks `media-source` stats first (Android exposes `audioLevel` here), falls back to `outbound-rtp` (desktop). Remote audio: `inbound-rtp`. Speech threshold: `audioLevel > 0.01` or `totalAudioEnergy` delta > 0.0001. `CallNotifier` wires `onSpeakingChanged` callback on connect, updates `isLocalSpeaking`/`isRemoteSpeaking` in state.
+
+## Reversed message list (2026-07-03 overhaul)
+
+The DM list is `ScrollablePositionedList` with `reverse: true`: the NEWEST message is builder index 0, pinned to the bottom. No sentinel row; `initialScrollIndex: 0, initialAlignment: 0.0`. The builder maps `chronoIndex = messages.length - 1 - revIndex` and all row logic (grouping via shouldGroup, DateSeparator, highlight, replyIndexById) stays chronological; positions/jumpTo/scrollTo are in REVERSED space (converted at the boundary; reversed alignment measures from the bottom edge).
+
+- At-bottom = `positions.any((p) => p.index <= 0)` (length-independent). `_onScrollPositionChanged` is edge-triggered: reaching bottom releases the freeze + marks seen; leaving freezes.
+- **Freeze-while-reading:** `_frozenLen` caps `_displayMessages()` while scrolled up so arrivals never shift the reading position; the unread pill takes over (its onTap marks seen against `allMessages.last`, the TRUE newest). Release on bottom-reach/pill/send.
+- **All list maintenance is instant post-frame `jumpTo(0, 0)`** (`_jumpToBottom`; `_scrollToBottom` delegates) — the old animated 150ms receive scroll caused the jump-then-glide artifact. Only reply-tap/search navigation keeps a short animated scrollTo.
+- Growth listener (`ref.listen(chatProvider)`): growth while frozen → no-op (held back); not at bottom → freeze at prevLen; else jump to 0.

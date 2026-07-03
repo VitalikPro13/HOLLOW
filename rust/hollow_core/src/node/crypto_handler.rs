@@ -50,10 +50,15 @@ pub(crate) fn request_sibling_dm_backfill(
             Ok(store) => store.get_dm_peer_ids()
                 .into_iter()
                 .map(|c| {
-                    let ts = store
+                    // Lookback overlap — a high-watermark skips messages
+                    // missed while a newer one arrived; the overlap is
+                    // mid-deduplicated on receipt.
+                    let ts = (store
                         .get_latest_dm_timestamp_any(&c)
                         .unwrap_or(None)
-                        .unwrap_or(0);
+                        .unwrap_or(0)
+                        - crate::storage::messages::SYNC_LOOKBACK_MS)
+                        .max(0);
                     (c, ts)
                 })
                 .collect(),

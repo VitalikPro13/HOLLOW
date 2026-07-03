@@ -96,12 +96,21 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     ref.read(selectedPeerProvider.notifier).state = masterId;
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(unreadProvider.notifier).markDmSeen(masterId, null);
-    Navigator.of(context, rootNavigator: true)
+    // A chat route may already be open (tap arrived while reading another
+    // conversation) — pop it instead of stacking a second chat on top. The
+    // selection is written above, BEFORE the pop, so the popped route's
+    // guarded cleanup no-ops instead of clobbering it.
+    final nav = Navigator.of(context, rootNavigator: true);
+    nav.popUntil(
+        (r) => r.settings.name != MobileChatRoute.routeName || r.isFirst);
+    nav
         .push(hollowMobileRoute(
+      settings: const RouteSettings(name: MobileChatRoute.routeName),
       builder: (_) => MobileChatRoute(peerId: masterId),
     ))
         .then((_) {
-      if (mounted) {
+      // Guarded: another chat may have replaced this one before it popped.
+      if (mounted && ref.read(selectedPeerProvider) == masterId) {
         ref.read(selectedPeerProvider.notifier).state = null;
       }
     });
@@ -126,8 +135,13 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     // Subscribe to the channel's relay topic so live MLS topic-broadcasts arrive
     // (without this the channel only fetched messages on open, never real-time).
     _subscribeActiveChannel(serverId, channelId);
-    Navigator.of(context, rootNavigator: true)
+    // Pop any chat route already on the stack — see _openChatFromPush.
+    final nav = Navigator.of(context, rootNavigator: true);
+    nav.popUntil(
+        (r) => r.settings.name != MobileChatRoute.routeName || r.isFirst);
+    nav
         .push(hollowMobileRoute(
+      settings: const RouteSettings(name: MobileChatRoute.routeName),
       builder: (_) => MobileChatRoute(
         serverId: serverId,
         channelId: channelId,
@@ -135,7 +149,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
       ),
     ))
         .then((_) {
-      if (mounted) {
+      if (mounted && ref.read(selectedChannelProvider) == channelId) {
         ref.read(selectedServerProvider.notifier).state = null;
         ref.read(selectedChannelProvider.notifier).state = null;
       }

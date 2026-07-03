@@ -57,17 +57,10 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
   }
 
   void _jumpToBottom() {
+    // reverse:true — the newest message is index 0 pinned to the bottom.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_itemScrollController.isAttached) return;
-      final key = '${widget.serverId}:${widget.channelId}';
-      final messages = ref.read(channelChatProvider)[key] ?? [];
-      if (messages.isEmpty) return;
-      final visible = messages.where((m) => m.hiddenAt == null).toList();
-      final hasMore =
-          ref.read(guestHasMoreProvider)[key] ?? false;
-      // Sentinel index = visible.length + (hasMore ? 1 : 0) for the Load More offset.
-      final sentinelIndex = visible.length + (hasMore ? 1 : 0);
-      _itemScrollController.jumpTo(index: sentinelIndex, alignment: 1.0);
+      _itemScrollController.jumpTo(index: 0, alignment: 0.0);
     });
   }
 
@@ -218,15 +211,20 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                                 'guest-list-${widget.serverId}-${widget.channelId}'),
                             itemScrollController: _itemScrollController,
                             itemPositionsListener: _itemPositionsListener,
-                            initialScrollIndex: filtered.length,
-                            initialAlignment: 1.0,
+                            // reverse:true — newest message at builder index
+                            // 0, pinned to the bottom edge; the "Load more"
+                            // button becomes the LAST reversed index (the
+                            // oldest end = visual top). No sentinel row.
+                            reverse: true,
+                            initialScrollIndex: 0,
+                            initialAlignment: 0.0,
                             padding: const EdgeInsets.symmetric(
                               vertical: HollowSpacing.sm,
                             ),
-                            itemCount: filtered.length + 1 + (hasMore ? 1 : 0),
-                            itemBuilder: (context, index) {
-                              // "Load more" button at the very top.
-                              if (hasMore && index == 0) {
+                            itemCount: filtered.length + (hasMore ? 1 : 0),
+                            itemBuilder: (context, revIndex) {
+                              // "Load more" button at the visual top.
+                              if (hasMore && revIndex == filtered.length) {
                                 return Center(
                                   child: Padding(
                                     padding: const EdgeInsets.all(
@@ -248,13 +246,9 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                                 );
                               }
 
+                              // Reversed builder index → chronological.
                               final msgIndex =
-                                  hasMore ? index - 1 : index;
-
-                              // Sentinel at the end for bottom anchoring.
-                              if (msgIndex >= filtered.length) {
-                                return const SizedBox.shrink();
-                              }
+                                  filtered.length - 1 - revIndex;
 
                               final msg = filtered[msgIndex];
                               final showHeader = msgIndex == 0 ||

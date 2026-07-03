@@ -4,6 +4,15 @@ use rusqlite::{params, Connection};
 
 use crate::crdt::operations::CrdtOp;
 
+/// Sync lookback overlap (ms). "Since" watermarks are per-sender/-conversation
+/// MAX timestamps, and a plain high-watermark permanently skips a message that
+/// was MISSED while a newer one arrived (live topic miss during a
+/// subscribe/reconnect window, push-fetch inserting newer rows first, …).
+/// Requesters therefore ask from `watermark - SYNC_LOOKBACK_MS`; receivers
+/// deduplicate the overlap by message_id, so the only cost is responders
+/// re-sending up to this much recent history per sync request.
+pub(crate) const SYNC_LOOKBACK_MS: i64 = 30 * 60 * 1000;
+
 /// A user profile stored locally (ours or a peer's).
 pub(crate) struct StoredProfile {
     pub peer_id: String,
@@ -248,25 +257,27 @@ impl MessageStore {
 
         // Migration: add UNIQUE constraint to existing channel_messages tables.
         // SQLite can't ALTER constraints, so we create a unique index instead.
-        // This also deduplicates existing rows (OR IGNORE skips dupes).
+        //
+        // The index is PARTIAL (message_id IS NULL): the original full-table
+        // content index treated two DISTINCT rapid messages with identical
+        // text in the same millisecond as one duplicate and dropped the
+        // second (fast channel spam lost messages). Rows carrying a
+        // message_id dedup by channel_message_exists() at every insert site;
+        // the content index (and the cleanup DELETE) apply only to legacy
+        // rows without one — the DELETE must NEVER eat distinct mid rows.
         conn.execute_batch(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_msgs_unique
-             ON channel_messages (server_id, channel_id, sender_id, timestamp, text);
-             DELETE FROM channel_messages WHERE id NOT IN (
-                SELECT MIN(id) FROM channel_messages
+            "DROP INDEX IF EXISTS idx_channel_msgs_unique;"
+        ).unwrap_or(());
+        conn.execute_batch(
+            "DELETE FROM channel_messages WHERE message_id IS NULL AND id NOT IN (
+                SELECT MIN(id) FROM channel_messages WHERE message_id IS NULL
                 GROUP BY server_id, channel_id, sender_id, timestamp, text
-             );"
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_msgs_unique_legacy
+             ON channel_messages (server_id, channel_id, sender_id, timestamp, text)
+             WHERE message_id IS NULL;"
         ).unwrap_or_else(|e| {
-            // If index creation fails because dupes exist, clean up first.
-            eprintln!("[HOLLOW] Deduplicating channel_messages: {e}");
-            let _ = conn.execute_batch(
-                "DELETE FROM channel_messages WHERE id NOT IN (
-                    SELECT MIN(id) FROM channel_messages
-                    GROUP BY server_id, channel_id, sender_id, timestamp, text
-                 );
-                 CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_msgs_unique
-                 ON channel_messages (server_id, channel_id, sender_id, timestamp, text);"
-            );
+            eprintln!("[HOLLOW] channel_messages legacy dedup migration failed: {e}");
         });
 
         // -- CRDT tables (Phase 3) --
@@ -330,9 +341,21 @@ impl MessageStore {
 
         // -- Migration: DM deduplication unique index --
         // Allows INSERT OR IGNORE for DM sync (like channel_messages).
+        //
+        // The index is PARTIAL (message_id IS NULL): the original full-table
+        // content index treated two DISTINCT rapid messages with identical
+        // text in the same millisecond as one duplicate — INSERT OR IGNORE
+        // silently dropped the second AND its MessageReceived event, so fast
+        // identical-text spam lost messages. Rows carrying a message_id dedup
+        // by dm_message_exists() at every insert site instead; the content
+        // index survives only as a backstop for legacy rows without one.
         conn.execute_batch(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedup
-             ON messages (peer_id, timestamp, text, is_mine);"
+            "DROP INDEX IF EXISTS idx_messages_dedup;"
+        ).unwrap_or(());
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedup_legacy
+             ON messages (peer_id, timestamp, text, is_mine)
+             WHERE message_id IS NULL;"
         ).unwrap_or(());
 
         // -- User profiles (Phase 3.5) --
@@ -879,14 +902,22 @@ impl MessageStore {
     ) -> Result<bool, String> {
         // Find a candidate row: same peer + timestamp, received (is_mine=0),
         // whose message_id is NULL or different from the canonical one.
+        //
+        // A different-mid row only qualifies when its TEXT differs (the
+        // edit-delivered-via-another-path case). A different-mid row with
+        // IDENTICAL text is a DISTINCT message from a same-millisecond
+        // identical-text burst — grafting the incoming mid onto it silently
+        // merged two real messages into one row (permanent loss: every later
+        // sync then saw the mid as "existing" and never re-inserted it).
         let existing_id: Option<i64> = self
             .conn
             .query_row(
                 "SELECT id FROM messages
                  WHERE peer_id = ?1 AND timestamp = ?2 AND is_mine = 0
-                   AND (message_id IS NULL OR message_id != ?3)
+                   AND (message_id IS NULL
+                        OR (message_id != ?3 AND text != ?4))
                  LIMIT 1",
-                params![peer_id, timestamp, message_id],
+                params![peer_id, timestamp, message_id, new_text],
                 |row| row.get(0),
             )
             .ok();
@@ -1793,25 +1824,42 @@ impl MessageStore {
         Ok(deleted as u32)
     }
 
-    /// Count unread DM messages: messages with autoincrement id greater than
-    /// the row matching `last_seen_message_id`. Returns 0 if not found.
+    /// Count unread DM messages: messages STRICTLY NEWER (millisecond
+    /// timestamp) than the `last_seen_message_id` row.
+    ///
+    /// Deliberately millisecond-granular, NOT rowid and NOT the full display
+    /// tuple:
+    /// - rowid (`id >`): a sync backfill inserts older-timestamped rows with
+    ///   HIGHER rowids — those counted forever ("ghost unread" that no
+    ///   reading cleared, because the seen pointer is the newest-by-time
+    ///   message while the ghost had the max rowid).
+    /// - full tuple (timestamp, order_us, id): Dart marks seen from its
+    ///   in-memory list's `.last`, which is millisecond-sorted — in a
+    ///   same-millisecond burst that may not be the tuple-max row, so the
+    ///   tail of the burst stayed "unread" until the user SENT something.
+    /// Same-millisecond messages render together on screen, so treating the
+    /// whole millisecond as seen matches what the user actually saw, and any
+    /// same-ms seen pointer zeroes the count deterministically.
+    /// Returns 0 when the seen row is not found (never a count-everything
+    /// degradation — the live event path still increments for new arrivals).
     pub fn count_unread_dm(&self, peer_id: &str, last_seen_message_id: &str) -> u32 {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM messages
-                 WHERE peer_id = ?1
-                   AND id > COALESCE(
-                       (SELECT id FROM messages WHERE peer_id = ?1 AND message_id = ?2), 0
-                   )
-                   AND hidden_at IS NULL AND is_mine = 0",
+                "SELECT COUNT(*) FROM messages m
+                 WHERE m.peer_id = ?1
+                   AND m.hidden_at IS NULL AND m.is_mine = 0
+                   AND m.timestamp >
+                       (SELECT s.timestamp FROM messages s
+                         WHERE s.peer_id = ?1 AND s.message_id = ?2)",
                 params![peer_id, last_seen_message_id],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap_or(0) as u32
     }
 
-    /// Count unread channel messages: messages with autoincrement id greater than
-    /// the row matching `last_seen_message_id`. Returns 0 if not found.
+    /// Count unread channel messages strictly newer (millisecond) than the
+    /// seen row — see [`Self::count_unread_dm`] for why neither rowids nor
+    /// the full display tuple work here.
     pub fn count_unread_channel(
         &self,
         server_id: &str,
@@ -1820,13 +1868,12 @@ impl MessageStore {
     ) -> u32 {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM channel_messages
-                 WHERE server_id = ?1 AND channel_id = ?2
-                   AND id > COALESCE(
-                       (SELECT id FROM channel_messages
-                        WHERE server_id = ?1 AND channel_id = ?2 AND message_id = ?3), 0
-                   )
-                   AND hidden_at IS NULL AND is_mine = 0",
+                "SELECT COUNT(*) FROM channel_messages m
+                 WHERE m.server_id = ?1 AND m.channel_id = ?2
+                   AND m.hidden_at IS NULL AND m.is_mine = 0
+                   AND m.timestamp >
+                       (SELECT s.timestamp FROM channel_messages s
+                         WHERE s.server_id = ?1 AND s.channel_id = ?2 AND s.message_id = ?3)",
                 params![server_id, channel_id, last_seen_message_id],
                 |row| row.get::<_, i64>(0),
             )
@@ -1868,26 +1915,29 @@ impl MessageStore {
         last_seen_message_id: Option<&str>,
         mention_patterns: &[String],
     ) -> (u32, u32) {
-        let threshold: i64 = if let Some(mid) = last_seen_message_id {
-            self.conn
-                .query_row(
-                    "SELECT id FROM channel_messages
-                     WHERE server_id = ?1 AND channel_id = ?2 AND message_id = ?3",
-                    params![server_id, channel_id, mid],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0)
-        } else {
-            0
-        };
-
         let mut mention_clauses = Vec::new();
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         param_values.push(Box::new(server_id.to_string()));
         param_values.push(Box::new(channel_id.to_string()));
-        param_values.push(Box::new(threshold));
 
-        let mut param_idx = 4;
+        let mut param_idx = 3;
+        // Strictly newer (millisecond) than the seen row — see
+        // count_unread_dm for why neither rowids nor the full display tuple
+        // work. When the seen row is missing the comparison is NULL →
+        // count 0 (never count-everything).
+        let seen_filter = if let Some(mid) = last_seen_message_id {
+            param_values.push(Box::new(mid.to_string()));
+            let f = format!(
+                "AND timestamp >
+                     (SELECT s.timestamp FROM channel_messages s
+                       WHERE s.server_id = ?1 AND s.channel_id = ?2 AND s.message_id = ?{param_idx})"
+            );
+            param_idx += 1;
+            f
+        } else {
+            String::new()
+        };
+
         for pattern in mention_patterns {
             mention_clauses.push(format!("text LIKE ?{param_idx}"));
             param_values.push(Box::new(format!("%{pattern}%")));
@@ -1901,7 +1951,7 @@ impl MessageStore {
         let sql = format!(
             "SELECT COUNT(*), COUNT(CASE WHEN ({mention_expr}) THEN 1 END)
              FROM channel_messages
-             WHERE server_id = ?1 AND channel_id = ?2 AND id > ?3
+             WHERE server_id = ?1 AND channel_id = ?2 {seen_filter}
                AND hidden_at IS NULL AND is_mine = 0"
         );
 
@@ -1952,7 +2002,14 @@ impl MessageStore {
         let mut map = HashMap::new();
         for row in rows {
             let (sender, ts) = row.map_err(|e| format!("Failed to read per_sender row: {e}"))?;
-            map.insert(sender, ts);
+            // Lookback overlap: MAX(timestamp) is a high-watermark, and a
+            // watermark permanently skips a message that was MISSED while a
+            // newer one arrived (live topic miss during a subscribe/reconnect
+            // window, push-fetch inserting newer rows first). Asking from
+            // `watermark - LOOKBACK` re-covers that hole; the overlap is
+            // deduplicated by message_id on receipt, so the only cost is
+            // re-sending up to LOOKBACK of recent messages per sync.
+            map.insert(sender, (ts - SYNC_LOOKBACK_MS).max(0));
         }
         Ok(map)
     }
@@ -4673,6 +4730,44 @@ mod tests {
             .map(|m| m.text)
             .collect();
         assert_eq!(order, vec!["first", "second"], "legacy NULL rows order by timestamp");
+    }
+
+    /// Ghost-unread regression: the unread count is millisecond-granular —
+    /// a sync-BACKFILLED older row with a higher rowid must NOT count, and a
+    /// same-millisecond burst sibling of the seen row must NOT count (Dart
+    /// marks seen from a millisecond-sorted `.last`, which may not be the
+    /// intra-ms tuple-max). Only strictly-newer milliseconds are unread.
+    #[test]
+    fn unread_counts_are_millisecond_granular() {
+        let store = mem_store();
+
+        // DM: seen row at ts=1000.
+        let peer = "friend_master";
+        store.insert(peer, "seen", false, 1000, None, None, Some("seen"), None, None, None).unwrap();
+        // Same-ms burst sibling (higher rowid, same millisecond) — NOT unread.
+        store.insert(peer, "same-ms", false, 1000, None, None, Some("m2"), None, None, None).unwrap();
+        // Sync backfill: OLDER timestamp, higher rowid — NOT unread.
+        store.insert(peer, "backfill", false, 500, None, None, Some("m3"), None, None, None).unwrap();
+        // Genuinely newer — unread.
+        store.insert(peer, "newer", false, 2000, None, None, Some("m4"), None, None, None).unwrap();
+        assert_eq!(store.count_unread_dm(peer, "seen"), 1, "only the strictly-newer message is unread");
+        // Missing seen row → 0, never count-everything.
+        assert_eq!(store.count_unread_dm(peer, "no-such-mid"), 0);
+
+        // Channel: same shape.
+        let (sid, cid) = ("s-unread", "c-unread");
+        store.insert_channel_message(sid, cid, "al", "seen", false, 1000,
+            None, None, Some("ch-seen"), None, None, None).unwrap();
+        store.insert_channel_message(sid, cid, "al", "same-ms", false, 1000,
+            None, None, Some("ch2"), None, None, None).unwrap();
+        store.insert_channel_message(sid, cid, "al", "backfill", false, 500,
+            None, None, Some("ch3"), None, None, None).unwrap();
+        store.insert_channel_message(sid, cid, "al", "newer", false, 2000,
+            None, None, Some("ch4"), None, None, None).unwrap();
+        assert_eq!(store.count_unread_channel(sid, cid, "ch-seen"), 1);
+        assert_eq!(store.count_unread_channel(sid, cid, "gone"), 0);
+        let (total, _) = store.count_unread_channel_with_mentions(sid, cid, Some("ch-seen"), &[]);
+        assert_eq!(total, 1);
     }
 
     // ── Storage Manager ────────────────────────────────────────────────────

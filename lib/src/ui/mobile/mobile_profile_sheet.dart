@@ -331,13 +331,30 @@ class MobileProfileSheet extends ConsumerWidget {
                           padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
                           child: HollowButton.filled(
                             onPressed: () {
+                              final nav =
+                                  Navigator.of(context, rootNavigator: true);
+                              final container = ProviderScope.containerOf(
+                                  context,
+                                  listen: false);
                               Navigator.of(context).pop();
                               ref.read(selectedPeerProvider.notifier).state = peerId;
-                              Navigator.of(context, rootNavigator: true).push(
+                              nav.push(
                                 hollowMobileRoute(
+                                  settings: const RouteSettings(
+                                      name: MobileChatRoute.routeName),
                                   builder: (_) => MobileChatRoute(peerId: peerId),
                                 ),
-                              );
+                              ).then((_) {
+                                // Guarded: only clear if this chat is still the
+                                // selected one (the sheet is gone by now — use
+                                // the captured container, not ref).
+                                if (container.read(selectedPeerProvider) ==
+                                    peerId) {
+                                  container
+                                      .read(selectedPeerProvider.notifier)
+                                      .state = null;
+                                }
+                              });
                             },
                             icon: const Icon(LucideIcons.messageCircle, size: 16),
                             expand: true,

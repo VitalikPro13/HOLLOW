@@ -202,6 +202,15 @@ struct WsClientState {
     joined_rooms: Arc<RwLock<HashSet<String>>>,
     /// Last room we attempted to join (for error rollback).
     last_join_attempt: Arc<RwLock<Option<String>>>,
+    /// Channel-topic subscriptions per room (for re-subscribe on reconnect).
+    /// The relay keeps subscriptions as PER-SOCKET state, so a silent
+    /// reconnect (doze blip, relay restart) wiped them — the client kept
+    /// receiving room traffic (typing, presence) but ZERO topic-routed
+    /// channel messages until the user re-opened a channel (re-subscribing
+    /// as a side effect). Mirrors `joined_rooms`: the latest Subscribe per
+    /// room wins (the relay replaces the topic set), replayed right after
+    /// the room re-joins.
+    subscriptions: Arc<RwLock<std::collections::HashMap<String, Vec<String>>>>,
 }
 
 // -- Public API --
@@ -236,6 +245,7 @@ async fn ws_client_loop(
     let state = WsClientState {
         joined_rooms: Arc::new(RwLock::new(HashSet::new())),
         last_join_attempt: Arc::new(RwLock::new(None)),
+        subscriptions: Arc::new(RwLock::new(std::collections::HashMap::new())),
     };
 
     let mut backoff_secs = 1u64;
@@ -263,6 +273,29 @@ async fn ws_client_loop(
                         let _ = ws_write.send(Message::Text(join_msg.into())).await;
                     }
                     let _ = event_tx.send(WsEvent::RoomBudgetUpdate { joined: rooms.len() as u32, limit: ROOM_BUDGET_LIMIT });
+                }
+
+                // Re-subscribe channel topics — the relay's subscription
+                // state is per-socket and died with the old connection.
+                // Without this a silent reconnect left the client receiving
+                // room traffic (typing) but no topic-routed channel messages
+                // until the user re-opened a channel.
+                {
+                    let subs = state.subscriptions.read().await;
+                    for (room, topics) in subs.iter() {
+                        let msg = serde_json::json!({
+                            "type": "subscribe",
+                            "room": room,
+                            "topics": topics,
+                        });
+                        if ws_write.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            hollow_log!("[HOLLOW-WS] Re-subscribe send failed for room {room}");
+                            break;
+                        }
+                    }
+                    if !subs.is_empty() {
+                        hollow_log!("[HOLLOW-WS] Re-subscribed topics for {} room(s) after reconnect", subs.len());
+                    }
                 }
 
                 // Send any commands that arrived while disconnected.
@@ -774,7 +807,18 @@ async fn track_room_change(state: &WsClientState, cmd: &WsCommand, event_tx: &mp
         WsCommand::LeaveRoom { room_code } => {
             let mut rooms = state.joined_rooms.write().await;
             rooms.remove(room_code);
+            state.subscriptions.write().await.remove(room_code);
             rooms.len() as u32
+        }
+        WsCommand::Subscribe { room_code, topics } => {
+            // Remember the latest topic set per room so a reconnect can
+            // replay it — the relay's subscription state is per-socket.
+            state
+                .subscriptions
+                .write()
+                .await
+                .insert(room_code.clone(), topics.clone());
+            return;
         }
         _ => return,
     };

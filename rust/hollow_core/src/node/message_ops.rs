@@ -1684,31 +1684,45 @@ pub(crate) async fn handle_envelope_channel_message(
     let is_mine = super::resolver::same_identity(&sender_peer_id, local_peer);
 
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        let rows = store.insert_channel_message(
-            &sid, &cid, &sender_peer_id, &text, is_mine, ts,
-            sig.as_deref(), pk.as_deref(), mid.as_deref(),
-            reply_to.as_deref(), file_id.as_deref(), order_us,
-        );
-        let is_new = rows.as_ref().map(|&r| r > 0).unwrap_or(false);
+        // Dedup by message_id (replays); the content UNIQUE index is
+        // legacy-only (WHERE message_id IS NULL) so identical-text spam
+        // in the same millisecond persists as distinct messages.
+        let already = mid.as_deref()
+            .map(|m| store.channel_message_exists(m))
+            .unwrap_or(false);
+        let is_new = if already {
+            false
+        } else {
+            store.insert_channel_message(
+                &sid, &cid, &sender_peer_id, &text, is_mine, ts,
+                sig.as_deref(), pk.as_deref(), mid.as_deref(),
+                reply_to.as_deref(), file_id.as_deref(), order_us,
+            ).map(|r| r > 0).unwrap_or(false)
+        };
         if is_new {
             if let (Some(lp), Some(message_id)) = (link_preview.as_ref(), mid.as_ref()) {
                 if let Ok(lp_json) = serde_json::to_string(lp) {
                     let _ = store.update_channel_link_preview(message_id, &lp_json);
                 }
             }
-            let _ = event_tx.send(NetworkEvent::ChannelMessageReceived {
-                server_id: sid,
-                channel_id: cid,
-                from_peer: sender_peer_id,
-                text,
-                timestamp: ts,
-                message_id: mid.unwrap_or_default(),
-                reply_to_mid: reply_to.unwrap_or_default(),
-                link_preview,
-                signature: sig,
-                public_key: pk,
-            }).await;
         }
+        // ALWAYS emit — a ChannelSyncBatch racing this live message inserts
+        // the row first without emitting; suppressing the live event too left
+        // the open pane stale until re-entry. Dart dedups by message_id and
+        // skips unread/notifications when `duplicate`.
+        let _ = event_tx.send(NetworkEvent::ChannelMessageReceived {
+            server_id: sid,
+            channel_id: cid,
+            from_peer: sender_peer_id,
+            text,
+            timestamp: ts,
+            message_id: mid.unwrap_or_default(),
+            reply_to_mid: reply_to.unwrap_or_default(),
+            link_preview,
+            signature: sig,
+            public_key: pk,
+            duplicate: !is_new,
+        }).await;
     }
 }
 

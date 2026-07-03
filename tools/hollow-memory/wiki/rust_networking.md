@@ -692,3 +692,7 @@ Error messages include the channel name for user-friendly display.
 4. Every tick: `handle_gossip_eviction()` cleans dedup cache, falls back on timed-out relays
 5. Periodically: `handle_gossip_exchange()` broadcasts neighbor lists for topology awareness
 6. Peer goes offline: `remove_known_peer()` finds replacement neighbor
+
+## Topic re-subscribe on reconnect (2026-07-03)
+
+Relay channel-topic subscriptions are PER-SOCKET state — they die with the connection. `WsClientState.subscriptions` (ws_client.rs) mirrors `joined_rooms`: `track_room_change` records the latest `WsCommand::Subscribe` topic set per room (cleared on LeaveRoom), and after every reconnect the client re-joins rooms THEN replays all subscriptions (log: `[HOLLOW-WS] Re-subscribed topics for N room(s) after reconnect`). Without this, a silent reconnect kept room traffic (typing/presence) flowing while topic-routed channel messages went nowhere until a channel re-open.

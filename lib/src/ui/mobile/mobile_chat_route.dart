@@ -64,6 +64,11 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 class MobileChatRoute extends ConsumerStatefulWidget {
+  /// RouteSettings name every push site tags its route with. Notification
+  /// taps (in-app banner + push) popUntil past any chat route already on the
+  /// stack before pushing the new one, so chats never stack on each other.
+  static const String routeName = 'mobile-chat';
+
   final String? peerId;
   final String? serverId;
   final String? channelId;
@@ -120,6 +125,26 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   List<storage_api.StoredChannelMessage> _searchResults = [];
   int? _highlightIndex;
 
+  /// True between deactivate() and activate()/unmount. A popped route's
+  /// ref.listen / positions callbacks can still fire during the pop frame
+  /// (a banner tap pops this route while its providers are notifying);
+  /// `mounted` stays true on a deactivated element, but `ref.read` there
+  /// walks ancestors and throws "Looking up a deactivated widget's ancestor
+  /// is unsafe" — so callbacks must bail on this flag instead.
+  bool _routeDeactivated = false;
+
+  @override
+  void deactivate() {
+    _routeDeactivated = true;
+    super.deactivate();
+  }
+
+  @override
+  void activate() {
+    super.activate();
+    _routeDeactivated = false;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -174,6 +199,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       // which isn't available until AFTER initState — defer it one frame.
       ref.read(channelListProvider.notifier).loadForServer(widget.serverId!);
       ref.read(channelLayoutProvider.notifier).loadForServer(widget.serverId!);
+      // Subscribe this channel's relay topic on EVERY open. The Chats tab
+      // path never subscribed (only the push-tap path did), so a channel
+      // opened from the tab received NO live topic broadcasts — messages
+      // only appeared on the next sync. Route-level = every entry point.
+      try {
+        network_api.subscribeChannels(
+            serverId: widget.serverId!, channelIds: [widget.channelId!]);
+      } catch (_) {}
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         ref.invalidate(myRoleProvider(widget.serverId!));
@@ -206,21 +239,53 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   void _checkAutoScroll() {
+    // Popped route: the positions notifier stays attached until dispose and
+    // can fire during the pop frame — the ref.reads below would crash on the
+    // deactivated element (see _routeDeactivated).
+    if (!mounted || _routeDeactivated) return;
+    // Reversed list: "at bottom" is simply "index 0 (the newest) visible" —
+    // length-independent, immune to burst growth.
     final positions = _positionsListener.itemPositions.value;
     if (positions.isEmpty) return;
-    final maxIndex = positions.map((p) => p.index).reduce((a, b) => a > b ? a : b);
-    final count = widget.isDm
-        ? (ref.read(chatProvider)[widget.peerId!]?.length ?? 0)
-        : (ref.read(channelChatProvider)[_channelKey]?.length ?? 0);
+    final minIndex =
+        positions.map((p) => p.index).reduce((a, b) => a < b ? a : b);
     final wasInZone = _isInAutoScrollZone;
-    _isInAutoScrollZone = maxIndex >= count - 2;
+    _isInAutoScrollZone = minIndex <= 0;
     if (wasInZone != _isInAutoScrollZone) {
       setState(() {});
       if (_isInAutoScrollZone) {
+        // Reached the bottom: release the freeze — snap to the true newest
+        // row if messages were held back while reading.
+        final count = _conversationLength();
+        if (_frozenLen != null && count > _frozenLen!) {
+          _jumpToBottom();
+        } else {
+          _frozenLen = null;
+        }
         _markSeen();
+      } else {
+        // Left the bottom: freeze the display so arrivals can't shift the
+        // reading position (unread pill takes over).
+        _frozenLen ??= _conversationLength();
       }
     }
   }
+
+  // ── Reversed-list scroll model — see chat_pane.dart for the rationale ──
+
+  /// Non-null while the user is scrolled up: display list capped here.
+  int? _frozenLen;
+
+  /// The messages currently displayed (frozen prefix while scrolled up).
+  List<T> _displayMessages<T>(List<T> messages) {
+    final frozen = _frozenLen;
+    if (frozen == null || messages.length <= frozen) return messages;
+    return messages.sublist(0, frozen);
+  }
+
+  int _conversationLength() => widget.isDm
+      ? (ref.read(chatProvider)[widget.peerId!]?.length ?? 0)
+      : (ref.read(channelChatProvider)[_channelKey]?.length ?? 0);
 
   void _markSeen() {
     if (widget.isDm) {
@@ -244,31 +309,38 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   void _jumpToBottom() {
+    if (_frozenLen != null) setState(() => _frozenLen = null);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scrollController.isAttached) return;
-      final count = widget.isDm
-          ? (ref.read(chatProvider)[widget.peerId!]?.length ?? 0)
-          : (ref.read(channelChatProvider)[_channelKey]?.length ?? 0);
-      if (count > 0) {
-        _scrollController.jumpTo(index: count, alignment: 1.0);
-      }
+      _scrollController.jumpTo(index: 0, alignment: 0.0);
     });
   }
 
+  /// [index] is CHRONOLOGICAL (0 = oldest) — converted to the reversed
+  /// builder index here, in one place.
   void _scrollToMessage(int index) {
     if (!_scrollController.isAttached) return;
+    final count = _displayLength();
+    if (index < 0 || index >= count) return;
     setState(() => _highlightIndex = index);
     _scrollController.scrollTo(
-      index: index,
+      index: count - 1 - index,
       duration: ReduceMotionController.instance.isReduced
           ? Duration.zero
           : const Duration(milliseconds: 300),
       curve: Curves.easeOutCubic,
-      alignment: 0.3,
+      // Reversed alignment measures from the BOTTOM edge.
+      alignment: 0.6,
     );
     Future.delayed(const Duration(milliseconds: 1500), () {
       if (mounted) setState(() => _highlightIndex = null);
     });
+  }
+
+  int _displayLength() {
+    final frozen = _frozenLen;
+    final len = _conversationLength();
+    return frozen != null && frozen < len ? frozen : len;
   }
 
   Future<void> _onSearch(String query) async {
@@ -287,25 +359,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     } catch (_) {}
   }
 
+  /// Bottom snap — INSTANT (jumpTo, never animated). The old animated scroll
+  /// rendered the new row first and then glided to it, a visible
+  /// jump-then-move; the instant jump is one clean motion.
   void _scrollToBottom() {
-    // Post-frame so the new message row is laid out before the scroll target
-    // is computed — animating against a stale layout causes a visible
-    // overshoot-and-settle jump (worst on iOS while the keyboard insets are
-    // still moving).
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scrollController.isAttached) return;
-      final count = widget.isDm
-          ? (ref.read(chatProvider)[widget.peerId!]?.length ?? 0)
-          : (ref.read(channelChatProvider)[_channelKey]?.length ?? 0);
-      if (count > 0) {
-        _scrollController.scrollTo(
-          index: count,
-          alignment: 1.0,
-          duration: const Duration(milliseconds: 150),
-          curve: Curves.easeOutCubic,
-        );
-      }
-    });
+    _jumpToBottom();
     _markSeen();
   }
 
@@ -317,16 +375,21 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       if (!mounted || !_scrollController.isAttached) return;
       int index = -1;
       if (widget.isDm) {
-        final msgs = ref.read(chatProvider)[widget.peerId!] ?? const [];
+        final msgs = _displayMessages(
+            ref.read(chatProvider)[widget.peerId!] ?? const <ChatMessage>[]);
         index = msgs.indexWhere((m) => m.messageId == messageId);
       } else {
-        final msgs = ref.read(channelChatProvider)[_channelKey] ?? const [];
+        final msgs = _displayMessages(
+            ref.read(channelChatProvider)[_channelKey] ??
+                const <ChannelChatMessage>[]);
         index = msgs.indexWhere((m) => m.messageId == messageId);
       }
       if (index >= 0) {
         _scrollController.scrollTo(
-          index: index,
-          alignment: 0.15,
+          // Chronological → reversed builder index; alignment measures from
+          // the BOTTOM edge under reverse:true.
+          index: _displayLength() - 1 - index,
+          alignment: 0.7,
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOutCubic,
         );
@@ -903,13 +966,15 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     // to the Chats tab so the now-hidden channel simply disappears.
     if (!widget.isDm && widget.serverId != null && widget.channelId != null) {
       ref.listen(visibleChannelsProvider, (prev, next) {
-        if (!mounted) return;
+        // _routeDeactivated: a popped route's listener can still fire during
+        // the pop frame; ref.read on the deactivated element crashes.
+        if (!mounted || _routeDeactivated) return;
         // Only act when THIS route's server is the selected one (visibleChannels
         // tracks the selected server); otherwise the map isn't about us.
         if (ref.read(selectedServerProvider) != widget.serverId) return;
         if (next.containsKey(widget.channelId)) return; // still visible — fine
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted && Navigator.of(context).canPop()) {
+          if (mounted && !_routeDeactivated && Navigator.of(context).canPop()) {
             Navigator.of(context).pop();
           }
         });
@@ -1251,16 +1316,28 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   Widget _buildDmMessages() {
     // Per-conversation select — messages in other conversations must not
     // rebuild this list (the provider map is replaced wholesale per insert).
-    final messages =
+    final allMessages =
         ref.watch(chatProvider.select((m) => m[widget.peerId!])) ?? [];
+    // While the user reads history the display is frozen (see the
+    // reversed-list scroll model near _checkAutoScroll).
+    final messages = _displayMessages(allMessages);
     final profiles = ref.watch(profileProvider);
 
+    // New-message handling under the reversed list: following (at bottom) →
+    // instant re-pin; reading history → freeze (unread pill takes over).
     ref.listen<Map<String, List<ChatMessage>>>(chatProvider, (prev, next) {
+      if (!mounted || _routeDeactivated) return; // popped route — see field doc
       final prevLen = (prev?[widget.peerId!] ?? const []).length;
       final nextLen = (next[widget.peerId!] ?? const []).length;
-      if (nextLen > prevLen && _isInAutoScrollZone) {
-        _scrollToBottom();
+      if (nextLen <= prevLen) return;
+      if (_frozenLen != null) return; // frozen — held back + pill
+      if (!_isInAutoScrollZone) {
+        _frozenLen = prevLen;
+        return;
       }
+      // _scrollToBottom (not the bare jump): it also marks the arrival seen —
+      // the user is following at the bottom, so it must not count as unread.
+      _scrollToBottom();
     });
 
     if (messages.isEmpty) {
@@ -1274,15 +1351,21 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     return ScrollablePositionedList.builder(
       itemScrollController: _scrollController,
       itemPositionsListener: _positionsListener,
-      initialScrollIndex: messages.length,
-      initialAlignment: 1.0,
-      itemCount: messages.length + 1,
+      // reverse:true — the NEWEST message is builder index 0, pinned to the
+      // bottom edge. No sentinel row; appends while following never move the
+      // viewport.
+      reverse: true,
+      initialScrollIndex: 0,
+      initialAlignment: 0.0,
+      itemCount: messages.length,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm,
         vertical: HollowSpacing.sm,
       ),
-      itemBuilder: (context, index) {
-        if (index == messages.length) return const SizedBox(height: 8);
+      itemBuilder: (context, revIndex) {
+        // Reversed builder index → chronological; all row logic below stays
+        // chronological.
+        final index = messages.length - 1 - revIndex;
         final msg = messages[index];
         final prev = index > 0 ? messages[index - 1] : null;
 
@@ -1385,16 +1468,26 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   Widget _buildChannelMessages() {
     // Per-channel select — messages in other channels must not rebuild this
     // list (the provider map is replaced wholesale per insert).
-    final messages =
+    final allMessages =
         ref.watch(channelChatProvider.select((m) => m[_channelKey])) ?? [];
+    // While the user reads history the display is frozen (see the
+    // reversed-list scroll model near _checkAutoScroll).
+    final messages = _displayMessages(allMessages);
     final profiles = ref.watch(profileProvider);
 
+    // New-message handling under the reversed list — see _buildDmMessages.
     ref.listen(channelChatProvider, (prev, next) {
+      if (!mounted || _routeDeactivated) return; // popped route — see field doc
       final prevLen = (prev?[_channelKey] ?? const []).length;
       final nextLen = (next[_channelKey] ?? const []).length;
-      if (nextLen > prevLen && _isInAutoScrollZone) {
-        _scrollToBottom();
+      if (nextLen <= prevLen) return;
+      if (_frozenLen != null) return; // frozen — held back + pill
+      if (!_isInAutoScrollZone) {
+        _frozenLen = prevLen;
+        return;
       }
+      // _scrollToBottom (not the bare jump): it also marks the arrival seen.
+      _scrollToBottom();
     });
 
     if (messages.isEmpty) {
@@ -1408,15 +1501,19 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     return ScrollablePositionedList.builder(
       itemScrollController: _scrollController,
       itemPositionsListener: _positionsListener,
-      initialScrollIndex: messages.length,
-      initialAlignment: 1.0,
-      itemCount: messages.length + 1,
+      // reverse:true — newest message at builder index 0, pinned to the
+      // bottom edge (see _buildDmMessages).
+      reverse: true,
+      initialScrollIndex: 0,
+      initialAlignment: 0.0,
+      itemCount: messages.length,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm,
         vertical: HollowSpacing.sm,
       ),
-      itemBuilder: (context, index) {
-        if (index == messages.length) return const SizedBox(height: 8);
+      itemBuilder: (context, revIndex) {
+        // Reversed builder index → chronological.
+        final index = messages.length - 1 - revIndex;
         final msg = messages[index];
         final prev = index > 0 ? messages[index - 1] : null;
 
@@ -1783,8 +1880,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                     child: HollowPressable(
                       subtle: true,
                       onTap: () {
-                        final messages = ref.read(
-                            channelChatProvider)[_channelKey] ?? [];
+                        // Index against the DISPLAY (possibly frozen) list —
+                        // _scrollToMessage converts to the reversed index.
+                        final messages = _displayMessages(
+                            ref.read(channelChatProvider)[_channelKey] ??
+                                const <ChannelChatMessage>[]);
                         final idx = messages.indexWhere(
                             (m) => m.messageId == msg.messageId);
                         setState(() {

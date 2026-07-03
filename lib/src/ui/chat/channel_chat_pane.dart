@@ -158,10 +158,22 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     // + FFI settings write per scroll frame while sitting at the bottom.
     if (nearBottom && !_wasNearBottom) {
       final msgs = ref.read(channelChatProvider)[_stateKey];
+      // Reached the bottom: release the freeze. If messages were held back
+      // while reading, snap to the true newest row.
+      if (_frozenLen != null && msgs != null && msgs.length > _frozenLen!) {
+        _jumpToBottom();
+      } else {
+        _frozenLen = null;
+      }
       if (msgs != null && msgs.isNotEmpty) {
         ref.read(unreadProvider.notifier).markChannelSeen(
               widget.serverId, widget.channelId, msgs.last.messageId);
       }
+    } else if (!nearBottom && _wasNearBottom) {
+      // Left the bottom: freeze the display so arrivals can't shift the
+      // reading position (see chat_pane.dart's reversed-list scroll model).
+      _frozenLen ??=
+          (ref.read(channelChatProvider)[_stateKey] ?? const []).length;
     }
     _wasNearBottom = nearBottom;
     _requestViewportFiles();
@@ -173,11 +185,16 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       if (!mounted) return;
       final positions = _itemPositionsListener.itemPositions.value;
       if (positions.isEmpty) return;
-      final indices = positions.map((p) => p.index);
-      final firstVisible = indices.reduce((a, b) => a < b ? a : b);
-      final lastVisible = indices.reduce((a, b) => a > b ? a : b);
-      final msgs = ref.read(channelChatProvider)[_stateKey] ?? [];
+      final msgs =
+          _displayMessages(ref.read(channelChatProvider)[_stateKey] ?? []);
       if (msgs.isEmpty) return;
+      // Positions are in REVERSED index space (newest = 0) — map the visible
+      // range back to chronological indices for requestVisibleFiles.
+      final indices = positions.map((p) => p.index);
+      final minRev = indices.reduce((a, b) => a < b ? a : b);
+      final maxRev = indices.reduce((a, b) => a > b ? a : b);
+      final firstVisible = (msgs.length - 1 - maxRev).clamp(0, msgs.length - 1);
+      final lastVisible = (msgs.length - 1 - minRev).clamp(0, msgs.length - 1);
       ref.read(channelChatProvider.notifier).requestVisibleFiles(
           widget.serverId, widget.channelId,
           msgs, firstVisible, lastVisible);
@@ -231,62 +248,55 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     super.dispose();
   }
 
+  // ── Reversed-list scroll model — see chat_pane.dart for the rationale ──
+  // reverse:true, newest message at index 0 pinned to the bottom; while the
+  // user reads history the display is FROZEN (arrivals held back, pill takes
+  // over); all bottom snaps are instant jumpTo — never animated.
+
+  /// Non-null while the user is scrolled up: display list capped here.
+  int? _frozenLen;
+
+  /// The messages currently displayed (frozen prefix while scrolled up).
+  List<ChannelChatMessage> _displayMessages(List<ChannelChatMessage> messages) {
+    final frozen = _frozenLen;
+    if (frozen == null || messages.length <= frozen) return messages;
+    return messages.sublist(0, frozen);
+  }
+
   bool get _isNearBottom {
     final positions = _itemPositionsListener.itemPositions.value;
     if (positions.isEmpty) return true;
-    final messages = ref.read(channelChatProvider)[_stateKey] ?? [];
-    if (messages.isEmpty) return true;
-    // Strictly at bottom: sentinel (one past last message) visible.
-    return positions.any((p) => p.index >= messages.length - 1);
+    return positions.any((p) => p.index <= 0);
   }
 
-  /// Auto-scroll capture zone: a bit more forgiving than `_isNearBottom`.
-  /// If any of the last ~3 messages are visible we treat the user as
-  /// "following along" and auto-scroll on new messages. Outside this
-  /// zone the unread pill takes over.
-  bool get _isInAutoScrollZone {
-    final positions = _itemPositionsListener.itemPositions.value;
-    if (positions.isEmpty) return true;
-    final messages = ref.read(channelChatProvider)[_stateKey] ?? [];
-    if (messages.isEmpty) return true;
-    final threshold = messages.length - 3;
-    return positions.any((p) => p.index >= threshold);
+  void _releaseFreeze() {
+    if (_frozenLen != null) setState(() => _frozenLen = null);
   }
 
   void _jumpToBottom() {
+    _releaseFreeze();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_itemScrollController.isAttached) return;
-      final messages = ref.read(channelChatProvider)[_stateKey] ?? [];
-      if (messages.isEmpty) return;
-      _itemScrollController.jumpTo(index: messages.length, alignment: 1.0);
+      _itemScrollController.jumpTo(index: 0, alignment: 0.0);
     });
   }
 
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_itemScrollController.isAttached) return;
-      final messages = ref.read(channelChatProvider)[_stateKey] ?? [];
-      // Scroll TO the sentinel anchored at the bottom, not BY 100k pixels —
-      // `ScrollOffsetController.animateScroll(offset:)` is a delta, so a
-      // large number animated over 150ms flashed past the entire history
-      // before clamping at the end.
-      _itemScrollController.scrollTo(
-        index: messages.length,
-        alignment: 1.0,
-        duration: const Duration(milliseconds: 150),
-        curve: Curves.easeOut,
-      );
-    });
-  }
+  void _scrollToBottom() => _jumpToBottom();
 
+  /// [index] is CHRONOLOGICAL (0 = oldest) — converted to the reversed
+  /// builder index here, in one place.
   void _scrollToMessage(int index) {
     if (!_itemScrollController.isAttached) return;
+    final messages =
+        _displayMessages(ref.read(channelChatProvider)[_stateKey] ?? []);
+    if (index < 0 || index >= messages.length) return;
     setState(() => _highlightIndex = index);
     _itemScrollController.scrollTo(
-      index: index,
+      index: messages.length - 1 - index,
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOutCubic,
-      alignment: 0.3,
+      // Reversed alignment measures from the BOTTOM edge.
+      alignment: 0.6,
     );
     Future.delayed(const Duration(milliseconds: 1500), () {
       if (mounted) setState(() => _highlightIndex = null);
@@ -1265,28 +1275,38 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     final hollow = HollowTheme.of(context);
     // Per-channel select: a message in ANY other channel/server used to
     // rebuild this whole pane (the map is replaced wholesale per insert).
-    final messages =
+    final allMessages =
         ref.watch(channelChatProvider.select((m) => m[_stateKey])) ?? [];
+    // While the user reads history the display is frozen — arrivals are held
+    // back (see the reversed-list scroll model above).
+    final messages = _displayMessages(allMessages);
 
     // If cache was cleared by sync (clearServerCache) and we have no messages,
     // reload from DB. This catches the case where sync completed while we
     // weren't viewing, cache was cleared, and now we need fresh data.
-    if (messages.isEmpty && _historyLoaded && !_loadingHistory) {
+    if (allMessages.isEmpty && _historyLoaded && !_loadingHistory) {
       _historyLoaded = false;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _loadHistory();
       });
     }
 
-    // Auto-scroll on new messages if the user is in the bottom capture zone.
-    // Outside the zone (scrolled up meaningfully), the unread pill takes over.
+    // New-message handling under the reversed list: following (at bottom) →
+    // instant re-pin to the newest row; reading history → freeze the display
+    // (the unread pill takes over) so the view never shifts mid-read.
     ref.listen<Map<String, List<ChannelChatMessage>>>(channelChatProvider,
         (prev, next) {
       final prevLen = (prev?[_stateKey] ?? const []).length;
       final nextLen = (next[_stateKey] ?? const []).length;
-      if (nextLen > prevLen && _isInAutoScrollZone) {
-        _scrollToBottom();
+      if (nextLen <= prevLen) return;
+      if (_frozenLen != null) return; // already frozen — held back + pill
+      if (!_isNearBottom) {
+        // Scroll-away raced the freeze transition — freeze at the pre-growth
+        // length so this arrival is held back too.
+        _frozenLen = prevLen;
+        return;
       }
+      _jumpToBottom();
     });
 
     // Focus search field when opened via global shortcut (Ctrl+K).
@@ -1522,8 +1542,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                           child: HollowPressable(
                             subtle: true,
                             onTap: () {
-                              // Scroll to the matched message in the list.
-                              final messages = ref.read(channelChatProvider)[_stateKey] ?? [];
+                              // Scroll to the matched message in the list —
+                              // index against the DISPLAY (possibly frozen)
+                              // list, which _scrollToMessage also uses.
+                              final messages = _displayMessages(
+                                  ref.read(channelChatProvider)[_stateKey] ??
+                                      []);
                               final idx = messages.indexWhere(
                                   (m) => m.messageId == msg.messageId);
                               ref.read(channelSearchOpenProvider.notifier).state = false;
@@ -1659,17 +1683,20 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                     itemScrollController: _itemScrollController,
                     itemPositionsListener: _itemPositionsListener,
                     scrollOffsetController: _scrollOffsetController,
-                    initialScrollIndex: messages.length,
-                    initialAlignment: 1.0,
+                    // reverse:true — the NEWEST message is builder index 0,
+                    // pinned to the bottom edge. No sentinel row; appends
+                    // while following never move the viewport.
+                    reverse: true,
+                    initialScrollIndex: 0,
+                    initialAlignment: 0.0,
                     padding: const EdgeInsets.symmetric(
                       vertical: HollowSpacing.sm,
                     ),
-                    itemCount: messages.length + 1,
-                    itemBuilder: (context, index) {
-                      // Sentinel item at the end for bottom anchoring.
-                      if (index >= messages.length) {
-                        return const SizedBox.shrink();
-                      }
+                    itemCount: messages.length,
+                    itemBuilder: (context, revIndex) {
+                      // Map the reversed builder index back to chronological
+                      // order — all row logic below stays chronological.
+                      final index = messages.length - 1 - revIndex;
                       final msg = messages[index];
                       // Grouping: compare with the previous message in chronological
                       // order. Multi-device: collapse each sender to its MASTER so a
@@ -1697,13 +1724,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                             _editingMessageId == msg.messageId,
                         onEditStart: msg.messageId != null && msg.isMe && msg.fileAttachment == null
                             ? () {
+                                // Positions + jumpTo are in the REVERSED
+                                // index space.
                                 final positions = _itemPositionsListener
                                     .itemPositions.value;
                                 final current = positions
-                                    .where((p) => p.index == index)
+                                    .where((p) => p.index == revIndex)
                                     .firstOrNull;
                                 final alignment =
-                                    current?.itemLeadingEdge ?? 0.7;
+                                    current?.itemLeadingEdge ?? 0.3;
                                 setState(() =>
                                     _editingMessageId = msg.messageId);
                                 WidgetsBinding.instance
@@ -1711,7 +1740,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                                   if (!mounted ||
                                       !_itemScrollController.isAttached) return;
                                   _itemScrollController.jumpTo(
-                                    index: index,
+                                    index: revIndex,
                                     alignment: alignment,
                                   );
                                 });
@@ -1990,10 +2019,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                         count: unreadCount,
                         onTap: () {
                           _scrollToBottom();
+                          // The display list may be frozen — mark seen against
+                          // the TRUE newest message.
                           ref.read(unreadProvider.notifier).markChannelSeen(
                                 widget.serverId,
                                 widget.channelId,
-                                messages.last.messageId,
+                                allMessages.last.messageId,
                               );
                         },
                       ),

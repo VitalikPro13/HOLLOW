@@ -364,8 +364,9 @@ class ChannelChatNotifier
         final carryOver = existing
             .where((m) => m.messageId != null && !loadedIds.contains(m.messageId))
             .toList();
-        final merged = [...messages, ...carryOver]
-          ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+        // STABLE sort (index tie-break): same-millisecond messages must not
+        // shuffle on reload — see _stableSortByTimestamp.
+        final merged = _stableSortByTimestamp([...messages, ...carryOver]);
         final updated = Map.of(state);
         updated[key] = merged;
         state = updated;
@@ -504,9 +505,9 @@ class ChannelChatNotifier
       // Merge: DB messages + any in-memory messages not in DB (live-delivered).
       final liveOnly = existing.where((m) =>
           m.messageId != null && !dbMessageIds.contains(m.messageId));
-      final merged = [...dbMessages, ...liveOnly];
-      // Sort by timestamp (newest last) and cap.
-      merged.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+      // Stable sort by timestamp (newest last) and cap — same-millisecond
+      // messages keep their DB (order_us) order.
+      final merged = _stableSortByTimestamp([...dbMessages, ...liveOnly]);
       final capped = merged.length > _maxMessages
           ? merged.sublist(merged.length - _maxMessages)
           : merged;
@@ -623,8 +624,7 @@ class ChannelChatNotifier
         .where(
             (m) => m.messageId == null || !existingIds.contains(m.messageId))
         .toList();
-    final merged = [...existing, ...newMsgs]
-      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    final merged = _stableSortByTimestamp([...existing, ...newMsgs]);
     state = {...state, key: merged};
   }
 
@@ -641,6 +641,18 @@ class ChannelChatNotifier
     updated.remove(key);
     state = updated;
   }
+}
+
+/// Sort by timestamp with the ORIGINAL index as tie-break — a stable sort.
+/// `List.sort` is unstable: messages sharing a millisecond (fast spam) would
+/// otherwise swap randomly on every history merge.
+List<ChannelChatMessage> _stableSortByTimestamp(List<ChannelChatMessage> list) {
+  final entries = list.asMap().entries.toList()
+    ..sort((a, b) {
+      final c = a.value.timestamp.compareTo(b.value.timestamp);
+      return c != 0 ? c : a.key.compareTo(b.key);
+    });
+  return [for (final e in entries) e.value];
 }
 
 final channelChatProvider = NotifierProvider<ChannelChatNotifier,
