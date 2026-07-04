@@ -14,12 +14,11 @@
 // pipewire-pulse). Delivers fixed 10ms frames of 48kHz stereo s16le PCM on a
 // dedicated capture thread.
 //
-// This is the Linux SEND analog of the Windows WASAPI loopback capturer.
-// LIMITATION (v1): the monitor source carries the WHOLE mix, including the
-// call audio Hollow itself plays — an entire-screen share re-captures remote
-// voices (echo), like Windows < 2004. The per-stream exclude fix would be a
-// pa_stream_set_monitor_stream INCLUDE-set mixer (the PA analog of
-// MultiProcessCapturer); do that if echo reports come in.
+// This is the Linux SEND analog of the plain Windows WASAPI loopback
+// capturer, and since the per-sink-input capturer landed it is only the
+// FALLBACK path: the monitor carries the WHOLE mix including the call audio
+// Hollow itself plays (echo). PulseSinkInputCapturer (exclude/include tree)
+// is the primary capture; this runs when that can't start.
 class PulseMonitorCapturer {
  public:
   static constexpr int kSampleRate = 48000;

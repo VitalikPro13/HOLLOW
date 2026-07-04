@@ -14,10 +14,11 @@ void _log(String msg) {
 /// Out-of-process screen audio capturer for Windows and Linux.
 ///
 /// Spawns `screen_audio_capturer --mode pipe` as a child process.
-/// The exe captures the system output (Windows: WASAPI loopback, per-app
-/// capable; Linux: the default sink's PulseAudio/PipeWire monitor source,
-/// whole-mix only) → Opus encodes → writes framed binary packets to stdout.
-/// This process reads them and calls [onPacket].
+/// The exe captures the system output (Windows: WASAPI loopback; Linux:
+/// PulseAudio/PipeWire per-sink-input capture — both per-app capable, both
+/// excluding Hollow's own audio on entire-screen shares) → Opus encodes →
+/// writes framed binary packets to stdout. This process reads them and calls
+/// [onPacket].
 ///
 /// Running in a separate process avoids libwebrtc's AudioDeviceModule
 /// interfering with the WASAPI capture (causes audio looping).
@@ -109,8 +110,23 @@ class ScreenAudioCapturer {
 
     final args = ['--mode', 'pipe', '--duration', '0'];
     if (!Platform.isWindows) {
-      // Linux: the exe captures the default sink's monitor source — no per-app
-      // or exclude-tree capture, so the pid/hwnd/exclude flags don't apply.
+      // Linux mirrors the Windows model via per-sink-input capture:
+      //  - window share -> the source id IS the X11 window id; the exe
+      //    resolves it to a pid (_NET_WM_PID) and INCLUDE-captures that
+      //    process tree's audio streams (silent/unresolvable app = silence,
+      //    never the system mix);
+      //  - entire screen -> capture everything EXCLUDING Hollow's own process
+      //    tree (anti-echo; also drops Hollow's in-app media, like the
+      //    Windows exclude-self fallback). Falls back to the whole monitor
+      //    inside the exe if per-sink-input capture can't start.
+      if (windowHwnd != 0) {
+        args.addAll(['--window-xid', windowHwnd.toString()]);
+      } else if (pid != 0) {
+        args.addAll(['--window-pid', pid.toString()]);
+      } else {
+        final excludeTarget = excludePid != 0 ? excludePid : io.pid;
+        args.addAll(['--exclude-pid', excludeTarget.toString()]);
+      }
     } else if (windowHwnd != 0) {
       // Per-app (window) share: hand the window HANDLE to the exe, which resolves
       // it to the owning pid then the real audio-rendering pid set (browser audio

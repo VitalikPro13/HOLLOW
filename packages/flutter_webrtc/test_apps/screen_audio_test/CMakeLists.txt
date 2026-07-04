@@ -67,6 +67,8 @@ elseif(UNIX)
   list(APPEND COMMON_SOURCES
     audio_player_linux.cpp
     pulse_monitor_capturer.cc
+    pulse_sink_input_capturer.cc
+    x11_window_pid.cc
   )
 endif()
 
@@ -109,11 +111,22 @@ elseif(APPLE)
 elseif(UNIX)
   find_package(PkgConfig REQUIRED)
   find_package(Threads REQUIRED)
-  # libpulse (async API) for the default-sink query; libpulse-simple for the
-  # record/playback streams.
+  # libpulse (async API) for the per-sink-input capturer + default-sink query;
+  # libpulse-simple for the plain monitor/playback streams.
   pkg_check_modules(PULSE REQUIRED libpulse-simple libpulse)
   target_include_directories(screen_audio_test PRIVATE ${PULSE_INCLUDE_DIRS})
   target_link_libraries(screen_audio_test PRIVATE
     ${PULSE_LIBRARIES} Threads::Threads
   )
+  # libX11 (optional): resolves a shared window's X id -> _NET_WM_PID for
+  # per-app audio capture. Without it, per-app shares mix silence.
+  pkg_check_modules(X11 x11)
+  if(X11_FOUND)
+    target_compile_definitions(screen_audio_test PRIVATE HAVE_X11)
+    target_include_directories(screen_audio_test PRIVATE ${X11_INCLUDE_DIRS})
+    target_link_libraries(screen_audio_test PRIVATE ${X11_LIBRARIES})
+  else()
+    message(WARNING "libX11 dev headers not found — per-app screen-share \
+audio will capture SILENCE (install libx11-dev).")
+  endif()
 endif()

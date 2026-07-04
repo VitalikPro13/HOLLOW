@@ -36,8 +36,19 @@ echo "==> Hollow Linux release — version $VERSION"
 cd "$ROOT_DIR"
 
 # --- 1. Build -----------------------------------------------------------
-echo "==> 1. flutter build linux (release)"
+# Screen audio exe FIRST — linux/CMakeLists.txt installs it into the bundle
+# during `flutter build linux`, and that install is warning-not-fatal: wrong
+# order silently ships a release without screen-share audio (send AND receive).
+echo "==> 1a. screen_audio_capturer"
+bash "$ROOT_DIR/scripts/build_screen_audio.sh"
+
+echo "==> 1b. flutter build linux (release)"
 flutter build linux
+
+if [ ! -f "$ROOT_DIR/build/linux/x64/release/bundle/screen_audio_capturer" ]; then
+  echo "ERROR: screen_audio_capturer missing from the bundle — release would ship without screen-share audio"
+  exit 1
+fi
 
 # --- 2. Tarball ---------------------------------------------------------
 echo "==> 2. Tarball"

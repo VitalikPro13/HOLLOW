@@ -16,6 +16,8 @@
 #include <unistd.h>
 #include <chrono>
 #include "pulse_monitor_capturer.h"
+#include "pulse_sink_input_capturer.h"
+#include "x11_window_pid.h"
 #endif
 #endif
 
@@ -128,6 +130,11 @@ static void PrintUsage() {
     "                          already known). INCLUDE-captures the resolved\n"
     "                          audio pids and mixes. Silent app -> silence\n"
     "                          (no system-audio fallback). Win 10 2004+.\n"
+    "  --window-xid <xid>      Per-app share (Linux): the shared WINDOW's X11\n"
+    "                          window id. Resolved to a pid via _NET_WM_PID,\n"
+    "                          then that process TREE's sink-inputs are\n"
+    "                          INCLUDE-captured and mixed. Silent app ->\n"
+    "                          silence (no system-audio fallback).\n"
     "  --duration <seconds>    Capture duration (default: 10)\n"
     "  --format wav|opus|both  Output format (default: both)\n"
     "  --output <basename>     Output file basename (default: captured_audio)\n"
@@ -158,6 +165,11 @@ static Options ParseArgs(int argc, char* argv[]) {
     } else if (arg == "--window-pid" && i + 1 < argc) {
       opts.window_pid = static_cast<unsigned int>(atoi(argv[++i]));
     } else if (arg == "--window-hwnd" && i + 1 < argc) {
+      opts.window_hwnd = strtoull(argv[++i], nullptr, 10);
+    } else if (arg == "--window-xid" && i + 1 < argc) {
+      // Linux spelling of --window-hwnd: the shared window's X11 window id
+      // (the desktop source `id` on X sessions). Resolved to a pid via
+      // _NET_WM_PID inside the exe.
       opts.window_hwnd = strtoull(argv[++i], nullptr, 10);
     } else if (arg == "--duration" && i + 1 < argc) {
       opts.duration = atoi(argv[++i]);
@@ -812,21 +824,23 @@ static int RunPipeMode(const Options& opts) {
 // Same contract as the Windows pipe mode: capture system output, Opus-encode,
 // write framed packets to stdout:
 //   [uint16_le: payload_len][uint32_le: seq][...opus_bytes...]
-// Stop on stdin 'Q' or EOF. Capture source is the default sink's PulseAudio/
-// PipeWire MONITOR (whole system mix — no per-app / exclude support on Linux
-// yet, so the pid/hwnd/exclude-pid options are accepted but ignored).
+// Stop on stdin 'Q' or EOF. Capture source selection (mirrors Windows):
+//   --window-xid / --window-pid : per-app share — resolve the X window to its
+//                  pid (_NET_WM_PID), INCLUDE-capture the sink-inputs of that
+//                  process TREE and mix. Unresolvable/silent app -> SILENCE,
+//                  never the system mix.
+//   --exclude-pid : entire-screen anti-echo — per-sink-input capture of
+//                  everything EXCEPT that process tree (Hollow's call
+//                  playback + own media + the render child). Falls back to
+//                  the whole default-sink MONITOR if it can't start (echo
+//                  returns there, acceptable degrade).
+//   (none)        : whole default-sink monitor.
 // =============================================================================
 
 static int RunPipeModeLinux(const Options& opts) {
   fprintf(stderr, "[PIPE] Starting out-of-process audio capture (PulseAudio)\n");
   fprintf(stderr, "[PIPE] Duration: %d seconds (0 = until stdin EOF/Q)\n",
           opts.duration);
-  if (opts.pid != 0 || opts.window_pid != 0 || opts.window_hwnd != 0 ||
-      opts.exclude_pid != 0) {
-    fprintf(stderr,
-            "[PIPE] NOTE: per-app / exclude capture is not supported on "
-            "Linux; capturing the full system mix\n");
-  }
 
   OpusEncoderWrapper encoder(48000, 2, OPUS_APPLICATION_AUDIO);
   if (!encoder.valid()) {
@@ -874,12 +888,54 @@ static int RunPipeModeLinux(const Options& opts) {
     }
   };
 
-  PulseMonitorCapturer capturer;
-  if (!capturer.Start(frame_callback)) {
-    fprintf(stderr, "[PIPE] ERROR: Failed to start monitor capture\n");
-    return 1;
+  PulseMonitorCapturer monitor_capturer;
+  PulseSinkInputCapturer si_capturer;
+  bool started = false;
+
+  const bool per_app = (opts.window_hwnd != 0) || (opts.window_pid != 0);
+  if (per_app) {
+    const int target = opts.window_pid != 0
+        ? static_cast<int>(opts.window_pid)
+        : ResolveX11WindowPid(opts.window_hwnd);
+    if (target == 0) {
+      // Unresolvable window (stale id / wayland-native / no _NET_WM_PID):
+      // the INCLUDE mixer with no matches emits SILENCE — by design we never
+      // fall back to the system mix on a per-app share (audio-leak rule).
+      fprintf(stderr,
+              "[PIPE] Per-app share: window did not resolve to a pid — "
+              "sharing silence\n");
+    }
+    if (!si_capturer.Start(PulseSinkInputCapturer::Mode::kIncludeTree, target,
+                           frame_callback)) {
+      fprintf(stderr, "[PIPE] ERROR: Failed to start per-app capture\n");
+      return 1;
+    }
+    started = true;
+    fprintf(stderr, "[PIPE] Capturing per-app audio (INCLUDE tree, pid %d)\n",
+            target);
+  } else if (opts.exclude_pid != 0) {
+    if (si_capturer.Start(PulseSinkInputCapturer::Mode::kExcludeTree,
+                          static_cast<int>(opts.exclude_pid),
+                          frame_callback)) {
+      started = true;
+      fprintf(stderr,
+              "[PIPE] Capturing system audio EXCLUDING pid %u tree "
+              "(anti-echo)\n",
+              opts.exclude_pid);
+    } else {
+      fprintf(stderr,
+              "[PIPE] Per-sink-input capture failed; falling back to the "
+              "whole monitor (call audio may echo)\n");
+    }
   }
-  fprintf(stderr, "[PIPE] Capturing system audio...\n");
+
+  if (!started) {
+    if (!monitor_capturer.Start(frame_callback)) {
+      fprintf(stderr, "[PIPE] ERROR: Failed to start monitor capture\n");
+      return 1;
+    }
+    fprintf(stderr, "[PIPE] Capturing system audio (whole monitor)...\n");
+  }
 
   // Wait for duration, stdin 'Q', or stdin EOF (parent died / stopped us).
   const auto start = std::chrono::steady_clock::now();
@@ -907,7 +963,8 @@ static int RunPipeModeLinux(const Options& opts) {
   }
 
   active.store(false);
-  capturer.Stop();
+  si_capturer.Stop();
+  monitor_capturer.Stop();
 
   double seconds = total_frames > 0
       ? static_cast<double>(total_frames) / 48000.0 : 0.0;

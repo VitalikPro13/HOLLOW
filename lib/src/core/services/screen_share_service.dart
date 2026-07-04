@@ -484,8 +484,10 @@ class ScreenShareService {
   ///
   /// - Windows: WASAPI loopback exe (`--mode pipe`). A separate process avoids
   ///   libwebrtc's AudioDeviceModule interfering with the WASAPI capture.
-  /// - Linux: same exe, `--mode pipe` capturing the default sink's PulseAudio/
-  ///   PipeWire monitor source (whole system mix; per-app/exclude unsupported).
+  /// - Linux: same exe, `--mode pipe` with per-sink-input capture — window
+  ///   shares INCLUDE only the shared app's process tree (X id -> _NET_WM_PID),
+  ///   entire-screen EXCLUDES Hollow's own tree (anti-echo); whole-monitor
+  ///   capture is the in-exe fallback.
   /// - macOS 13.0–14.1: ScreenCaptureKit audio-only capture -> exe `--mode
   ///   encode`. (macOS 14.2+ uses the Process Tap -> WebRTC track in createOffer,
   ///   never this method.)
