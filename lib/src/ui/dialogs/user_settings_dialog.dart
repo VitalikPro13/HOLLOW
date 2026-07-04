@@ -176,7 +176,9 @@ extension _SettingsCategoryMeta on _SettingsCategory {
         _SettingsCategory.accessibility =>
           'accessibility contrast motion reduce animations transitions '
               'transparency blur text size voice screen reader voiceover',
-        _SettingsCategory.network => 'network relay server domain connection',
+        _SettingsCategory.network =>
+          'network relay server domain connection offline delivery inbox '
+              'buffer retention',
         _SettingsCategory.storage =>
           'files storage disk space cache clear reclaim downloads breakdown '
               'auto download threshold data location folder media image quality '
@@ -770,6 +772,8 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
 
   // ── Network category ─────────────────────────────────────────────
   List<Widget> _networkCards(HollowTheme hollow) {
+    final offlineInbox = ref.watch(offlineInboxProvider);
+    final retentionDays = ref.watch(offlineInboxRetentionProvider);
     return [
       _SettingsCard(
         title: 'Relay',
@@ -807,6 +811,45 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
                 onPressed: _applyRelayAndRestart,
                 child: const Text('Apply & Restart'),
               ),
+            ),
+          ],
+        ],
+      ),
+      _SettingsCard(
+        title: 'Offline Delivery',
+        children: [
+          _ToggleRow(
+            icon: LucideIcons.inbox,
+            label: 'Hold My Messages While I\'m Offline',
+            subtitle:
+                'Messages and file cards sent TO YOU while you\'re offline '
+                'wait on the relay, encrypted, and arrive when you come back '
+                '— even if the sender has gone offline by then. This only '
+                'affects what you receive; senders don\'t need it enabled. '
+                'The relay can\'t read any of it.',
+            value: offlineInbox,
+            onChanged: (v) =>
+                ref.read(offlineInboxProvider.notifier).setEnabled(v),
+          ),
+          if (offlineInbox) ...[
+            const SizedBox(height: HollowSpacing.md),
+            Text(
+              'Keep messages for',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+                fontSize: 11,
+              ),
+            ),
+            const SizedBox(height: HollowSpacing.xs),
+            _TriStateSegment<int>(
+              value: retentionDays,
+              options: const [
+                (1, '1 day'),
+                (3, '3 days'),
+                (7, '7 days'),
+              ],
+              onChanged: (d) =>
+                  ref.read(offlineInboxRetentionProvider.notifier).setDays(d),
             ),
           ],
         ],

@@ -634,6 +634,10 @@ pub(crate) enum NodeCommand {
     /// Register per-server/channel push notification prefs with the relay
     /// (RAM only, re-sent on reconnect). See `WsCommand::SetPushPrefs`.
     SetPushPrefs { prefs_json: String },
+    /// Opt in/out of the relay's extended offline DM buffer ("offline inbox").
+    /// RAM-only on the relay, re-registered on every reconnect by ws_client.
+    /// See `WsCommand::SetOfflineBuffer`.
+    SetOfflineInbox { enabled: bool, retention_secs: i64 },
     // -- Typing indicators (Phase 3.5) --
     SendTypingIndicator { server_id: String, channel_id: String },
     // -- Presence (Phase 6.75) --

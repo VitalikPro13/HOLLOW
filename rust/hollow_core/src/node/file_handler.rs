@@ -11,7 +11,7 @@ use crate::node::image_convert;
 use super::crypto_handler::{
     message_signing_payload, sign_message,
     peer_is_reachable, ws_room_for_peer,
-    send_mls_broadcast, send_encrypted_message,
+    send_mls_broadcast, send_mls_broadcast_topic, send_encrypted_message,
     send_message_to_peer,
 };
 use super::gossip;
@@ -555,14 +555,27 @@ pub(crate) async fn finish_send_file(
             // must NOT call it here; the caption is sent exactly once below via
             // the DM-room-direct path (which also actually delivers to the buffer).
             // The online path and the non-image offline path are unchanged.
-            let offline_image = !reachable && is_image;
-            if !offline_image {
+            if reachable {
                 send_encrypted_message(
                                 olm, crypto_store,
                                 peer_str, &envelope_json, event_tx,
                                             &ws_cmd_tx, &ws_room_peers,
                 ).await;
+            } else if !is_image {
+                // OFFLINE non-image: target the MASTER-pair DM room directly
+                // (0x04, text cap) so the relay's offline buffer holds the
+                // caption/"[file:...]" message. `send_encrypted_message` would
+                // encrypt and then DISCARD for a peer in no known room — a
+                // wasted ratchet slot and nothing buffered. Mirrors
+                // message_ops' offline text-DM path.
+                crate::node::crypto_handler::send_encrypted_text_to_peer(
+                    olm, crypto_store,
+                    peer_str, dm_room_f.clone(), &envelope_json, event_tx,
+                    &ws_cmd_tx,
+                ).await;
             }
+            // offline_image: caption deliberately deferred — sent exactly once
+            // below, AFTER the inlined FileHeader (see that block).
 
             // Only send file data if peer is reachable right now.
             // If offline, the file_id is in the message — sync will request it later.
@@ -706,7 +719,50 @@ pub(crate) async fn finish_send_file(
                         hollow_log!("[HOLLOW-FILE] Buffered offline image caption for DM {peer_str}");
                     }
                 }
-            } // if peer reachable (live stream) / else offline image (inline)
+            } else {
+                // OFFLINE non-image file: send a METADATA-ONLY FileHeader to
+                // the DM room (0x04, text cap) so the relay's offline buffer
+                // carries the file card — never the bytes (RAM/bandwidth
+                // bomb). No aes_key/nonce → the receiver inserts metadata
+                // without registering a pending stream (same semantics as a
+                // DM-sync `file_meta` card) and fetches the bytes via the
+                // normal request-on-open path once both peers are online.
+                let header = MessageEnvelope::FileHeader {
+                    inner: Box::new(FileHeaderPayload {
+                        fid: file_id.clone(),
+                        name: original_name.clone(),
+                        ext: final_ext.clone(),
+                        mime: final_mime.clone(),
+                        size: file_size,
+                        chunks: 0,
+                        img: is_image,
+                        w: width,
+                        h: height,
+                        mid: Some(message_id.clone()),
+                        sid: None,
+                        cid: None,
+                        ts: timestamp,
+                        // Carry the signature so a captionless file row
+                        // verifies instead of showing "Unsigned" (mirrors the
+                        // offline-image header).
+                        sig: sig.clone(),
+                        pk: pk.clone(),
+                        aes_key: None,
+                        aes_nonce: None,
+                        target: None,
+                        vthumb: vthumb.clone(),
+                        share_ref: None,
+                        inline_bytes: None,
+                    }),
+                };
+                let header_json = serde_json::to_string(&header).unwrap_or_default();
+                crate::node::crypto_handler::send_encrypted_text_to_peer(
+                    olm, crypto_store,
+                    peer_str, dm_room_f.clone(), &header_json, event_tx,
+                    &ws_cmd_tx,
+                ).await;
+                hollow_log!("[HOLLOW-FILE] Buffered metadata-only FileHeader {file_id} for offline DM {peer_str}");
+            } // if peer reachable (live stream) / offline image (inline) / offline file (metadata-only)
         } else {
             // No Olm session with this device yet (a freshly-appeared device before
             // key exchange completes). The text-DM path queues + KeyRequests here
@@ -759,9 +815,16 @@ pub(crate) async fn finish_send_file(
             }
         }
 
-        // Send the TEXT MESSAGE via MLS (for proper sync/queue to offline peers).
-        // Restricted channels (Option B) use the per-channel subgroup so only
-        // qualifying members can decrypt the companion text.
+        // Send the TEXT MESSAGE ("[file:...]" / caption) via the MLS TOPIC
+        // broadcast — the SAME path normal channel text takes. It used to fan
+        // targeted per-member direct sends, which (a) silently skipped every
+        // OFFLINE member (no queue, no relay copy — the file card's message
+        // row only healed via channel sync) and (b) never entered the relay's
+        // per-channel offline ring, so catch-up replayed the FileHeader with
+        // no message row to hang it on and the chat showed NOTHING.
+        // Restricted channels (Option B) encrypt under the per-channel
+        // subgroup — the room sees ciphertext either way, identical to
+        // message_ops' text sends.
         if let Some(mls_mgr) = mls {
             let use_subgroup = server_states.get(&sid)
                 .is_some_and(|s| s.channel_uses_subgroup(&cid));
@@ -770,22 +833,9 @@ pub(crate) async fn finish_send_file(
             } else {
                 sid.clone()
             };
-            if let Ok(ct) = mls_mgr.encrypt(&group_key, envelope_json.as_bytes()) {
-                // MLS rule: persist on encrypt — send-side ratchet state must
-                // never be debounced (see send_mls_broadcast for the why).
-                crate::node::crypto_handler::persist_mls_state(mls_mgr, crypto_store);
-                let mls_msg = HavenMessage::MlsChannelMessage {
-                    server_id: sid.clone(),
-                    body: base64::engine::general_purpose::STANDARD.encode(&ct),
-                    channel_id: if use_subgroup { Some(cid.clone()) } else { None },
-                };
-                if let Some(state) = server_states.get(&sid) {
-                    let mls_data = serde_json::to_vec(&mls_msg).unwrap_or_default();
-                    for member_peer_str in state.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, &local_peer) { continue; }
-                        if use_subgroup && !state.can_see_channel(member_peer_str, &cid) { continue; }
-                        super::crypto_handler::send_raw_to_identity(&ws_cmd_tx, &ws_room_peers, member_peer_str, mls_data.clone());
-                    }
+            if mls_mgr.has_group(&group_key) {
+                if let Err(e) = send_mls_broadcast_topic(mls_mgr, &ws_cmd_tx, &sid, &cid, use_subgroup, &envelope, crypto_store) {
+                    hollow_log!("[HOLLOW-MLS] Channel file message broadcast failed: {e}");
                 }
             }
         }
@@ -863,10 +913,22 @@ pub(crate) async fn finish_send_file(
             let header_json = serde_json::to_string(&header).unwrap_or_default();
 
             if let Some(state) = server_states.get(&sid) {
-                // Broadcast FileHeader via MLS (single encrypt, relay fans out).
-                let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&sid));
+                // Broadcast FileHeader via MLS over the CHANNEL TOPIC (0x07),
+                // mirroring the channel text path: subgroup-aware, and the
+                // relay tees topic frames into the per-channel offline ring —
+                // a 0x03 room broadcast never reached offline members' catch-up,
+                // so buffered channel images/files rendered captions with no
+                // file card. Live delivery semantics match text (subscribed
+                // members get it now; others via channel sync / catch-up).
+                let use_subgroup = state.channel_uses_subgroup(&cid);
+                let group_key = if use_subgroup {
+                    crate::crypto::subgroup_id(&sid, &cid)
+                } else {
+                    sid.clone()
+                };
+                let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
                 if mls_ok {
-                    if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), &ws_cmd_tx, &sid, &header, crypto_store) {
+                    if let Err(e) = send_mls_broadcast_topic(mls.as_mut().unwrap(), &ws_cmd_tx, &sid, &cid, use_subgroup, &header, crypto_store) {
                         hollow_log!("[HOLLOW-MLS] FileHeader broadcast failed: {e}");
                     }
                 } else {

@@ -831,6 +831,23 @@ impl ServerState {
             .unwrap_or(512)
     }
 
+    /// Relay offline catch-up retention in seconds. DEFAULT ON at 3 days when
+    /// the setting is absent (2026-07-04: users won't find the toggle and will
+    /// assume offline delivery is broken); an explicit "0" = owner turned it
+    /// OFF. Stored in `settings["relay_catchup_secs"]` (Owner/Admin-gated like
+    /// every server setting). When >0, member clients register the server's
+    /// text channels with the relay's per-channel ring buffer and request
+    /// catch-up on connect + channel open — the relay stays an availability
+    /// helper (same E2EE signed bytes, receiver verifies + dedups), never a
+    /// source of truth.
+    pub fn relay_catchup_secs(&self) -> i64 {
+        self.settings
+            .get("relay_catchup_secs")
+            .and_then(|reg| reg.read().parse::<i64>().ok())
+            .unwrap_or(3 * 86400)
+            .max(0)
+    }
+
     /// Whether the server is private (invite-only). Defaults to public.
     /// Stored in `settings["is_private"]` as "true"/"false".
     pub fn is_private(&self) -> bool {

@@ -447,6 +447,21 @@ Future<void> registerPushToken({
 Future<void> setPushPrefs({required String prefsJson}) =>
     RustLib.instance.api.crateApiNetworkSetPushPrefs(prefsJson: prefsJson);
 
+/// Opt in/out of the relay's extended offline DM delivery ("offline inbox").
+/// When enabled, the relay keeps Olm-encrypted DM text + FileHeader frames
+/// addressed to this device for `retention_secs` (relay clamps to 1h..7d)
+/// instead of the 24h push baseline, and replays them on the next connect —
+/// delivered entries are deleted relay-side. Text and file METADATA only,
+/// never file bytes. RAM-only registry: ws_client re-registers automatically
+/// on every reconnect; Dart must call this once per app start (and on change).
+Future<void> setOfflineInbox({
+  required bool enabled,
+  required PlatformInt64 retentionSecs,
+}) => RustLib.instance.api.crateApiNetworkSetOfflineInbox(
+  enabled: enabled,
+  retentionSecs: retentionSecs,
+);
+
 /// Resolve server + channel names and the effective local notification level
 /// directly from SQLCipher (no running node). Returns None when the server is
 /// unknown locally or identity is locked.

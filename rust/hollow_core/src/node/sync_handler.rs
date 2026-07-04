@@ -182,6 +182,70 @@ pub(crate) async fn handle_create_server(
     }
 }
 
+// ── Relay offline catch-up registration ──────────────────────────────
+
+/// Register this server's text channels with the relay's per-channel offline
+/// ring buffer when the CRDT `relay_catchup_secs` setting is on. Registration
+/// is additive/refresh-only — it NEVER clears here, because a member holding a
+/// stale CRDT (flag still off locally) must not wipe a buffer everyone else
+/// relies on. Clearing happens only at the Owner/Admin toggle site in
+/// `handle_update_server_setting`.
+pub(crate) fn register_relay_catchup(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    state: &ServerState,
+    server_id: &str,
+) {
+    let secs = state.relay_catchup_secs();
+    if secs <= 0 {
+        return;
+    }
+    let channels: Vec<String> = state
+        .channels
+        .values()
+        .filter(|c| matches!(c.channel_type, crate::crdt::server_state::ChannelType::Text))
+        .map(|c| c.channel_id.clone())
+        .collect();
+    if channels.is_empty() {
+        return;
+    }
+    hollow_log!("[HOLLOW-TOPIC] Registering relay catch-up rings for {server_id}: {} channel(s), retention {secs}s", channels.len());
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetTopicBuffer {
+        room_code: server_id.to_string(),
+        channels,
+        retention_secs: secs,
+        clear: false,
+    });
+}
+
+/// Age window (seconds) for a relay topic catch-up request: how far back the
+/// relay should replay ring frames for this channel. Derived from the local
+/// channel watermark (newest stored message) + a 30-minute overlap, mirroring
+/// the peer-sync `SYNC_LOOKBACK_MS` pattern — frames older than what we
+/// already hold are undecryptable (MLS consumed those generations) and were
+/// pure SecretReuse noise on every reconnect. 0 = no watermark (fresh
+/// channel) → replay the whole retention window.
+pub(crate) fn catchup_watermark_age_secs(
+    db_path: &str,
+    db_passphrase: &str,
+    server_id: &str,
+    channel_id: &str,
+) -> i64 {
+    const LOOKBACK_SECS: i64 = 1800;
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return 0;
+    };
+    match store.get_latest_channel_timestamp(server_id, channel_id) {
+        Ok(Some(ts_ms)) if ts_ms > 0 => {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            ((now_ms - ts_ms) / 1000 + LOOKBACK_SECS).max(LOOKBACK_SECS)
+        }
+        _ => 0,
+    }
+}
+
 // ── 2. CreateChannel ──────────────────────────────────────────────────
 
 pub(crate) async fn handle_create_channel(
@@ -261,6 +325,11 @@ broadcast_crdt_op_to_members(
             )
             }
         }
+
+        // Relay offline catch-up: a new channel must be in the relay's
+        // registration or its messages never buffer. The creator is online
+        // right now, so their refresh covers everyone.
+        register_relay_catchup(ws_cmd_tx, state, &server_id);
     } else {
         let _ = event_tx.send(NetworkEvent::Error {
             message: format!("[CRDT] Server {server_id} not found"),
@@ -561,6 +630,22 @@ pub(crate) async fn handle_update_server_setting(
 broadcast_crdt_op_to_members(
                 ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
             )
+            }
+        }
+
+        // Relay offline catch-up toggle: (de)register the relay-side ring
+        // buffers immediately. Other members refresh on their own next
+        // connect; only THIS authoritative toggle site may clear.
+        if key == "relay_catchup_secs" {
+            if state.relay_catchup_secs() > 0 {
+                register_relay_catchup(ws_cmd_tx, state, &server_id);
+            } else {
+                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetTopicBuffer {
+                    room_code: server_id.clone(),
+                    channels: Vec::new(),
+                    retention_secs: 0,
+                    clear: true,
+                });
             }
         }
     }

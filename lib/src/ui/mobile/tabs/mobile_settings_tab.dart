@@ -1107,6 +1107,13 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
         _buildRelaySection(hollow),
 
         const SizedBox(height: HollowSpacing.xl),
+
+        // ── Offline delivery (relay message-availability cache) ──
+        _SectionLabel(label: 'Offline Delivery'),
+        const SizedBox(height: HollowSpacing.sm),
+        const _OfflineInboxSection(),
+
+        const SizedBox(height: HollowSpacing.xl),
       ],
     );
   }
@@ -1928,6 +1935,77 @@ class _InvisibleToggleRow extends ConsumerWidget {
           activeColor: Colors.white,
           inactiveTrackColor: hollow.border,
         ),
+      ],
+    );
+  }
+}
+
+/// Offline message delivery (relay message-availability cache) — opt-in
+/// toggle + retention segment. Mirrors the desktop Network > Offline Delivery
+/// card.
+class _OfflineInboxSection extends ConsumerWidget {
+  const _OfflineInboxSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final enabled = ref.watch(offlineInboxProvider);
+    final retentionDays = ref.watch(offlineInboxRetentionProvider);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(LucideIcons.inbox, size: 18, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Hold My Messages While I\'m Offline',
+                      style: HollowTypography.body.copyWith(
+                        color: hollow.textPrimary,
+                      )),
+                  Text(
+                      'Messages sent TO YOU while you\'re offline wait on the '
+                      'relay, encrypted, and arrive when you return — even if '
+                      'the sender has gone offline. Only affects what you '
+                      'receive. The relay can\'t read any of it.',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary, fontSize: 11,
+                      )),
+                ],
+              ),
+            ),
+            Switch(
+              value: enabled,
+              onChanged: (v) =>
+                  ref.read(offlineInboxProvider.notifier).setEnabled(v),
+              activeTrackColor: hollow.accent,
+              activeColor: Colors.white,
+              inactiveTrackColor: hollow.border,
+            ),
+          ],
+        ),
+        if (enabled) ...[
+          const SizedBox(height: HollowSpacing.md),
+          Text('Keep messages for',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary, fontSize: 11,
+              )),
+          const SizedBox(height: HollowSpacing.xs),
+          _MobileSegment<int>(
+            value: retentionDays,
+            options: const [
+              (1, '1 day'),
+              (3, '3 days'),
+              (7, '7 days'),
+            ],
+            onChanged: (d) =>
+                ref.read(offlineInboxRetentionProvider.notifier).setDays(d),
+          ),
+        ],
       ],
     );
   }

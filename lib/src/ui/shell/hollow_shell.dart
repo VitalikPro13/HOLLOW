@@ -905,6 +905,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // correct toggle/status).
     ref.read(invisibleModeProvider.notifier).load();
 
+    // Offline inbox (relay message-availability cache): the relay registry is
+    // RAM-only, so re-register on every app start. Retention loads FIRST so
+    // the enable re-apply reads the right window; enabled.load() then calls
+    // the FFI when opted in. Fire-and-forget (node just started above).
+    ref.read(offlineInboxRetentionProvider.notifier).load().then((_) {
+      ref.read(offlineInboxProvider.notifier).load();
+    }).catchError((_) {});
+
     // (theme/accent/background/nicknames/strip layout already loaded in the
     // local-first phase above, before the network calls.)
 

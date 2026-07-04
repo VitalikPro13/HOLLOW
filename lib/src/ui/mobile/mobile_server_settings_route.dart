@@ -60,6 +60,10 @@ class _MobileServerSettingsRouteState
   bool _isNsfw = false;
   bool _savingAccess = false;
 
+  /// Relay offline catch-up retention in DAYS (0 = off). Mirrors the CRDT
+  /// setting `relay_catchup_secs` (stored in seconds).
+  int _catchupDays = 0;
+
   @override
   void initState() {
     super.initState();
@@ -82,6 +86,8 @@ class _MobileServerSettingsRouteState
           await crdt_api.getServerSetting(serverId: sid, key: 'is_nsfw');
       final maxMembers =
           await crdt_api.getServerSetting(serverId: sid, key: 'max_members');
+      final catchupSecs =
+          await crdt_api.getServerSetting(serverId: sid, key: 'relay_catchup_secs');
       if (mounted) {
         setState(() {
           _isPrivate = isPrivate == 'true';
@@ -89,9 +95,37 @@ class _MobileServerSettingsRouteState
           // 0 / empty = unlimited; leave the field blank in that case.
           _maxMembersController.text =
               (maxMembers.isEmpty || maxMembers == '0') ? '' : maxMembers;
+          // Absent = default ON at 3 days (matches Rust relay_catchup_secs()).
+          if (catchupSecs.isEmpty) {
+            _catchupDays = 3;
+          } else {
+            final secs = int.tryParse(catchupSecs) ?? 0;
+            _catchupDays = secs <= 0
+                ? 0
+                : (secs <= 86400 ? 1 : (secs <= 3 * 86400 ? 3 : 7));
+          }
         });
       }
     } catch (_) {}
+  }
+
+  /// Applies immediately (single CRDT key, optimistic local apply in Rust).
+  Future<void> _setRelayCatchup(int days) async {
+    final prev = _catchupDays;
+    setState(() => _catchupDays = days);
+    try {
+      await crdt_api.updateServerSetting(
+        serverId: widget.serverId,
+        key: 'relay_catchup_secs',
+        value: (days * 86400).toString(),
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(() => _catchupDays = prev);
+        HollowToast.show(context, 'Failed to update: $e',
+            type: HollowToastType.error);
+      }
+    }
   }
 
   Future<void> _saveAccessSettings() async {
@@ -717,6 +751,76 @@ class _MobileServerSettingsRouteState
                         child: const Text('Save'),
                       ),
                     ),
+                    const SizedBox(height: HollowSpacing.xl),
+
+                    // ── Offline catch-up (relay availability cache) ──
+                    _SectionDivider(label: 'Offline Catch-Up'),
+                    const SizedBox(height: HollowSpacing.sm),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(LucideIcons.inbox,
+                                      size: 15, color: hollow.textSecondary),
+                                  const SizedBox(width: HollowSpacing.sm),
+                                  Text('Relay offline catch-up',
+                                      style: HollowTypography.body.copyWith(
+                                          color: hollow.textPrimary)),
+                                ],
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                'The relay keeps encrypted channel messages '
+                                'so members catch up even when nobody else is '
+                                'online. Text and file cards only.',
+                                style: HollowTypography.caption.copyWith(
+                                  color: hollow.textSecondary, fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: HollowSpacing.md),
+                        HollowToggle(
+                          value: _catchupDays > 0,
+                          onChanged: (v) => _setRelayCatchup(v ? 3 : 0),
+                        ),
+                      ],
+                    ),
+                    if (_catchupDays > 0) ...[
+                      const SizedBox(height: HollowSpacing.md),
+                      Text(
+                        'Keep messages for',
+                        style: HollowTypography.label
+                            .copyWith(color: hollow.textSecondary),
+                      ),
+                      const SizedBox(height: HollowSpacing.sm),
+                      Row(
+                        children: [
+                          for (final days in const [1, 3, 7]) ...[
+                            if (_catchupDays == days)
+                              HollowButton.filled(
+                                compact: true,
+                                onPressed: () {},
+                                child:
+                                    Text('$days day${days == 1 ? '' : 's'}'),
+                              )
+                            else
+                              HollowButton.ghost(
+                                compact: true,
+                                onPressed: () => _setRelayCatchup(days),
+                                child:
+                                    Text('$days day${days == 1 ? '' : 's'}'),
+                              ),
+                            const SizedBox(width: HollowSpacing.sm),
+                          ],
+                        ],
+                      ),
+                    ],
                     const SizedBox(height: HollowSpacing.xl),
                   ],
 

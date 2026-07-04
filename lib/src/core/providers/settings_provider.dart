@@ -633,3 +633,89 @@ class InvisibleModeNotifier extends Notifier<bool> {
 
 final invisibleModeProvider =
     NotifierProvider<InvisibleModeNotifier, bool>(InvisibleModeNotifier.new);
+
+/// Offline inbox retention window in DAYS (1 / 3 / 7). Only meaningful while
+/// [offlineInboxProvider] is enabled; the relay clamps server-side too.
+class OfflineInboxRetentionNotifier extends Notifier<int> {
+  @override
+  int build() => 3;
+
+  /// Load persisted value from DB. Called during bootstrap BEFORE
+  /// [OfflineInboxNotifier.load] so the enable re-apply reads the right days.
+  Future<void> load() async {
+    try {
+      final val = await storage_api.loadSetting(key: 'offline_inbox_retention_days');
+      final days = int.tryParse(val ?? '') ?? 0;
+      if (days == 1 || days == 3 || days == 7) state = days;
+    } catch (_) {}
+  }
+
+  Future<void> setDays(int days) async {
+    if (days != 1 && days != 3 && days != 7) return;
+    state = days;
+    await storage_api.saveSetting(
+      key: 'offline_inbox_retention_days',
+      value: days.toString(),
+    );
+    // Re-register with the relay if the feature is on.
+    if (ref.read(offlineInboxProvider)) {
+      try {
+        await network_api.setOfflineInbox(
+          enabled: true,
+          retentionSecs: days * 86400,
+        );
+      } catch (_) {}
+    }
+  }
+}
+
+final offlineInboxRetentionProvider =
+    NotifierProvider<OfflineInboxRetentionNotifier, int>(
+        OfflineInboxRetentionNotifier.new);
+
+/// Offline inbox ("offline message delivery") — ON by default at 3 days
+/// (2026-07-04: users won't discover the toggle and will assume offline
+/// delivery is broken; turning it off is the explicit choice). While enabled,
+/// the relay keeps encrypted DM text + file cards addressed to this device for
+/// the chosen retention (instead of the 24h push baseline) and replays them on
+/// the next connect, deleting delivered entries. Text and file metadata only —
+/// never file bytes; content stays E2EE (the relay holds ciphertext it cannot
+/// read or forge). The relay registry is RAM-only, so the FFI is re-applied on
+/// every app start; Rust's ws_client then re-registers on every reconnect.
+class OfflineInboxNotifier extends Notifier<bool> {
+  @override
+  bool build() => true;
+
+  /// Load persisted value + re-register with the relay. Called during
+  /// bootstrap (fire-and-forget), after the node has started. Never-touched
+  /// setting = default ON.
+  Future<void> load() async {
+    try {
+      final val = await storage_api.loadSetting(key: 'offline_inbox_enabled');
+      if (val != null && val.isNotEmpty) state = val == 'true';
+      if (state) await _apply();
+    } catch (_) {}
+  }
+
+  Future<void> setEnabled(bool value) async {
+    state = value;
+    await storage_api.saveSetting(
+      key: 'offline_inbox_enabled',
+      value: value.toString(),
+    );
+    await _apply();
+  }
+
+  Future<void> _apply() async {
+    final days = ref.read(offlineInboxRetentionProvider);
+    try {
+      await network_api.setOfflineInbox(
+        enabled: state,
+        retentionSecs: days * 86400,
+      );
+    } catch (_) {} // node not running yet — bootstrap re-applies after start
+  }
+}
+
+final offlineInboxProvider =
+    NotifierProvider<OfflineInboxNotifier, bool>(OfflineInboxNotifier.new);

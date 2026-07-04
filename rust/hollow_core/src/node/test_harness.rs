@@ -56,6 +56,12 @@ struct RelayInner {
     /// replay when the target next joins that room. Mirrors the relay's
     /// offline buffer (the load-bearing peer-fallback path).
     offline: HashMap<String, Vec<BufferedMsg>>,
+    /// (room_code, channel/topic) -> ring of (sender_device, frame data).
+    /// Mirrors the real relay's per-channel topic buffers (relay offline
+    /// catch-up): key presence = registered via SetTopicBuffer, inbound
+    /// SendToRoomTopic frames tee in, TopicCatchup replays them to the
+    /// requester (skipping the requester's own frames). Caps/TTL not modeled.
+    topic_buffers: HashMap<(String, String), Vec<(String, Vec<u8>)>>,
 }
 
 struct BufferedMsg {
@@ -255,7 +261,13 @@ impl MockRelay {
                     });
                 }
             }
-            WsCommand::SendToRoomTopic { room_code, data, .. } => {
+            WsCommand::SendToRoomTopic { room_code, topic, data } => {
+                // Tee into the channel's ring buffer when registered (relay
+                // offline catch-up), mirroring the real relay.
+                let key = (room_code.clone(), topic.clone());
+                if let Some(buf) = inner.topic_buffers.get_mut(&key) {
+                    buf.push((from.to_string(), data.clone()));
+                }
                 // Simplify topic routing to a plain room broadcast (no test
                 // exercises topic filtering yet).
                 inner.broadcast_except(&room_code, from, WsEvent::Message {
@@ -263,6 +275,32 @@ impl MockRelay {
                     from: from.to_string(),
                     data,
                 });
+            }
+            WsCommand::SetTopicBuffer { room_code, channels, clear, .. } => {
+                if clear {
+                    inner.topic_buffers.retain(|(r, _), _| r != &room_code);
+                } else {
+                    for c in channels {
+                        inner.topic_buffers.entry((room_code.clone(), c)).or_default();
+                    }
+                }
+            }
+            WsCommand::TopicCatchup { room_code, channel_id, .. } => {
+                // max_age_secs ignored — the mock doesn't model frame age.
+                let frames: Vec<(String, Vec<u8>)> = inner
+                    .topic_buffers
+                    .get(&(room_code.clone(), channel_id))
+                    .map(|v| v.iter().filter(|(s, _)| s != from).cloned().collect())
+                    .unwrap_or_default();
+                if let Some(conn) = inner.conns.get(from).filter(|c| c.online) {
+                    for (sender, data) in frames {
+                        let _ = conn.event_tx.send(WsEvent::Message {
+                            room: room_code.clone(),
+                            from: sender,
+                            data,
+                        });
+                    }
+                }
             }
             WsCommand::DiscoverPeers { room_code } => {
                 let peers: Vec<String> = inner
@@ -5198,4 +5236,458 @@ async fn leave_tears_down_durably_on_sibling_and_owner_prunes_member() {
     drop(o);
     drop(b);
     drop(c);
+}
+
+// ---------------------------------------------------------------------------
+// Relay message-availability cache (opt-in offline buffer) — DM leg.
+// The classic gap: Alice DMs Bob while Bob is offline, then ALICE goes offline
+// before Bob returns. No peer holds the message online — only the relay's
+// offline buffer can deliver it. The buffer must replay on Bob's DM-room join
+// and be CLEARED afterwards (delete-on-delivery frees relay RAM). Availability,
+// not authority: the replayed frame rides the normal Olm-decrypt + dedup path.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn dm_relay_buffer_delivers_after_sender_goes_offline_and_clears() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 90;
+    const B_MASTER: u8 = 100;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    sleep_ms(4000).await; // Olm sessions confirm
+    assert_eq!(
+        a.olm_status(&b.device_id).await, "confirmed",
+        "sender needs a confirmed Olm session before the recipient goes offline"
+    );
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // Bob goes fully offline.
+    relay.set_online(&b.device_id, false);
+    sleep_ms(500).await;
+    drain_events(&mut b);
+
+    // Alice sends while Bob is gone — the relay buffers under Bob's device id.
+    a.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: b_master.clone(),
+            text: "missed-you".to_string(),
+            message_id: "relay-buffer-dm-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    sleep_ms(800).await;
+    assert!(
+        relay.buffered_count(&b.device_id) > 0,
+        "relay must buffer the DM for offline Bob"
+    );
+
+    // Alice goes offline TOO — nobody is left online to serve the message.
+    relay.set_online(&a.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut a);
+
+    // Bob returns: the relay replay (on DM-room join) is the ONLY delivery path.
+    relay.set_online(&b.device_id, true);
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "missed-you")
+    })
+    .await;
+    assert!(got, "Bob must receive the buffered DM from the relay with Alice offline");
+    sleep_ms(300).await;
+
+    // Delivered entries are deleted relay-side (freeing RAM).
+    assert_eq!(
+        relay.buffered_count(&b.device_id), 0,
+        "the relay buffer for Bob must be cleared after replay"
+    );
+
+    // The message persisted through the normal verify/dedup path.
+    let dm_texts: Vec<String> = b.dm_thread(&a_master).iter().map(|m| m.text.clone()).collect();
+    assert!(
+        dm_texts.contains(&"missed-you".to_string()),
+        "buffered DM must be persisted on Bob, got {dm_texts:?}"
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// Relay message-availability cache — CHANNEL leg (server-owner opt-in).
+// Owner enables `relay_catchup_secs` (a normal Owner/Admin ServerSettingChanged
+// key). From then on channel topic frames tee into a per-channel relay ring.
+// Alice (owner) posts while Bob is offline, then Alice goes offline; Bob's
+// reconnect must deliver the message via TopicCatchup replay — one stored copy
+// serves any late joiner; nothing depends on a member staying online.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn channel_relay_catchup_delivers_when_all_other_members_offline() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 110;
+    const J_MASTER: u8 = 120;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+
+    let server_id = create_server_and_wait(&mut o, "Catchup Server").await;
+    let general = general_channel_of(&server_id);
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should join the server");
+    sleep_ms(2500).await; // let MemberAdded + MLS welcome settle
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // Owner enables relay catch-up (3 days). The toggle site registers the
+    // topic buffers with the relay immediately.
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting {
+            server_id: server_id.clone(),
+            key: "relay_catchup_secs".to_string(),
+            value: "259200".to_string(),
+        })
+        .await
+        .unwrap();
+    // The setting must reach the JOINER's CRDT before it goes offline (its own
+    // reconnect hook reads the LOCAL state).
+    let j_updated = wait_event(&mut j, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ServerUpdated { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(j_updated, "joiner must apply the relay_catchup_secs setting op");
+    sleep_ms(500).await;
+
+    // Bob (joiner) goes offline.
+    relay.set_online(&j.device_id, false);
+    sleep_ms(500).await;
+    drain_events(&mut j);
+
+    // Alice (owner) posts to #general while Bob is gone — the frame tees into
+    // the relay's per-channel ring — then goes offline herself.
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "catch-me-later".to_string(),
+            message_id: "relay-catchup-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    sleep_ms(1000).await;
+    relay.set_online(&o.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut o);
+
+    // Bob returns to an EMPTY room. TopicCatchup replay is the only path.
+    relay.set_online(&j.device_id, true);
+    let got = wait_event(&mut j, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "catch-me-later")
+    })
+    .await;
+    assert!(
+        got,
+        "joiner must receive the channel message via relay catch-up with every other member offline"
+    );
+    sleep_ms(300).await;
+
+    let msgs = j.channel_messages(&server_id, &general);
+    let row = msgs.iter().find(|m| m.text == "catch-me-later").expect("catch-up message stored");
+    assert_eq!(row.sender_master, o_master, "catch-up message attributed to the owner's master");
+
+    // Dedup guard: a second catch-up replay (reconnect again) must not
+    // duplicate the row — replay is idempotent with peer sync.
+    relay.set_online(&j.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut j);
+    relay.set_online(&j.device_id, true);
+    sleep_ms(2500).await;
+    drain_events(&mut j);
+    let count = j
+        .channel_messages(&server_id, &general)
+        .iter()
+        .filter(|m| m.text == "catch-me-later")
+        .count();
+    assert_eq!(count, 1, "re-replayed catch-up frames must dedup by message_id");
+
+    drop(o);
+    drop(j);
+}
+
+// ---------------------------------------------------------------------------
+// Relay catch-up must cover EVERY text channel, not just the first/selected
+// one (field report 2026-07-04: #general caught up on launch but a second
+// channel stayed empty). Owner posts to TWO channels while the joiner is
+// offline, then goes offline; the returning joiner must get BOTH.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn channel_relay_catchup_covers_all_channels() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 110;
+    const J_MASTER: u8 = 120;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+
+    let server_id = create_server_and_wait(&mut o, "Two Chan Server").await;
+    let general = general_channel_of(&server_id);
+
+    // Owner creates a SECOND text channel.
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            name: "second".to_string(),
+            category: None,
+            channel_type: "text".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut second_cid = None;
+    let made = wait_event(&mut o, std::time::Duration::from_secs(3), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, name, .. } = ev {
+            if name == "second" {
+                second_cid = Some(channel_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(made, "owner should create the second channel");
+    let second_cid = second_cid.expect("second channel id");
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should join the server");
+    sleep_ms(2500).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // Owner enables relay catch-up; wait for the joiner to apply the op.
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting {
+            server_id: server_id.clone(),
+            key: "relay_catchup_secs".to_string(),
+            value: "259200".to_string(),
+        })
+        .await
+        .unwrap();
+    let j_updated = wait_event(&mut j, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ServerUpdated { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(j_updated, "joiner must apply the relay_catchup_secs setting op");
+    sleep_ms(500).await;
+
+    // Joiner offline; owner posts to BOTH channels, then goes offline.
+    relay.set_online(&j.device_id, false);
+    sleep_ms(500).await;
+    drain_events(&mut j);
+
+    for (cid, text, mid) in [
+        (&general, "in-general", "two-chan-1"),
+        (&second_cid, "in-second", "two-chan-2"),
+    ] {
+        o.cmd_tx
+            .send(NodeCommand::SendChannelMessage {
+                server_id: server_id.clone(),
+                channel_id: cid.to_string(),
+                text: text.to_string(),
+                message_id: mid.to_string(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+        sleep_ms(600).await;
+    }
+    relay.set_online(&o.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut o);
+
+    // Joiner returns to an empty room — catch-up must deliver BOTH channels.
+    relay.set_online(&j.device_id, true);
+    let mut got_general = false;
+    let mut got_second = false;
+    wait_event(&mut j, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::ChannelMessageReceived { text, .. } = ev {
+            if text == "in-general" { got_general = true; }
+            if text == "in-second" { got_second = true; }
+        }
+        got_general && got_second
+    })
+    .await;
+    sleep_ms(300).await;
+
+    assert!(
+        j.channel_messages(&server_id, &general).iter().any(|m| m.text == "in-general"),
+        "catch-up must deliver the #general message"
+    );
+    assert!(
+        j.channel_messages(&server_id, &second_cid).iter().any(|m| m.text == "in-second"),
+        "catch-up must deliver the SECOND channel's message too"
+    );
+
+    drop(o);
+    drop(j);
+}
+
+// ---------------------------------------------------------------------------
+// Relay catch-up must deliver CHANNEL FILE messages (field report 2026-07-04
+// round 2: captions/cards never appeared). The companion text message used to
+// fan targeted per-member sends — offline members got nothing and nothing
+// entered the ring; the FileHeader alone replayed with no message row to hang
+// on. Both now ride the topic broadcast: the returning member must get the
+// caption row + the file metadata (bytes come later via request-on-open).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn channel_relay_catchup_delivers_file_message_and_header() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 110;
+    const J_MASTER: u8 = 120;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+
+    let server_id = create_server_and_wait(&mut o, "File Catchup Server").await;
+    let general = general_channel_of(&server_id);
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should join the server");
+    sleep_ms(2500).await; // MemberAdded + MLS welcome settle
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // Joiner offline (catch-up is DEFAULT ON — no server setting needed).
+    relay.set_online(&j.device_id, false);
+    sleep_ms(500).await;
+    drain_events(&mut j);
+
+    // Owner sends a channel FILE with a caption while the joiner is gone,
+    // then goes offline herself.
+    let src = global_tmp.path().join("notes.txt");
+    std::fs::write(&src, b"channel file catch-up contents").expect("write src file");
+    o.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.clone()),
+            channel_id: Some(general.clone()),
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "chan-file-catchup-1".to_string(),
+            message_text: "file-caption-test".to_string(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+        })))
+        .await
+        .unwrap();
+    sleep_ms(1500).await;
+    relay.set_online(&o.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut o);
+
+    // Joiner returns to an empty room — the caption row AND the FileHeader
+    // must both arrive via ring replay.
+    relay.set_online(&j.device_id, true);
+    let mut got_msg = false;
+    let mut got_fid: Option<String> = None;
+    wait_event(&mut j, std::time::Duration::from_secs(10), |ev| {
+        match ev {
+            NetworkEvent::ChannelMessageReceived { text, .. } if text == "file-caption-test" => {
+                got_msg = true;
+            }
+            NetworkEvent::FileHeaderReceived { file_id, file_name, .. }
+                if file_name.starts_with("notes") =>
+            {
+                got_fid = Some(file_id.clone());
+            }
+            _ => {}
+        }
+        got_msg && got_fid.is_some()
+    })
+    .await;
+    assert!(got_msg, "the file's caption message must arrive via relay catch-up");
+    let fid = got_fid.expect("the channel FileHeader must arrive via relay catch-up");
+    sleep_ms(500).await;
+
+    let msgs = j.channel_messages(&server_id, &general);
+    let row = msgs.iter().find(|m| m.text == "file-caption-test").expect("caption row stored");
+    assert_eq!(row.sender_master, o_master, "caption attributed to the owner's master");
+
+    // Header landed as metadata (card renders); bytes come later via the
+    // request-on-open sweep once a holder is back online.
+    let meta = j.file_meta(&fid).expect("file metadata row persisted from the replayed header");
+    assert_eq!(meta.file_name, "notes.txt", "header name persisted");
+    assert!(meta.completed_at.is_none(), "no bytes yet — the relay never carries file bytes");
+
+    drop(o);
+    drop(j);
 }

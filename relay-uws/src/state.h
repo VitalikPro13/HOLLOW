@@ -35,6 +35,35 @@ static constexpr int64_t OFFLINE_BUFFER_TTL_SECS = 86400;  // 24 hours
 // message copies fanned out by the SENDER; the relay never learns server
 // membership). Separate buffer cap so chatty servers can't evict buffered DMs.
 static constexpr size_t MAX_BUFFERED_CHANNEL_MSGS_PER_PEER = 30;
+
+// Opt-in offline delivery ("message-availability cache") — the relay stays an
+// availability HELPER, never a source of truth: it retains the SAME E2EE,
+// Ed25519-signed ciphertext it already routes, the receiver verifies + dedups
+// exactly as if a peer served it, and peer-to-peer sync remains the
+// correctness floor. RAM only (nothing survives a restart — deliberate).
+// Opted-in peers get a bigger DM text/FileHeader window + their own retention;
+// inlined-image frames stay at the 24h push baseline (no media bytes ride the
+// extended tier).
+static constexpr size_t MAX_OPTIN_MSGS_PER_PEER = 500;
+// Opted-in peers keep several inlined offline images (the push baseline keeps
+// exactly ONE — a push notification shows one preview, but an offline inbox
+// user expects every image sent while away). Still 24h TTL — inlined bytes
+// never ride the extended retention.
+static constexpr size_t MAX_OPTIN_IMAGES_PER_PEER = 8;
+static constexpr int64_t OFFLINE_RETENTION_MIN_SECS = 3600;            // 1 hour
+static constexpr int64_t OFFLINE_RETENTION_MAX_SECS = 7 * 86400;       // 7 days
+// Per-channel topic ring buffers (server-owner opt-in, registered by member
+// clients on connect). One copy per channel serves every late joiner —
+// deletion is by retention expiry, never by delivery, because "everyone got
+// it" is unknowable to a relay that refuses to learn membership.
+static constexpr size_t MAX_TOPIC_BUFFER_MSGS = 200;                    // frames per channel
+static constexpr size_t MAX_TOPIC_BUFFER_BYTES = 1024 * 1024;           // 1 MB per channel
+static constexpr size_t MAX_TOPIC_CHANNELS_PER_CALL = 128;              // defensive cap
+static constexpr size_t MAX_TOPIC_BUFFERS_TOTAL = 65536;                // defensive cap
+static constexpr int64_t TOPIC_BUFFER_IDLE_EXPIRE_SECS = 7 * 86400;     // no member re-registered
+// Global budget across ALL buffered frames (DM + topic). Oldest-first
+// eviction when exceeded — organic use never gets near this.
+static constexpr size_t MAX_BUFFER_TOTAL_BYTES = 512ull * 1024 * 1024;
 // Anti-spam: non-mention channel pushes are heavily throttled — the banner has
 // no content until the device fetches, so repeats add nothing. Mentions are
 // urgent and bypass the long window.
@@ -155,6 +184,32 @@ struct RelayState {
         bool is_channel = false;       // channel message frame (separate cap)
     };
     std::unordered_map<std::string, std::deque<BufferedMsg>> offline_buffer;
+
+    // Opt-in offline delivery registry (RAM only — re-registered on every
+    // connect like push prefs). Presence = opted in; value = retention secs
+    // (clamped to OFFLINE_RETENTION_MIN/MAX_SECS).
+    std::unordered_map<std::string, int64_t> offline_optin;
+
+    // Per-channel topic ring buffers. Key = room + '\0' + topic. Frames are
+    // stored in the outbound 0x08 fan-out form (room/topic/sender/payload) so
+    // catch-up replay is a straight send. Ciphertext only — E2EE preserved.
+    struct TopicFrame {
+        std::string frame;
+        std::string sender;  // catch-up skips the requester's own frames
+                             // (live fan-out never echoes the sender; MLS
+                             // can't decrypt your own ciphertext)
+        std::chrono::steady_clock::time_point at;
+    };
+    struct TopicBuffer {
+        std::deque<TopicFrame> frames;
+        size_t bytes = 0;
+        int64_t retention_secs = 86400;
+        std::chrono::steady_clock::time_point last_registered;
+    };
+    std::unordered_map<std::string, TopicBuffer> topic_buffers;
+
+    // Total bytes across offline_buffer + topic_buffers frames (global budget).
+    size_t buffer_total_bytes = 0;
 
     // Channel push prefs (RAM only — replaced wholesale by set_push_prefs,
     // re-sent by the app on every connect). peer_id -> server room -> pref.

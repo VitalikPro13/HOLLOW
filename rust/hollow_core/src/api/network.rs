@@ -2383,6 +2383,28 @@ pub fn set_push_prefs(prefs_json: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Opt in/out of the relay's extended offline DM delivery ("offline inbox").
+/// When enabled, the relay keeps Olm-encrypted DM text + FileHeader frames
+/// addressed to this device for `retention_secs` (relay clamps to 1h..7d)
+/// instead of the 24h push baseline, and replays them on the next connect —
+/// delivered entries are deleted relay-side. Text and file METADATA only,
+/// never file bytes. RAM-only registry: ws_client re-registers automatically
+/// on every reconnect; Dart must call this once per app start (and on change).
+#[frb]
+pub fn set_offline_inbox(enabled: bool, retention_secs: i64) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::SetOfflineInbox { enabled, retention_secs }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
 /// Display metadata for a channel push notification (Tier 1-style: resolved
 /// from the local DB, no node needed).
 pub struct PushChannelMeta {

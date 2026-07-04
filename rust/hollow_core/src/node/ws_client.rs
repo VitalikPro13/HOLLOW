@@ -93,6 +93,22 @@ pub enum WsCommand {
         mention: bool,
         data: Vec<u8>,
     },
+    /// Register the opt-in offline-delivery setting ("offline inbox") with the
+    /// relay. RAM-side registry like push prefs — the latest value is replayed
+    /// automatically on every reconnect. Enabled = the relay keeps a bigger
+    /// DM text/FileHeader window for this peer at the given retention.
+    SetOfflineBuffer { enabled: bool, retention_secs: i64 },
+    /// Register/refresh per-channel topic ring buffers for a server room whose
+    /// owner enabled relay catch-up (`clear` = owner turned it off). Must be
+    /// sent AFTER joining the room; re-sent once per connection by the swarm.
+    SetTopicBuffer { room_code: String, channels: Vec<String>, retention_secs: i64, clear: bool },
+    /// Ask the relay to replay one channel's buffered ring. Frames arrive as
+    /// normal topic messages and ride the standard verify/dedup/merge path.
+    /// `max_age_secs` > 0 = only frames younger than that (the client passes
+    /// its channel watermark age + lookback so already-delivered frames aren't
+    /// re-replayed every session — MLS can't decrypt consumed generations and
+    /// the retries were pure noise). 0 = replay everything in retention.
+    TopicCatchup { room_code: String, channel_id: String, max_age_secs: i64 },
 }
 
 /// Events received from the WebSocket relay, forwarded to the swarm.
@@ -211,6 +227,10 @@ struct WsClientState {
     /// room wins (the relay replaces the topic set), replayed right after
     /// the room re-joins.
     subscriptions: Arc<RwLock<std::collections::HashMap<String, Vec<String>>>>,
+    /// Latest opt-in offline-delivery setting (enabled, retention_secs) — the
+    /// relay registry is RAM-per-relay-lifetime, so replay it on every
+    /// reconnect like subscriptions. None = never set this session.
+    offline_optin: Arc<RwLock<Option<(bool, i64)>>>,
 }
 
 // -- Public API --
@@ -246,6 +266,7 @@ async fn ws_client_loop(
         joined_rooms: Arc::new(RwLock::new(HashSet::new())),
         last_join_attempt: Arc::new(RwLock::new(None)),
         subscriptions: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        offline_optin: Arc::new(RwLock::new(None)),
     };
 
     let mut backoff_secs = 1u64;
@@ -295,6 +316,23 @@ async fn ws_client_loop(
                     }
                     if !subs.is_empty() {
                         hollow_log!("[HOLLOW-WS] Re-subscribed topics for {} room(s) after reconnect", subs.len());
+                    }
+                }
+
+                // Re-register the opt-in offline-delivery setting — the relay
+                // registry is RAM-only and a relay restart would silently
+                // drop this peer back to the 24h push baseline.
+                {
+                    let optin = *state.offline_optin.read().await;
+                    if let Some((enabled, retention_secs)) = optin {
+                        let msg = serde_json::json!({
+                            "type": "set_offline_buffer",
+                            "enabled": enabled,
+                            "retention_secs": retention_secs,
+                        });
+                        if ws_write.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            hollow_log!("[HOLLOW-WS] Offline-buffer re-register send failed");
+                        }
                     }
                 }
 
@@ -688,6 +726,52 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
+        WsCommand::SetOfflineBuffer { enabled, retention_secs } => {
+            let msg = serde_json::json!({
+                "type": "set_offline_buffer",
+                "enabled": enabled,
+                "retention_secs": retention_secs,
+            });
+            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] SetOfflineBuffer send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::SetTopicBuffer { room_code, channels, retention_secs, clear } => {
+            let msg = if *clear {
+                serde_json::json!({
+                    "type": "set_topic_buffer",
+                    "room": room_code,
+                    "clear": true,
+                })
+            } else {
+                serde_json::json!({
+                    "type": "set_topic_buffer",
+                    "room": room_code,
+                    "channels": channels,
+                    "retention_secs": retention_secs,
+                })
+            };
+            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] SetTopicBuffer send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::TopicCatchup { room_code, channel_id, max_age_secs } => {
+            let msg = serde_json::json!({
+                "type": "topic_catchup",
+                "room": room_code,
+                "channel": channel_id,
+                "max_age_secs": max_age_secs,
+            });
+            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] TopicCatchup send failed: {e}");
+                return false;
+            }
+            return true;
+        }
         WsCommand::SendChannelDirect { room_code, target_peer, channel_id, mention, data } => {
             // [0x09][room\0][target\0][channel\0][flags:1][payload]
             // flags bit0 = mention. Payload may be empty (push trigger only).
@@ -818,6 +902,12 @@ async fn track_room_change(state: &WsClientState, cmd: &WsCommand, event_tx: &mp
                 .write()
                 .await
                 .insert(room_code.clone(), topics.clone());
+            return;
+        }
+        WsCommand::SetOfflineBuffer { enabled, retention_secs } => {
+            // Remember the latest opt-in so a reconnect can re-register it —
+            // the relay registry dies with a relay restart.
+            *state.offline_optin.write().await = Some((*enabled, *retention_secs));
             return;
         }
         _ => return,

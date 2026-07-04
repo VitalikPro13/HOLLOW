@@ -3,6 +3,7 @@
 #include "json.hpp"
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -455,6 +456,40 @@ static std::string build_direct_frame(std::string_view room,
     return frame;
 }
 
+// Global-budget eviction: while total buffered bytes exceed the budget, find
+// the queue (DM or topic) with the OLDEST front entry and drop that entry.
+// O(#queues) per drop — only runs when the 512 MB budget is exceeded, which
+// organic use never reaches.
+static void evict_over_budget(RelayState& state) {
+    while (state.buffer_total_bytes > MAX_BUFFER_TOTAL_BYTES) {
+        std::deque<RelayState::BufferedMsg>* oldest_dm = nullptr;
+        RelayState::TopicBuffer* oldest_topic = nullptr;
+        std::chrono::steady_clock::time_point oldest_at = std::chrono::steady_clock::time_point::max();
+        for (auto& [pid, q] : state.offline_buffer) {
+            if (!q.empty() && q.front().at < oldest_at) {
+                oldest_at = q.front().at; oldest_dm = &q; oldest_topic = nullptr;
+            }
+        }
+        for (auto& [key, tb] : state.topic_buffers) {
+            if (!tb.frames.empty() && tb.frames.front().at < oldest_at) {
+                oldest_at = tb.frames.front().at; oldest_topic = &tb; oldest_dm = nullptr;
+            }
+        }
+        if (oldest_dm) {
+            state.buffer_total_bytes -= std::min(state.buffer_total_bytes, oldest_dm->front().frame.size());
+            oldest_dm->pop_front();
+        } else if (oldest_topic) {
+            size_t sz = oldest_topic->frames.front().frame.size();
+            state.buffer_total_bytes -= std::min(state.buffer_total_bytes, sz);
+            oldest_topic->bytes -= std::min(oldest_topic->bytes, sz);
+            oldest_topic->frames.pop_front();
+        } else {
+            state.buffer_total_bytes = 0;  // nothing left to evict — resync counter
+            break;
+        }
+    }
+}
+
 // Buffer an offline DM frame for later replay when the target joins its DM room.
 // RAM only, ciphertext only. Capped per-peer (drop oldest on overflow).
 static void buffer_offline_msg(const std::string& target_peer_id,
@@ -462,6 +497,7 @@ static void buffer_offline_msg(const std::string& target_peer_id,
                                std::string frame, RelayState& state,
                                bool is_image = false, bool is_channel = false) {
     auto& q = state.offline_buffer[target_peer_id];
+    state.buffer_total_bytes += frame.size();
     q.push_back({room, std::move(frame), std::chrono::steady_clock::now(), is_image, is_channel});
     // Three independent caps: DM text, inlined-image and channel frames evict
     // separately so a chatty server never pushes out buffered DMs (and
@@ -473,12 +509,22 @@ static void buffer_offline_msg(const std::string& target_peer_id,
     };
     auto drop_oldest_kind = [&](bool img, bool chan) {
         for (auto it = q.begin(); it != q.end(); ++it) {
-            if (it->is_image == img && it->is_channel == chan) { q.erase(it); return; }
+            if (it->is_image == img && it->is_channel == chan) {
+                state.buffer_total_bytes -= std::min(state.buffer_total_bytes, it->frame.size());
+                q.erase(it);
+                return;
+            }
         }
     };
-    while (count_kind(false, false) > MAX_BUFFERED_MSGS_PER_PEER)          drop_oldest_kind(false, false);
-    while (count_kind(true, false)  > MAX_BUFFERED_IMAGES_PER_PEER)        drop_oldest_kind(true, false);
-    while (count_kind(false, true)  > MAX_BUFFERED_CHANNEL_MSGS_PER_PEER)  drop_oldest_kind(false, true);
+    // Opted-in peers get the extended text/FileHeader window and a multi-image
+    // window; the channel-push cap stays at the push baseline regardless.
+    bool opted_in = state.offline_optin.count(target_peer_id) != 0;
+    size_t text_cap = opted_in ? MAX_OPTIN_MSGS_PER_PEER : MAX_BUFFERED_MSGS_PER_PEER;
+    size_t image_cap = opted_in ? MAX_OPTIN_IMAGES_PER_PEER : MAX_BUFFERED_IMAGES_PER_PEER;
+    while (count_kind(false, false) > text_cap)                             drop_oldest_kind(false, false);
+    while (count_kind(true, false)  > image_cap)                            drop_oldest_kind(true, false);
+    while (count_kind(false, true)  > MAX_BUFFERED_CHANNEL_MSGS_PER_PEER)   drop_oldest_kind(false, true);
+    evict_over_budget(state);
     // No per-message logging — the relay must not record who buffers what for whom
     // (peer_id + room = social-graph metadata). Privacy-preserving by design.
 }
@@ -499,6 +545,7 @@ static void replay_buffered_msgs(SSLWebSocket* ws, const std::string& peer_id,
     for (auto& m : q) {
         if (m.room == room) {
             send_to_peer(ws, m.frame, uWS::OpCode::BINARY);
+            state.buffer_total_bytes -= std::min(state.buffer_total_bytes, m.frame.size());
             delivered++;
         } else {
             remaining.push_back(std::move(m));
@@ -513,23 +560,59 @@ static void replay_buffered_msgs(SSLWebSocket* ws, const std::string& peer_id,
 }
 
 // Evict offline-buffer entries older than the TTL. Drops empty per-peer queues.
+// Opted-in peers keep text/FileHeader frames for their registered retention;
+// inlined-image frames always expire at the 24h push baseline (no media bytes
+// in the extended tier). Also sweeps topic buffers + idle registrations.
 void sweep_offline_buffer(RelayState& state) {
     auto now = std::chrono::steady_clock::now();
     size_t evicted = 0;
     for (auto it = state.offline_buffer.begin(); it != state.offline_buffer.end(); ) {
         auto& q = it->second;
-        while (!q.empty()) {
-            auto age = std::chrono::duration_cast<std::chrono::seconds>(
-                now - q.front().at).count();
-            if (age >= OFFLINE_BUFFER_TTL_SECS) {
-                q.pop_front();
+        int64_t retention = OFFLINE_BUFFER_TTL_SECS;
+        auto oit = state.offline_optin.find(it->first);
+        if (oit != state.offline_optin.end()) retention = oit->second;
+        std::deque<RelayState::BufferedMsg> kept;
+        for (auto& m : q) {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(now - m.at).count();
+            // Images never outlive the push baseline; channel-push copies and
+            // text ride the peer's retention (default = baseline).
+            int64_t ttl = m.is_image ? std::min<int64_t>(OFFLINE_BUFFER_TTL_SECS, retention) : retention;
+            if (age >= ttl) {
+                state.buffer_total_bytes -= std::min(state.buffer_total_bytes, m.frame.size());
                 evicted++;
             } else {
-                break;  // deque is FIFO by insertion time — front is oldest
+                kept.push_back(std::move(m));
             }
         }
+        q = std::move(kept);
         if (q.empty()) {
             it = state.offline_buffer.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    // Topic ring buffers: retention expiry (front is oldest — FIFO), then drop
+    // registrations no member has refreshed for TOPIC_BUFFER_IDLE_EXPIRE_SECS.
+    for (auto it = state.topic_buffers.begin(); it != state.topic_buffers.end(); ) {
+        auto& tb = it->second;
+        while (!tb.frames.empty()) {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                now - tb.frames.front().at).count();
+            if (age >= tb.retention_secs) {
+                size_t sz = tb.frames.front().frame.size();
+                state.buffer_total_bytes -= std::min(state.buffer_total_bytes, sz);
+                tb.bytes -= std::min(tb.bytes, sz);
+                tb.frames.pop_front();
+                evicted++;
+            } else {
+                break;
+            }
+        }
+        auto idle = std::chrono::duration_cast<std::chrono::seconds>(
+            now - tb.last_registered).count();
+        if (idle >= TOPIC_BUFFER_IDLE_EXPIRE_SECS) {
+            state.buffer_total_bytes -= std::min(state.buffer_total_bytes, tb.bytes);
+            it = state.topic_buffers.erase(it);
         } else {
             ++it;
         }
@@ -594,6 +677,111 @@ static void handle_set_push_prefs(PerSocketData* data, const json& j, RelayState
     }
     state.push_prefs[data->peer_id] = std::move(prefs);
     // No logging — peer_id + server set is membership metadata.
+}
+
+// Opt-in offline delivery registration (RAM only — the app re-sends this on
+// every connect, like push prefs). Presence in offline_optin = opted in:
+// bigger DM text/FileHeader window + user-chosen retention.
+static void handle_set_offline_buffer(PerSocketData* data, const json& j, RelayState& state) {
+    if (data->is_guest) return;
+    if (!j.value("enabled", false)) {
+        state.offline_optin.erase(data->peer_id);
+        return;
+    }
+    int64_t retention = j.value("retention_secs", OFFLINE_BUFFER_TTL_SECS);
+    retention = std::max(OFFLINE_RETENTION_MIN_SECS,
+                         std::min(OFFLINE_RETENTION_MAX_SECS, retention));
+    state.offline_optin[data->peer_id] = retention;
+    // No logging — opt-in status per peer_id is user metadata.
+}
+
+// Register/refresh per-channel topic ring buffers for a server room. Sent by
+// members of servers whose owner enabled relay catch-up, re-sent on every
+// connect (refresh keeps the registration alive past the idle expiry). Only
+// adds/refreshes — never wholesale-replaces, because members with
+// restricted-channel visibility register different channel subsets.
+// {"type":"set_topic_buffer","room":..,"channels":[..],"retention_secs":N}
+// {"type":"set_topic_buffer","room":..,"clear":true}  — owner turned it off
+static void handle_set_topic_buffer(PerSocketData* data, const json& j, RelayState& state) {
+    if (data->is_guest) return;
+    std::string room = j.value("room", "");
+    if (!is_valid_room_code(room)) return;
+    // Must actually be in the room — random peers can't register or clear.
+    auto rit = state.ws_rooms.find(room);
+    if (rit == state.ws_rooms.end() || !rit->second.peers.count(data->peer_id)) return;
+
+    std::string prefix = room;
+    prefix.push_back('\0');
+
+    if (j.value("clear", false)) {
+        for (auto it = state.topic_buffers.begin(); it != state.topic_buffers.end(); ) {
+            if (it->first.rfind(prefix, 0) == 0) {
+                state.buffer_total_bytes -=
+                    std::min(state.buffer_total_bytes, it->second.bytes);
+                it = state.topic_buffers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        return;
+    }
+
+    if (!j.contains("channels") || !j["channels"].is_array()) return;
+    int64_t retention = j.value("retention_secs", (int64_t)86400);
+    retention = std::max(OFFLINE_RETENTION_MIN_SECS,
+                         std::min(OFFLINE_RETENTION_MAX_SECS, retention));
+    auto now = std::chrono::steady_clock::now();
+    size_t n = 0;
+    for (const auto& c : j["channels"]) {
+        if (!c.is_string()) continue;
+        if (++n > MAX_TOPIC_CHANNELS_PER_CALL) break;
+        const std::string& cid = c.get_ref<const std::string&>();
+        if (cid.empty() || cid.size() > 128) continue;
+        std::string key = prefix + cid;
+        auto it = state.topic_buffers.find(key);
+        if (it == state.topic_buffers.end()) {
+            if (state.topic_buffers.size() >= MAX_TOPIC_BUFFERS_TOTAL) break;
+            auto& tb = state.topic_buffers[key];
+            tb.retention_secs = retention;
+            tb.last_registered = now;
+        } else {
+            it->second.retention_secs = retention;  // latest registrar wins
+            it->second.last_registered = now;
+        }
+    }
+    // No logging — room + channel set is membership metadata.
+}
+
+// Replay one channel's buffered ring to the requesting room member. Frames
+// are the same 0x08 fan-out frames a live subscriber would have received —
+// the client runs its normal verify/dedup/merge path, so replay is
+// idempotent with peer sync. Nothing is deleted here: retention owns
+// deletion, and the next late joiner needs the same frames.
+static void handle_topic_catchup(SSLWebSocket* ws, PerSocketData* data,
+                                 const json& j, RelayState& state) {
+    if (data->is_guest) return;
+    std::string room = j.value("room", "");
+    std::string channel = j.value("channel", "");
+    if (room.empty() || channel.empty()) return;
+    auto rit = state.ws_rooms.find(room);
+    if (rit == state.ws_rooms.end() || !rit->second.peers.count(data->peer_id)) return;
+    std::string key = room;
+    key.push_back('\0');
+    key += channel;
+    auto it = state.topic_buffers.find(key);
+    if (it == state.topic_buffers.end()) return;
+    // Age filter: the client passes its channel watermark age (+lookback) so
+    // frames it already holds aren't re-replayed every session. 0 = all.
+    int64_t max_age = j.value("max_age_secs", (int64_t)0);
+    auto now = std::chrono::steady_clock::now();
+    for (const auto& f : it->second.frames) {
+        if (f.sender == data->peer_id) continue;  // never echo own frames
+        if (max_age > 0) {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(now - f.at).count();
+            if (age > max_age) continue;
+        }
+        send_to_peer(ws, f.frame, uWS::OpCode::BINARY);
+    }
 }
 
 // Fire a channel push for an offline server member, filtered by their
@@ -684,17 +872,25 @@ static void handle_binary_channel_direct(PerSocketData* data,
     if (rit == state.ws_rooms.end()) return;
     if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return;
 
-    // Only act for FULLY offline targets — online members already got the room
-    // broadcast (and connected-but-elsewhere members recover via channel sync).
-    if (state.peer_sockets.find(target_str) != state.peer_sockets.end()) return;
+    // Buffer whenever the target is NOT in the server room — a member who IS
+    // in the room already got the topic broadcast. Mirrors the 0x04 DM fix for
+    // the auth→join race (and the ghost-socket window after a hard quit):
+    // "connected" per peer_sockets does NOT mean the member received the room
+    // broadcast, and the old full-return here silently dropped the copy.
+    bool in_room = rit->second.peers.find(target_str) != rit->second.peers.end();
+    bool fully_offline = state.peer_sockets.find(target_str) == state.peer_sockets.end();
+    if (in_room) return;
 
     if (!payload.empty()) {
         buffer_offline_msg(target_str, room_str,
                            build_direct_frame(room_code, data->peer_id, payload), state,
                            /*is_image=*/false, /*is_channel=*/true);
     }
-    try_channel_push_notify(target_str, data->peer_id, room_str,
-                            std::string(channel), mention, state);
+    // Push only for FULLY offline targets (a live socket needs no wake).
+    if (fully_offline) {
+        try_channel_push_notify(target_str, data->peer_id, room_str,
+                                std::string(channel), mention, state);
+    }
 }
 
 static void handle_msg(PerSocketData* data, const std::string& room,
@@ -981,6 +1177,30 @@ static void handle_binary_topic_msg(PerSocketData* data,
     forwarded.append(data->peer_id);
     forwarded.push_back(0x00);
     forwarded.append(payload);
+
+    // Tee into the channel's ring buffer when registered (server owner opted
+    // into relay catch-up). Ciphertext only; per-channel caps + retention +
+    // the global budget bound RAM. One stored copy serves every late joiner.
+    {
+        std::string key = room_str;
+        key.push_back('\0');
+        key += topic_str;
+        auto tit = state.topic_buffers.find(key);
+        if (tit != state.topic_buffers.end()) {
+            auto& tb = tit->second;
+            tb.frames.push_back({forwarded, data->peer_id, std::chrono::steady_clock::now()});
+            tb.bytes += forwarded.size();
+            state.buffer_total_bytes += forwarded.size();
+            while (!tb.frames.empty() &&
+                   (tb.frames.size() > MAX_TOPIC_BUFFER_MSGS || tb.bytes > MAX_TOPIC_BUFFER_BYTES)) {
+                size_t sz = tb.frames.front().frame.size();
+                tb.bytes -= std::min(tb.bytes, sz);
+                state.buffer_total_bytes -= std::min(state.buffer_total_bytes, sz);
+                tb.frames.pop_front();
+            }
+            evict_over_budget(state);
+        }
+    }
 
     for (auto& [pid, peer_ws] : rit->second.peers) {
         if (pid == data->peer_id) continue;
@@ -1270,6 +1490,12 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                                    j.value("platform", ""), state);
     } else if (type == "set_push_prefs") {
         handle_set_push_prefs(data, j, state);
+    } else if (type == "set_offline_buffer") {
+        handle_set_offline_buffer(data, j, state);
+    } else if (type == "set_topic_buffer") {
+        handle_set_topic_buffer(data, j, state);
+    } else if (type == "topic_catchup") {
+        handle_topic_catchup(ws, data, j, state);
     } else if (type == "get_turn_credentials") {
         // TURN credentials over the LIVE authenticated WS connection —
         // replaces the open HTTP /turn-credentials endpoint for current

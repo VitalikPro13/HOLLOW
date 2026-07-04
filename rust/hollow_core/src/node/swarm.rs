@@ -475,6 +475,13 @@ async fn run_event_loop(
     // Peers we've already triggered sync for this session.
     let mut synced_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // (server room, channel) pairs whose relay offline catch-up replay already
+    // ran THIS connection — fed by both the connect-time sweep (RoomMembers)
+    // and the channel-open hook (SubscribeChannels). Cleared on
+    // WsEvent::Disconnected like every sync gate — a new socket needs a fresh
+    // registration + replay.
+    let mut relay_catchup_done: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
     let mut is_invisible = initial_invisible;
     if initial_invisible {
         hollow_log!("[HOLLOW-STATUS] Node starting in invisible mode (persisted preference)");
@@ -1637,6 +1644,14 @@ async fn run_event_loop(
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetPushPrefs { prefs_json });
                     }
 
+                    NodeCommand::SetOfflineInbox { enabled, retention_secs } => {
+                        // ws_client remembers the latest value and re-registers it
+                        // on every reconnect (the relay registry is RAM-only).
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetOfflineBuffer {
+                            enabled, retention_secs,
+                        });
+                    }
+
                     NodeCommand::AcceptFriendRequest { peer_id: peer_id_str } => {
                         social::handle_accept_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
@@ -1688,9 +1703,32 @@ async fn run_event_loop(
                         hollow_log!("[HOLLOW-TOPIC] Subscribe room={server_id} topics={channel_ids:?}");
                         subscribed_channels.insert(server_id.clone(), channel_ids.clone());
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::Subscribe {
-                            room_code: server_id,
-                            topics: channel_ids,
+                            room_code: server_id.clone(),
+                            topics: channel_ids.clone(),
                         });
+                        // Relay offline catch-up on CHANNEL OPEN (safety net for
+                        // the connect-time sweep): refresh the ring registration
+                        // (covers channels created since anyone last registered)
+                        // and replay any ring this connection hasn't pulled yet.
+                        // Dedup-by-message_id makes a re-pull harmless.
+                        if let Some(state) = server_states.get(&server_id) {
+                            if state.relay_catchup_secs() > 0 {
+                                sync_handler::register_relay_catchup(&ws_cmd_tx, state, &server_id);
+                                for cid in &channel_ids {
+                                    if relay_catchup_done.insert((server_id.clone(), cid.clone())) {
+                                        let max_age_secs = sync_handler::catchup_watermark_age_secs(
+                                            &db_path, &db_passphrase, &server_id, cid,
+                                        );
+                                        hollow_log!("[HOLLOW-TOPIC] Catch-up request (channel open) {server_id}/{cid} max_age={max_age_secs}s");
+                                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
+                                            room_code: server_id.clone(),
+                                            channel_id: cid.clone(),
+                                            max_age_secs,
+                                        });
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     NodeCommand::UpdateChannelLayout { server_id, layout_json } => {
@@ -2179,6 +2217,7 @@ async fn run_event_loop(
                         let _ = event_tx.send(NetworkEvent::RelayDisconnected).await;
                         ws_room_peers.clear();
                         synced_peers.clear();
+                        relay_catchup_done.clear();
                         key_request_in_flight.clear();
                         key_bundle_sent_to.clear();
                         mls_bootstrap_requested.clear();
@@ -2783,6 +2822,36 @@ async fn run_event_loop(
                                     for peer_id in initial {
                                         hollow_log!("[HOLLOW-GOSSIP] Initial neighbor: {peer_id} (server={})", room);
                                         let _ = event_tx.send(NetworkEvent::GossipConnect { peer_id }).await;
+                                    }
+                                }
+                            }
+                        }
+
+                        // -- Relay offline catch-up (server-owner opt-in) --
+                        // Once per connection per server room: refresh the relay's
+                        // per-channel ring-buffer registration, then replay whatever
+                        // buffered while nobody was online. Replayed frames arrive as
+                        // ordinary topic messages (verify + dedup-by-message_id +
+                        // CRDT merge — idempotent with peer sync). Runs even when the
+                        // room has zero peers: that empty room is exactly the gap
+                        // this feature closes.
+                        if let Some(state) = server_states.get(&room) {
+                            if state.relay_catchup_secs() > 0 {
+                                sync_handler::register_relay_catchup(&ws_cmd_tx, state, &room);
+                                for ch in state.channels.values() {
+                                    if matches!(ch.channel_type, crate::crdt::server_state::ChannelType::Text)
+                                        && state.can_see_channel(&local_peer, &ch.channel_id)
+                                        && relay_catchup_done.insert((room.clone(), ch.channel_id.clone()))
+                                    {
+                                        let max_age_secs = sync_handler::catchup_watermark_age_secs(
+                                            &db_path, &db_passphrase, &room, &ch.channel_id,
+                                        );
+                                        hollow_log!("[HOLLOW-TOPIC] Catch-up request (connect) {room}/{} max_age={max_age_secs}s", ch.channel_id);
+                                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
+                                            room_code: room.clone(),
+                                            channel_id: ch.channel_id.clone(),
+                                            max_age_secs,
+                                        });
                                     }
                                 }
                             }
@@ -6093,7 +6162,7 @@ async fn handle_incoming_request(
                 }
                 // -- File transfer receive handlers --
                 Ok(MessageEnvelope::FileHeader { inner }) => {
-                    let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref, .. } = *inner;
+                    let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, sig, pk, aes_key, aes_nonce, vthumb, share_ref, inline_bytes, .. } = *inner;
                     use crate::node::file_transfer;
                     hollow_log!("[HOLLOW-FILE] FileHeader received: {fid} ({name}, {size} bytes, {chunks} chunks, share_ref={})", share_ref.is_some());
 
@@ -6171,7 +6240,7 @@ async fn handle_incoming_request(
                         );
                     }
 
-                    let mid_str = mid.unwrap_or_default();
+                    let mid_str = mid.clone().unwrap_or_default();
                     let sid_str = sid.unwrap_or_default();
                     // For a DM, the FileHeaderReceived `channel_id` carries the
                     // conversation key the Dart side reloads — use the MASTER (same as
@@ -6212,9 +6281,70 @@ async fn handle_incoming_request(
                         hollow_log!("[HOLLOW-FILE] FileHeader for {fid} ignored — already complete on disk");
                     }
 
+                    // Inlined offline image (relay-buffered 0x08 DM): the AES ciphertext
+                    // rides INSIDE the header — write it to disk NOW; no stream will ever
+                    // arrive. The FCM fetch node always did this (fetch.rs); the FULL node
+                    // ignored inline_bytes, registered a pending stream that never
+                    // completed, and the buffered image rendered as nothing on desktop.
+                    let mut inline_done = false;
+                    if !already_complete && share_ref.is_none() {
+                        if let (Some(b64), Some(ak), Some(an)) =
+                            (inline_bytes.as_ref(), aes_key.as_ref(), aes_nonce.as_ref())
+                        {
+                            let decoded = base64::engine::general_purpose::STANDARD
+                                .decode(b64)
+                                .ok()
+                                .and_then(|ct| {
+                                    let key = hex::decode(ak).ok()?;
+                                    let nonce = hex::decode(an).ok()?;
+                                    if key.len() != 32 || nonce.len() != 12 {
+                                        return None;
+                                    }
+                                    let mut k = [0u8; 32];
+                                    let mut n = [0u8; 12];
+                                    k.copy_from_slice(&key);
+                                    n.copy_from_slice(&nonce);
+                                    crate::vault::pipeline::aes_decrypt(&ct, &k, &n).ok()
+                                });
+                            if let Some(plaintext) = decoded {
+                                let files_dir = file_transfer::files_dir();
+                                let _ = std::fs::create_dir_all(&files_dir);
+                                let disk_path = files_dir.join(format!("{fid}.{ext}"));
+                                if std::fs::write(&disk_path, &plaintext).is_ok() {
+                                    let disk_str = disk_path.to_string_lossy().to_string();
+                                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                                        // Captionless offline image: the "[file:...]"
+                                        // companion DM is never sent to offline peers, so
+                                        // insert the message row here (dedup by mid — a
+                                        // captioned image's real caption DM wins later via
+                                        // promote_file_sentinel_to_caption). Mirrors fetch.rs.
+                                        if ctx_type == "dm"
+                                            && !mid.as_deref()
+                                                .map(|m| store.dm_message_exists(m))
+                                                .unwrap_or(false)
+                                        {
+                                            let _ = store.insert(
+                                                &dm_convo, &format!("[file:{fid}]"), false, ts,
+                                                sig.as_deref(), pk.as_deref(),
+                                                mid.as_deref(), None, Some(&fid), None,
+                                            );
+                                        }
+                                        let _ = store.mark_file_complete(&fid, &disk_str);
+                                    }
+                                    hollow_log!("[HOLLOW-FILE] Wrote inline image {fid} ({} bytes) from buffered header", plaintext.len());
+                                    let _ = event_tx.send(NetworkEvent::FileCompleted {
+                                        file_id: fid.clone(),
+                                        disk_path: disk_str,
+                                    }).await;
+                                    inline_done = true;
+                                }
+                            }
+                        }
+                    }
+
                     // If aes_key is present and no share_ref, this is a streamed transfer — register for stream receive.
                     // Share-backed files skip this — Share handles delivery, no P2P binary data.
-                    if !already_complete && share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
+                    if !already_complete && !inline_done && share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
                         // Preserve the retry counter across a re-registration. A DM
                         // file is fanned out to several of the recipient's devices, so
                         // the SAME file can produce MULTIPLE FileHeaders here — and the

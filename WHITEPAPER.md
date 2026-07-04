@@ -1000,6 +1000,19 @@ To allow users to send friend requests without sharing a 64-character peer ID, t
 
 Because the mapping lives only in relay memory for the duration of a connection, the relay holds no long-term directory of human-readable handles. The underlying identity remains the Ed25519 peer ID; the nickname is a transient convenience layer.
 
+### 12.13 Message-Availability Cache (Offline Delivery)
+
+A fully peer-served history model has a structural gap: if Alice sends a message and disconnects before Bob comes online, no online party holds the message, and Bob waits until Alice (or another member) returns. To close this gap the relay may **retain, for a bounded time, the same end-to-end-encrypted frames it already routes**, and replay them to a returning recipient.
+
+The design invariant is **availability, not authority**. The relay buffers only ciphertext bytes it would have forwarded anyway; the recipient verifies every Ed25519 signature, deduplicates by message ID, and merges through the same CRDT/sync logic as peer-served data. The relay therefore cannot forge (signatures), cannot read (Olm/MLS encryption), and cannot become a source of truth — if it withholds or loses data, peer-to-peer synchronization remains the correctness floor. All buffers are RAM-only by design: a relay restart or power-off leaves no recoverable artifact, and nothing about the cache is logged.
+
+Two tiers exist:
+
+- **Direct messages** — a per-device queue (enabled by default; the recipient controls an on/off toggle and a retention window of 1–7 days, registered per connection). Buffered entries are text and file *metadata* only — never file bytes — plus a small bounded set of inlined image previews. Delivered entries are deleted on replay.
+- **Server channels** — one ciphertext ring per channel (bounded per-channel message and byte caps), populated from the channel's topic-routed frames and replayed on request to any member of the room. Deletion is by retention expiry, never by delivery, because "all members received it" is unknowable to a relay that refuses to learn server membership. Enabled per server via a CRDT-replicated setting (default on; the server owner can disable it).
+
+A global byte budget bounds total buffer memory with oldest-first eviction. Because MLS enforces forward secrecy, replayed channel ciphertext is decryptable only within a bounded window: Hollow configures its MLS groups with an enlarged out-of-order tolerance and a small number of retained past-epoch secrets, deliberately trading a bounded amount of forward secrecy for offline deliverability. Frames outside that window are recovered through ordinary peer synchronization instead.
+
 ---
 
 ## 13. Push Notifications (Mobile)
@@ -1019,7 +1032,7 @@ A small push-relay sidecar service holds the Firebase/APNs credentials and emits
 
 ### 13.2 Direct Message Push Flow
 
-The relay is normally stateless. Push delivery requires one concession: when a DM's recipient is **offline**, the relay briefly buffers the **ciphertext** in RAM (a per-peer cap of 100 text messages and 1 image, 24-hour TTL, swept periodically) so the woken client can fetch the *triggering* message — the relay is a dumb pipe, and without buffering the message would already be gone by the time the client wakes seconds later. This buffer is latency glue, not durability; the distributed sync layer (§3.5, §10) owns durability. The buffered bytes are ciphertext only.
+The relay is normally stateless. Push delivery requires one concession: when a DM's recipient is **offline**, the relay briefly buffers the **ciphertext** in RAM (a per-peer cap of 100 text messages and 1 image, 24-hour TTL, swept periodically) so the woken client can fetch the *triggering* message — the relay is a dumb pipe, and without buffering the message would already be gone by the time the client wakes seconds later. This buffer is latency glue, not durability; the distributed sync layer (§3.5, §10) owns durability. The buffered bytes are ciphertext only. The same mechanism, with larger user-controlled caps and retention, backs the message-availability cache (§12.13).
 
 When the woken client later joins the DM room, the relay replays all buffered frames. The client runs a minimal **fetch node** that connects in a special fetch mode (excluded from member lists, emits no presence — *waking via push does not show the user as online*), pulls the replayed ciphertext, decrypts it with the existing Olm session, persists it, and posts a populated notification.
 

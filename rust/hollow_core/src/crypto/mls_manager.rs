@@ -13,6 +13,34 @@ use crate::hollow_log;
 const CIPHERSUITE: Ciphersuite =
     Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
+/// Late-delivery windows (relay message-availability cache, 2026-07-04).
+/// The relay's per-channel rings replay OLD ciphertext — after the receiver
+/// may have processed newer traffic from the same sender or even crossed an
+/// epoch bump. OpenMLS defaults (out_of_order_tolerance=5, max_past_epochs=0)
+/// made such frames PERMANENTLY undecryptable (SecretTreeError / WrongEpoch).
+/// Keep a bounded window instead: up to 512 skipped message keys per sender
+/// ratchet and receive secrets for the last 3 epochs. This is a deliberate,
+/// bounded relaxation of forward secrecy — the same plaintext would be
+/// re-served by any peer via channel sync anyway; ring capacity is 200
+/// frames/channel so 512 generations covers every replayable frame.
+const SENDER_RATCHET_TOLERANCE: u32 = 512;
+const SENDER_RATCHET_MAX_FORWARD: u32 = 2000;
+const MAX_PAST_EPOCHS: usize = 3;
+
+/// The shared join-config carrying the late-delivery windows. Applied at
+/// create, at join, AND (via `set_configuration`) to groups loaded from disk,
+/// so pre-existing groups upgrade on the next app start.
+fn hollow_join_config() -> MlsGroupJoinConfig {
+    MlsGroupJoinConfig::builder()
+        .use_ratchet_tree_extension(true)
+        .max_past_epochs(MAX_PAST_EPOCHS)
+        .sender_ratchet_configuration(SenderRatchetConfiguration::new(
+            SENDER_RATCHET_TOLERANCE,
+            SENDER_RATCHET_MAX_FORWARD,
+        ))
+        .build()
+}
+
 /// Group-key for a per-channel MLS subgroup ("Option B"). A restricted channel
 /// (visibility != Everyone, non-public) is encrypted under its own MLS group
 /// keyed by this string instead of the server-wide group keyed by bare
@@ -125,7 +153,14 @@ impl MlsManager {
         for server_id in server_ids {
             let group_id = GroupId::from_slice(server_id.as_bytes());
             match MlsGroup::load(provider.storage(), &group_id) {
-                Ok(Some(group)) => {
+                Ok(Some(mut group)) => {
+                    // Upgrade pre-existing groups to the late-delivery config
+                    // (bigger sender-ratchet tolerance + past-epoch secrets) —
+                    // idempotent; without this only NEW groups would tolerate
+                    // relay ring replay.
+                    if let Err(e) = group.set_configuration(provider.storage(), &hollow_join_config()) {
+                        hollow_log!("[HOLLOW-MLS] set_configuration failed for {server_id}: {e:?}");
+                    }
                     hollow_log!("[HOLLOW-MLS] Loaded MLS group for server {server_id}");
                     groups.insert(server_id.clone(), group);
                 }
@@ -208,6 +243,11 @@ impl MlsManager {
         let config = MlsGroupCreateConfig::builder()
             .ciphersuite(CIPHERSUITE)
             .use_ratchet_tree_extension(true)
+            .max_past_epochs(MAX_PAST_EPOCHS)
+            .sender_ratchet_configuration(SenderRatchetConfiguration::new(
+                SENDER_RATCHET_TOLERANCE,
+                SENDER_RATCHET_MAX_FORWARD,
+            ))
             .build();
 
         let group = MlsGroup::new_with_group_id(
@@ -419,9 +459,7 @@ impl MlsManager {
             _ => return Err("Message is not a Welcome".to_string()),
         };
 
-        let config = MlsGroupJoinConfig::builder()
-            .use_ratchet_tree_extension(true)
-            .build();
+        let config = hollow_join_config();
 
         let group = StagedWelcome::new_from_welcome(
             &self.provider,
