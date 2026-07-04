@@ -217,6 +217,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MemberFfi> dco_decode_list_member_ffi(dynamic raw);
 
   @protected
+  List<MutedMemberFfi> dco_decode_list_muted_member_ffi(dynamic raw);
+
+  @protected
   List<int> dco_decode_list_prim_u_32_loose(dynamic raw);
 
   @protected
@@ -278,6 +281,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MemberFfi dco_decode_member_ffi(dynamic raw);
+
+  @protected
+  MutedMemberFfi dco_decode_muted_member_ffi(dynamic raw);
 
   @protected
   NetworkEvent dco_decode_network_event(dynamic raw);
@@ -638,6 +644,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MemberFfi> sse_decode_list_member_ffi(SseDeserializer deserializer);
 
   @protected
+  List<MutedMemberFfi> sse_decode_list_muted_member_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<int> sse_decode_list_prim_u_32_loose(SseDeserializer deserializer);
 
   @protected
@@ -715,6 +726,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MemberFfi sse_decode_member_ffi(SseDeserializer deserializer);
+
+  @protected
+  MutedMemberFfi sse_decode_muted_member_ffi(SseDeserializer deserializer);
 
   @protected
   NetworkEvent sse_decode_network_event(SseDeserializer deserializer);
@@ -1186,6 +1200,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_muted_member_ffi(
+    List<MutedMemberFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_32_loose(
     List<int> self,
     SseSerializer serializer,
@@ -1292,6 +1312,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_member_ffi(MemberFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_muted_member_ffi(
+    MutedMemberFfi self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_network_event(NetworkEvent self, SseSerializer serializer);

@@ -272,6 +272,8 @@ Row contains:
   - **Public toggle** (globe icon) -- `HollowPressable` toggle button. When `is_public` is true: accent-tinted globe icon with filled background. When false: neutral globe icon. Tap calls `crdt_api.setChannelPublic(serverId, channelId, !isPublic)` with **optimistic update** via `channelListProvider.updateChannel()` BEFORE the FFI call. Only shown for text channels. Public channels send messages as Ed25519-signed plaintext (not MLS-encrypted).
   - **Visibility `_AccessChip`** (eye icon) -- `PopupMenuButton` cycling through `'everyone'` / `'moderator'` / `'admin'`
   - **Posting `_AccessChip`** (messageSquare icon) -- same options
+  - **Slow-mode `_SlowModeChip`** (timer icon, text channels only) -- `PopupMenuButton<int>` over `kSlowModeOptions` (Off/5s/10s/30s/1m/5m/15m/1h). Warning-tinted when active; labels via `slowModeDurationLabel()` from `lib/src/core/moderation_format.dart`. Optimistic update then `crdt_api.setChannelSlowMode()`. Moderator+ are exempt from the limit.
+  - **Media-only toggle** (image icon, text channels only) -- `HollowPressable`, accent when on. Optimistic update then `crdt_api.setChannelMediaOnly()`. Media-only channels accept only images/GIFs/videos (captions allowed); the chat input filters the file picker to `kMediaOnlyExtensions` and blocks text-only sends + voice recordings with a toast.
   - Rename button (pencil icon)
   - Delete button (trash icon, red)
 
@@ -327,6 +329,7 @@ Watches `serverMembersProvider(serverId)` (async) and `myRoleProvider(serverId)`
 - Role change options: for each assignable role that differs from current, shows icon + "Make {Role}" text
 - Divider (if any assignable roles exist)
 - "Kick Member" (userMinus icon, red)
+- "Mute Member" (volumeX icon, warning)
 - "Ban Member" (ban icon, red)
 
 **Role change (`_changeRole`):**
@@ -340,6 +343,21 @@ Watches `serverMembersProvider(serverId)` (async) and `myRoleProvider(serverId)`
 **Ban (`_confirmBan`):**
 - `_ConfirmDialog` with `isDanger: true`, "Are you sure you want to ban {name}? They will be removed and unable to rejoin."
 - On confirm: calls `crdt_api.banMember(serverId, peerId)`, shows success toast
+
+**Mute (`_showMuteDialog`):**
+- `_MuteDurationDialog` with duration options from `kMuteDurationOptions`: 10 minutes / 1 hour / 24 hours / 7 days / Permanent (0 = permanent, shown in error color)
+- On pick: calls `crdt_api.muteMember(serverId, peerId, durationSecs)` (`<= 0` = permanent), shows success toast
+- Same hierarchy gate as kick/ban (KICK_MEMBERS + outrank), enforced in Rust
+
+### Muted Members Section
+
+`_MutedMembersSection` -- `ConsumerStatefulWidget`, shown only when `canKick`, ABOVE the banned section.
+
+**Data:** watches `mutedMembersProvider(serverId)` (channel_provider.dart) — NOT a one-shot load. The provider is invalidated on `ServerUpdated` via the event provider's 0/120/400/1000ms ramp (CrdtStore writes are fire-and-forget, a single immediate reload reads stale DB), so a fresh mute appears without leaving the tab.
+
+**Display:** expandable header (chevron + volumeX + "Muted ({count})" in warning color); rows show `HollowAvatar` + display name (server nickname > displayName, resolved from `serverMembersProvider` — muted members are still members) + remaining time via `formatMuteRemaining()` ("Permanent" / "2h 10m left"); "Unmute" ghost button calls `crdt_api.unmuteMember` then invalidates the provider.
+
+Mobile parity: `mobile_members_route.dart` mirrors all of this (mute option in the actions bottom sheet → duration bottom sheet; `_MutedRow` list watching the same provider). The muted user's own input bar shows a "You are muted on this server — {remaining} left" banner via `myMuteStatusProvider` (self-invalidates at expiry).
 
 ### Banned Members Section
 

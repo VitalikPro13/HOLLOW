@@ -89,6 +89,14 @@ pub struct ChannelInfo {
     pub posting: ChannelPosting,
     #[serde(default)]
     pub is_public: bool,
+    /// Slow mode: minimum seconds between messages per member (0 = off).
+    /// Moderator+ are exempt.
+    #[serde(default)]
+    pub slow_mode: u32,
+    /// Media-only: only image/video/GIF attachments (with optional captions)
+    /// may be posted; standalone text and other file types are rejected.
+    #[serde(default)]
+    pub media_only: bool,
 }
 
 /// Metadata for a member within a server.
@@ -124,6 +132,10 @@ pub struct ServerState {
     pub role_permissions: HashMap<String, AdminLwwReg<u32>>,
     #[serde(default)]
     pub banned_members: HashMap<String, AdminLwwReg<bool>>,
+    /// Muted members (server-wide read-only): master peer_id -> mute expiry in
+    /// epoch ms. `u64::MAX` = permanent, `0` = unmuted (pruned on unmute).
+    #[serde(default)]
+    pub muted_members: HashMap<String, AdminLwwReg<u64>>,
     #[serde(default)]
     pub labels: HashMap<String, LabelInfo>,
     #[serde(default)]
@@ -158,7 +170,7 @@ impl ServerState {
         let ServerState {
             server_id, name, channels, members, roles, nicknames,
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
-            settings, role_permissions, banned_members, labels,
+            settings, role_permissions, banned_members, muted_members, labels,
             label_assignments, deleted,
             op_log: _, hlc: _, op_log_dedup: _,
         } = self;
@@ -176,6 +188,7 @@ impl ServerState {
             settings: settings.clone(),
             role_permissions: role_permissions.clone(),
             banned_members: banned_members.clone(),
+            muted_members: muted_members.clone(),
             labels: labels.clone(),
             label_assignments: label_assignments.clone(),
             deleted: *deleted,
@@ -203,6 +216,8 @@ impl ServerState {
                 visibility: ChannelVisibility::Everyone,
                 posting: ChannelPosting::Everyone,
                 is_public: false,
+                slow_mode: 0,
+                media_only: false,
             },
         );
 
@@ -235,6 +250,7 @@ impl ServerState {
             settings: HashMap::new(),
             role_permissions: HashMap::new(),
             banned_members: HashMap::new(),
+            muted_members: HashMap::new(),
             labels: HashMap::new(),
             label_assignments: HashMap::new(),
             deleted: false,
@@ -310,6 +326,7 @@ impl ServerState {
         changed |= fold_lww(&mut self.twitch_usernames, &resolve);
         changed |= fold_lww(&mut self.storage_pledges, &resolve);
         changed |= fold_lww(&mut self.banned_members, &resolve);
+        changed |= fold_lww(&mut self.muted_members, &resolve);
 
         // label_assignments: Vec<label_id> per member — union under master.
         {
@@ -465,6 +482,8 @@ impl ServerState {
                         visibility: ChannelVisibility::Everyone,
                         posting: ChannelPosting::Everyone,
                         is_public: false,
+                        slow_mode: 0,
+                        media_only: false,
                     }
                 });
             }
@@ -532,6 +551,18 @@ impl ServerState {
             CrdtPayload::ChannelPublicChanged { channel_id, is_public } => {
                 if let Some(ch) = self.channels.get_mut(channel_id) {
                     ch.is_public = *is_public;
+                }
+            }
+
+            CrdtPayload::ChannelSlowModeChanged { channel_id, seconds } => {
+                if let Some(ch) = self.channels.get_mut(channel_id) {
+                    ch.slow_mode = *seconds;
+                }
+            }
+
+            CrdtPayload::ChannelMediaOnlyChanged { channel_id, media_only } => {
+                if let Some(ch) = self.channels.get_mut(channel_id) {
+                    ch.media_only = *media_only;
                 }
             }
 
@@ -637,6 +668,28 @@ impl ServerState {
                 // instead of running on every op. LWW-aware: a newer ban wins
                 // the merge above and survives the retain.
                 self.banned_members.retain(|_, reg| *reg.read());
+            }
+
+            CrdtPayload::MemberMuted { peer_id, expires_at } => {
+                let priority = self.author_priority(&op.author);
+                let entry = self.muted_members.entry(peer_id.clone()).or_insert_with(|| {
+                    AdminLwwReg::new(*expires_at, op.hlc.clone(), priority)
+                });
+                let remote = AdminLwwReg::new(*expires_at, op.hlc.clone(), priority);
+                entry.merge(&remote);
+            }
+
+            CrdtPayload::MemberUnmuted { peer_id } => {
+                let priority = self.author_priority(&op.author);
+                let entry = self.muted_members.entry(peer_id.clone()).or_insert_with(|| {
+                    AdminLwwReg::new(0u64, op.hlc.clone(), priority)
+                });
+                let remote = AdminLwwReg::new(0u64, op.hlc.clone(), priority);
+                entry.merge(&remote);
+                // Prune unmuted entries to prevent unbounded growth. Mirrors the
+                // MemberUnbanned sweep: only this arm can flip a register to 0,
+                // and a newer mute wins the merge above and survives the retain.
+                self.muted_members.retain(|_, reg| *reg.read() != 0);
             }
 
             CrdtPayload::LabelCreated { label_id, name, color } => {
@@ -919,6 +972,32 @@ impl ServerState {
         self.can_kick(actor, target)
     }
 
+    /// Check if a peer is muted at `now_ms` (epoch ms). Expired mutes read as
+    /// unmuted; `u64::MAX` = permanent.
+    pub fn is_muted(&self, peer_id: &str, now_ms: u64) -> bool {
+        // Multi-device: mutes are master-keyed; collapse a device id first.
+        let key = super::resolve_identity(peer_id);
+        self.muted_members
+            .get(&key)
+            .map(|reg| *reg.read() > now_ms)
+            .unwrap_or(false)
+    }
+
+    /// Check if `actor` can mute `target`. Same hierarchy as kick/ban.
+    pub fn can_mute(&self, actor: &str, target: &str) -> bool {
+        self.can_kick(actor, target)
+    }
+
+    /// List active mutes at `now_ms` as (master peer_id, expiry ms) pairs.
+    /// Expired entries are skipped (they linger in the map until unmute).
+    pub fn muted_list(&self, now_ms: u64) -> Vec<(String, u64)> {
+        self.muted_members
+            .iter()
+            .filter(|(_, reg)| *reg.read() > now_ms)
+            .map(|(pid, reg)| (pid.clone(), *reg.read()))
+            .collect()
+    }
+
     /// List all currently banned peer IDs.
     pub fn banned_list(&self) -> Vec<String> {
         self.banned_members
@@ -979,6 +1058,21 @@ impl ServerState {
         } else {
             false
         }
+    }
+
+    /// Slow-mode interval for a channel in seconds (0 = off).
+    pub fn channel_slow_mode(&self, channel_id: &str) -> u32 {
+        self.channels.get(channel_id).map_or(0, |ch| ch.slow_mode)
+    }
+
+    /// Whether a channel only accepts image/video/GIF attachments.
+    pub fn is_channel_media_only(&self, channel_id: &str) -> bool {
+        self.channels.get(channel_id).map_or(false, |ch| ch.media_only)
+    }
+
+    /// Moderator+ (and Owner) bypass slow mode, matching the Discord behavior.
+    pub fn bypasses_slow_mode(&self, peer_id: &str) -> bool {
+        self.get_role(peer_id).priority() >= MemberRole::Moderator.priority()
     }
 
     /// Whether a channel is cryptographically isolated in its own MLS subgroup

@@ -344,6 +344,28 @@ Emits: `NetworkEvent::ServerUpdated { server_id }` — triggers Dart-side `myPer
 
 Standard broadcast pattern.
 
+## handle_mute_member() / handle_unmute_member()
+
+`sync_handler.rs:handle_mute_member()` — Server-wide mute (read-only member). Parameters: `server_id`, `peer_id` (normalized to MASTER via `resolver::resolve` before the op), `expires_at` (epoch ms; `u64::MAX` = permanent).
+
+Permission: `state.can_mute(&local_peer, &target)` — same hierarchy as kick/ban (KICK_MEMBERS + actor outranks target). Unmute requires KICK_MEMBERS only.
+
+CrdtPayload: `MemberMuted { peer_id, expires_at }` / `MemberUnmuted { peer_id }` — stored in `ServerState.muted_members: HashMap<String, AdminLwwReg<u64>>` (master-keyed). Expiry is LAZY: `is_muted(peer, now_ms)` compares against the wall clock — no timers anywhere. `MemberUnmuted` writes 0 then retain-prunes (mirrors the MemberUnbanned sweep).
+
+Emits: `NetworkEvent::ServerUpdated`. Standard broadcast pattern (MLS + plaintext CrdtOpBroadcast).
+
+Enforcement: send-side in `message_ops::handle_send_channel_message` + `file_handler::handle_send_file`; receive-side (LIVE path only, never sync backfill) in `message_ops::handle_envelope_channel_message` + both FileHeader ingest paths. See memory `project_moderation_trio`.
+
+## handle_set_channel_slow_mode() / handle_set_channel_media_only()
+
+`sync_handler.rs` — Both delegate to the shared `handle_channel_moderation_change()` body (MANAGE_CHANNELS gate → op → persist → ServerUpdated → broadcast).
+
+CrdtPayload: `ChannelSlowModeChanged { channel_id, seconds }` (u32, 0 = off) / `ChannelMediaOnlyChanged { channel_id, media_only }` — stored as `ChannelInfo.slow_mode` / `ChannelInfo.media_only`.
+
+Slow mode: minimum seconds between messages per member; Moderator+ (and Owner) are EXEMPT (`ServerState::bypasses_slow_mode`). Send-side gate uses `MessageStore::latest_own_channel_ts` (is_mine=1); receive-side gate (live path only) uses `channel_sender_has_msg_in_range` on signed timestamps. Message edits are never gated.
+
+Media-only: only image/GIF/video attachments allowed (`img || vthumb.is_some() || mime.starts_with("video/")`); captions ride the file message row; standalone text and other file types rejected at send + dropped at live ingest. The channel file-send path also runs `can_post_in_channel` here (gap closed 2026-07 — it historically skipped posting permission).
+
 ## handle_set_nickname()
 
 `sync_handler.rs:handle_set_nickname()` — Sets a per-server nickname for a member.

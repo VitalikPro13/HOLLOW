@@ -564,6 +564,30 @@ impl TestNode {
         }.to_string())
     }
 
+    /// A channel's slow-mode interval (seconds, 0 = off) as the UI reads it.
+    pub(crate) fn channel_slow_mode(&self, server_id: &str, channel_id: &str) -> Option<u32> {
+        let state = self.server_state(server_id)?;
+        Some(state.channels.get(channel_id)?.slow_mode)
+    }
+
+    /// A channel's media-only flag as the UI reads it.
+    pub(crate) fn channel_media_only(&self, server_id: &str, channel_id: &str) -> Option<bool> {
+        let state = self.server_state(server_id)?;
+        Some(state.channels.get(channel_id)?.media_only)
+    }
+
+    /// Whether `peer` is muted RIGHT NOW per this node's CRDT state — exactly
+    /// the predicate the send/ingest moderation gates evaluate.
+    pub(crate) fn is_muted_now(&self, server_id: &str, peer: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.server_state(server_id)
+            .map(|s| s.is_muted(peer, now))
+            .unwrap_or(false)
+    }
+
     /// Whether this node's local user can SEE a channel — exactly what
     /// `visibleChannelsProvider` computes (role tier vs channel visibility). The
     /// UI hides the channel + evicts the user when this flips to false.
@@ -3758,6 +3782,298 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
         v2.channel_visibility(&server_id, &cid));
     assert!(!v2.can_see_channel(&server_id, &cid, &v_master),
         "after catch-up, V can't see the now-Admin+ channel");
+}
+
+// ---------------------------------------------------------------------------
+// MODERATION TRIO: mute (timed + permanent), per-channel slow mode, and
+// media-only channels. Covers: CRDT convergence of all three settings to a
+// remote member, send-side rejection (the Error events the input bar toasts),
+// unmute/expiry restoring posting, and the Moderator+ slow-mode exemption.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn moderation_trio_mute_slowmode_mediaonly() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 72; // owner
+    const V_MASTER: u8 = 73; // plain member
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let v_master = NativeKeypair::from_secret_bytes(&seed_bytes(V_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&v_master]).await;
+    sleep_ms(1500).await;
+    let mut v = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await; // Olm confirm
+
+    let server_id = create_server_and_wait(&mut o, "Mod Server").await;
+    sleep_ms(500).await;
+    v.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut v, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "V should join");
+    sleep_ms(3000).await;
+    let general = general_channel_of(&server_id);
+
+    // --- Baseline: V can post. ---
+    v.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "baseline".to_string(),
+            message_id: "mod-m0".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let got = wait_event(&mut o, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "baseline")
+    })
+    .await;
+    assert!(got, "owner receives V's baseline message");
+
+    // --- PERMANENT MUTE: converges to V, V's send is rejected. ---
+    o.cmd_tx
+        .send(NodeCommand::MuteMember {
+            server_id: server_id.clone(),
+            peer_id: v_master.clone(),
+            expires_at: u64::MAX,
+        })
+        .await
+        .unwrap();
+    let mut muted_ok = false;
+    for _ in 0..20 {
+        sleep_ms(300).await;
+        if v.is_muted_now(&server_id, &v_master) { muted_ok = true; break; }
+    }
+    assert!(muted_ok, "V's own CRDT must show V as muted (permanent)");
+
+    drain_events(&mut v);
+    v.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "while-muted".to_string(),
+            message_id: "mod-m1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let rejected = wait_event(&mut v, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::Error { message } if message.contains("muted"))
+    })
+    .await;
+    assert!(rejected, "muted V's send must be rejected with the muted error");
+    sleep_ms(1000).await;
+    assert!(
+        !o.channel_messages(&server_id, &general).iter().any(|m| m.text == "while-muted"),
+        "owner must never store a message a muted member tried to send"
+    );
+
+    // --- UNMUTE restores posting. ---
+    o.cmd_tx
+        .send(NodeCommand::UnmuteMember {
+            server_id: server_id.clone(),
+            peer_id: v_master.clone(),
+        })
+        .await
+        .unwrap();
+    let mut unmuted_ok = false;
+    for _ in 0..20 {
+        sleep_ms(300).await;
+        if !v.is_muted_now(&server_id, &v_master) { unmuted_ok = true; break; }
+    }
+    assert!(unmuted_ok, "unmute must converge to V");
+    v.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "unmuted-again".to_string(),
+            message_id: "mod-m2".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let got = wait_event(&mut o, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "unmuted-again")
+    })
+    .await;
+    assert!(got, "after unmute V can post again");
+
+    // --- TIMED MUTE expires on its own (no unmute op). ---
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    o.cmd_tx
+        .send(NodeCommand::MuteMember {
+            server_id: server_id.clone(),
+            peer_id: v_master.clone(),
+            expires_at: now_ms + 4000,
+        })
+        .await
+        .unwrap();
+    let mut timed_ok = false;
+    for _ in 0..10 {
+        sleep_ms(250).await;
+        if v.is_muted_now(&server_id, &v_master) { timed_ok = true; break; }
+    }
+    assert!(timed_ok, "timed mute must converge while active");
+    sleep_ms(4500).await; // let it lapse
+    assert!(!v.is_muted_now(&server_id, &v_master),
+        "an expired timed mute must read as unmuted with NO unmute op");
+    v.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "after-expiry".to_string(),
+            message_id: "mod-m3".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let got = wait_event(&mut o, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "after-expiry")
+    })
+    .await;
+    assert!(got, "V can post after the timed mute lapses");
+
+    // --- SLOW MODE: 5s window; Member throttled, Owner exempt. ---
+    o.cmd_tx
+        .send(NodeCommand::SetChannelSlowMode {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            seconds: 5,
+        })
+        .await
+        .unwrap();
+    let mut slow_ok = false;
+    for _ in 0..20 {
+        sleep_ms(300).await;
+        if v.channel_slow_mode(&server_id, &general) == Some(5) { slow_ok = true; break; }
+    }
+    assert!(slow_ok, "slow_mode=5 must converge to V");
+
+    // Ensure V's previous message is outside the 5s window, then send two fast.
+    sleep_ms(5200).await;
+    v.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "slow-1".to_string(),
+            message_id: "mod-m4".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    sleep_ms(400).await; // local persist lands; still deep inside the window
+    drain_events(&mut v);
+    v.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "slow-2".to_string(),
+            message_id: "mod-m5".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let throttled = wait_event(&mut v, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::Error { message } if message.contains("Slow mode"))
+    })
+    .await;
+    assert!(throttled, "V's second rapid send must hit the slow-mode gate");
+    sleep_ms(1000).await;
+    let o_msgs = o.channel_messages(&server_id, &general);
+    assert!(o_msgs.iter().any(|m| m.text == "slow-1"), "slow-1 arrives at owner");
+    assert!(!o_msgs.iter().any(|m| m.text == "slow-2"),
+        "slow-2 must never reach the owner (throttled at V's send)");
+
+    // Owner is Moderator+ → exempt: two back-to-back sends both land at V.
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "owner-fast-1".to_string(),
+            message_id: "mod-m6".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "owner-fast-2".to_string(),
+            message_id: "mod-m7".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let got = wait_event(&mut v, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "owner-fast-2")
+    })
+    .await;
+    assert!(got, "owner (Moderator+ exempt) posts through slow mode unthrottled");
+    let v_msgs = v.channel_messages(&server_id, &general);
+    assert!(v_msgs.iter().any(|m| m.text == "owner-fast-1"),
+        "V stored the owner's first rapid message too (exempt sender not dropped at ingest)");
+
+    // --- MEDIA-ONLY: text-only sends are rejected. ---
+    o.cmd_tx
+        .send(NodeCommand::SetChannelMediaOnly {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            media_only: true,
+        })
+        .await
+        .unwrap();
+    let mut media_ok = false;
+    for _ in 0..20 {
+        sleep_ms(300).await;
+        if v.channel_media_only(&server_id, &general) == Some(true) { media_ok = true; break; }
+    }
+    assert!(media_ok, "media_only=true must converge to V");
+
+    sleep_ms(5200).await; // clear V's slow-mode window so only media-only can reject
+    drain_events(&mut v);
+    v.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "text-in-media-only".to_string(),
+            message_id: "mod-m8".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let rejected = wait_event(&mut v, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::Error { message } if message.contains("media-only"))
+    })
+    .await;
+    assert!(rejected, "text-only send into a media-only channel must be rejected");
+    sleep_ms(1000).await;
+    assert!(
+        !o.channel_messages(&server_id, &general).iter().any(|m| m.text == "text-in-media-only"),
+        "owner must never store the rejected text-only message"
+    );
 }
 
 // ---------------------------------------------------------------------------

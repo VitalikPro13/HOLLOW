@@ -87,6 +87,55 @@ pub(crate) async fn handle_send_file(
         .to_string_lossy()
         .to_lowercase();
 
+    // 2b. Channel moderation gates (posting permission + mute + media-only +
+    // slow mode). Posting permission was historically only enforced on the
+    // text send path — file sends bypassed it; this closes that gap too.
+    if let (Some(sid), Some(cid)) = (&server_id, &channel_id) {
+        if let Some(server) = server_states.get(sid) {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let reject = |msg: &str| NetworkEvent::FileFailed {
+                file_id: message_id.clone(),
+                error: msg.to_string(),
+            };
+            if !server.can_post_in_channel(local_peer_str, cid) {
+                let _ = event_tx.send(reject("You don't have permission to post in this channel")).await;
+                return;
+            }
+            if server.is_muted(local_peer_str, now_ms as u64) {
+                let _ = event_tx.send(reject("You are muted on this server")).await;
+                return;
+            }
+            if server.is_channel_media_only(cid) {
+                let mime = file_transfer::mime_from_ext(&original_ext);
+                let is_media = file_transfer::is_image_mime(&mime) || mime.starts_with("video/");
+                if !is_media {
+                    let _ = event_tx.send(reject(
+                        "This is a media-only channel — only images, GIFs, and videos can be posted",
+                    )).await;
+                    return;
+                }
+            }
+            let slow = server.channel_slow_mode(cid);
+            if slow > 0 && !server.bypasses_slow_mode(local_peer_str) {
+                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    if let Some(last_ts) = store.latest_own_channel_ts(sid, cid) {
+                        let next_allowed = last_ts + (slow as i64) * 1000;
+                        if (now_ms as i64) < next_allowed {
+                            let wait_s = ((next_allowed - now_ms as i64) + 999) / 1000;
+                            let _ = event_tx.send(reject(
+                                &format!("Slow mode is on — wait {wait_s}s before sending again"),
+                            )).await;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // 3. Check size limit (34MB default, hard cap on default relay).
     let max_size = if let Some(ref sid) = server_id {
         server_states.get(sid)
@@ -1560,6 +1609,32 @@ pub(crate) async fn handle_envelope_file_header(
         if size > max_bytes {
             hollow_log!("[HOLLOW-SECURITY] REJECTED MLS FileHeader from {sender_peer_id} — size {size} exceeds max {max_bytes}");
             return;
+        }
+    }
+
+    // Moderation trio (receive-side): drop files from muted members and
+    // non-media files headed into a media-only channel. Mirrors the text
+    // ingest gate in message_ops::handle_envelope_channel_message.
+    if let Some(state) = server_states.get(server_id) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if state.is_muted(&sender_peer_id, now_ms) {
+            hollow_log!("[HOLLOW-MOD] DROPPED MLS FileHeader from muted member {sender_peer_id} in {server_id}");
+            return;
+        }
+        if let Some(c) = &cid {
+            if state.is_channel_media_only(c) {
+                let is_media = img
+                    || vthumb.is_some()
+                    || mime.starts_with("video/")
+                    || file_transfer::is_image_mime(&mime);
+                if !is_media {
+                    hollow_log!("[HOLLOW-MOD] DROPPED non-media FileHeader ({mime}) from {sender_peer_id} in media-only channel {c}");
+                    return;
+                }
+            }
         }
     }
 

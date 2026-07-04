@@ -340,6 +340,52 @@ Future<void> unbanMember({required String serverId, required String peerId}) =>
 Future<List<String>> getBannedMembers({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtGetBannedMembers(serverId: serverId);
 
+/// Mute a member server-wide (read-only: they can't post in any channel).
+/// `duration_secs <= 0` = permanent mute; otherwise the mute expires
+/// `duration_secs` from now.
+Future<void> muteMember({
+  required String serverId,
+  required String peerId,
+  required PlatformInt64 durationSecs,
+}) => RustLib.instance.api.crateApiCrdtMuteMember(
+  serverId: serverId,
+  peerId: peerId,
+  durationSecs: durationSecs,
+);
+
+/// Unmute a member.
+Future<void> unmuteMember({required String serverId, required String peerId}) =>
+    RustLib.instance.api.crateApiCrdtUnmuteMember(
+      serverId: serverId,
+      peerId: peerId,
+    );
+
+/// Get the currently active mutes for a server.
+Future<List<MutedMemberFfi>> getMutedMembers({required String serverId}) =>
+    RustLib.instance.api.crateApiCrdtGetMutedMembers(serverId: serverId);
+
+/// Set a channel's slow-mode interval in seconds (0 = off). Moderator+ exempt.
+Future<void> setChannelSlowMode({
+  required String serverId,
+  required String channelId,
+  required int seconds,
+}) => RustLib.instance.api.crateApiCrdtSetChannelSlowMode(
+  serverId: serverId,
+  channelId: channelId,
+  seconds: seconds,
+);
+
+/// Toggle a channel's media-only mode (only images/GIFs/videos may be posted).
+Future<void> setChannelMediaOnly({
+  required String serverId,
+  required String channelId,
+  required bool mediaOnly,
+}) => RustLib.instance.api.crateApiCrdtSetChannelMediaOnly(
+  serverId: serverId,
+  channelId: channelId,
+  mediaOnly: mediaOnly,
+);
+
 /// Change the permissions bitmask for a role. Owner-only.
 Future<void> changeRolePermissions({
   required String serverId,
@@ -445,6 +491,8 @@ class ChannelFfi {
   final String visibility;
   final String posting;
   final bool isPublic;
+  final int slowMode;
+  final bool mediaOnly;
 
   const ChannelFfi({
     required this.channelId,
@@ -454,6 +502,8 @@ class ChannelFfi {
     required this.visibility,
     required this.posting,
     required this.isPublic,
+    required this.slowMode,
+    required this.mediaOnly,
   });
 
   @override
@@ -464,7 +514,9 @@ class ChannelFfi {
       channelType.hashCode ^
       visibility.hashCode ^
       posting.hashCode ^
-      isPublic.hashCode;
+      isPublic.hashCode ^
+      slowMode.hashCode ^
+      mediaOnly.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -477,7 +529,9 @@ class ChannelFfi {
           channelType == other.channelType &&
           visibility == other.visibility &&
           posting == other.posting &&
-          isPublic == other.isPublic;
+          isPublic == other.isPublic &&
+          slowMode == other.slowMode &&
+          mediaOnly == other.mediaOnly;
 }
 
 /// Label info for FFI (Dart-visible).
@@ -543,6 +597,33 @@ class MemberFfi {
           nickname == other.nickname &&
           twitchUsername == other.twitchUsername &&
           labels == other.labels;
+}
+
+/// A muted member for FFI (Dart-visible). `permanent` = no expiry;
+/// otherwise `expires_at_ms` is the epoch-ms expiry.
+class MutedMemberFfi {
+  final String peerId;
+  final PlatformInt64 expiresAtMs;
+  final bool permanent;
+
+  const MutedMemberFfi({
+    required this.peerId,
+    required this.expiresAtMs,
+    required this.permanent,
+  });
+
+  @override
+  int get hashCode =>
+      peerId.hashCode ^ expiresAtMs.hashCode ^ permanent.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MutedMemberFfi &&
+          runtimeType == other.runtimeType &&
+          peerId == other.peerId &&
+          expiresAtMs == other.expiresAtMs &&
+          permanent == other.permanent;
 }
 
 /// Server info for FFI (Dart-visible).

@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 
@@ -36,6 +38,8 @@ class ChannelListNotifier extends Notifier<Map<String, ChannelInfo>> {
         visibility: ch.visibility,
         posting: ch.posting,
         isPublic: ch.isPublic,
+        slowModeSecs: ch.slowMode,
+        mediaOnly: ch.mediaOnly,
       );
     }
     return map;
@@ -154,6 +158,49 @@ final canPostInChannelProvider =
   if (posting == 'moderator') return priority >= 1;
   if (posting == 'admin') return priority >= 2;
   return true;
+});
+
+/// Active mutes for a server (what the Members tab's muted section shows).
+/// Invalidated on ServerUpdated via the event provider's ramp (the CrdtStore
+/// write is fire-and-forget, so a single immediate reload can read stale DB).
+final mutedMembersProvider = FutureProvider.autoDispose
+    .family<List<crdt_api.MutedMemberFfi>, String>((ref, serverId) async {
+  try {
+    return await crdt_api.getMutedMembers(serverId: serverId);
+  } catch (_) {
+    return const [];
+  }
+});
+
+/// My mute status in a server: null = not muted, otherwise the FFI record
+/// (permanent flag + expiry ms). Master-keyed — collapses the local device id.
+/// Invalidated on ServerUpdated (event_provider._refreshServerState).
+final myMuteStatusProvider = FutureProvider.autoDispose
+    .family<crdt_api.MutedMemberFfi?, String>((ref, serverId) async {
+  final myDeviceId = await ref.watch(localDevicePeerIdProvider.future);
+  if (myDeviceId == null) return null;
+  final myMaster = ref.watch(deviceLinkProvider).identityOf(myDeviceId);
+  try {
+    final muted = await crdt_api.getMutedMembers(serverId: serverId);
+    for (final m in muted) {
+      if (m.peerId == myMaster || m.peerId == myDeviceId) {
+        // Timed mute: self-invalidate right after expiry so the input bar
+        // unlocks without waiting for the next ServerUpdated.
+        if (!m.permanent) {
+          final remaining =
+              m.expiresAtMs - DateTime.now().millisecondsSinceEpoch;
+          if (remaining <= 0) return null;
+          final t = Timer(Duration(milliseconds: remaining + 500),
+              () => ref.invalidateSelf());
+          ref.onDispose(t.cancel);
+        }
+        return m;
+      }
+    }
+  } catch (_) {
+    // Node not running / server unknown — treat as not muted.
+  }
+  return null;
 });
 
 /// Currently selected channel ID.

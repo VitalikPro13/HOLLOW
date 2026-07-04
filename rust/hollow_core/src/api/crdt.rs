@@ -20,6 +20,16 @@ pub struct ChannelFfi {
     pub visibility: String,
     pub posting: String,
     pub is_public: bool,
+    pub slow_mode: u32,
+    pub media_only: bool,
+}
+
+/// A muted member for FFI (Dart-visible). `permanent` = no expiry;
+/// otherwise `expires_at_ms` is the epoch-ms expiry.
+pub struct MutedMemberFfi {
+    pub peer_id: String,
+    pub expires_at_ms: i64,
+    pub permanent: bool,
 }
 
 /// Member info for FFI (Dart-visible).
@@ -210,6 +220,8 @@ pub fn get_server_channels(server_id: String) -> Result<Vec<ChannelFfi>, String>
                     ChannelPosting::AdminPlus => "admin".to_string(),
                 },
                 is_public: ch.is_public,
+                slow_mode: ch.slow_mode,
+                media_only: ch.media_only,
             }
         })
         .collect();
@@ -929,6 +941,138 @@ pub fn get_banned_members(server_id: String) -> Result<Vec<String>, String> {
             .map_err(|e| format!("Failed to parse server state: {e}"))?;
 
     Ok(state.banned_list())
+}
+
+/// Mute a member server-wide (read-only: they can't post in any channel).
+/// `duration_secs <= 0` = permanent mute; otherwise the mute expires
+/// `duration_secs` from now.
+#[frb]
+pub fn mute_member(server_id: String, peer_id: String, duration_secs: i64) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+
+    let expires_at = if duration_secs <= 0 {
+        u64::MAX
+    } else {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        now_ms.saturating_add(duration_secs as u64 * 1000)
+    };
+
+    let rt = get_runtime();
+    rt.block_on(
+        cmd_tx.send(node::NodeCommand::MuteMember {
+            server_id,
+            peer_id,
+            expires_at,
+        }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+/// Unmute a member.
+#[frb]
+pub fn unmute_member(server_id: String, peer_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+
+    let rt = get_runtime();
+    rt.block_on(
+        cmd_tx.send(node::NodeCommand::UnmuteMember {
+            server_id,
+            peer_id,
+        }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+/// Get the currently active mutes for a server.
+#[frb]
+pub fn get_muted_members(server_id: String) -> Result<Vec<MutedMemberFfi>, String> {
+    let store_guard = super::storage::get_store().lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let store = store_guard.as_ref().ok_or("Message store is not open")?;
+    let state_json = store
+        .load_server_state(&server_id)?
+        .ok_or(format!("Server {server_id} not found"))?;
+
+    let state =
+        serde_json::from_str::<crate::crdt::server_state::ServerState>(&state_json)
+            .map_err(|e| format!("Failed to parse server state: {e}"))?;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    Ok(state
+        .muted_list(now_ms)
+        .into_iter()
+        .map(|(peer_id, expires_at)| MutedMemberFfi {
+            peer_id,
+            permanent: expires_at == u64::MAX,
+            expires_at_ms: if expires_at == u64::MAX { 0 } else { expires_at as i64 },
+        })
+        .collect())
+}
+
+/// Set a channel's slow-mode interval in seconds (0 = off). Moderator+ exempt.
+#[frb]
+pub fn set_channel_slow_mode(server_id: String, channel_id: String, seconds: u32) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+
+    let rt = get_runtime();
+    rt.block_on(
+        cmd_tx.send(node::NodeCommand::SetChannelSlowMode {
+            server_id,
+            channel_id,
+            seconds,
+        }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+/// Toggle a channel's media-only mode (only images/GIFs/videos may be posted).
+#[frb]
+pub fn set_channel_media_only(server_id: String, channel_id: String, media_only: bool) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+
+    let rt = get_runtime();
+    rt.block_on(
+        cmd_tx.send(node::NodeCommand::SetChannelMediaOnly {
+            server_id,
+            channel_id,
+            media_only,
+        }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
 }
 
 /// Change the permissions bitmask for a role. Owner-only.

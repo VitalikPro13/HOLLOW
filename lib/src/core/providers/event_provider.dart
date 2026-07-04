@@ -223,6 +223,7 @@ class EventStreamNotifier extends Notifier<bool> {
     ref.invalidate(serverIsNsfwProvider(serverId));
     ref.invalidate(myPermissionsProvider(serverId));
     ref.invalidate(myRoleProvider(serverId));
+    ref.invalidate(myMuteStatusProvider(serverId));
     // CrdtStore persists via fire-and-forget mpsc, so getServerChannels (a DB
     // read) races the actor's write — a single fixed delay was unreliable (worked
     // on join because that path re-reads after the write lands, but flaky for a
@@ -294,6 +295,11 @@ class EventStreamNotifier extends Notifier<bool> {
       Future.delayed(d, () {
         // Per-server snapshot — refresh regardless of selection (Chats tab).
         ref.invalidate(serverChannelsProvider(serverId));
+        // Mute state rides the same fire-and-forget CrdtStore write, so it
+        // needs the same ramp — a single immediate invalidate reads stale DB
+        // (the "switch tabs and it finally shows" bug).
+        ref.invalidate(mutedMembersProvider(serverId));
+        ref.invalidate(myMuteStatusProvider(serverId));
         if (ref.read(selectedServerProvider) == serverId) {
           ref.read(channelListProvider.notifier).loadForServer(serverId);
           ref.read(channelLayoutProvider.notifier).loadForServer(serverId);

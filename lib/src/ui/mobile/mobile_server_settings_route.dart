@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
+import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
@@ -1533,6 +1534,34 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     );
   }
 
+  /// Set a channel's slow-mode interval (seconds, 0 = off). Mirrors the
+  /// desktop _SlowModeChip: optimistic local update then the CRDT op.
+  Future<void> _setChannelSlowMode(String channelId, int seconds) async {
+    final old = _channels[channelId];
+    if (old != null && mounted) {
+      setState(() => _channels[channelId] = old.copyWith(slowModeSecs: seconds));
+    }
+    await crdt_api.setChannelSlowMode(
+      serverId: widget.serverId,
+      channelId: channelId,
+      seconds: seconds,
+    );
+  }
+
+  /// Toggle a channel's media-only flag. Mirrors the desktop image-icon toggle.
+  Future<void> _toggleChannelMediaOnly(String channelId, bool current) async {
+    final newVal = !current;
+    final old = _channels[channelId];
+    if (old != null && mounted) {
+      setState(() => _channels[channelId] = old.copyWith(mediaOnly: newVal));
+    }
+    await crdt_api.setChannelMediaOnly(
+      serverId: widget.serverId,
+      channelId: channelId,
+      mediaOnly: newVal,
+    );
+  }
+
   void _renameChannel(int index, String channelId, String currentName) {
     final controller = TextEditingController(text: currentName);
     showHollowDialog(
@@ -1952,6 +1981,62 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                 ),
               ),
             ],
+            // Slow mode + media-only — text channels (public or private; both
+            // are enforced at send AND ingest so they work for plaintext too).
+            if (!isVoice) ...[
+              const SizedBox(height: HollowSpacing.xs),
+              Padding(
+                padding: const EdgeInsets.only(left: 28),
+                child: Row(
+                  children: [
+                    _MobileSlowModeChip(
+                      seconds: ch?.slowModeSecs ?? 0,
+                      onChanged: (s) => _setChannelSlowMode(item.channelId, s),
+                    ),
+                    const SizedBox(width: HollowSpacing.sm),
+                    HollowPressable(
+                      onTap: () => _toggleChannelMediaOnly(
+                          item.channelId, ch?.mediaOnly ?? false),
+                      semanticLabel: (ch?.mediaOnly ?? false)
+                          ? 'Allow all message types, currently media-only'
+                          : 'Make channel media-only, currently allows all messages',
+                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: (ch?.mediaOnly ?? false)
+                              ? hollow.accent.withValues(alpha: 0.15)
+                              : hollow.border.withValues(alpha: 0.3),
+                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(LucideIcons.image,
+                                size: 12,
+                                color: (ch?.mediaOnly ?? false)
+                                    ? hollow.accent
+                                    : hollow.textSecondary),
+                            const SizedBox(width: 4),
+                            Text(
+                              'Media only',
+                              style: HollowTypography.caption.copyWith(
+                                fontSize: 11,
+                                color: (ch?.mediaOnly ?? false)
+                                    ? hollow.accent
+                                    : hollow.textSecondary,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ],
         ),
       );
@@ -1990,6 +2075,72 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
 /// Compact popup chip for channel visibility or posting access on mobile.
 /// Mirrors the desktop `_AccessChip` (channels_tab): tap → Everyone / Mod+ /
 /// Admin+. Restricted values render in the warning color.
+class _MobileSlowModeChip extends StatelessWidget {
+  final int seconds;
+  final Future<void> Function(int) onChanged;
+
+  const _MobileSlowModeChip({required this.seconds, required this.onChanged});
+
+  static const _options = [0, 5, 10, 30, 60, 300, 900, 3600];
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final active = seconds > 0;
+
+    return PopupMenuButton<int>(
+      tooltip: '',
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(),
+      color: hollow.elevated,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        side: BorderSide(color: hollow.border),
+      ),
+      onSelected: onChanged,
+      itemBuilder: (_) => [
+        for (final s in _options)
+          PopupMenuItem(
+            value: s,
+            child: Text(
+              s == 0 ? 'Off' : slowModeDurationLabel(s),
+              style: HollowTypography.body.copyWith(
+                color: s == seconds ? hollow.accent : hollow.textPrimary,
+                fontWeight: s == seconds ? FontWeight.w600 : FontWeight.w400,
+              ),
+            ),
+          ),
+      ],
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: active
+              ? hollow.warning.withValues(alpha: 0.15)
+              : hollow.border.withValues(alpha: 0.3),
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(LucideIcons.timer,
+                size: 12,
+                color: active ? hollow.warning : hollow.textSecondary),
+            const SizedBox(width: 4),
+            Text(
+              active ? 'Slow ${slowModeDurationLabel(seconds)}' : 'Slow mode',
+              style: HollowTypography.caption.copyWith(
+                fontSize: 11,
+                color: active ? hollow.warning : hollow.textSecondary,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _MobileAccessChip extends StatelessWidget {
   final IconData icon;
   final String value;

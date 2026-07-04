@@ -11,6 +11,12 @@ class ChannelInfo {
   final String posting;
   final bool isPublic;
 
+  /// Slow mode: minimum seconds between messages per member (0 = off).
+  final int slowModeSecs;
+
+  /// Media-only: only images/GIFs/videos (with optional captions) allowed.
+  final bool mediaOnly;
+
   const ChannelInfo({
     required this.channelId,
     required this.name,
@@ -19,6 +25,8 @@ class ChannelInfo {
     this.visibility = 'everyone',
     this.posting = 'everyone',
     this.isPublic = false,
+    this.slowModeSecs = 0,
+    this.mediaOnly = false,
   });
 
   ChannelInfo copyWith({
@@ -29,6 +37,8 @@ class ChannelInfo {
     String? visibility,
     String? posting,
     bool? isPublic,
+    int? slowModeSecs,
+    bool? mediaOnly,
   }) {
     return ChannelInfo(
       channelId: channelId ?? this.channelId,
@@ -38,6 +48,8 @@ class ChannelInfo {
       visibility: visibility ?? this.visibility,
       posting: posting ?? this.posting,
       isPublic: isPublic ?? this.isPublic,
+      slowModeSecs: slowModeSecs ?? this.slowModeSecs,
+      mediaOnly: mediaOnly ?? this.mediaOnly,
     );
   }
 }

@@ -1297,6 +1297,42 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
+                    NodeCommand::MuteMember { server_id, peer_id, expires_at } => {
+                        if sync_handler::handle_mute_member(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &local_peer_str,
+                            server_id, peer_id, expires_at,
+                            &crypto_store, &crdt_store,
+                        ).await { continue; }
+                    }
+
+                    NodeCommand::UnmuteMember { server_id, peer_id } => {
+                        if sync_handler::handle_unmute_member(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &local_peer_str,
+                            server_id, peer_id,
+                            &crypto_store, &crdt_store,
+                        ).await { continue; }
+                    }
+
+                    NodeCommand::SetChannelSlowMode { server_id, channel_id, seconds } => {
+                        if sync_handler::handle_set_channel_slow_mode(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &local_peer_str,
+                            server_id, channel_id, seconds,
+                            &crypto_store, &crdt_store,
+                        ).await { continue; }
+                    }
+
+                    NodeCommand::SetChannelMediaOnly { server_id, channel_id, media_only } => {
+                        if sync_handler::handle_set_channel_media_only(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &local_peer_str,
+                            server_id, channel_id, media_only,
+                            &crypto_store, &crdt_store,
+                        ).await { continue; }
+                    }
+
                     // -- Guest sync commands (Public Channels Phase 3) --
                     NodeCommand::RequestPublicChannels { server_id } => {
                         hollow_log!("[HOLLOW-GUEST] RequestPublicChannels for {server_id}, is_member={}", server_states.contains_key(&server_id));
@@ -6083,6 +6119,32 @@ async fn handle_incoming_request(
                         }
                     }
 
+                    // Moderation trio (receive-side, channel files only): drop files
+                    // from muted members and non-media files headed into a media-only
+                    // channel. Mirrors the MLS twin in file_handler.rs.
+                    if let Some(state) = sid.as_ref().and_then(|s| server_states.get(s)) {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        if state.is_muted(&peer_str, now_ms) {
+                            hollow_log!("[HOLLOW-MOD] DROPPED FileHeader from muted member {peer_str}");
+                            return;
+                        }
+                        if let Some(c) = &cid {
+                            if state.is_channel_media_only(c) {
+                                let is_media = img
+                                    || vthumb.is_some()
+                                    || mime.starts_with("video/")
+                                    || file_transfer::is_image_mime(&mime);
+                                if !is_media {
+                                    hollow_log!("[HOLLOW-MOD] DROPPED non-media FileHeader ({mime}) from {peer_str} in media-only channel {c}");
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
                     let ctx_type = if sid.is_some() { "channel" } else { "dm" };
                     // Multi-device: a DM file's conversation key MUST be the sender's
                     // MASTER id (where the DM message row itself is stored), NOT the
@@ -7427,9 +7489,19 @@ async fn handle_incoming_request(
                         CrdtPayload::MemberUnbanned { .. } => {
                             (sender_perms & Permission::KICK_MEMBERS) != 0
                         }
+                        CrdtPayload::MemberMuted { peer_id, .. } => {
+                            let target_role = state.get_role(peer_id);
+                            (sender_perms & Permission::KICK_MEMBERS) != 0
+                                && sender_role.outranks(&target_role)
+                        }
+                        CrdtPayload::MemberUnmuted { .. } => {
+                            (sender_perms & Permission::KICK_MEMBERS) != 0
+                        }
                         CrdtPayload::ChannelVisibilityChanged { .. }
                         | CrdtPayload::ChannelPostingChanged { .. }
-                        | CrdtPayload::ChannelPublicChanged { .. } => {
+                        | CrdtPayload::ChannelPublicChanged { .. }
+                        | CrdtPayload::ChannelSlowModeChanged { .. }
+                        | CrdtPayload::ChannelMediaOnlyChanged { .. } => {
                             (sender_perms & Permission::MANAGE_CHANNELS) != 0
                         }
                         CrdtPayload::LabelCreated { .. }
@@ -8597,8 +8669,9 @@ async fn handle_incoming_request(
                         match envelope {
                             MessageEnvelope::ChannelMessage { inner } => {
                                 let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us } = *inner;
+                                let mod_state = server_states.get(&sid);
                                 message_ops::handle_envelope_channel_message(
-                                    event_tx, bundle_keypair, &local_peer,
+                                    event_tx, bundle_keypair, mod_state, &local_peer,
                                     sender_master.clone(), sid, cid, text, ts,
                                     sig, pk, mid, reply_to, file_id, link_preview, order_us,
                                     db_path, db_passphrase,
@@ -10015,7 +10088,7 @@ async fn handle_incoming_request(
             // path. Single-device senders resolve to themselves (no-op).
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_channel_message(
-                &event_tx, &bundle_keypair, &local_peer_str,
+                &event_tx, &bundle_keypair, server_states.get(&server_id), &local_peer_str,
                 sender_master,
                 server_id, channel_id, text, ts, sig, pk,
                 Some(mid), reply_to, file_id, link_preview, None,

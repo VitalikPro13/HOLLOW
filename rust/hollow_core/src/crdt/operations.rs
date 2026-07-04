@@ -153,6 +153,27 @@ pub enum CrdtPayload {
     MemberUnbanned {
         peer_id: String,
     },
+
+    // Moderation trio (mute / slow mode / media-only)
+    /// Server-wide mute (read-only member). `expires_at` = epoch ms;
+    /// `u64::MAX` = permanent.
+    MemberMuted {
+        peer_id: String,
+        expires_at: u64,
+    },
+    MemberUnmuted {
+        peer_id: String,
+    },
+    /// Per-channel slow mode: min seconds between posts per member (0 = off).
+    ChannelSlowModeChanged {
+        channel_id: String,
+        seconds: u32,
+    },
+    /// Per-channel media-only: only image/video/GIF attachments allowed.
+    ChannelMediaOnlyChanged {
+        channel_id: String,
+        media_only: bool,
+    },
 }
 
 /// Member roles with hierarchical priority.

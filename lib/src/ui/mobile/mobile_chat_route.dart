@@ -11,6 +11,7 @@ import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -102,6 +103,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   final _editController = TextEditingController();
   final _editFocusNode = FocusNode();
   DateTime? _lastTypingSent;
+  /// Slow mode: earliest time the next send is allowed (null = no cooldown).
+  DateTime? _slowModeReadyAt;
+  Timer? _slowModeTimer;
   bool _isInAutoScrollZone = true;
   String? _stagedFilePath;
   String? _stagedFileName;
@@ -223,6 +227,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           setState(() {});
           _jumpToBottom();
           _markSeen();
+          // Re-derive the slow-mode cooldown from the freshly loaded history
+          // (the route remounts per open — pill state is gone, history isn't).
+          _recomputeSlowMode();
         }
       });
     }
@@ -231,6 +238,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   @override
   void dispose() {
     _urlDebounce?.cancel();
+    _slowModeTimer?.cancel();
     _controller.dispose();
     _focusNode.dispose();
     _editController.dispose();
@@ -582,12 +590,97 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
+  /// The channel's slow-mode interval, or 0 when off / DM / Moderator+.
+  int get _effectiveSlowModeSecs {
+    if (widget.isDm) return 0;
+    final slow = ref
+            .read(channelListProvider)[widget.channelId!]?.slowModeSecs ?? 0;
+    if (slow == 0) return 0;
+    final role =
+        ref.read(myRoleProvider(widget.serverId!)).valueOrNull ?? 'member';
+    const exempt = {'owner', 'admin', 'moderator'};
+    return exempt.contains(role) ? 0 : slow;
+  }
+
+  bool get _channelMediaOnly => !widget.isDm &&
+      (ref.read(channelListProvider)[widget.channelId!]?.mediaOnly ?? false);
+
+  /// The DERIVED slow-mode cooldown for this channel right now — my newest
+  /// message's timestamp + the interval, straight from the loaded list. Never
+  /// widget state: survives route re-opens and always matches the Rust gate.
+  DateTime? _derivedSlowModeReadyAt() {
+    if (widget.isDm) return null;
+    final msgs = ref.read(channelChatProvider)[_channelKey] ?? const [];
+    return slowModeReadyAtFrom(msgs, _effectiveSlowModeSecs);
+  }
+
+  /// True (and toasts) when the slow-mode cooldown blocks a send right now.
+  bool _blockedBySlowMode() {
+    final readyAt = _derivedSlowModeReadyAt();
+    if (readyAt == null) return false;
+    final remaining = readyAt.difference(DateTime.now());
+    HollowToast.show(
+      context,
+      'Slow mode — wait ${remaining.inSeconds + 1}s before sending again',
+      type: HollowToastType.info,
+    );
+    return true;
+  }
+
+  /// Re-derives the cooldown (pill state) and keeps a 1s ticker running while
+  /// it's active. Called on mount, on every message-list change (my optimistic
+  /// send lands there too), and by the ticker itself until expiry.
+  void _recomputeSlowMode() {
+    if (!mounted) return;
+    final ready = _derivedSlowModeReadyAt();
+    if (ready != _slowModeReadyAt) {
+      setState(() => _slowModeReadyAt = ready);
+    }
+    _slowModeTimer?.cancel();
+    if (ready != null) {
+      _slowModeTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+        if (!mounted) {
+          t.cancel();
+          return;
+        }
+        if (!DateTime.now().isBefore(_slowModeReadyAt ?? DateTime.now())) {
+          t.cancel();
+          _recomputeSlowMode(); // derives null → clears the pill
+        } else {
+          setState(() {});
+        }
+      });
+    }
+  }
+
   Future<void> _handleSend() async {
     final text = _controller.text.trim();
     final filePath = _stagedFilePath;
     final preview = _stagedPreview;
 
     if (text.isEmpty && filePath == null) return;
+    if (_blockedBySlowMode()) return;
+    if (_channelMediaOnly) {
+      if (filePath == null) {
+        HollowToast.show(
+          context,
+          'This is a media-only channel — attach an image, GIF, or video',
+          type: HollowToastType.info,
+        );
+        return;
+      }
+      final stagedExt = (_stagedFileName ?? '').contains('.')
+          ? _stagedFileName!.split('.').last.toLowerCase()
+          : '';
+      if (!kMediaOnlyExtensions.contains(stagedExt)) {
+        HollowToast.show(
+          context,
+          'This is a media-only channel — only images, GIFs, and videos can be posted',
+          type: HollowToastType.info,
+        );
+        return;
+      }
+    }
     _controller.clear();
     _lastTypingSent = null;
     _focusNode.requestFocus();
@@ -649,8 +742,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   Future<void> _pickFile({bool imagesOnly = false}) async {
+    // Media-only channels: restrict the picker to what the channel accepts.
     final result = await FilePicker.platform.pickFiles(
-      type: imagesOnly ? FileType.image : FileType.any,
+      type: imagesOnly
+          ? FileType.image
+          : (_channelMediaOnly ? FileType.custom : FileType.any),
+      allowedExtensions: !imagesOnly && _channelMediaOnly
+          ? kMediaOnlyExtensions.toList()
+          : null,
     );
     if (result == null || result.files.isEmpty) return;
     final file = result.files.first;
@@ -1146,11 +1245,38 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                   _stagedFileIsImage = false;
                 }),
               ),
+            // Slow-mode countdown pill (mirrors the desktop pill by the send button).
+            if (!widget.isDm && _slowModeReadyAt != null)
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.md,
+                  vertical: HollowSpacing.xs,
+                ),
+                color: hollow.surface,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(LucideIcons.timer, size: 12, color: hollow.warning),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Slow mode — ${(_slowModeReadyAt!.difference(DateTime.now()).inSeconds + 1).clamp(1, 3600)}s',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.warning,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             if (!widget.isDm &&
-                !ref.watch(canPostInChannelProvider((
-                  serverId: widget.serverId!,
-                  channelId: widget.channelId!,
-                ))))
+                (!ref.watch(canPostInChannelProvider((
+                      serverId: widget.serverId!,
+                      channelId: widget.channelId!,
+                    ))) ||
+                    muteBannerText(ref
+                            .watch(myMuteStatusProvider(widget.serverId!))
+                            .valueOrNull) !=
+                        null))
               Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.md,
@@ -1162,7 +1288,10 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                 ),
                 child: Center(
                   child: Text(
-                    'You don\'t have permission to send messages in this channel',
+                    muteBannerText(ref
+                            .watch(myMuteStatusProvider(widget.serverId!))
+                            .valueOrNull) ??
+                        'You don\'t have permission to send messages in this channel',
                     style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
                   ),
                 ),
@@ -1187,7 +1316,19 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                     onAttach: _showAttachSheet,
                     onMic: _stagedFilePath != null
                         ? null
-                        : () => setState(() => _isRecordingVoice = true),
+                        : () {
+                            // Voice notes are audio, not media — blocked in
+                            // media-only channels (toast, don't record).
+                            if (_channelMediaOnly) {
+                              HollowToast.show(
+                                context,
+                                'This is a media-only channel — voice messages can\'t be posted here',
+                                type: HollowToastType.info,
+                              );
+                              return;
+                            }
+                            setState(() => _isRecordingVoice = true);
+                          },
                     onEmoji: _showEmojiSheet,
                     onChanged: _onTextChanged,
                     hasStagedFile: _stagedFilePath != null,
@@ -1500,6 +1641,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       final prevLen = (prev?[_channelKey] ?? const []).length;
       final nextLen = (next[_channelKey] ?? const []).length;
       if (nextLen <= prevLen) return;
+      // Slow mode: my optimistic send (and sibling-device sends) land here —
+      // re-derive the cooldown pill from the list, never from send-time state.
+      _recomputeSlowMode();
       if (_frozenLen != null) return; // frozen — held back + pill
       if (!_isInAutoScrollZone) {
         _frozenLen = prevLen;

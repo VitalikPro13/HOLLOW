@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
+import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
@@ -100,6 +101,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   String? _replyToSenderName;
   String? _replyToImagePath;
   DateTime? _lastTypingSent;
+  /// Slow mode: earliest time the next send is allowed (null = no cooldown).
+  DateTime? _slowModeReadyAt;
+  Timer? _slowModeTimer;
   int? _highlightIndex;
   final _searchController = TextEditingController();
   List<dynamic> _searchResults = [];
@@ -138,6 +142,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         ref.read(channelSearchOpenProvider.notifier).state = false;
+        // Re-derive the slow-mode cooldown for THIS channel (the pane remounts
+        // per channel — the previous pane's ephemeral pill state is gone, but
+        // the message history isn't).
+        _recomputeSlowMode();
       }
     });
     _loadHistory();
@@ -239,6 +247,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   void dispose() {
     _dismissMentionOverlay();
     _urlDebounce?.cancel();
+    _slowModeTimer?.cancel();
     _fileRequestDebounce?.cancel();
     _itemPositionsListener.itemPositions.removeListener(_onScrollPositionChanged);
     _controller.dispose();
@@ -796,8 +805,79 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     }
   }
 
+  /// Extensions the chat renders inline — the only types a media-only
+  /// channel accepts (matches the Rust-side ingest gate).
+  static const _mediaExtensions = kMediaOnlyExtensions;
+
+  /// The channel's slow-mode interval, or 0 when off / when the local user
+  /// is Moderator+ (exempt — mirrors the Rust rule).
+  int get _effectiveSlowModeSecs {
+    final slow = ref
+            .read(channelListProvider)[widget.channelId]?.slowModeSecs ?? 0;
+    if (slow == 0) return 0;
+    final role =
+        ref.read(myRoleProvider(widget.serverId)).valueOrNull ?? 'member';
+    const exempt = {'owner', 'admin', 'moderator'};
+    return exempt.contains(role) ? 0 : slow;
+  }
+
+  bool get _channelMediaOnly =>
+      ref.read(channelListProvider)[widget.channelId]?.mediaOnly ?? false;
+
+  /// Banner text when the local user is muted (null = not muted / expired).
+  String? _muteBannerText(crdt_api.MutedMemberFfi? mute) =>
+      muteBannerText(mute);
+
+  /// The DERIVED slow-mode cooldown for this channel right now — my newest
+  /// message's timestamp + the interval, straight from the loaded list. Never
+  /// widget state: survives channel switches and always matches the Rust gate.
+  DateTime? _derivedSlowModeReadyAt() {
+    final msgs = ref.read(channelChatProvider)[_stateKey] ?? const [];
+    return slowModeReadyAtFrom(msgs, _effectiveSlowModeSecs);
+  }
+
+  /// True (and toasts) when the slow-mode cooldown blocks a send right now.
+  bool _blockedBySlowMode() {
+    final readyAt = _derivedSlowModeReadyAt();
+    if (readyAt == null) return false;
+    final remaining = readyAt.difference(DateTime.now());
+    HollowToast.show(
+      context,
+      'Slow mode — wait ${remaining.inSeconds + 1}s before sending again',
+      type: HollowToastType.info,
+    );
+    return true;
+  }
+
+  /// Re-derives the cooldown (pill state) and keeps a 1s ticker running while
+  /// it's active. Called on mount, on every message-list change (my optimistic
+  /// send lands there too), and by the ticker itself until expiry.
+  void _recomputeSlowMode() {
+    if (!mounted) return;
+    final ready = _derivedSlowModeReadyAt();
+    if (ready != _slowModeReadyAt) {
+      setState(() => _slowModeReadyAt = ready);
+    }
+    _slowModeTimer?.cancel();
+    if (ready != null) {
+      _slowModeTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+        if (!mounted) {
+          t.cancel();
+          return;
+        }
+        if (!DateTime.now().isBefore(_slowModeReadyAt ?? DateTime.now())) {
+          t.cancel();
+          _recomputeSlowMode(); // derives null → clears the pill
+        } else {
+          setState(() {}); // tick the countdown pill
+        }
+      });
+    }
+  }
+
   Future<void> _handleSend() async {
     _dismissMentionOverlay();
+    if (_blockedBySlowMode()) return;
     // If a file is staged, send it (with optional text).
     if (_stagedFilePath != null) {
       await _sendStagedFile();
@@ -805,6 +885,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     }
     final text = _controller.text.trim();
     if (text.isEmpty) return;
+    if (_channelMediaOnly) {
+      HollowToast.show(
+        context,
+        'This is a media-only channel — attach an image, GIF, or video',
+        type: HollowToastType.info,
+      );
+      return;
+    }
     _controller.clear();
     _lastTypingSent = null;
     _focusNode.requestFocus();
@@ -826,6 +914,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         .read(channelChatProvider.notifier)
         .sendMessage(widget.serverId, widget.channelId, text,
             replyToMid: replyMid, linkPreview: preview);
+    _recomputeSlowMode();
     _scrollToBottom();
   }
 
@@ -851,6 +940,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       if (!ok || !mounted) return;
     }
     final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
+    if (_channelMediaOnly && !_mediaExtensions.contains(ext)) {
+      HollowToast.show(
+        context,
+        'This is a media-only channel — only images, GIFs, and videos can be posted',
+        type: HollowToastType.info,
+      );
+      return;
+    }
     setState(() {
       _stagedFilePath = path;
       _stagedFileName = name;
@@ -864,7 +961,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     if (_isPicking) return;
     _isPicking = true;
     try {
-      final result = await FilePicker.platform.pickFiles();
+      // Media-only channels: restrict the native picker to what the channel
+      // accepts (images/GIFs/videos) instead of failing after selection.
+      final result = _channelMediaOnly
+          ? await FilePicker.platform.pickFiles(
+              type: FileType.custom,
+              allowedExtensions: _mediaExtensions.toList(),
+            )
+          : await FilePicker.platform.pickFiles();
       if (result == null || result.files.isEmpty) { _isPicking = false; return; }
       final file = result.files.first;
       if (file.path == null) { _isPicking = false; return; }
@@ -939,6 +1043,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         : '';
     final isImage = _stagedFileIsImage;
 
+    if (_channelMediaOnly && !_mediaExtensions.contains(ext)) {
+      HollowToast.show(
+        context,
+        'This is a media-only channel — only images, GIFs, and videos can be posted',
+        type: HollowToastType.info,
+      );
+      return;
+    }
+
     // Clear staged state + input.
     setState(() {
       _stagedFilePath = null;
@@ -969,6 +1082,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           messageText: messageText,
           memberCount: members?.length ?? 0,
         );
+    _recomputeSlowMode();
 
     // Clean up voice recording temp files after successful send.
     if (fileName.endsWith('.ogg') && filePath.contains('temp')) {
@@ -1275,6 +1389,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     // rebuild this whole pane (the map is replaced wholesale per insert).
     final allMessages =
         ref.watch(channelChatProvider.select((m) => m[_stateKey])) ?? [];
+    // Slow mode: the cooldown is derived from my newest message in this list
+    // (history load, my optimistic send, sibling-device sends all count).
+    ref.listen<List<ChannelChatMessage>?>(
+        channelChatProvider.select((m) => m[_stateKey]),
+        (_, __) => _recomputeSlowMode());
     // While the user reads history the display is frozen — arrivals are held
     // back (see the reversed-list scroll model above).
     final messages = _displayMessages(allMessages);
@@ -2259,8 +2378,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             },
           ),
 
-        // Input bar — hidden if no posting permission
-        if (!ref.watch(canPostInChannelProvider((serverId: widget.serverId, channelId: widget.channelId))))
+        // Input bar — hidden if no posting permission or when muted
+        if (!ref.watch(canPostInChannelProvider((serverId: widget.serverId, channelId: widget.channelId))) ||
+            ref.watch(myMuteStatusProvider(widget.serverId)).valueOrNull != null)
           Container(
             padding: const EdgeInsets.symmetric(
               horizontal: HollowSpacing.md,
@@ -2272,7 +2392,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             ),
             child: Center(
               child: Text(
-                'You don\'t have permission to send messages in this channel',
+                _muteBannerText(
+                    ref.watch(myMuteStatusProvider(widget.serverId)).valueOrNull) ??
+                    'You don\'t have permission to send messages in this channel',
                 style: HollowTypography.bodySmall.copyWith(
                   color: hollow.textSecondary,
                 ),
@@ -2320,7 +2442,19 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                       semanticLabel: 'Record voice message',
                       onTap: _stagedFilePath != null
                           ? null
-                          : () => setState(() => _isRecordingVoice = true),
+                          : () {
+                              // Voice notes are audio, not media — blocked in
+                              // media-only channels (toast, don't record).
+                              if (_channelMediaOnly) {
+                                HollowToast.show(
+                                  context,
+                                  'This is a media-only channel — voice messages can\'t be posted here',
+                                  type: HollowToastType.info,
+                                );
+                                return;
+                              }
+                              setState(() => _isRecordingVoice = true);
+                            },
                       borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.sm),
                       child: Icon(
@@ -2399,6 +2533,32 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                       ),
                     ),
                     const SizedBox(width: HollowSpacing.sm),
+                    if (_slowModeReadyAt != null) ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: hollow.warning.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(LucideIcons.timer,
+                                size: 12, color: hollow.warning),
+                            const SizedBox(width: 3),
+                            Text(
+                              '${(_slowModeReadyAt!.difference(DateTime.now()).inSeconds + 1).clamp(1, 3600)}s',
+                              style: HollowTypography.caption.copyWith(
+                                color: hollow.warning,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: HollowSpacing.xs),
+                    ],
                     HollowPressable(
                       semanticLabel: 'Send message',
                       onTap: _handleSend,

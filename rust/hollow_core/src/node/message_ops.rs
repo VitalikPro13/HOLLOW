@@ -485,6 +485,39 @@ pub(crate) async fn handle_send_channel_message(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
+
+    // Moderation trio gates (mute / media-only / slow mode). Receivers drop
+    // violations too — these are the cooperative-client fast-fail path.
+    if server.is_muted(local_peer_str, now.as_millis() as u64) {
+        let _ = event_tx.send(NetworkEvent::Error {
+            message: "You are muted on this server".to_string(),
+        }).await;
+        return;
+    }
+    if server.is_channel_media_only(&channel_id) {
+        // Standalone text is rejected; captions ride the file send path.
+        let _ = event_tx.send(NetworkEvent::Error {
+            message: "This is a media-only channel — attach an image, GIF, or video".to_string(),
+        }).await;
+        return;
+    }
+    let slow = server.channel_slow_mode(&channel_id);
+    if slow > 0 && !server.bypasses_slow_mode(local_peer_str) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            if let Some(last_ts) = store.latest_own_channel_ts(&server_id, &channel_id) {
+                let next_allowed = last_ts + (slow as i64) * 1000;
+                let now_ms = now.as_millis() as i64;
+                if now_ms < next_allowed {
+                    let wait_s = ((next_allowed - now_ms) + 999) / 1000;
+                    let _ = event_tx.send(NetworkEvent::Error {
+                        message: format!("Slow mode is on — wait {wait_s}s before sending again"),
+                    }).await;
+                    return;
+                }
+            }
+        }
+    }
+
     let timestamp = now.as_millis() as i64;
     // Microsecond send timestamp for stable ordering (Step 9C/C4) — see the DM send.
     let order_us = now.as_micros() as i64;
@@ -1643,6 +1676,7 @@ pub(crate) async fn handle_remove_dm_reaction(
 pub(crate) async fn handle_envelope_channel_message(
     event_tx: &mpsc::Sender<NetworkEvent>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    server_state: Option<&ServerState>,
     local_peer: &str,
     sender_peer_id: String,
     sid: String,
@@ -1682,6 +1716,36 @@ pub(crate) async fn handle_envelope_channel_message(
 
     // Multi-device: a message from ANY of our own devices is ours.
     let is_mine = super::resolver::same_identity(&sender_peer_id, local_peer);
+
+    // Moderation trio (receive-side): drop LIVE messages that violate the
+    // channel's rules so a modified client can't bypass what receivers
+    // refuse to store. Sync backfill intentionally skips these gates —
+    // history may legitimately predate a mute / slow-mode / media-only
+    // change, and dropping it there would diverge stored history.
+    if let Some(state) = server_state {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if state.is_muted(&sender_peer_id, now_ms) {
+            hollow_log!("[HOLLOW-MOD] DROPPED channel message from muted member {sender_peer_id} in {sid}");
+            return;
+        }
+        if state.is_channel_media_only(&cid) && file_id.is_none() {
+            hollow_log!("[HOLLOW-MOD] DROPPED text-only message from {sender_peer_id} in media-only channel {cid}");
+            return;
+        }
+        let slow = state.channel_slow_mode(&cid);
+        if slow > 0 && !state.bypasses_slow_mode(&sender_peer_id) {
+            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                let window_start = ts - (slow as i64) * 1000;
+                if store.channel_sender_has_msg_in_range(&sid, &cid, &sender_peer_id, window_start, ts) {
+                    hollow_log!("[HOLLOW-MOD] DROPPED slow-mode violation from {sender_peer_id} in {cid} (window {slow}s)");
+                    return;
+                }
+            }
+        }
+    }
 
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         // Dedup by message_id (replays); the content UNIQUE index is

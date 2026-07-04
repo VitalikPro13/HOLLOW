@@ -1355,6 +1355,242 @@ broadcast_crdt_op_to_members(
     false
 }
 
+// ── 10d-bis. Moderation trio: mute / slow mode / media-only ──────────
+
+/// Server-wide mute (read-only member). `expires_at` = epoch ms, u64::MAX = permanent.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_mute_member(
+    server_states: &mut HashMap<String, ServerState>,
+    mls: &mut Option<MlsManager>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    server_id: String,
+    peer_id: String,
+    expires_at: u64,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+) -> bool {
+    if let Some(state) = server_states.get_mut(&server_id) {
+        let local_peer = local_peer_str.to_string();
+        // Mutes are master-keyed (multi-device): normalize if a device id slipped in.
+        let target_master = super::resolver::resolve(&peer_id);
+
+        if !state.can_mute(&local_peer, &target_master) {
+            hollow_log!("[HOLLOW-CRDT] Permission denied: cannot mute {target_master} in {server_id}");
+            let _ = event_tx.send(NetworkEvent::Error {
+                message: "Permission denied: cannot mute this member".to_string(),
+            }).await;
+            return true;
+        }
+
+        hollow_log!("[HOLLOW-CRDT] Muting member {target_master} in {server_id} until {expires_at}");
+        let op = state.create_op(CrdtPayload::MemberMuted {
+            peer_id: target_master,
+            expires_at,
+        });
+        let _ = state.apply_op(&op);
+
+        crdt_store.insert_op(op.clone());
+        crdt_store.save_state_snapshot(server_id.clone(), state);
+
+        let _ = event_tx.send(NetworkEvent::ServerUpdated {
+            server_id: server_id.clone(),
+        }).await;
+
+        if let Ok(op_json) = serde_json::to_string(&op) {
+            let mut sent_via_mls = false;
+            let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+            if mls_ok {
+                let envelope = MessageEnvelope::CrdtOp { sid: server_id.clone(), op_json: op_json.clone() };
+                match send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store) {
+                    Ok(()) => { sent_via_mls = true; }
+                    Err(e) => {
+                        hollow_log!("[HOLLOW-MLS] CrdtOp broadcast failed, falling back to plaintext: {e}");
+                    }
+                }
+            }
+            // Always ALSO broadcast plaintext (idempotent; guarantees convergence
+            // at skewed MLS epochs — see handle_unban_member).
+            {
+                let _ = sent_via_mls;
+                broadcast_crdt_op_to_members(
+                    ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                )
+            }
+        }
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_unmute_member(
+    server_states: &mut HashMap<String, ServerState>,
+    mls: &mut Option<MlsManager>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    server_id: String,
+    peer_id: String,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+) -> bool {
+    if let Some(state) = server_states.get_mut(&server_id) {
+        let local_peer = local_peer_str.to_string();
+        let target_master = super::resolver::resolve(&peer_id);
+
+        if !state.has_permission(&local_peer, Permission::KICK_MEMBERS) {
+            hollow_log!("[HOLLOW-CRDT] Permission denied: cannot unmute {target_master} in {server_id}");
+            let _ = event_tx.send(NetworkEvent::Error {
+                message: "Permission denied: cannot unmute members".to_string(),
+            }).await;
+            return true;
+        }
+
+        hollow_log!("[HOLLOW-CRDT] Unmuting member {target_master} in {server_id}");
+        let op = state.create_op(CrdtPayload::MemberUnmuted {
+            peer_id: target_master,
+        });
+        let _ = state.apply_op(&op);
+
+        crdt_store.insert_op(op.clone());
+        crdt_store.save_state_snapshot(server_id.clone(), state);
+
+        let _ = event_tx.send(NetworkEvent::ServerUpdated {
+            server_id: server_id.clone(),
+        }).await;
+
+        if let Ok(op_json) = serde_json::to_string(&op) {
+            let mut sent_via_mls = false;
+            let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+            if mls_ok {
+                let envelope = MessageEnvelope::CrdtOp { sid: server_id.clone(), op_json: op_json.clone() };
+                match send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store) {
+                    Ok(()) => { sent_via_mls = true; }
+                    Err(e) => {
+                        hollow_log!("[HOLLOW-MLS] CrdtOp broadcast failed, falling back to plaintext: {e}");
+                    }
+                }
+            }
+            {
+                let _ = sent_via_mls;
+                broadcast_crdt_op_to_members(
+                    ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                )
+            }
+        }
+    }
+    false
+}
+
+/// Shared body for the two per-channel moderation setters (slow mode /
+/// media-only): MANAGE_CHANNELS gate → op → persist → ServerUpdated → broadcast.
+#[allow(clippy::too_many_arguments)]
+async fn handle_channel_moderation_change(
+    server_states: &mut HashMap<String, ServerState>,
+    mls: &mut Option<MlsManager>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    server_id: String,
+    payload: CrdtPayload,
+    log_label: &str,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+) -> bool {
+    if let Some(state) = server_states.get_mut(&server_id) {
+        let local_peer = local_peer_str.to_string();
+        if !state.has_permission(&local_peer, Permission::MANAGE_CHANNELS) {
+            hollow_log!("[HOLLOW-CRDT] Permission denied: cannot set {log_label} in {server_id}");
+            let _ = event_tx.send(NetworkEvent::Error {
+                message: "Permission denied: cannot manage channels".to_string(),
+            }).await;
+            return true;
+        }
+
+        hollow_log!("[HOLLOW-CRDT] Setting {log_label} in {server_id}");
+        let op = state.create_op(payload);
+        let _ = state.apply_op(&op);
+
+        crdt_store.insert_op(op.clone());
+        crdt_store.save_state_snapshot(server_id.clone(), state);
+
+        let _ = event_tx.send(NetworkEvent::ServerUpdated {
+            server_id: server_id.clone(),
+        }).await;
+
+        if let Ok(op_json) = serde_json::to_string(&op) {
+            let mut sent_via_mls = false;
+            let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+            if mls_ok {
+                let envelope = MessageEnvelope::CrdtOp { sid: server_id.clone(), op_json: op_json.clone() };
+                match send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store) {
+                    Ok(()) => { sent_via_mls = true; }
+                    Err(e) => {
+                        hollow_log!("[HOLLOW-MLS] CrdtOp broadcast failed, falling back to plaintext: {e}");
+                    }
+                }
+            }
+            {
+                let _ = sent_via_mls;
+                broadcast_crdt_op_to_members(
+                    ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                )
+            }
+        }
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_set_channel_slow_mode(
+    server_states: &mut HashMap<String, ServerState>,
+    mls: &mut Option<MlsManager>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    server_id: String,
+    channel_id: String,
+    seconds: u32,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+) -> bool {
+    handle_channel_moderation_change(
+        server_states, mls, event_tx, ws_cmd_tx, ws_room_peers, local_peer_str,
+        server_id,
+        CrdtPayload::ChannelSlowModeChanged { channel_id: channel_id.clone(), seconds },
+        &format!("slow_mode={seconds}s on {channel_id}"),
+        crypto_store, crdt_store,
+    ).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_set_channel_media_only(
+    server_states: &mut HashMap<String, ServerState>,
+    mls: &mut Option<MlsManager>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    server_id: String,
+    channel_id: String,
+    media_only: bool,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+) -> bool {
+    handle_channel_moderation_change(
+        server_states, mls, event_tx, ws_cmd_tx, ws_room_peers, local_peer_str,
+        server_id,
+        CrdtPayload::ChannelMediaOnlyChanged { channel_id: channel_id.clone(), media_only },
+        &format!("media_only={media_only} on {channel_id}"),
+        crypto_store, crdt_store,
+    ).await
+}
+
 // ── 10e. Label operations ────────────────────────────────────────────
 
 pub(crate) async fn handle_label_op(
@@ -2329,9 +2565,19 @@ pub(crate) async fn handle_envelope_crdt_op(
             CrdtPayload::MemberUnbanned { .. } => {
                 (sender_perms & Permission::KICK_MEMBERS) != 0
             }
+            CrdtPayload::MemberMuted { peer_id, .. } => {
+                let target_role = state.get_role(peer_id);
+                (sender_perms & Permission::KICK_MEMBERS) != 0
+                    && sender_role.outranks(&target_role)
+            }
+            CrdtPayload::MemberUnmuted { .. } => {
+                (sender_perms & Permission::KICK_MEMBERS) != 0
+            }
             CrdtPayload::ChannelVisibilityChanged { .. }
             | CrdtPayload::ChannelPostingChanged { .. }
-            | CrdtPayload::ChannelPublicChanged { .. } => {
+            | CrdtPayload::ChannelPublicChanged { .. }
+            | CrdtPayload::ChannelSlowModeChanged { .. }
+            | CrdtPayload::ChannelMediaOnlyChanged { .. } => {
                 (sender_perms & Permission::MANAGE_CHANNELS) != 0
             }
             CrdtPayload::LabelCreated { .. }
@@ -2425,8 +2671,12 @@ pub(crate) async fn handle_envelope_crdt_op(
             | CrdtPayload::RolePermissionsChanged { .. }
             | CrdtPayload::MemberBanned { .. }
             | CrdtPayload::MemberUnbanned { .. }
+            | CrdtPayload::MemberMuted { .. }
+            | CrdtPayload::MemberUnmuted { .. }
             | CrdtPayload::ChannelVisibilityChanged { .. }
             | CrdtPayload::ChannelPostingChanged { .. }
+            | CrdtPayload::ChannelSlowModeChanged { .. }
+            | CrdtPayload::ChannelMediaOnlyChanged { .. }
             | CrdtPayload::LabelCreated { .. }
             | CrdtPayload::LabelDeleted { .. }
             | CrdtPayload::LabelUpdated { .. }

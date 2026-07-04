@@ -2,6 +2,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
+import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -523,6 +524,31 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
                         visibility: info?.visibility ?? 'everyone',
                         posting: info?.posting ?? 'everyone',
                         isPublic: info?.isPublic ?? false,
+                        slowModeSecs: info?.slowModeSecs ?? 0,
+                        mediaOnly: info?.mediaOnly ?? false,
+                        onSlowModeChanged: (secs) async {
+                          ref.read(channelListProvider.notifier).updateChannel(
+                            item.channelId,
+                            (ch) => ch.copyWith(slowModeSecs: secs),
+                          );
+                          await crdt_api.setChannelSlowMode(
+                            serverId: widget.serverId,
+                            channelId: item.channelId,
+                            seconds: secs,
+                          );
+                        },
+                        onMediaOnlyToggled: () {
+                          final newVal = !(info?.mediaOnly ?? false);
+                          ref.read(channelListProvider.notifier).updateChannel(
+                            item.channelId,
+                            (ch) => ch.copyWith(mediaOnly: newVal),
+                          );
+                          crdt_api.setChannelMediaOnly(
+                            serverId: widget.serverId,
+                            channelId: item.channelId,
+                            mediaOnly: newVal,
+                          ).catchError((_) {});
+                        },
                         onVisibilityChanged: (v) async {
                           ref.read(channelListProvider.notifier).updateChannel(
                             item.channelId,
@@ -693,13 +719,17 @@ class _ChannelRow extends StatelessWidget {
   final VoidCallback onRename;
   final VoidCallback onDelete;
   final VoidCallback onPublicToggled;
+  final VoidCallback onMediaOnlyToggled;
   final Future<void> Function(String) onVisibilityChanged;
   final Future<void> Function(String) onPostingChanged;
+  final Future<void> Function(int) onSlowModeChanged;
   final String serverId;
   final String channelId;
   final String visibility;
   final String posting;
   final bool isPublic;
+  final int slowModeSecs;
+  final bool mediaOnly;
 
   const _ChannelRow({
     super.key,
@@ -711,13 +741,17 @@ class _ChannelRow extends StatelessWidget {
     required this.onRename,
     required this.onDelete,
     required this.onPublicToggled,
+    required this.onMediaOnlyToggled,
     required this.onVisibilityChanged,
     required this.onPostingChanged,
+    required this.onSlowModeChanged,
     required this.serverId,
     required this.channelId,
     this.visibility = 'everyone',
     this.posting = 'everyone',
     this.isPublic = false,
+    this.slowModeSecs = 0,
+    this.mediaOnly = false,
   });
 
   @override
@@ -784,6 +818,27 @@ class _ChannelRow extends StatelessWidget {
                     value: posting,
                     onChanged: onPostingChanged,
                   ),
+                  if (!isVoice) ...[
+                    const SizedBox(width: 4),
+                    _SlowModeChip(
+                      seconds: slowModeSecs,
+                      onChanged: onSlowModeChanged,
+                    ),
+                    const SizedBox(width: 4),
+                    HollowPressable(
+                      onTap: onMediaOnlyToggled,
+                      semanticLabel: mediaOnly
+                          ? 'Allow all message types, currently media-only'
+                          : 'Make channel media-only, currently allows all messages',
+                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      padding: const EdgeInsets.all(HollowSpacing.xs),
+                      child: Icon(
+                        LucideIcons.image,
+                        size: 14,
+                        color: mediaOnly ? hollow.accent : hollow.textSecondary,
+                      ),
+                    ),
+                  ],
                   const SizedBox(width: 4),
                   HollowPressable(
                     onTap: onPublicToggled,
@@ -1038,6 +1093,72 @@ class _AccessChip extends StatelessWidget {
         style: HollowTypography.body.copyWith(
           color: selected ? hollow.accent : hollow.textPrimary,
           fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+        ),
+      ),
+    );
+  }
+}
+
+/// The slow-mode duration options offered in channel settings.
+const kSlowModeOptions = [0, 5, 10, 30, 60, 300, 900, 3600];
+
+class _SlowModeChip extends StatelessWidget {
+  final int seconds;
+  final Future<void> Function(int) onChanged;
+
+  const _SlowModeChip({required this.seconds, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final active = seconds > 0;
+
+    return PopupMenuButton<int>(
+      tooltip: '',
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(),
+      color: hollow.elevated,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        side: BorderSide(color: hollow.border),
+      ),
+      onSelected: onChanged,
+      itemBuilder: (_) => [
+        for (final s in kSlowModeOptions)
+          PopupMenuItem(
+            value: s,
+            child: Text(
+              s == 0 ? 'Off' : slowModeDurationLabel(s),
+              style: HollowTypography.body.copyWith(
+                color: s == seconds ? hollow.accent : hollow.textPrimary,
+                fontWeight: s == seconds ? FontWeight.w600 : FontWeight.w400,
+              ),
+            ),
+          ),
+      ],
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: active
+              ? hollow.warning.withValues(alpha: 0.15)
+              : hollow.border.withValues(alpha: 0.3),
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(LucideIcons.timer, size: 10,
+                color: active ? hollow.warning : hollow.textSecondary),
+            const SizedBox(width: 3),
+            Text(
+              slowModeDurationLabel(seconds),
+              style: TextStyle(
+                fontSize: 10,
+                color: active ? hollow.warning : hollow.textSecondary,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
         ),
       ),
     );

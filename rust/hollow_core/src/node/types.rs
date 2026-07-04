@@ -562,6 +562,10 @@ pub(crate) enum NodeCommand {
     SetChannelVisibility { server_id: String, channel_id: String, visibility: String },
     SetChannelPosting { server_id: String, channel_id: String, posting: String },
     SetChannelPublic { server_id: String, channel_id: String, is_public: bool },
+    MuteMember { server_id: String, peer_id: String, expires_at: u64 },
+    UnmuteMember { server_id: String, peer_id: String },
+    SetChannelSlowMode { server_id: String, channel_id: String, seconds: u32 },
+    SetChannelMediaOnly { server_id: String, channel_id: String, media_only: bool },
     // -- Guest sync commands (Public Channels Phase 3) --
     RequestPublicChannels { server_id: String },
     RequestPublicChannelSync { server_id: String, channel_id: String, before_timestamp: Option<i64> },

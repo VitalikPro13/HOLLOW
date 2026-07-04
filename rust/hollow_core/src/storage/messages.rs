@@ -1626,6 +1626,47 @@ impl MessageStore {
         }
     }
 
+    /// Latest timestamp of the LOCAL user's own messages in a channel
+    /// (`is_mine = 1`, so it stays correct across the user's linked devices).
+    /// Used by the send-side slow-mode gate. Returns None on query failure —
+    /// slow mode fails open rather than blocking sends on a DB error.
+    pub fn latest_own_channel_ts(&self, server_id: &str, channel_id: &str) -> Option<i64> {
+        self.conn
+            .query_row(
+                "SELECT MAX(timestamp) FROM channel_messages
+                 WHERE server_id = ?1 AND channel_id = ?2 AND is_mine = 1",
+                params![server_id, channel_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// Whether `sender_id` already has a channel message in the open interval
+    /// (`from_ts`, `to_ts`) (epoch ms). Used by the receive-side slow-mode
+    /// gate: a message whose signed timestamp lands within the slow-mode
+    /// window of another message from the same sender is dropped.
+    pub fn channel_sender_has_msg_in_range(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        sender_id: &str,
+        from_ts: i64,
+        to_ts: i64,
+    ) -> bool {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM channel_messages
+                     WHERE server_id = ?1 AND channel_id = ?2 AND sender_id = ?3
+                       AND timestamp > ?4 AND timestamp < ?5
+                 )",
+                params![server_id, channel_id, sender_id, from_ts, to_ts],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
+    }
+
     /// Get channel messages newer than a given timestamp (for sync responses).
     /// Includes hidden (deleted) messages — evidence must sync to all peers (Rat Files).
     pub fn get_channel_messages_since(

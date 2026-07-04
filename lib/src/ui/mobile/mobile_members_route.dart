@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/moderation_format.dart';
+import 'package:hollow/src/core/providers/channel_provider.dart'
+    show mutedMembersProvider;
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
@@ -33,6 +36,7 @@ class MobileMembersRoute extends ConsumerStatefulWidget {
 class _MobileMembersRouteState extends ConsumerState<MobileMembersRoute> {
   List<String> _bannedPeers = [];
   bool _showBanned = false;
+  bool _showMuted = false;
 
   @override
   void initState() {
@@ -78,6 +82,15 @@ class _MobileMembersRouteState extends ConsumerState<MobileMembersRoute> {
                   onToggleBanned: () => setState(() => _showBanned = !_showBanned),
                   onUnban: _unban,
                   onRefreshBanned: _loadBanned,
+                  // Provider-backed so a fresh mute shows without leaving the
+                  // route (ServerUpdated invalidates it on the CrdtStore ramp).
+                  mutedMembers: ref
+                          .watch(mutedMembersProvider(widget.serverId))
+                          .valueOrNull ??
+                      const [],
+                  showMuted: _showMuted,
+                  onToggleMuted: () => setState(() => _showMuted = !_showMuted),
+                  onUnmute: _unmute,
                 ),
               ),
             ),
@@ -98,6 +111,21 @@ class _MobileMembersRouteState extends ConsumerState<MobileMembersRoute> {
     } catch (e) {
       if (mounted) {
         HollowToast.show(context, 'Failed to unban', type: HollowToastType.error);
+      }
+    }
+  }
+
+  Future<void> _unmute(String peerId) async {
+    try {
+      await crdt_api.unmuteMember(serverId: widget.serverId, peerId: peerId);
+      ref.invalidate(mutedMembersProvider(widget.serverId));
+      ref.invalidate(serverMembersProvider(widget.serverId));
+      if (mounted) {
+        HollowToast.show(context, 'Member unmuted', type: HollowToastType.success);
+      }
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(context, 'Failed to unmute', type: HollowToastType.error);
       }
     }
   }
@@ -159,6 +187,10 @@ class _MemberList extends ConsumerWidget {
   final VoidCallback onToggleBanned;
   final Future<void> Function(String) onUnban;
   final VoidCallback onRefreshBanned;
+  final List<crdt_api.MutedMemberFfi> mutedMembers;
+  final bool showMuted;
+  final VoidCallback onToggleMuted;
+  final Future<void> Function(String) onUnmute;
 
   const _MemberList({
     required this.members,
@@ -170,6 +202,10 @@ class _MemberList extends ConsumerWidget {
     required this.onToggleBanned,
     required this.onUnban,
     required this.onRefreshBanned,
+    required this.mutedMembers,
+    required this.showMuted,
+    required this.onToggleMuted,
+    required this.onUnmute,
   });
 
   @override
@@ -191,6 +227,41 @@ class _MemberList extends ConsumerWidget {
             myRole: myRole,
             canKick: canKick,
           ),
+
+        // Muted members section
+        if (canKick && mutedMembers.isNotEmpty) ...[
+          const SizedBox(height: HollowSpacing.lg),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+            child: HollowPressable(
+              onTap: onToggleMuted,
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
+              padding: const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
+              child: Row(
+                children: [
+                  Icon(
+                    showMuted ? LucideIcons.chevronDown : LucideIcons.chevronRight,
+                    size: 16, color: hollow.warning,
+                  ),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Text('Muted (${mutedMembers.length})',
+                      style: HollowTypography.body.copyWith(color: hollow.warning)),
+                ],
+              ),
+            ),
+          ),
+          if (showMuted)
+            for (final muted in mutedMembers)
+              _MutedRow(
+                muted: muted,
+                displayName: members
+                    .where((m) => m.peerId == muted.peerId)
+                    .map((m) =>
+                        m.nickname.isNotEmpty ? m.nickname : m.displayName)
+                    .firstOrNull,
+                onUnmute: () => onUnmute(muted.peerId),
+              ),
+        ],
 
         // Banned members section
         if (canKick && bannedPeers.isNotEmpty) ...[
@@ -413,6 +484,22 @@ class _MemberRow extends ConsumerWidget {
 
             if (canKick)
               HollowPressable(
+                onTap: () => _showMuteSheet(context, ref),
+                subtle: true,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.lg, vertical: HollowSpacing.md,
+                ),
+                child: Row(
+                  children: [
+                    Icon(LucideIcons.volumeX, size: 18, color: hollow.warning),
+                    const SizedBox(width: HollowSpacing.md),
+                    Text('Mute', style: HollowTypography.body.copyWith(color: hollow.warning)),
+                  ],
+                ),
+              ),
+
+            if (canKick)
+              HollowPressable(
                 onTap: () => _confirmBan(context, ref),
                 subtle: true,
                 padding: const EdgeInsets.symmetric(
@@ -430,6 +517,95 @@ class _MemberRow extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  void _showMuteSheet(BuildContext context, WidgetRef ref) {
+    Navigator.pop(context);
+    final hollow = HollowTheme.of(context);
+    const options = [
+      ('10 minutes', 600),
+      ('1 hour', 3600),
+      ('24 hours', 86400),
+      ('7 days', 604800),
+      ('Permanent', 0),
+    ];
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: hollow.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
+      ),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: HollowSpacing.sm),
+              child: Container(width: 32, height: 4,
+                decoration: BoxDecoration(color: hollow.border, borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
+            const SizedBox(height: HollowSpacing.md),
+            Text('Mute ${member.displayName}',
+                style: HollowTypography.body.copyWith(
+                  color: hollow.textPrimary, fontWeight: FontWeight.w600,
+                )),
+            const SizedBox(height: HollowSpacing.xs),
+            Text('They won\'t be able to send messages in this server',
+                style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
+            const SizedBox(height: HollowSpacing.md),
+            Divider(height: 1, color: hollow.border),
+            for (final (label, secs) in options)
+              HollowPressable(
+                onTap: () => _mute(context, ref, secs, label),
+                subtle: true,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.lg, vertical: HollowSpacing.md,
+                ),
+                child: Row(
+                  children: [
+                    Icon(LucideIcons.timer, size: 18,
+                        color: secs == 0 ? hollow.error : hollow.textSecondary),
+                    const SizedBox(width: HollowSpacing.md),
+                    Text(label,
+                        style: HollowTypography.body.copyWith(
+                          color: secs == 0 ? hollow.error : hollow.textPrimary,
+                        )),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _mute(
+      BuildContext context, WidgetRef ref, int durationSecs, String label) async {
+    Navigator.pop(context);
+    try {
+      await crdt_api.muteMember(
+        serverId: serverId,
+        peerId: member.peerId,
+        durationSecs: durationSecs,
+      );
+      ref.invalidate(serverMembersProvider(serverId));
+      ref.invalidate(mutedMembersProvider(serverId));
+      if (context.mounted) {
+        HollowToast.show(
+          context,
+          durationSecs <= 0
+              ? '${member.displayName} muted (permanent)'
+              : '${member.displayName} muted for $label',
+          type: HollowToastType.success,
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        HollowToast.show(context, 'Failed to mute', type: HollowToastType.error);
+      }
+    }
   }
 
   Future<void> _changeRole(BuildContext context, WidgetRef ref, String newRole) async {
@@ -538,6 +714,62 @@ Color _roleColor(String role, HollowTheme hollow) {
     case 'admin': return const Color(0xFFA78BFA);
     case 'moderator': return Color.lerp(hollow.warning, hollow.error, 0.5) ?? hollow.warning;
     default: return hollow.textSecondary;
+  }
+}
+
+class _MutedRow extends StatelessWidget {
+  final crdt_api.MutedMemberFfi muted;
+  final String? displayName;
+  final VoidCallback onUnmute;
+
+  const _MutedRow(
+      {required this.muted, required this.displayName, required this.onUnmute});
+
+  String get _label {
+    if (muted.permanent) return 'Permanent';
+    final remaining = DateTime.fromMillisecondsSinceEpoch(muted.expiresAtMs)
+        .difference(DateTime.now());
+    if (remaining.isNegative) return 'Expired';
+    return '${formatMuteRemaining(remaining)} left';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm,
+      ),
+      child: Row(
+        children: [
+          HollowAvatar(peerId: muted.peerId, size: 36),
+          const SizedBox(width: HollowSpacing.md),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  displayName ?? '${muted.peerId.substring(0, 8)}...',
+                  style: HollowTypography.bodySmall.copyWith(
+                    color: hollow.textPrimary,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  _label,
+                  style: HollowTypography.caption.copyWith(color: hollow.warning),
+                ),
+              ],
+            ),
+          ),
+          HollowButton.ghost(
+            onPressed: onUnmute,
+            compact: true,
+            child: Text('Unmute', style: TextStyle(color: hollow.success)),
+          ),
+        ],
+      ),
+    );
   }
 }
 

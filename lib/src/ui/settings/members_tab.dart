@@ -1,5 +1,8 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/moderation_format.dart';
+import 'package:hollow/src/core/providers/channel_provider.dart'
+    show mutedMembersProvider;
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -64,8 +67,10 @@ class MembersTab extends ConsumerWidget {
                 nickname: member.nickname,
                 myRole: myRole,
               ),
-            if (canKick)
+            if (canKick) ...[
+              _MutedMembersSection(serverId: serverId),
               _BannedMembersSection(serverId: serverId),
+            ],
           ],
         );
       },
@@ -281,6 +286,25 @@ class _MemberRow extends ConsumerWidget {
                       ),
                     ),
                     PopupMenuItem(
+                      value: 'mute',
+                      child: Row(
+                        children: [
+                          Icon(
+                            LucideIcons.volumeX,
+                            size: 14,
+                            color: hollow.warning,
+                          ),
+                          const SizedBox(width: HollowSpacing.sm),
+                          Text(
+                            'Mute Member',
+                            style: HollowTypography.body.copyWith(
+                              color: hollow.warning,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    PopupMenuItem(
                       value: 'ban',
                       child: Row(
                         children: [
@@ -309,6 +333,8 @@ class _MemberRow extends ConsumerWidget {
                     _confirmKick(context, ref);
                   } else if (value == 'ban') {
                     _confirmBan(context, ref);
+                  } else if (value == 'mute') {
+                    _showMuteDialog(context, ref);
                   }
                 },
               ),
@@ -394,6 +420,42 @@ class _MemberRow extends ConsumerWidget {
     );
   }
 
+  void _showMuteDialog(BuildContext context, WidgetRef ref) {
+    showHollowDialog(
+      context: context,
+      builder: (context) => _MuteDurationDialog(
+        displayName: displayName,
+        onMute: (durationSecs, label) async {
+          Navigator.of(context).pop();
+          try {
+            await crdt_api.muteMember(
+              serverId: serverId,
+              peerId: peerId,
+              durationSecs: durationSecs,
+            );
+            if (context.mounted) {
+              HollowToast.show(
+                context,
+                durationSecs <= 0
+                    ? '$displayName is now muted (permanent)'
+                    : '$displayName is muted for $label',
+                type: HollowToastType.success,
+              );
+            }
+          } catch (e) {
+            if (context.mounted) {
+              HollowToast.show(
+                context,
+                'Failed to mute member: $e',
+                type: HollowToastType.error,
+              );
+            }
+          }
+        },
+      ),
+    );
+  }
+
   void _confirmBan(BuildContext context, WidgetRef ref) {
     showHollowDialog(
       context: context,
@@ -428,6 +490,238 @@ class _MemberRow extends ConsumerWidget {
           }
         },
       ),
+    );
+  }
+}
+
+/// Mute duration options: label + seconds (0 = permanent).
+const kMuteDurationOptions = [
+  ('10 minutes', 600),
+  ('1 hour', 3600),
+  ('24 hours', 86400),
+  ('7 days', 604800),
+  ('Permanent', 0),
+];
+
+class _MuteDurationDialog extends StatelessWidget {
+  final String displayName;
+  final void Function(int durationSecs, String label) onMute;
+
+  const _MuteDurationDialog({
+    required this.displayName,
+    required this.onMute,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+
+    return Center(
+      child: Material(
+        color: Colors.transparent,
+        child: Container(
+          width: 360,
+          padding: const EdgeInsets.all(HollowSpacing.lg),
+          decoration: BoxDecoration(
+            color: hollow.surface.withValues(alpha: 0.92),
+            borderRadius: BorderRadius.circular(hollow.radiusLg),
+            border: Border.all(color: hollow.accent.withValues(alpha: 0.2)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.5),
+                blurRadius: 24,
+                offset: const Offset(0, 8),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Mute Member',
+                textAlign: TextAlign.center,
+                style: HollowTypography.heading
+                    .copyWith(color: hollow.textPrimary, fontSize: 18),
+              ),
+              const SizedBox(height: HollowSpacing.md),
+              Text(
+                '$displayName won\'t be able to send messages in any channel of this server. How long?',
+                style: HollowTypography.body
+                    .copyWith(color: hollow.textSecondary),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: HollowSpacing.lg),
+              for (final (label, secs) in kMuteDurationOptions)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
+                  child: HollowButton.ghost(
+                    onPressed: () => onMute(secs, label),
+                    expand: true,
+                    child: Text(
+                      label,
+                      style: HollowTypography.body.copyWith(
+                        color: secs == 0 ? hollow.error : hollow.textPrimary,
+                      ),
+                    ),
+                  ),
+                ),
+              const SizedBox(height: HollowSpacing.sm),
+              HollowButton.ghost(
+                onPressed: () => Navigator.of(context).pop(),
+                expand: true,
+                child: const Text('Cancel'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MutedMembersSection extends ConsumerStatefulWidget {
+  final String serverId;
+
+  const _MutedMembersSection({required this.serverId});
+
+  @override
+  ConsumerState<_MutedMembersSection> createState() =>
+      _MutedMembersSectionState();
+}
+
+class _MutedMembersSectionState extends ConsumerState<_MutedMembersSection> {
+  bool _expanded = false;
+
+  Future<void> _unmute(String peerId) async {
+    try {
+      await crdt_api.unmuteMember(serverId: widget.serverId, peerId: peerId);
+      ref.invalidate(mutedMembersProvider(widget.serverId));
+      if (mounted) {
+        HollowToast.show(context, 'Member unmuted',
+            type: HollowToastType.success);
+      }
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(context, 'Failed to unmute: $e',
+            type: HollowToastType.error);
+      }
+    }
+  }
+
+  String _muteLabel(crdt_api.MutedMemberFfi m) {
+    if (m.permanent) return 'Permanent';
+    final remaining = DateTime.fromMillisecondsSinceEpoch(m.expiresAtMs)
+        .difference(DateTime.now());
+    if (remaining.isNegative) return 'Expired';
+    return '${formatMuteRemaining(remaining)} left';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    // Provider-backed (not a one-shot load) so the section appears the moment
+    // a mute lands — ServerUpdated invalidates it on the CrdtStore ramp.
+    final muted =
+        ref.watch(mutedMembersProvider(widget.serverId)).valueOrNull ?? const [];
+    if (muted.isEmpty) return const SizedBox.shrink();
+    // Muted members are still members — resolve their display names.
+    final members =
+        ref.watch(serverMembersProvider(widget.serverId)).valueOrNull ?? const [];
+    String nameFor(String peerId) {
+      for (final m in members) {
+        if (m.peerId == peerId) {
+          return m.nickname.isNotEmpty ? m.nickname : m.displayName;
+        }
+      }
+      return peerId.length > 12 ? '${peerId.substring(0, 12)}…' : peerId;
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: HollowSpacing.lg),
+        HollowFocusRing(
+          enabled: true,
+          onActivate: () => setState(() => _expanded = !_expanded),
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          child: GestureDetector(
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Row(
+              children: [
+                Icon(
+                  _expanded ? LucideIcons.chevronDown : LucideIcons.chevronRight,
+                  size: 14,
+                  color: hollow.textSecondary,
+                ),
+                const SizedBox(width: HollowSpacing.xs),
+                Icon(LucideIcons.volumeX, size: 14, color: hollow.warning),
+                const SizedBox(width: HollowSpacing.xs),
+                Text(
+                  'Muted (${muted.length})',
+                  style: HollowTypography.label.copyWith(
+                    color: hollow.warning,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_expanded) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          for (final m in muted)
+            Padding(
+              padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.md,
+                  vertical: HollowSpacing.sm,
+                ),
+                decoration: BoxDecoration(
+                  color: hollow.elevated,
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
+                ),
+                child: Row(
+                  children: [
+                    HollowAvatar(peerId: m.peerId, size: 28),
+                    const SizedBox(width: HollowSpacing.sm),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            nameFor(m.peerId),
+                            style: HollowTypography.bodySmall.copyWith(
+                              color: hollow.textPrimary,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          Text(
+                            _muteLabel(m),
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.warning,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    HollowButton.ghost(
+                      compact: true,
+                      onPressed: () => _unmute(m.peerId),
+                      child: Text(
+                        'Unmute',
+                        style: HollowTypography.bodySmall.copyWith(
+                          color: hollow.accent,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ],
     );
   }
 }

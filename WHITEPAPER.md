@@ -836,7 +836,7 @@ Each channel has two independent access control settings, stored as CRDT values:
 - Channel posting restrictions: enforced server-side (`can_post_in_channel`) as an authorization gate and reflected by disabling the input bar, but posting is not a confidentiality property — a posting-locked member can still read a channel it can see.
 - Sidebar filtering of `Everyone` channels: cosmetic ordering/grouping only; those channels carry no confidentiality restriction.
 
-**Scope:** restricted *voice* channels currently still derive their SFrame media key from the server-wide group; deriving it from the channel subgroup (so non-qualifying members cannot decrypt restricted-channel media) is the planned next step.
+**Scope:** restricted *voice* channels derive their SFrame media key from the channel subgroup's `export_secret`, so non-qualifying members cannot decrypt restricted-channel media; joining a restricted voice channel is additionally rejected when the member's role fails `can_see_channel`.
 
 ### 11.6 Public Channels
 
@@ -852,6 +852,16 @@ Individual channels can be marked as **public** via a per-channel `is_public` bo
 - Real-time updates: `PublicChannelConfigChanged` HavenMessage broadcast via `SendToRoom` when a channel's public flag changes. Guests receive new messages in real time because `SendToRoom` delivers to all peers in the room, including guests.
 
 **Broadcast channels:** A public channel with posting set to `AdminPlus` functions as a broadcast/announcement channel — publicly readable, admin-only posting.
+
+### 11.7 Moderation Primitives
+
+Hollow provides three moderation controls, all carried as signed CRDT operations subject to the same author verification and rank checks as role changes (§11.3):
+
+- **Member mute (timed or permanent):** a server-wide read-only state, keyed by the target's master identity so it covers all of their linked devices. The mute record stores an absolute expiry timestamp (a sentinel value denotes permanent); expiry is evaluated lazily at enforcement time, requiring no timers or follow-up operations. Issuing a mute requires kick permission and strictly higher rank than the target.
+- **Per-channel slow mode:** a minimum interval between messages per member, evaluated against the sender's own signed message timestamps. Moderator-rank and above are exempt. Message edits are not rate-limited.
+- **Media-only channels:** a per-channel flag restricting posts to image, GIF, and video attachments (optionally captioned); standalone text and other file types are rejected.
+
+**Enforcement model:** because no server mediates message flow, these are authorization gates enforced twice — at the sender (cooperative clients fail fast with a local error) and independently by **every receiver**, which refuses to store live messages or file announcements that violate the rules in force per its replicated server state. A modified client can transmit, but compliant peers discard the traffic, which is the strongest guarantee available in a serverless topology (and equivalent in effect to a central server dropping it). Receive-side enforcement deliberately applies only to live traffic, not to historical sync: history may legitimately predate a rule change, and dropping it during backfill would permanently diverge replicas. These are authorization properties, not confidentiality boundaries.
 
 ---
 
