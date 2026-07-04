@@ -680,8 +680,10 @@ class CallNotifier extends Notifier<CallState> {
           jsonEncode({'call_id': callId, 'enabled': true, 'quality': qualityLabel}));
 
       // Start screen audio capture via data channel on the data-channel-audio
-      // platforms: Windows (WASAPI) and macOS 13.0+ (ScreenCaptureKit).
+      // platforms: Windows (WASAPI), Linux (PulseAudio monitor), and
+      // macOS 13.0+ (ScreenCaptureKit).
       final dcAudio = Platform.isWindows ||
+          Platform.isLinux ||
           (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio);
       if (shareAudio && dcAudio) {
         final webrtc = ref.read(webRtcProvider.notifier).service;

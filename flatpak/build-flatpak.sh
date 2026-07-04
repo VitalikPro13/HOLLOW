@@ -49,6 +49,19 @@ cp "$FLUTTER_BUNDLE/hollow" "$BUNDLE_DIR/"
 cp -r "$FLUTTER_BUNDLE/lib" "$BUNDLE_DIR/"
 cp -r "$FLUTTER_BUNDLE/data" "$BUNDLE_DIR/"
 
+# Screen audio capturer/renderer (out-of-process Opus exe for screen share
+# audio, send AND receive). Lands in the Flutter bundle via linux/CMakeLists.txt
+# when it was built (scripts/build_screen_audio.sh) before 'flutter build linux'.
+if [ -f "$FLUTTER_BUNDLE/screen_audio_capturer" ]; then
+    cp "$FLUTTER_BUNDLE/screen_audio_capturer" "$BUNDLE_DIR/"
+    chmod +x "$BUNDLE_DIR/screen_audio_capturer"
+    echo "  Bundled: screen_audio_capturer"
+else
+    echo "WARNING: screen_audio_capturer not in the Flutter bundle."
+    echo "         Run scripts/build_screen_audio.sh, then 'flutter build linux'."
+    echo "         Screen share audio will be unavailable in this flatpak."
+fi
+
 # Icon (Flatpak max 512x512)
 if command -v convert &>/dev/null; then
     convert "$FLUTTER_BUNDLE/data/flutter_assets/assets/hollow_logo_rounded.png" \

@@ -11,6 +11,12 @@
 #include <io.h>
 #else
 #include <csignal>
+#ifdef __linux__
+#include <poll.h>
+#include <unistd.h>
+#include <chrono>
+#include "pulse_monitor_capturer.h"
+#endif
 #endif
 
 #include <algorithm>
@@ -799,6 +805,118 @@ static int RunPipeMode(const Options& opts) {
 }
 #endif  // _WIN32
 
+#ifdef __linux__
+// =============================================================================
+// Pipe mode (Linux) — out-of-process capturer for Flutter integration.
+//
+// Same contract as the Windows pipe mode: capture system output, Opus-encode,
+// write framed packets to stdout:
+//   [uint16_le: payload_len][uint32_le: seq][...opus_bytes...]
+// Stop on stdin 'Q' or EOF. Capture source is the default sink's PulseAudio/
+// PipeWire MONITOR (whole system mix — no per-app / exclude support on Linux
+// yet, so the pid/hwnd/exclude-pid options are accepted but ignored).
+// =============================================================================
+
+static int RunPipeModeLinux(const Options& opts) {
+  fprintf(stderr, "[PIPE] Starting out-of-process audio capture (PulseAudio)\n");
+  fprintf(stderr, "[PIPE] Duration: %d seconds (0 = until stdin EOF/Q)\n",
+          opts.duration);
+  if (opts.pid != 0 || opts.window_pid != 0 || opts.window_hwnd != 0 ||
+      opts.exclude_pid != 0) {
+    fprintf(stderr,
+            "[PIPE] NOTE: per-app / exclude capture is not supported on "
+            "Linux; capturing the full system mix\n");
+  }
+
+  OpusEncoderWrapper encoder(48000, 2, OPUS_APPLICATION_AUDIO);
+  if (!encoder.valid()) {
+    fprintf(stderr, "[PIPE] ERROR: Opus encoder creation failed\n");
+    return 1;
+  }
+
+  std::vector<uint8_t> encode_buffer(4000);
+  std::mutex stdout_mutex;
+  std::atomic<bool> active{true};
+  uint32_t sequence_number = 0;
+  uint64_t total_frames = 0;
+  uint32_t packets_sent = 0;
+
+  // The capturer delivers exact 10ms 48k-stereo frames — Opus frame size, so
+  // each callback encodes straight through with no re-blocking.
+  auto frame_callback = [&](const int16_t* pcm, size_t frames) {
+    if (!active.load()) return;
+
+    int encoded = encoder.Encode(pcm, static_cast<int>(frames), encode_buffer);
+    if (encoded <= 0) return;
+
+    uint32_t seq = sequence_number++;
+    uint16_t payload_len = static_cast<uint16_t>(4 + encoded);
+    uint8_t header[6];
+    header[0] = static_cast<uint8_t>(payload_len);
+    header[1] = static_cast<uint8_t>(payload_len >> 8);
+    header[2] = static_cast<uint8_t>(seq);
+    header[3] = static_cast<uint8_t>(seq >> 8);
+    header[4] = static_cast<uint8_t>(seq >> 16);
+    header[5] = static_cast<uint8_t>(seq >> 24);
+
+    {
+      std::lock_guard<std::mutex> lock(stdout_mutex);
+      fwrite(header, 1, 6, stdout);
+      fwrite(encode_buffer.data(), 1, encoded, stdout);
+      fflush(stdout);
+    }
+
+    packets_sent++;
+    total_frames += frames;
+    if (packets_sent % 500 == 0) {
+      double sec = static_cast<double>(total_frames) / 48000.0;
+      fprintf(stderr, "[PIPE] Sent %u packets (%.1f sec)\n", packets_sent, sec);
+    }
+  };
+
+  PulseMonitorCapturer capturer;
+  if (!capturer.Start(frame_callback)) {
+    fprintf(stderr, "[PIPE] ERROR: Failed to start monitor capture\n");
+    return 1;
+  }
+  fprintf(stderr, "[PIPE] Capturing system audio...\n");
+
+  // Wait for duration, stdin 'Q', or stdin EOF (parent died / stopped us).
+  const auto start = std::chrono::steady_clock::now();
+  while (active.load() && g_running.load()) {
+    if (opts.duration > 0) {
+      const auto elapsed = std::chrono::steady_clock::now() - start;
+      if (elapsed >= std::chrono::seconds(opts.duration)) break;
+    }
+
+    struct pollfd pfd = {0 /* stdin */, POLLIN, 0};
+    int r = poll(&pfd, 1, 100);
+    if (r > 0) {
+      if (pfd.revents & POLLIN) {
+        char c = 0;
+        ssize_t n = read(0, &c, 1);
+        if (n <= 0 || c == 'Q' || c == 'q') {
+          fprintf(stderr, "[PIPE] Received stop signal\n");
+          break;
+        }
+      } else if (pfd.revents & (POLLHUP | POLLERR)) {
+        fprintf(stderr, "[PIPE] stdin closed\n");
+        break;
+      }
+    }
+  }
+
+  active.store(false);
+  capturer.Stop();
+
+  double seconds = total_frames > 0
+      ? static_cast<double>(total_frames) / 48000.0 : 0.0;
+  fprintf(stderr, "[PIPE] Done. Sent %u packets (%.1f sec)\n",
+          packets_sent, seconds);
+  return 0;
+}
+#endif  // __linux__
+
 // =============================================================================
 // Render mode — out-of-process audio renderer for Flutter integration.
 //
@@ -1199,6 +1317,10 @@ int main(int argc, char* argv[]) {
     return RunRenderPcmMode(opts);
   } else if (opts.mode == "encode") {
     return RunEncodeMode(opts);
+#ifdef __linux__
+  } else if (opts.mode == "pipe") {
+    return RunPipeModeLinux(opts);
+#endif
 #ifdef _WIN32
   } else if (opts.mode == "pipe") {
     return RunPipeMode(opts);

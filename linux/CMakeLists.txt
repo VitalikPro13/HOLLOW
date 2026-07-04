@@ -133,3 +133,22 @@ install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/com.anonlisten.hollow.desktop"
 install(FILES "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}/assets/hollow_logo_rounded.png"
   DESTINATION "${CMAKE_INSTALL_PREFIX}" RENAME "com.anonlisten.hollow.png"
   COMPONENT Runtime)
+
+# Bundle the screen audio capturer/renderer (out-of-process PulseAudio monitor
+# capture + Opus encode/decode for screen share audio). Built separately via
+# scripts/build_screen_audio.sh from
+# packages/flutter_webrtc/test_apps/screen_audio_test/. Next to the `hollow`
+# binary — that's where the Dart exe discovery looks first.
+set(SCREEN_AUDIO_EXE
+  "${CMAKE_SOURCE_DIR}/../packages/flutter_webrtc/test_apps/screen_audio_test/build/screen_audio_test")
+if(EXISTS "${SCREEN_AUDIO_EXE}")
+  install(PROGRAMS "${SCREEN_AUDIO_EXE}"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}"
+    RENAME "screen_audio_capturer"
+    COMPONENT Runtime)
+else()
+  message(WARNING
+    "screen_audio_test not found. "
+    "Run scripts/build_screen_audio.sh first. "
+    "Screen share audio (send AND receive) will be unavailable.")
+endif()

@@ -11,11 +11,13 @@ void _log(String msg) {
   network_api.logFromDart(message: msg);
 }
 
-/// Out-of-process WASAPI screen audio capturer for Windows.
+/// Out-of-process screen audio capturer for Windows and Linux.
 ///
-/// Spawns `screen_audio_capturer.exe --mode pipe` as a child process.
-/// The exe captures WASAPI loopback → Opus encodes → writes framed binary
-/// packets to stdout. This process reads them and calls [onPacket].
+/// Spawns `screen_audio_capturer --mode pipe` as a child process.
+/// The exe captures the system output (Windows: WASAPI loopback, per-app
+/// capable; Linux: the default sink's PulseAudio/PipeWire monitor source,
+/// whole-mix only) → Opus encodes → writes framed binary packets to stdout.
+/// This process reads them and calls [onPacket].
 ///
 /// Running in a separate process avoids libwebrtc's AudioDeviceModule
 /// interfering with the WASAPI capture (causes audio looping).
@@ -41,15 +43,21 @@ class ScreenAudioCapturer {
   static String? _findExePath() {
     final appDir = File(Platform.resolvedExecutable).parent.path;
     final sep = Platform.pathSeparator;
+    final ext = Platform.isWindows ? '.exe' : '';
     _log('[SCREEN-AUDIO] App dir: $appDir');
 
     final candidates = <String>[
-      '$appDir${sep}screen_audio_capturer.exe',
-      '$appDir${sep}screen_audio_test.exe',
-      // Dev fallback
-      '$appDir$sep..${sep}..${sep}..${sep}..${sep}..${sep}packages'
-      '${sep}flutter_webrtc${sep}test_apps${sep}screen_audio_test'
-      '${sep}build${sep}Release${sep}screen_audio_test.exe',
+      '$appDir${sep}screen_audio_capturer$ext',
+      '$appDir${sep}screen_audio_test$ext',
+      // Dev fallback (Windows builds under Release/, Linux at the build root)
+      if (Platform.isWindows)
+        '$appDir$sep..${sep}..${sep}..${sep}..${sep}..${sep}packages'
+        '${sep}flutter_webrtc${sep}test_apps${sep}screen_audio_test'
+        '${sep}build${sep}Release${sep}screen_audio_test.exe'
+      else
+        '$appDir$sep..${sep}..${sep}..${sep}..${sep}..${sep}packages'
+        '${sep}flutter_webrtc${sep}test_apps${sep}screen_audio_test'
+        '${sep}build${sep}screen_audio_test',
     ];
 
     for (final path in candidates) {
@@ -100,7 +108,10 @@ class ScreenAudioCapturer {
     }
 
     final args = ['--mode', 'pipe', '--duration', '0'];
-    if (windowHwnd != 0) {
+    if (!Platform.isWindows) {
+      // Linux: the exe captures the default sink's monitor source — no per-app
+      // or exclude-tree capture, so the pid/hwnd/exclude flags don't apply.
+    } else if (windowHwnd != 0) {
       // Per-app (window) share: hand the window HANDLE to the exe, which resolves
       // it to the owning pid then the real audio-rendering pid set (browser audio
       // service etc.) and INCLUDE-captures + mixes that set.

@@ -211,12 +211,14 @@ class ScreenShareService {
     //    ADM-independent and uniform across all macOS versions.
     //  - <13.0 : no capture API; the UI locks the toggle off, so shareAudio is
     //    false here anyway.
-    // Windows and macOS 13.0+ send audio via the data channel — never request
-    // it in getDisplayMedia (the WASAPI/AudioSource path crashes on Windows and
-    // isn't available on macOS). The macOS CoreAudio Process Tap is retired (it
-    // was ADM-coupled and fed 0 tracks under the CoreAudio ADM).
+    // Windows, macOS 13.0+, and Linux send audio via the data channel — never
+    // request it in getDisplayMedia (the WASAPI/AudioSource path crashes on
+    // Windows, isn't available on macOS, and yields nothing on Linux). The
+    // macOS CoreAudio Process Tap is retired (it was ADM-coupled and fed 0
+    // tracks under the CoreAudio ADM).
     final useDataChannelAudio = shareAudio &&
         (Platform.isWindows ||
+            Platform.isLinux ||
             (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio));
     final getDisplayAudio = shareAudio && !useDataChannelAudio;
 
@@ -482,6 +484,8 @@ class ScreenShareService {
   ///
   /// - Windows: WASAPI loopback exe (`--mode pipe`). A separate process avoids
   ///   libwebrtc's AudioDeviceModule interfering with the WASAPI capture.
+  /// - Linux: same exe, `--mode pipe` capturing the default sink's PulseAudio/
+  ///   PipeWire monitor source (whole system mix; per-app/exclude unsupported).
   /// - macOS 13.0–14.1: ScreenCaptureKit audio-only capture -> exe `--mode
   ///   encode`. (macOS 14.2+ uses the Process Tap -> WebRTC track in createOffer,
   ///   never this method.)
@@ -495,9 +499,9 @@ class ScreenShareService {
     int excludePid = 0,
     required void Function(Uint8List packet) onPacket,
   }) async {
-    if (Platform.isWindows) {
+    if (Platform.isWindows || Platform.isLinux) {
       if (_screenAudioCapturer?.isActive == true) return;
-      _log('[HOLLOW-AU-SCREEN] Starting WASAPI capture '
+      _log('[HOLLOW-AU-SCREEN] Starting system audio capture '
           '(pid=$pid hwnd=$windowHwnd excludePid=$excludePid)');
       _screenAudioCapturer = ScreenAudioCapturer();
       final ok = await _screenAudioCapturer!.start(
@@ -506,7 +510,7 @@ class ScreenShareService {
           excludePid: excludePid,
           onPacket: onPacket);
       if (!ok) {
-        _log('[HOLLOW-AU-SCREEN] Failed to start WASAPI capturer');
+        _log('[HOLLOW-AU-SCREEN] Failed to start system audio capturer');
         _screenAudioCapturer = null;
       }
       return;

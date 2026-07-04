@@ -66,6 +66,7 @@ elseif(APPLE)
 elseif(UNIX)
   list(APPEND COMMON_SOURCES
     audio_player_linux.cpp
+    pulse_monitor_capturer.cc
   )
 endif()
 
@@ -107,7 +108,12 @@ elseif(APPLE)
 
 elseif(UNIX)
   find_package(PkgConfig REQUIRED)
-  pkg_check_modules(PULSE REQUIRED libpulse-simple)
+  find_package(Threads REQUIRED)
+  # libpulse (async API) for the default-sink query; libpulse-simple for the
+  # record/playback streams.
+  pkg_check_modules(PULSE REQUIRED libpulse-simple libpulse)
   target_include_directories(screen_audio_test PRIVATE ${PULSE_INCLUDE_DIRS})
-  target_link_libraries(screen_audio_test PRIVATE ${PULSE_LIBRARIES})
+  target_link_libraries(screen_audio_test PRIVATE
+    ${PULSE_LIBRARIES} Threads::Threads
+  )
 endif()

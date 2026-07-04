@@ -1002,10 +1002,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // Capture screen ONCE.
     await desktopCapturer.getSources(
         types: [SourceType.Screen, SourceType.Window]);
-    // On Windows, audio goes via data channel (not WebRTC audio track)
-    // so never request audio in getDisplayMedia — the old WASAPI→AudioSource
-    // path crashes and produces garbled output.
-    final getDisplayAudio = shareAudio && !Platform.isWindows;
+    // On Windows and Linux, audio goes via data channel (not a WebRTC audio
+    // track) so never request audio in getDisplayMedia — the old
+    // WASAPI→AudioSource path crashes on Windows and yields nothing on Linux.
+    final getDisplayAudio =
+        shareAudio && !Platform.isWindows && !Platform.isLinux;
 
     _screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
       'video': {
@@ -1246,9 +1247,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       );
 
       // Start screen audio capture via the data channel on the data-channel-audio
-      // platforms: Windows (WASAPI) and macOS 13.0+ (ScreenCaptureKit).
+      // platforms: Windows (WASAPI), Linux (PulseAudio monitor), and
+      // macOS 13.0+ (ScreenCaptureKit).
       // Sends Opus packets via the existing WebRtcService data channel.
       final dcAudio = Platform.isWindows ||
+          Platform.isLinux ||
           (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio);
       if (_screenShareAudio && dcAudio && _screenCaptureStream != null) {
         final webrtc = ref.read(webRtcProvider.notifier).service;
