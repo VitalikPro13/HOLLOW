@@ -632,10 +632,11 @@ Provider: `vaultCacheCapProvider` -- `AsyncNotifierProvider<VaultCacheCapNotifie
 - Controls LRU eviction limit for `~/.hollow/vault_cache/`. Eviction runs every 30 minutes.
 - `setCap(int mb)` -- Clamps to [256, 10240] before persisting.
 
-### Proxy Enabled
-Provider: `proxyEnabledProvider` -- `AsyncNotifierProvider<ProxyEnabledNotifier, bool>`
-- Key: `'proxy_enabled'`
-- Default: `false`. For censored networks. Note: Shadowsocks tunnel was implemented then fully removed from Rust; this setting is vestigial (dead Dart code remains).
+### Anti-Censorship Proxy (REALITY tunnel)
+Provider: `proxyConfigProvider` -- `AsyncNotifierProvider<ProxyConfigNotifier, ProxyConfig>` (replaced the old dead `proxyEnabledProvider`).
+- `ProxyConfig`: `enabled` + `server`/`uuid`/`publicKey`/`shortId`/`sni` (the VLESS+REALITY params). Persisted as 6 `proxy_*` `app_settings` keys.
+- Fields default to compiled-in `kDefaultProxy*` consts (the official Hollow Xray on the VPS) — like `kDefaultRelayDomain`. `build()` uses `?? kDefault…` so a fresh install is PRE-FILLED and the user just flips one toggle; an explicit stored value (self-hoster) is respected.
+- `build()` and `save()` push to Rust via `network_api.setProxyConfig(...)` — seeds a global read by `start_node`, which launches the bundled `shoes` REALITY client as a local SOCKS5 subprocess (`node/proxy_tunnel.rs`) and routes the relay WSS through it. Toggling requires a node RESTART (WS URL captured at spawn). Desktop-only in v1 (mobile toggle is disabled). See `project_anti_censorship_transport`.
 
 ### Invisible Mode
 Provider: `invisibleModeProvider` -- `NotifierProvider<InvisibleModeNotifier, bool>` (synchronous, NOT async)

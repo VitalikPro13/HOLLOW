@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/android_platform.dart';
+import 'package:hollow/src/core/services/android_version.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
@@ -985,6 +986,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // request battery optimization exemption on first launch.
     if (Platform.isAndroid) {
       await acquireWifiLock();
+      // Prime Build.VERSION.SDK_INT so the screen-share sheet can lock the
+      // audio toggle on Android < 10 without a first-frame flash.
+      await AndroidScreenAudioSupport.prime();
       final optimized = await isBatteryOptimized();
       if (optimized && mounted) {
         await requestBatteryExemption();

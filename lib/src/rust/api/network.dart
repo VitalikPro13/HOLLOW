@@ -8,15 +8,36 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'network.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `open_local_store`, `send_node_command`, `to_ffi_event`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NodeState`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`
+// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_license_key`, `get_node`, `get_proxy_config`, `get_proxy_socks_addr`, `get_relay_domain`, `get_runtime`, `open_local_store`, `send_node_command`, `set_proxy_socks_addr`, `to_ffi_event`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NodeState`, `ProxyConfig`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`, `from`, `from`, `from`, `from`
 
 Future<void> setLicenseKey({String? key}) =>
     RustLib.instance.api.crateApiNetworkSetLicenseKey(key: key);
 
 Future<void> setRelayUrl({String? domain}) =>
     RustLib.instance.api.crateApiNetworkSetRelayUrl(domain: domain);
+
+/// Configure (or clear) the anti-censorship REALITY proxy. Call BEFORE
+/// start_node() — like set_relay_url, it seeds a global that start_node reads to
+/// launch the `shoes` tunnel. Passing all-empty / null fields disables the proxy
+/// (direct connection). Takes effect on the next node start (toggling at runtime
+/// requires a node restart, same as changing the relay domain).
+Future<void> setProxyConfig({
+  required bool enabled,
+  required String server,
+  required String uuid,
+  required String publicKey,
+  required String shortId,
+  required String sni,
+}) => RustLib.instance.api.crateApiNetworkSetProxyConfig(
+  enabled: enabled,
+  server: server,
+  uuid: uuid,
+  publicKey: publicKey,
+  shortId: shortId,
+  sni: sni,
+);
 
 /// Start the libp2p node with mDNS peer discovery and E2EE.
 /// Uses the persistent identity from disk.

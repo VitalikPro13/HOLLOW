@@ -9,6 +9,7 @@ pub(crate) mod image_convert;
 pub(crate) mod link_handler;
 pub(crate) mod link_preview;
 pub(crate) mod message_ops;
+pub(crate) mod proxy_tunnel;
 pub(crate) mod recovery_pool;
 pub(crate) mod resolver;
 pub(crate) mod share_handler;

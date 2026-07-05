@@ -23,6 +23,9 @@ class MainActivity : FlutterFragmentActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "getSdkInt" -> {
+                        result.success(Build.VERSION.SDK_INT)
+                    }
                     "isBatteryOptimized" -> {
                         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
                         result.success(!pm.isIgnoringBatteryOptimizations(packageName))

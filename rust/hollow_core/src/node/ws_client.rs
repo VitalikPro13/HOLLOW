@@ -557,10 +557,20 @@ pub(crate) async fn connect_and_auth(
     license_key: Option<&str>,
     fetch: bool,
 ) -> Result<WsStream, String> {
-    // Connect.
-    let (ws_stream, _response) = tokio_tungstenite::connect_async(url)
-        .await
-        .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+    // Connect. When anti-censorship proxy mode is on, a local `shoes` REALITY
+    // tunnel exposes a SOCKS5 listener on 127.0.0.1; route the whole WSS
+    // connection through it so the relay traffic rides the REALITY tunnel and
+    // looks like ordinary HTTPS to a censor. Otherwise connect directly.
+    // Read fresh each call so a reconnect after the tunnel comes up picks it up.
+    let ws_stream = match crate::api::network::get_proxy_socks_addr() {
+        Some(socks_addr) => connect_via_socks(url, &socks_addr).await?,
+        None => {
+            let (s, _response) = tokio_tungstenite::connect_async(url)
+                .await
+                .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+            s
+        }
+    };
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -612,6 +622,49 @@ pub(crate) async fn connect_and_auth(
         }
         _ => Err("Unexpected auth response".to_string()),
     }
+}
+
+/// Open the relay WSS connection through a local SOCKS5 proxy (the `shoes`
+/// REALITY tunnel). We dial the SOCKS5 listener, ask it to reach the relay's
+/// host:port (DNS resolves proxy-side — no local leak), then run the WS + TLS
+/// handshake over that tunnelled TCP stream. The resulting stream type is
+/// identical to `connect_async`'s (`MaybeTlsStream<TcpStream>`) so callers are
+/// unaffected.
+async fn connect_via_socks(url: &str, socks_addr: &str) -> Result<WsStream, String> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    // Parse the relay host + port out of the wss:// URL, mirroring how
+    // tokio-tungstenite derives them internally (scheme default: wss → 443).
+    let request = url
+        .into_client_request()
+        .map_err(|e| format!("Bad relay URL: {e}"))?;
+    let uri = request.uri();
+    let host = uri
+        .host()
+        .ok_or_else(|| "Relay URL has no host".to_string())?
+        .to_string();
+    let port = uri.port_u16().unwrap_or(match uri.scheme_str() {
+        Some("ws") | Some("http") => 80,
+        _ => 443,
+    });
+
+    hollow_log!("[HOLLOW-WS] Dialing relay {host}:{port} via SOCKS5 tunnel {socks_addr}");
+
+    // Connect through SOCKS5. The target is sent as a domain so the tunnel
+    // (and ultimately the Xray server) resolves it — keeps DNS off the local
+    // censored network. tokio-socks takes (proxy, (host, port)).
+    let socks = tokio_socks::tcp::Socks5Stream::connect(socks_addr, (host.as_str(), port))
+        .await
+        .map_err(|e| format!("SOCKS5 connect via tunnel failed: {e}"))?;
+    let tcp = socks.into_inner();
+
+    // Run WS + TLS over the tunnelled stream. connector=None uses the crate's
+    // configured rustls-webpki-roots connector (same as connect_async).
+    let (ws_stream, _response) =
+        tokio_tungstenite::client_async_tls_with_config(url, tcp, None, None)
+            .await
+            .map_err(|e| format!("WS/TLS handshake over tunnel failed: {e}"))?;
+    Ok(ws_stream)
 }
 
 // -- Command sending --

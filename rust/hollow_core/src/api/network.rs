@@ -450,6 +450,52 @@ fn get_relay_domain() -> &'static Mutex<Option<String>> {
     RELAY_DOMAIN.get_or_init(|| Mutex::new(None))
 }
 
+// ── Anti-censorship proxy (VLESS+REALITY via a local `shoes` tunnel) ──────────
+// Set from Dart before start_node(). When present, start_node launches the
+// `shoes` REALITY client as a subprocess (local SOCKS5 listener) and publishes
+// its address here; ws_client routes the relay WSS connection through it.
+
+/// The REALITY proxy parameters, entered by the user (server prints these).
+/// Enough to render the `shoes` client YAML.
+#[derive(Debug, Clone)]
+pub struct ProxyConfig {
+    /// Xray REALITY server, `host:port` (e.g. `141.227.186.209:8443`).
+    pub server: String,
+    /// VLESS user UUID.
+    pub uuid: String,
+    /// REALITY public key (base64url — Xray 26.x prints it as `Password`).
+    pub public_key: String,
+    /// REALITY shortId (hex).
+    pub short_id: String,
+    /// SNI / serverName to clone (e.g. `www.microsoft.com`).
+    pub sni: String,
+}
+
+/// The full desired proxy config, set before start_node(). `None` = direct.
+static PROXY_CONFIG: OnceLock<Mutex<Option<ProxyConfig>>> = OnceLock::new();
+
+fn get_proxy_config() -> &'static Mutex<Option<ProxyConfig>> {
+    PROXY_CONFIG.get_or_init(|| Mutex::new(None))
+}
+
+/// The live SOCKS5 listener address of the running `shoes` tunnel, or None when
+/// proxy mode is off / the tunnel isn't up. ws_client reads this each connect.
+static PROXY_SOCKS_ADDR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+pub(crate) fn get_proxy_socks_addr() -> Option<String> {
+    PROXY_SOCKS_ADDR
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+}
+
+fn set_proxy_socks_addr(addr: Option<String>) {
+    if let Ok(mut g) = PROXY_SOCKS_ADDR.get_or_init(|| Mutex::new(None)).lock() {
+        *g = addr;
+    }
+}
+
 fn get_event_rx() -> &'static Mutex<Option<mpsc::Receiver<node::NetworkEvent>>> {
     EVENT_RX.get_or_init(|| Mutex::new(None))
 }
@@ -1129,6 +1175,42 @@ pub fn set_relay_url(domain: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// Configure (or clear) the anti-censorship REALITY proxy. Call BEFORE
+/// start_node() — like set_relay_url, it seeds a global that start_node reads to
+/// launch the `shoes` tunnel. Passing all-empty / null fields disables the proxy
+/// (direct connection). Takes effect on the next node start (toggling at runtime
+/// requires a node restart, same as changing the relay domain).
+#[frb]
+pub fn set_proxy_config(
+    enabled: bool,
+    server: String,
+    uuid: String,
+    public_key: String,
+    short_id: String,
+    sni: String,
+) -> Result<(), String> {
+    let cfg = if enabled
+        && !server.trim().is_empty()
+        && !uuid.trim().is_empty()
+        && !public_key.trim().is_empty()
+        && !sni.trim().is_empty()
+    {
+        Some(ProxyConfig {
+            server: server.trim().to_string(),
+            uuid: uuid.trim().to_string(),
+            public_key: public_key.trim().to_string(),
+            short_id: short_id.trim().to_string(),
+            sni: sni.trim().to_string(),
+        })
+    } else {
+        None
+    };
+    let pc = get_proxy_config();
+    let mut guard = pc.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    *guard = cfg;
+    Ok(())
+}
+
 /// Start the libp2p node with mDNS peer discovery and E2EE.
 /// Uses the persistent identity from disk.
 /// Returns the local peer ID as a string.
@@ -1239,6 +1321,28 @@ pub fn start_node() -> Result<String, String> {
         .map_err(|e| format!("Lock poisoned: {e}"))?
         .clone()
         .unwrap_or_else(|| "relay.anonlisten.com".to_string());
+
+    // Anti-censorship proxy: if a REALITY config is set, launch the local
+    // `shoes` tunnel and publish its SOCKS5 address so ws_client routes the
+    // relay connection through it. A tunnel-launch failure does NOT block node
+    // startup — we log it and fall back to a direct connection (which is what
+    // the user was doing before), so a bad proxy config never bricks the app.
+    {
+        let cfg = get_proxy_config()
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {e}"))?
+            .clone();
+        match cfg {
+            Some(cfg) => match node::proxy_tunnel::start(&cfg) {
+                Ok(addr) => set_proxy_socks_addr(Some(addr)),
+                Err(e) => {
+                    hollow_log!("[HOLLOW-PROXY] Tunnel failed to start ({e}); connecting directly");
+                    set_proxy_socks_addr(None);
+                }
+            },
+            None => set_proxy_socks_addr(None),
+        }
+    }
 
     let (event_tx, event_rx) = mpsc::channel::<node::NetworkEvent>(100);
     let (cmd_tx, cmd_rx) = mpsc::channel::<node::NodeCommand>(100);
@@ -2699,6 +2803,11 @@ pub fn stop_node() -> Result<(), String> {
     if let Ok(mut rx_guard) = get_event_rx().lock() {
         *rx_guard = None;
     }
+
+    // Kill the REALITY proxy tunnel subprocess (if running) and clear its addr
+    // so a subsequent restart re-evaluates the proxy config cleanly.
+    node::proxy_tunnel::stop();
+    set_proxy_socks_addr(None);
 
     match guard.take() {
         Some(state) => {

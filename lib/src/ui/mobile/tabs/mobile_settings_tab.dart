@@ -43,6 +43,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/stat_bar.dart';
 import 'package:hollow/src/ui/components/rainbow_slider_track.dart';
@@ -1212,6 +1213,48 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
         _SectionLabel(label: 'Offline Delivery'),
         const SizedBox(height: HollowSpacing.sm),
         const _OfflineInboxSection(),
+
+        const SizedBox(height: HollowSpacing.xl),
+
+        // ── Anti-censorship (desktop-only for now → disabled toggle) ──
+        _SectionLabel(label: 'Anti-Censorship'),
+        const SizedBox(height: HollowSpacing.sm),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(HollowSpacing.md),
+          decoration: BoxDecoration(
+            color: hollow.surface,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            border: Border.all(color: hollow.border),
+          ),
+          child: Row(
+            children: [
+              Icon(LucideIcons.shield, size: 16, color: hollow.textSecondary),
+              const SizedBox(width: HollowSpacing.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Route through REALITY tunnel',
+                      style: HollowTypography.body
+                          .copyWith(color: hollow.textPrimary),
+                    ),
+                    Text(
+                      'Bypass DPI censorship. Available on desktop.',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              // Disabled — mobile tunnel not yet supported.
+              const HollowToggle(value: false, onChanged: null),
+            ],
+          ),
+        ),
 
         const SizedBox(height: HollowSpacing.xl),
       ],

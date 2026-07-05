@@ -65,7 +65,9 @@ Persistent WSS connection to the relay (configurable domain, default `relay.anon
 ### Authentication Flow
 
 `ws_client.rs:connect_and_auth()`:
-1. `tokio_tungstenite::connect_async(url)` — establish WSS connection
+1. Establish the WSS connection. Branches on `network::get_proxy_socks_addr()`:
+   - **None (default):** `tokio_tungstenite::connect_async(url)` — direct.
+   - **Some(addr) (anti-censorship proxy on):** `connect_via_socks()` — dial the local `shoes` REALITY tunnel's SOCKS5 listener (`tokio_socks::Socks5Stream::connect(addr, relay_host:port)`, target sent as a domain so DNS resolves proxy-side), then `client_async_tls_with_config(url, tcp, None, None)`. Same `WsStream` type either way, so the rest of the flow is unchanged. Covers BOTH the live swarm and the push-fetch path (both funnel through `connect_and_auth`). See `project_anti_censorship_transport`.
 2. Build sign payload: `"hollow-ws-auth:{peer_id}:{timestamp}"` where timestamp is Unix epoch seconds
 3. Sign with Ed25519 via `NativeKeypair::from_protobuf_encoding().sign()`
 4. Send `Auth` JSON message with peer_id, public_key (base64), timestamp, signature (base64), optional license_key

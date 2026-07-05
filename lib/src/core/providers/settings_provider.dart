@@ -580,24 +580,128 @@ class FilesCacheCapNotifier extends AsyncNotifier<int> {
   }
 }
 
-/// Whether the Shadowsocks proxy is enabled (for censored networks).
-/// Loaded from the local DB at startup.
-final proxyEnabledProvider =
-    AsyncNotifierProvider<ProxyEnabledNotifier, bool>(ProxyEnabledNotifier.new);
+// ── Official REALITY tunnel defaults (Hollow's shared Xray on the VPS) ────────
+// Baked in like `kDefaultRelayDomain` so a normal user just flips the toggle —
+// no copy-paste. The fields stay editable for anyone self-hosting their own
+// relay + Xray. Update these if the server's keys/SNI are rotated.
+const kDefaultProxyServer = '141.227.186.209:8443';
+const kDefaultProxyUuid = 'bfe68ae0-4435-41ec-950a-aacc1caa2771';
+const kDefaultProxyPublicKey = 'zWJevNXCtw-PMBsUrrJWmYNZlXeSP5ojVDH8aoCA_xQ';
+const kDefaultProxyShortId = '5294730d0b4e9be7';
+const kDefaultProxySni = 'www.microsoft.com';
 
-class ProxyEnabledNotifier extends AsyncNotifier<bool> {
+/// Anti-censorship proxy (VLESS+REALITY tunnel via the bundled `shoes` client).
+/// For users behind DPI censorship (Russia/TSPU, China/GFW): routes the relay
+/// WSS connection through a local REALITY tunnel that looks like ordinary HTTPS.
+/// Pre-filled with the official Hollow config (above); editable for self-hosters.
+/// Changes take effect on the NEXT node start (toggling requires a restart, like
+/// the relay domain) — pushed to Rust via `setProxyConfig` before start_node.
+@immutable
+class ProxyConfig {
+  final bool enabled;
+  final String server; // host:port, e.g. 141.227.186.209:8443
+  final String uuid;
+  final String publicKey; // REALITY public key (Xray prints as "Password")
+  final String shortId;
+  final String sni; // serverName to clone, e.g. www.microsoft.com
+
+  const ProxyConfig({
+    this.enabled = false,
+    this.server = kDefaultProxyServer,
+    this.uuid = kDefaultProxyUuid,
+    this.publicKey = kDefaultProxyPublicKey,
+    this.shortId = kDefaultProxyShortId,
+    this.sni = kDefaultProxySni,
+  });
+
+  /// True when every required field is present (shortId may be empty).
+  bool get isComplete =>
+      server.trim().isNotEmpty &&
+      uuid.trim().isNotEmpty &&
+      publicKey.trim().isNotEmpty &&
+      sni.trim().isNotEmpty;
+
+  /// The proxy is only actually active when enabled AND fully configured.
+  bool get isActive => enabled && isComplete;
+
+  ProxyConfig copyWith({
+    bool? enabled,
+    String? server,
+    String? uuid,
+    String? publicKey,
+    String? shortId,
+    String? sni,
+  }) => ProxyConfig(
+        enabled: enabled ?? this.enabled,
+        server: server ?? this.server,
+        uuid: uuid ?? this.uuid,
+        publicKey: publicKey ?? this.publicKey,
+        shortId: shortId ?? this.shortId,
+        sni: sni ?? this.sni,
+      );
+}
+
+/// Loaded from the local DB at startup, persisted per-field, pushed to Rust.
+final proxyConfigProvider =
+    AsyncNotifierProvider<ProxyConfigNotifier, ProxyConfig>(
+        ProxyConfigNotifier.new);
+
+class ProxyConfigNotifier extends AsyncNotifier<ProxyConfig> {
   @override
-  Future<bool> build() async {
-    final val = await storage_api.loadSetting(key: 'proxy_enabled');
-    return val == 'true';
+  Future<ProxyConfig> build() async {
+    // Absent DB key (fresh install) → fall back to the baked-in official config
+    // so the fields are pre-filled and the toggle "just works". A present value
+    // (even empty — a self-hoster who cleared a field) is respected as-is.
+    final cfg = ProxyConfig(
+      enabled: (await storage_api.loadSetting(key: 'proxy_enabled')) == 'true',
+      server:
+          (await storage_api.loadSetting(key: 'proxy_server')) ?? kDefaultProxyServer,
+      uuid: (await storage_api.loadSetting(key: 'proxy_uuid')) ?? kDefaultProxyUuid,
+      publicKey: (await storage_api.loadSetting(key: 'proxy_public_key')) ??
+          kDefaultProxyPublicKey,
+      shortId: (await storage_api.loadSetting(key: 'proxy_short_id')) ??
+          kDefaultProxyShortId,
+      sni: (await storage_api.loadSetting(key: 'proxy_sni')) ?? kDefaultProxySni,
+    );
+    // Push the persisted config into Rust so a launch with proxy pre-enabled
+    // brings the tunnel up. Safe pre-node-start (seeds a global). Best-effort.
+    await _push(cfg);
+    return cfg;
   }
 
-  Future<void> setEnabled(bool value) async {
+  Future<void> _push(ProxyConfig cfg) async {
+    try {
+      await network_api.setProxyConfig(
+        enabled: cfg.enabled,
+        server: cfg.server.trim(),
+        uuid: cfg.uuid.trim(),
+        publicKey: cfg.publicKey.trim(),
+        shortId: cfg.shortId.trim(),
+        sni: cfg.sni.trim(),
+      );
+    } catch (_) {}
+  }
+
+  /// Update the whole config (persist every field + push to Rust). Takes effect
+  /// on the next node restart.
+  Future<void> save(ProxyConfig cfg) async {
     await storage_api.saveSetting(
-      key: 'proxy_enabled',
-      value: value.toString(),
-    );
-    state = AsyncData(value);
+        key: 'proxy_enabled', value: cfg.enabled.toString());
+    await storage_api.saveSetting(key: 'proxy_server', value: cfg.server.trim());
+    await storage_api.saveSetting(key: 'proxy_uuid', value: cfg.uuid.trim());
+    await storage_api.saveSetting(
+        key: 'proxy_public_key', value: cfg.publicKey.trim());
+    await storage_api.saveSetting(
+        key: 'proxy_short_id', value: cfg.shortId.trim());
+    await storage_api.saveSetting(key: 'proxy_sni', value: cfg.sni.trim());
+    await _push(cfg);
+    state = AsyncData(cfg);
+  }
+
+  /// Toggle just the enabled flag, keeping the entered config.
+  Future<void> setEnabled(bool value) async {
+    final current = state.valueOrNull ?? const ProxyConfig();
+    await save(current.copyWith(enabled: value));
   }
 }
 

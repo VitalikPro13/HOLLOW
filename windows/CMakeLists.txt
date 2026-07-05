@@ -146,6 +146,23 @@ else()
     "Screen share audio will be unavailable.")
 endif()
 
+# Copy the bundled `shoes` REALITY tunnel client (anti-censorship transport).
+# Ships next to hollow.exe; the Rust node spawns it as a local SOCKS5 proxy when
+# the user enables proxy mode. Built from cfal/shoes (MIT) via scripts/build_shoes.ps1.
+# See HOLLOW_PLAN.md "Fight Government Censorship".
+set(BUNDLED_SHOES_SRC "${CMAKE_SOURCE_DIR}/../vendor/shoes/shoes-win-x64.exe")
+if(EXISTS "${BUNDLED_SHOES_SRC}")
+  install(PROGRAMS "${BUNDLED_SHOES_SRC}"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    RENAME "shoes.exe"
+    COMPONENT Runtime)
+else()
+  message(WARNING
+    "vendor/shoes/shoes-win-x64.exe not found. "
+    "Run scripts/build_shoes.ps1 to populate it. "
+    "Anti-censorship proxy mode will be unavailable.")
+endif()
+
 # === Visual C++ runtime (VCRUNTIME140 / VCRUNTIME140_1 / MSVCP140) ===
 # hollow.exe, hollow_core.dll, flutter_webrtc_plugin.dll and mdk.dll all import
 # the MSVC C++ runtime. A fresh Windows install does NOT have these unless the

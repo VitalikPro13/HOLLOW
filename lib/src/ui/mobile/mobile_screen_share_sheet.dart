@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/services/android_version.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -43,8 +44,35 @@ class _ScreenShareSheetState extends State<_ScreenShareSheet> {
   bool _shareAudio = true;
 
   @override
+  void initState() {
+    super.initState();
+    // Android exposes SDK_INT only over the platform channel, so prime it and
+    // rebuild once known. Below Android 10 the audio toggle locks (matching the
+    // macOS-below-13 pattern) since AudioPlaybackCapture is unavailable there.
+    if (Platform.isAndroid && AndroidScreenAudioSupport.sdkInt == null) {
+      AndroidScreenAudioSupport.prime().then((_) {
+        if (mounted) setState(() {});
+      });
+    }
+  }
+
+  String _audioHelperText(bool audioBlocked) {
+    if (audioBlocked) {
+      return 'Sharing device audio needs Android 10 or newer. Your screen '
+          'still shares, and your mic stays on so you can talk.';
+    }
+    if (Platform.isAndroid) {
+      return 'Your mic stays on — you can talk over the shared audio. '
+          'Apps that block capture (some DRM/streaming apps) stay silent.';
+    }
+    return 'Your mic stays on — you can talk over the shared audio. '
+        'Pick Hollow in the broadcast menu and tap Start Broadcast to begin.';
+  }
+
+  @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final audioBlocked = AndroidScreenAudioSupport.audioSendBlockedByOldOs;
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
@@ -80,30 +108,32 @@ class _ScreenShareSheetState extends State<_ScreenShareSheet> {
             const SizedBox(height: HollowSpacing.lg),
             Row(
               children: [
-                Icon(LucideIcons.volume2, size: 18, color: hollow.textPrimary),
+                Icon(LucideIcons.volume2,
+                    size: 18,
+                    color: audioBlocked
+                        ? hollow.textTertiary
+                        : hollow.textPrimary),
                 const SizedBox(width: HollowSpacing.md),
                 Expanded(
                   child: Text(
                     'Share device audio',
-                    style: HollowTypography.body
-                        .copyWith(color: hollow.textPrimary),
+                    style: HollowTypography.body.copyWith(
+                        color: audioBlocked
+                            ? hollow.textTertiary
+                            : hollow.textPrimary),
                   ),
                 ),
                 HollowToggle(
-                  value: _shareAudio,
-                  onChanged: (v) => setState(() => _shareAudio = v),
+                  value: audioBlocked ? false : _shareAudio,
+                  onChanged: audioBlocked
+                      ? null
+                      : (v) => setState(() => _shareAudio = v),
                 ),
               ],
             ),
             const SizedBox(height: HollowSpacing.sm),
             Text(
-              Platform.isAndroid
-                  ? 'Your mic stays on — you can talk over the shared audio. '
-                      'Apps that block capture (some DRM/streaming apps) stay '
-                      'silent. Audio needs Android 10 or newer.'
-                  : 'Your mic stays on — you can talk over the shared audio. '
-                      'Pick Hollow in the broadcast menu and tap Start '
-                      'Broadcast to begin.',
+              _audioHelperText(audioBlocked),
               style:
                   HollowTypography.caption.copyWith(color: hollow.textTertiary),
             ),
@@ -121,7 +151,8 @@ class _ScreenShareSheetState extends State<_ScreenShareSheet> {
                   child: HollowButton.filled(
                     onPressed: () => Navigator.pop(
                       context,
-                      MobileScreenShareChoice(shareAudio: _shareAudio),
+                      MobileScreenShareChoice(
+                          shareAudio: audioBlocked ? false : _shareAudio),
                     ),
                     child: const Text('Start sharing'),
                   ),

@@ -2189,76 +2189,45 @@ SCALING ROADMAP:
 
 ### Phase ???: Fight Government Censorship
 
-**Goal:** Allow Hollow to work in countries with advanced DPI censorship (Russia, China, Iran).
+**Goal:** Allow Hollow to reach its relay from inside countries with advanced DPI censorship (Russia/TSPU, China/GFW, Iran, UK/OSA).
 
-**Explanation:**
+> **Full design & decision report:** `reports/ANTI_CENSORSHIP_TRANSPORT_2026.md` (deep-research: 105 agents, 24 sources, 25 adversarially-verified claims, 2026-07). This section is the summary; the report is authoritative.
 
-Russia's TSPU (DPI system) is one of the most advanced censorship systems in the world. It doesn't just look at port numbers — it analyzes traffic patterns, packet sizes, and timing. Even though our WSS goes through TLS on port 443, DPI can detect encapsulated traffic patterns. This is the same reason Tor needed pluggable transports (obfs4, meek, snowflake) — plain TLS wrapping isn't enough against sophisticated DPI.
+**The reframe (this is the whole point):** The problem is **not** IP blocking — it is **inner-traffic fingerprinting**. TSPU/GFW inspect the *shape* of the traffic inside the tunnel (TLS-1.3-over-TCP to a foreign-datacenter IP, real-time flow, server-heavy volume >~15-20 KB) and block on that, regardless of the outer wrapper or the port. **Plain WSS-on-443 is fingerprintable as-is** — which is exactly why our Russian tester's packets were dropped while a VPN worked. Changing ports does NOT help (verified-refuted).
 
-**Proven solutions exist (used by people in Russia/China/Iran right now):**
-- **VLESS + Reality (XRay):** Makes traffic indistinguishable from a real TLS connection to a legitimate website (e.g., google.com). Gold standard for DPI bypass.
-- **Shadowsocks (Outline):** Traffic looks like random noise. Simple to deploy, still effective against most DPI.
-- **AmneziaWG:** Modified WireGuard with junk packets and header obfuscation.
+**Decision:**
+- **PRIMARY transport: VLESS + REALITY (XTLS-Vision).** The only widely-deployed transport still surviving in 2026 ("disrupted-not-killed" — when Russia blocked *plain* VLESS in late 2025, REALITY kept working; providers just re-issued REALITY configs). REALITY clones a real popular website's TLS-1.3 ClientHello so middleboxes see ordinary HTTPS, and defends against GFW active probing by falling back to the genuine target site.
+- **Client (Hollow app, Rust):** embed the **`cfal/shoes`** crate — MIT, single Rust codebase, has `lib.rs` + an `ffi/` module (embeddable, not just a binary), ships `reality/`, `shadow_tls/`, `vless/`, `shadowsocks/`, `websocket/`, `hysteria2`, `tuic`, and `android/` + iOS support.
+- **Server (VPS, Go):** run **Xray-core** — the reference REALITY implementation, actively developed (v26.x, "Reality-Vision" framework shipped Feb 2026). Running Go on the VPS alongside the uWebSockets C++ relay and the hollow-push service is a non-issue (independent 443 listener → forwards to relay over loopback).
+- **The iOS win:** stock Xray/sing-box dies on iOS because its monolithic geo-routing files blow past the ~50 MiB Network-Extension memory budget. **Hollow needs zero geo-routing — it dials ONE relay** — so a single-destination Rust transport sidesteps the exact thing that breaks everyone else on iOS.
 
-**Implementation approaches (from easiest to hardest):**
-1. **Documentation only** — Guide for users to set up their own VLESS/Shadowsocks proxy, Hollow connects through it normally. Zero code changes.
-2. **Relay-side proxy** — Run XRay/Shadowsocks on our VPS alongside the relay. Censored users connect to the obfuscated proxy, which tunnels to the Hollow relay internally. Minimal Hollow code changes.
-3. **Built-in transport** — Integrate a Shadowsocks or VLESS client directly into Hollow's Rust backend. Auto-detect censorship (connection failures on WSS) and fall back to obfuscated tunnel. Best UX, most work.
+**Certificate correction (important):** REALITY does **NOT** use our own Let's Encrypt cert — it borrows a *real external website's* cert at handshake time (`target`/`dest` SNI; a domain we do **not** own). Our uWebSockets Let's Encrypt cert stays relevant to the plain-WSS relay and to a **ShadowTLS/plain-TLS fallback** (which CAN present our own cert), but not to the REALITY path.
 
-**Research findings (conducted when libp2p was still in use — libp2p has since been fully removed, eliminating the protocol fingerprint issue):**
-- WSS on port 443 — TSPU detected libp2p fingerprint inside TLS, killed connections in ~10-20 seconds (no longer applicable — libp2p removed)
-- VLESS+Reality over TCP — blocked by TSPU since Feb 2026 (~15-20KB payload threshold)
-- VLESS+Reality over XHTTP — proxy worked for HTTP traffic but libp2p bypassed system proxy (raw sockets), TUN mode still killed by TSPU (no longer applicable — libp2p removed)
-- External proxy (SOCKS5/TUN mode) — didn't work because libp2p opened raw TCP/UDP sockets, bypassing system proxies (no longer applicable — WSS goes through system proxy normally)
-- Regular VPN — works, confirming the issue was protocol fingerprinting, not IP blocking
-- **Shadowsocks-2022 (AEAD) — works on many ISPs, but TSPU on some ISPs detects it via encapsulated traffic fingerprinting (packet size/timing patterns) and kills connections after ~20 seconds**
-- Hysteria V2 — QUIC/UDP-based, Russia throttles UDP periodically, unreliable
-- WireGuard/OpenVPN/IKEv2 — all dead in Russia
-- AmneziaWG — UDP-based (same throttling issue), no embeddable Rust library
-- Russian VPS — domestic traffic fine, but outbound international traffic still inspected by TSPU
+**Ranked plan:**
+1. PRIMARY — VLESS+REALITY: `shoes` client (Rust) ↔ Xray-core server (Go, VPS).
+2. FALLBACK — ShadowTLS v3 (via `shoes`' portable Rust impl) wrapping WSS with our own Let's Encrypt cert.
+3. OPTIONAL — Hysteria2/TUIC (QUIC) where UDP isn't throttled (already in `shoes`).
+4. AVOID (known-dead): plain Shadowsocks/SS-2022 (~95% detection since Sept 2024), VMess, AmneziaWG, OpenVPN/WireGuard, port-hopping, and DIY rustls ClientHello camouflage (reinvents REALITY badly).
 
-**Solution implemented: Option 3 — Embedded Shadowsocks tunnel**
-
-Architecture:
+**Architecture (proxy ON):**
 ```
-[Proxy OFF — normal users]
-Hollow app → TCP/QUIC direct → relay:4001
-
-[Proxy ON — censored users]
-Hollow app → local TCP tunnel (127.0.0.1:14001) → SS encrypt → VPS:443 → ssserver decrypt → relay localhost:4001
-Hollow app → local TCP tunnel (127.0.0.1:18080) → SS encrypt → VPS:443 → ssserver decrypt → signaling localhost:8080
+Hollow Rust node ─▶ shoes client (in-process, REALITY/XTLS-Vision) ─▶ VPS:443 (Xray REALITY server)
+                                                                        └─▶ loopback ─▶ uWebSockets relay
 ```
+The node still just opens a WSS connection — it opens it *through* the local shoes tunnel when proxy mode is on. The dead `proxyEnabledProvider` (Dart) + local-tunnel→VPS→relay plumbing from the removed Shadowsocks attempt is REUSED — only the tunnel protocol changes.
+
+**History (what NOT to re-chase):** A Shadowsocks-2022 tunnel was implemented, tested from Russia (killed by TSPU in ~20s on some ISPs), and fully removed during libp2p cleanup — that removal was **correct**. The `app_settings` table + `save_setting()`/`load_setting()` FFI were kept (used by other features). The old plan's "next step" (DIY rustls TLS camouflage) is **abandoned** — REALITY does it correctly and stays current against AI-driven TLS fingerprinting; hand-rolling it is strictly worse.
 
 **Checklist:**
-- [x] Research: test VLESS+Reality from Russian network — BLOCKED by TSPU (TCP killed at ~15-20KB)
-- [x] Research: test VLESS+Reality XHTTP — proxy works for HTTP but libp2p bypasses it, TUN mode still killed
-- [x] Research: confirm external proxy won't work — libp2p bypasses SOCKS5/HTTP proxies
-- [x] Research: test Shadowsocks-2022 from Russia — PARTIALLY BLOCKED (ISP-dependent, TSPU uses encapsulated traffic fingerprinting on some ISPs)
-- [x] Research: evaluate Hysteria V2 — UDP-based, Russia throttles UDP, unreliable
-- [x] Research: evaluate embedded VPN (WireGuard/OpenVPN) — requires OS-level TUN/TAP drivers + admin privileges, not suitable for a chat app
-- [x] Research: evaluate Russian VPS — outbound international traffic still inspected by TSPU, doesn't solve the problem
-- [ ] Option 1: Write user-facing guide for external proxy setup — SKIPPED (external proxy doesn't work with libp2p)
-- [ ] Option 2: Deploy XRay/Shadowsocks proxy on relay VPS only — SKIPPED (went straight to Option 3)
-- [x] Option 3: Integrate obfuscated transport into Rust backend — **IMPLEMENTED THEN REMOVED**
-  - [x] Add `app_settings` key-value table to SQLCipher (`storage/messages.rs`) — **kept** (used by other settings)
-  - [x] Add `save_setting()`/`load_setting()` FFI functions (`api/storage.rs`) — **kept** (used by other settings)
-  - [x] ~~Add `shadowsocks-service` crate dependency (`Cargo.toml`)~~ — **removed** (crate removed during cleanup)
-  - [x] ~~Create tunnel module with dual-port local tunnels (`node/tunnel.rs`)~~ — **removed** (file deleted)
-  - [x] ~~Wire `proxy_enabled` through swarm startup~~ — **removed** (proxy code stripped from swarm.rs)
-  - [x] ~~Wire `proxy_enabled` through signaling~~ — **removed** (proxy code stripped from signaling.rs)
-  - [x] ~~Load proxy setting in `start_node()`~~ — **removed** (proxy code stripped from api/network.rs)
-  - [x] Regenerate FFI bindings
-  - [x] Create Dart settings provider (`settings_provider.dart`) — **kept** (dead code, provider exists but no UI toggle renders it)
-  - [x] ~~Add "Use Proxy" toggle to User Settings dialog~~ — **toggle removed from UI** (state plumbing remains as dead code)
-  - [x] ~~Deploy ssserver on VPS~~ — **removed** (ssserver no longer running)
-  - [x] ~~Hardcode generated key in `tunnel.rs`~~ — **removed** (tunnel.rs deleted)
-  - [x] Test from Russia with friend — SS connections killed by TSPU after ~20s on friend's ISP (encapsulated traffic fingerprinting + active probing)
-
-**Status: Shadowsocks tunnel was IMPLEMENTED, TESTED, and then REMOVED.**
-The Rust implementation (`tunnel.rs`, `shadowsocks-service` crate, proxy wiring in swarm/signaling/network) was stripped during the libp2p removal and codebase cleanup. The Dart settings provider (`proxyEnabledProvider`) and restart prompt code remain as dead code but no UI toggle is rendered. The `app_settings` table and `save_setting()`/`load_setting()` FFI functions were kept — they're used by other features (layout mode, theme, etc.).
-
-**Next step: TLS camouflage tunnel (REALITY-style)**
-DIY TLS camouflage using rustls — make tunnel traffic look like a real HTTPS connection to a popular domain (e.g., www.google.com). This is the approach that consistently beats TSPU with <5% detection rate. Requires implementing a custom TLS wrapper in Rust that generates browser-like ClientHello fingerprints. The existing proxy toggle UI and architecture (local tunnel → VPS → relay) would be reused — only the tunnel protocol changes from Shadowsocks to TLS camouflage.
+- [x] Research (2026-07): full field-status + embeddability sweep → `reports/ANTI_CENSORSHIP_TRANSPORT_2026.md`
+- [x] **Spike B (interop, 2026-07-05):** Xray REALITY server (VPS `:8443`) ↔ `shoes` REALITY client (Windows) ↔ WSS tunnel end-to-end. Verified: `wss://relay/ws` upgrades **101 Switching Protocols** through the SOCKS5 tunnel and the relay processes auth — the transport carries the real relay protocol.
+- [x] Re-validate field status (2026-07-05): REALITY still surviving RU (<5% detection from residential-looking IPs early 2026). Freeze heuristic now ~25 pkts / ~16 KB each dir → **XTLS-Vision mandatory** (enabled). Emerging: destination-IP **CIDR whitelisting** (the single-IP ceiling below).
+- [x] Deploy Xray REALITY server on the production VPS — **separate IPv4 port `:8443`** (NOT 443; relay keeps 443, untouched — IPv6:443 rejected, RU testers lack IPv6). `dest www.microsoft.com`, X25519 key, one shortId, `flow xtls-rprx-vision`, freedom outbound → `127.0.0.1:443` relay over loopback. `systemctl enable --now xray`.
+- [x] Bundle `shoes` client as a **subprocess** (not linked rlib — edition-2024/aws-lc-rs/tokio collision) + revive the Dart proxy toggle (manual entry). Desktop-first. Rust: `set_proxy_config` FFI + `node/proxy_tunnel.rs` (spawns shoes local SOCKS5) + SOCKS5 seam in `ws_client::connect_and_auth`. UI: Network settings "Anti-Censorship" card (desktop) + disabled mobile toggle. `windows/CMakeLists.txt` bundles `vendor/shoes/shoes-win-x64.exe` (built via `scripts/build_shoes.ps1`).
+- [ ] **Test from Russia with the tester who confirmed the drop** (Vitalik + friend, both paste the REALITY config, restart, chat with NO external VPN). ← acceptance criterion; WireShark capture on the friend's PC if it misbehaves.
+- [ ] **Spike A / mobile (deferred):** iOS/Android tunnel via shoes `ffi`/`staticlib` embed (NE 50 MiB budget; Hollow's zero-geo single-relay design is the win). Mobile toggle is disabled until then.
+- [ ] macOS/Linux desktop parity: build `shoes` for those platforms + bundle (CMake blocks mirror the Windows one; the Rust seam is already platform-agnostic).
+- [ ] Strategic risk (out of v1 scope, keep on radar): single known relay IP is the ceiling regardless of obfuscation — TSPU trends toward foreign-datacenter-IP correlation + IP/CIDR whitelisting; mitigations = CDN-fronting or rotating/multiple relay IPs
 
 ---
 

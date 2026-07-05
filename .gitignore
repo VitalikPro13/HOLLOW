@@ -93,6 +93,10 @@ loadtest/target/
 # Bundled native binaries (fetched via scripts/fetch_ffmpeg.{ps1,sh})
 vendor/ffmpeg/
 
+# Bundled shoes REALITY tunnel binary (built via scripts/build_shoes.ps1).
+# Keep the script + license + version note in git, not the 14 MB binary.
+vendor/shoes/*.exe
+
 # flutter_rust_bridge
 .flutter-plugins
 
