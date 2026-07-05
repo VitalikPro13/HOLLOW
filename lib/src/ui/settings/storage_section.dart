@@ -12,7 +12,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
-import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_pressable.dart';
 
 /// Shared Storage Manager widgets used by both the desktop settings dialog
 /// (`user_settings_dialog.dart`) and the mobile settings tab
@@ -346,7 +346,11 @@ class _ContextRowState extends ConsumerState<_ContextRow> {
         padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.sm, vertical: HollowSpacing.sm),
         decoration: BoxDecoration(
-          color: _hovered ? hollow.surface : Colors.transparent,
+          // Zero-alpha rest color, not Colors.transparent (transparent BLACK
+          // — the lerp flashed dark on hover/unhover, worst in light mode).
+          color: _hovered
+              ? hollow.surface
+              : hollow.surface.withValues(alpha: 0.0),
           borderRadius: BorderRadius.circular(hollow.radiusMd),
         ),
         child: Row(
@@ -406,22 +410,14 @@ class _RowTrashButton extends StatelessWidget {
       if (ok) await onConfirmed();
     }
 
-    return HollowFocusRing(
-      enabled: true,
-      onActivate: handleTap,
+    // HollowPressable (never Material InkWell — no ripple in Hollow, and the
+    // pressable already carries the focus ring + button semantics).
+    return HollowPressable(
+      onTap: handleTap,
+      semanticLabel: 'Delete files',
       borderRadius: BorderRadius.circular(hollow.radiusSm),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          onTap: handleTap,
-          child: Padding(
-            padding: const EdgeInsets.all(6),
-            child: Icon(LucideIcons.trash2, size: 16, color: hollow.error,
-                semanticLabel: 'Delete files'),
-          ),
-        ),
-      ),
+      padding: const EdgeInsets.all(6),
+      child: Icon(LucideIcons.trash2, size: 16, color: hollow.error),
     );
   }
 }

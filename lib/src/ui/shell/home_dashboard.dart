@@ -15,6 +15,7 @@ import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/news_provider.dart';
+import 'package:hollow/src/core/providers/relay_bandwidth_provider.dart';
 import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
@@ -23,7 +24,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/stat_bar.dart';
 import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -1432,16 +1433,16 @@ class _NewsPostEntry extends StatelessWidget {
 }
 
 /// Relay server stats card — RAM + bandwidth progress bars + synced poll bar.
-class _RelayStatsCard extends StatefulWidget {
+class _RelayStatsCard extends ConsumerStatefulWidget {
   final HollowTheme hollow;
   final RelayStats stats;
   const _RelayStatsCard({required this.hollow, required this.stats});
 
   @override
-  State<_RelayStatsCard> createState() => _RelayStatsCardState();
+  ConsumerState<_RelayStatsCard> createState() => _RelayStatsCardState();
 }
 
-class _RelayStatsCardState extends State<_RelayStatsCard>
+class _RelayStatsCardState extends ConsumerState<_RelayStatsCard>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   int _lastFetchCount = 0;
@@ -1485,6 +1486,13 @@ class _RelayStatsCardState extends State<_RelayStatsCard>
   Widget build(BuildContext context) {
     final hollow = widget.hollow;
     final stats = widget.stats;
+    // Watching keeps the autoDispose 30s WS poll alive exactly while this
+    // card is mounted (same demand-driven model as relayStatsProvider).
+    final bandwidth = ref.watch(relayBandwidthProvider);
+    final resetAt = bandwidth.resetAt;
+    final showReset = bandwidth.hasData &&
+        resetAt != null &&
+        resetAt.isAfter(DateTime.now().toUtc());
 
     return Container(
       width: double.infinity,
@@ -1498,7 +1506,7 @@ class _RelayStatsCardState extends State<_RelayStatsCard>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // RAM usage
-          _StatBar(
+          StatBar(
             hollow: hollow,
             icon: LucideIcons.memoryStick,
             label: 'RAM',
@@ -1507,13 +1515,40 @@ class _RelayStatsCardState extends State<_RelayStatsCard>
           ),
           const SizedBox(height: HollowSpacing.sm),
           // Bandwidth usage
-          _StatBar(
+          StatBar(
             hollow: hollow,
             icon: LucideIcons.activity,
             label: 'Bandwidth',
             value: stats.bandwidthLabel,
             progress: stats.bandwidthUsagePercent,
           ),
+          // Shown only once today's usage is non-zero — a "0 B of 10 GB" bar
+          // is noise; the meter appears with the first counted bytes and
+          // disappears again after the UTC-day reset.
+          if (bandwidth.hasData && bandwidth.usedBytes > 0) ...[
+            const SizedBox(height: HollowSpacing.sm),
+            // This connection's daily relay data budget (per-IP, from the
+            // relay over the authed WS — see relayBandwidthProvider). The
+            // usage reading + reset countdown share one caption line under
+            // the bar instead of dangling as their own rows.
+            DailyUsageMeter(
+              hollow: hollow,
+              icon: LucideIcons.gauge,
+              label: 'Your File Usage',
+              usageText: bandwidth.usageLabel,
+              progress: bandwidth.usagePercent,
+              trailing: showReset
+                  ? StatusCountdown(
+                      until: resetAt,
+                      label: 'resets in',
+                      color: bandwidth.limited
+                          ? hollow.error
+                          : hollow.textTertiary,
+                      fontSize: 9,
+                    )
+                  : null,
+            ),
+          ],
           const SizedBox(height: HollowSpacing.sm),
           // Poll cycle bar — synced to 5s fetch interval
           AnimatedBuilder(
@@ -1534,92 +1569,6 @@ class _RelayStatsCardState extends State<_RelayStatsCard>
           ),
         ],
       ),
-    );
-  }
-}
-
-/// Single stat row with label + animated progress bar + value.
-class _StatBar extends StatelessWidget {
-  final HollowTheme hollow;
-  final IconData icon;
-  final String label;
-  final String value;
-  final double progress;
-
-  const _StatBar({
-    required this.hollow,
-    required this.icon,
-    required this.label,
-    required this.value,
-    required this.progress,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    // Color shifts from accent → warning → error as usage increases.
-    final Color barColor;
-    if (progress < 0.6) {
-      barColor = hollow.accent;
-    } else if (progress < 0.85) {
-      barColor = hollow.warning;
-    } else {
-      barColor = hollow.error;
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Icon(icon, size: 12, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.xs),
-            Text(
-              label,
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 10,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            const Spacer(),
-            Text(
-              value,
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textPrimary,
-                fontSize: 10,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 4),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(2),
-          child: SizedBox(
-            height: 4,
-            width: double.infinity,
-            child: Stack(
-              children: [
-                Container(color: hollow.border),
-                TweenAnimationBuilder<double>(
-                  tween: Tween(begin: 0, end: progress.clamp(0.0, 1.0)),
-                  duration: HollowDurations.slow,
-                  curve: Curves.easeOutCubic,
-                  builder: (context, value, _) => FractionallySizedBox(
-                    alignment: Alignment.centerLeft,
-                    widthFactor: value,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: barColor,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
     );
   }
 }

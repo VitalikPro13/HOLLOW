@@ -137,7 +137,6 @@ class _HollowButtonState extends State<HollowButton>
     Color bg;
     Color fg;
     Color hoverBg;
-    Color glowColor;
     BoxBorder? border;
 
     switch (widget.variant) {
@@ -145,17 +144,17 @@ class _HollowButtonState extends State<HollowButton>
         bg = hollow.accent;
         fg = hollow.textOnAccent;
         hoverBg = hollow.accentHover;
-        glowColor = hollow.accent;
       case HollowButtonVariant.ghost:
-        bg = Colors.transparent;
+        // Resting bg = hover color at zero alpha, NOT Colors.transparent
+        // (transparent BLACK) — the color lerp passed through semi-opaque
+        // dark colors, flashing dark on hover/unhover in light mode.
+        bg = hollow.accentMuted.withValues(alpha: 0.0);
         fg = hollow.accent;
         hoverBg = hollow.accentMuted;
-        glowColor = hollow.accent;
       case HollowButtonVariant.outline:
-        bg = Colors.transparent;
+        bg = hollow.accentMuted.withValues(alpha: 0.0);
         fg = hollow.accent;
         hoverBg = hollow.accentMuted;
-        glowColor = hollow.accent;
         border = Border.all(
           color: _hovering && isInteractive
               ? hollow.accent.withValues(alpha: 0.6)
@@ -165,24 +164,11 @@ class _HollowButtonState extends State<HollowButton>
         bg = hollow.error;
         fg = Colors.white;
         hoverBg = hollow.error.withValues(alpha: 0.85);
-        glowColor = hollow.error;
     }
 
     final effectiveBg = _hovering && isInteractive ? hoverBg : bg;
-
-    // Subtle glow on hover for filled, outline, and danger variants.
-    final hoverShadow =
-        _hovering &&
-            isInteractive &&
-            widget.variant != HollowButtonVariant.ghost
-        ? [
-            BoxShadow(
-              color: glowColor.withValues(alpha: 0.2),
-              blurRadius: 8,
-              spreadRadius: 0,
-            ),
-          ]
-        : <BoxShadow>[];
+    // No hover glow: the 8px blurred halo painted OUTSIDE the button's
+    // outline — hover must never read bigger than the control itself.
 
     // Larger Text (a11y P3): scale the icon alongside the label so an
     // icon+text button stays visually balanced at high OS text scale (the
@@ -286,7 +272,6 @@ class _HollowButtonState extends State<HollowButton>
                     color: effectiveBg,
                     border: border,
                     borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    boxShadow: hoverShadow,
                   ),
                   child: content,
                 ),

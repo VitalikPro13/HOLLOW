@@ -324,6 +324,12 @@ Future<void> sendFriendRequestByNickname({required String nickname}) => RustLib
 Future<void> claimNickname({required String nickname}) =>
     RustLib.instance.api.crateApiNetworkClaimNickname(nickname: nickname);
 
+/// Ask the relay for this connection's daily byte-budget status (used /
+/// budget / seconds until the UTC-day reset). Fire-and-forget: the reply
+/// arrives as `NetworkEvent::BandwidthStatus` on the event stream.
+Future<void> requestRelayBandwidth() =>
+    RustLib.instance.api.crateApiNetworkRequestRelayBandwidth();
+
 /// Release the currently claimed temporary nickname.
 Future<void> releaseNickname() =>
     RustLib.instance.api.crateApiNetworkReleaseNickname();
@@ -1253,6 +1259,18 @@ sealed class NetworkEvent with _$NetworkEvent {
   /// backoff retry (after a drop) from the initial connect.
   const factory NetworkEvent.relayConnecting({required bool reconnecting}) =
       NetworkEvent_RelayConnecting;
+
+  /// Reply to `request_relay_bandwidth()` — this IP's daily relay byte
+  /// budget (binary frames both directions, fixed UTC-day window).
+  const factory NetworkEvent.bandwidthStatus({
+    required BigInt usedBytes,
+    required BigInt budgetBytes,
+    required BigInt resetInSecs,
+  }) = NetworkEvent_BandwidthStatus;
+
+  /// The relay closed us with "bandwidth_limit" — daily byte budget spent
+  /// until the UTC-day rollover.
+  const factory NetworkEvent.bandwidthLimited() = NetworkEvent_BandwidthLimited;
   const factory NetworkEvent.channelNotificationHint({
     required String serverId,
     required String channelId,

@@ -234,7 +234,7 @@
           "title": "Screen sharing",
           "sections": [
             {
-              "text": "You can share your screen during a call, which is useful for showing something off or getting help with a problem."
+              "text": "You can share your screen during a call, which is useful for showing something off or getting help with a problem. It works on every platform Hollow runs on, in both directions, and you can share your audio along with the picture."
             },
             {
               "text": "As said in 3.1, press the Screen Share button from the control panel of a call (right side of top header in a Direct Messages with a friend or a Voice Channel in a channel list on the left in a server). Select what you want to share (screen or a specific window), the resolution with frame rate of it, and the audio sharing."
@@ -243,7 +243,10 @@
               "text": "Then, click Share and you will see the preview of your own screen. The other peer will see it and hear the audio if you enabled it."
             },
             {
-              "text": "Like calls, the shared screen is encrypted end to end. Note: capture support varies by platforms. Currently, it's properly tested and supported on Windows and macOS. Linux is in Experimental support, so it might not work. Mobile devices don't support screen sharing yet. The same goes for screen audio sharing, so test it out and if any problems occur, simply report to the developer."
+              "text": "A small thing worth knowing on desktop: if you share a single window instead of the whole screen, only that app's audio is captured, and sharing the whole screen leaves out Hollow's own sound so you don't hear yourself echo. This per-app audio picking is a Windows and Linux thing. On macOS, sharing audio needs macOS 13 or newer, older versions still share the picture but grey out the audio toggle."
+            },
+            {
+              "text": "Like calls, the shared screen is encrypted end to end, so the relay never sees the picture or hears the audio. Phones can share too: on Android and iOS you can send your screen with system audio, and receive someone else's, the same as on desktop. If anything misbehaves on your particular setup, test it out and report it to the developer."
             }
           ]
         },
@@ -343,6 +346,24 @@
               "text": "Depending on your permissions you can assign roles, remove (kick) someone, or ban them. These actions respect the same tier rules as permissions, so you can't act on someone above your own level. If you don't want new members or make the server private, use the Overview tab (the Access section)."
             }
           ]
+        },
+        {
+          "id": "4.5",
+          "title": "Muting, slow mode and media-only channels",
+          "sections": [
+            {
+              "text": "Beyond roles, Hollow gives you three everyday moderation tools for keeping a channel civil: muting a member, slowing a channel down, and restricting a channel to media only. None of them touch history, they only change what's allowed from now on."
+            },
+            {
+              "text": "Muting stops a member from sending messages anywhere in the server while still letting them read along. Open the Members tab in Server Settings, press the three-dot menu on someone's row, and pick Mute Member. You can make it timed (10 minutes, an hour, a day, a week) or permanent, and a timed mute lifts itself with no action from you. Muting is Owner and Admin only, and you can't mute anyone at or above your own rank, the same tier rule as kick and ban. Active mutes gather in a Muted section at the bottom of the Members list, each with the time left and an Unmute button. The muted person sees a small banner on their input bar telling them they're muted and, for a timed mute, how long is left."
+            },
+            {
+              "text": "Slow mode puts a per-channel cooldown between messages, which calms a busy channel down without anyone having to babysit it. Set it from the Channels tab in Server Settings, using the little timer chip on a text channel row (Off, 5s, 10s, 30s, 1m, 5m, 15m, or 1h). Anyone with Manage Channels (Moderator and up) can set it, and Moderators, Admins, and the Owner are never throttled by it, only regular Members wait. A throttled member sees a short countdown near the input before they can send again."
+            },
+            {
+              "text": "A media-only channel accepts only images, GIFs, and videos, no plain text and no other file types. It's handy for gallery or clips channels where you want pictures, not chatter. Toggle it with the image icon on a text channel row in the Channels tab (Moderator and up), and the file picker in that channel automatically narrows to the media types it accepts. Captions are fine as long as they ride along with a media file."
+            }
+          ]
         }
       ]
     },
@@ -392,7 +413,7 @@
               "text": "On mobile, push notifications wake your phone for new messages even when the app is closed. The push itself carries no message content. It's just a nudge that tells your phone to wake up and fetch the real (encrypted) message itself. Apple and Google never see what was said, only that something arrived."
             },
             {
-              "text": "Push is a mobile thing. On desktop there's no always-on push service, so a desktop Hollow picks up messages when the app is open and connected. You will receive local notifications if the app is backgrounded (in a tray)."
+              "text": "Push is a mobile thing. On desktop there's no always-on push service, so a desktop Hollow picks up messages when the app is next open and connected. You won't miss them while you were away, though: the relay holds your encrypted messages and hands them over when you reconnect (see 6.1). You will also receive local notifications if the app is backgrounded (in a tray)."
             }
           ]
         },
@@ -426,19 +447,19 @@
           "title": "Why a message sometimes waits",
           "sections": [
             {
-              "text": "This is the behavior most likely to surprise someone coming from a normal chat app, so it's worth understanding rather than discovering it as a bug."
+              "text": "This used to be the behavior most likely to surprise someone coming from a normal chat app. It's gentler now than it was, but it's still worth understanding rather than running into it unprepared."
             },
             {
               "text": "If the other person is online, your message arrives right away, sent directly and encrypted. That's the normal case, on every platform."
             },
             {
-              "text": "If they're offline and on mobile, a push wakes their phone, and it fetches your message. So it still arrives soon after, even with the app closed."
+              "text": "If they're offline, the relay now holds your encrypted message for them and delivers it the moment they reconnect. This works even if you go offline before they come back, so you no longer have to both be online at the same time. The relay is just holding a sealed envelope it can't read and handing it over on their next connect. This is on by default and keeps messages for 3 days."
             },
             {
-              "text": "If they're offline and on desktop, there's no always-on push to wake a desktop, so they'll get the message the next time they open Hollow. If you also go offline before they come back, the message simply won't sync to them because the relay doesn't hold it in its RAM."
+              "text": "Each person controls this for their own account under Settings ==> Network ==> Offline Delivery, where they can turn it off or pick how long messages wait for them (1, 3, or 7 days). On mobile, a push also wakes the phone so the fetch happens even with the app closed (see 5.3)."
             },
             {
-              "text": "Push covers the gap on phones, and on desktop the model to keep in mind is simply: people get your message when they're next reachable."
+              "text": "There's one honest edge case left. If the recipient has turned offline delivery off, and they're offline, and you go offline too before they return, the message waits until you're both reachable again. With the default settings, though, the model is simply: people get your message when they're next online, whether or not you're still around."
             }
           ]
         },
@@ -468,7 +489,10 @@
               "text": "Messages are kept in sync across members using CRDTs, a method for merging everyone's copies without conflicts and without a central authority deciding the order. Each person keeps their own encrypted copy, so the history is held collectively rather than by one server."
             },
             {
-              "text": "There's one honest edge case. If you missed some messages and every member who had that particular stretch of history is also offline, that part stays unavailable until one of them comes back to share it. Once someone with the data is online, the gap fills in."
+              "text": "Servers also get a safety net from the relay. Recent channel messages are held there encrypted, the same way offline direct messages are (see 6.1), so when you open a channel after being away the relay can fill in what you missed even if the members who had it happen to be offline right then. The server's Owner or Admin controls this under Server Settings ==> Overview ==> Offline Catch-Up, where it's on by default and set to hold the last few days (1, 3, or 7)."
+            },
+            {
+              "text": "There's still one honest edge case beyond that window. If you missed some older messages, the relay no longer holds them, and every member who had that particular stretch of history is also offline, that part stays unavailable until one of them comes back to share it. Once someone with the data is online, the gap fills in."
             }
           ]
         },

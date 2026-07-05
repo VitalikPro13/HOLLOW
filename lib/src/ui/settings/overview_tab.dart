@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
@@ -713,21 +714,33 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                   HollowTypography.label.copyWith(color: hollow.textSecondary),
             ),
             const SizedBox(height: HollowSpacing.sm),
+            // Selection chips, not buttons: a filled HollowButton here read
+            // as another primary CTA competing with the section Save buttons.
             Row(
               children: [
                 for (final days in const [1, 3, 7]) ...[
-                  if (_catchupDays == days)
-                    HollowButton.filled(
-                      compact: true,
-                      onPressed: () {},
-                      child: Text('$days day${days == 1 ? '' : 's'}'),
-                    )
-                  else
-                    HollowButton.ghost(
-                      compact: true,
-                      onPressed: () => _setRelayCatchup(days),
-                      child: Text('$days day${days == 1 ? '' : 's'}'),
-                    ),
+                  Builder(builder: (context) {
+                    final selected = _catchupDays == days;
+                    return HollowPressable(
+                      onTap: selected ? null : () => _setRelayCatchup(days),
+                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      backgroundColor: selected ? hollow.accentMuted : null,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: HollowSpacing.md,
+                        vertical: HollowSpacing.xs + 2,
+                      ),
+                      child: Text(
+                        '$days day${days == 1 ? '' : 's'}',
+                        style: HollowTypography.label.copyWith(
+                          color: selected
+                              ? hollow.accent
+                              : hollow.textSecondary,
+                          fontWeight:
+                              selected ? FontWeight.w600 : FontWeight.normal,
+                        ),
+                      ),
+                    );
+                  }),
                   const SizedBox(width: HollowSpacing.sm),
                 ],
               ],

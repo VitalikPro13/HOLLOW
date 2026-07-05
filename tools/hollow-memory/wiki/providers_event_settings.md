@@ -1006,6 +1006,25 @@ File: `lib/src/core/providers/relay_domain_provider.dart`
 - Always includes `kDefaultRelayDomain` as first entry.
 - `loadCached()`, `addRelay(String)`, `removeRelay(String)` — all persist to DB.
 
+## Relay Bandwidth Provider (daily byte budget)
+
+File: `lib/src/core/providers/relay_bandwidth_provider.dart`
+Provider: `relayBandwidthProvider` -- `NotifierProvider.autoDispose<RelayBandwidthNotifier, RelayBandwidth>`
+
+This connection's daily relay byte budget (10 GB/day per IP, relay-RAM counter, binary frames both directions, UTC-day window).
+
+### RelayBandwidth Model
+- `usedBytes`, `budgetBytes` -- from the relay's `bandwidth_status` reply.
+- `resetAt` -- `DateTime?` local UTC deadline of the day rollover, computed at receipt from the relay's `reset_in_secs` (clock-skew immune; `StatusCountdown` ticks against it).
+- `limited` -- true after a `1008 "bandwidth_limit"` close; cleared by the first reply showing headroom.
+- `hasData` (`budgetBytes > 0`), `usagePercent`, `usageLabel` (`"X of Y"` via `formatBytes`).
+
+### RelayBandwidthNotifier
+- Demand-driven autoDispose: 30s `Timer.periodic` fire-and-forgets `request_relay_bandwidth()` FFI (`.catchError((_) {})` — node may not be running) ONLY while a relay card watches. Lifecycle-gated like relayStatsProvider.
+- ALSO re-requests on `overallConnectionProvider` offline→online — at app launch the card mounts before the relay WS is up, so without this the meter only appeared at the first 30s tick.
+- Data arrives via the event stream: event_provider dispatches `NetworkEvent_BandwidthStatus` → `onStatus(...)`; `NetworkEvent_BandwidthLimited` → `onLimited()` + error toast (overlayState pattern).
+- Consumers: desktop `_RelayStatsCard` (Home) + mobile `_MobileRelayCard` (Settings, gated on tab 3) — both render `DailyUsageMeter` "Your File Usage" only when `usedBytes > 0`.
+
 ## Relay Stats Provider
 
 File: `lib/src/core/providers/relay_stats_provider.dart`

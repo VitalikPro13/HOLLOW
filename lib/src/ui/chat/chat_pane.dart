@@ -376,8 +376,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                           peerId: source.peerId, type: source.type);
                 },
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
-                backgroundColor:
-                    isFocused ? hollow.accentMuted : Colors.transparent,
+                backgroundColor: isFocused ? hollow.accentMuted : null,
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.sm,
                   vertical: HollowSpacing.xs,
@@ -2154,8 +2153,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
               onTap: () =>
                   _onDmSourceTapped(source.peerId, source.type, localPeerId),
               borderRadius: BorderRadius.circular(hollow.radiusSm),
-              backgroundColor:
-                  isFocused ? hollow.accentMuted : Colors.transparent,
+              backgroundColor: isFocused ? hollow.accentMuted : null,
               padding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.sm,
                 vertical: HollowSpacing.xs,

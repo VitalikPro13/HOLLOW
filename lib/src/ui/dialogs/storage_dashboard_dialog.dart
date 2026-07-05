@@ -8,6 +8,7 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_card.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -426,16 +427,18 @@ class _StorageDashboardContentState
           ),
         ),
         actions: [
-          TextButton(
+          HollowButton.ghost(
+            compact: true,
             onPressed: () => Navigator.pop(ctx),
-            child: Text('Cancel', style: TextStyle(color: hollow.textSecondary)),
+            child: const Text('Cancel'),
           ),
-          TextButton(
+          HollowButton.filled(
+            compact: true,
             onPressed: () {
               final mb = int.tryParse(controller.text);
               if (mb != null && mb >= 512) Navigator.pop(ctx, mb);
             },
-            child: Text('Save', style: TextStyle(color: hollow.accent)),
+            child: const Text('Save'),
           ),
         ],
       ),

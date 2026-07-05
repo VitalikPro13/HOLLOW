@@ -6,6 +6,7 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -79,16 +80,18 @@ class _WelcomeContentState extends State<_WelcomeContent> {
             onSubmitted: (val) { if (val.isNotEmpty) Navigator.of(ctx).pop(val); },
           ),
           actions: [
-            TextButton(
+            HollowButton.ghost(
+              compact: true,
               onPressed: () => Navigator.of(ctx).pop(null),
-              child: Text('Cancel', style: TextStyle(color: hollow.textSecondary)),
+              child: const Text('Cancel'),
             ),
-            TextButton(
+            HollowButton.filled(
+              compact: true,
               onPressed: () {
                 final pass = controller.text.trim();
                 if (pass.isNotEmpty) Navigator.of(ctx).pop(pass);
               },
-              child: Text('Decrypt', style: TextStyle(color: hollow.accent)),
+              child: const Text('Decrypt'),
             ),
           ],
         );

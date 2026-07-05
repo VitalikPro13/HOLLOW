@@ -110,15 +110,19 @@ class _TabPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    return HollowPressable(
+    // Spacing lives OUTSIDE the pressable: padding on the pressable itself
+    // made the hover fill paint beyond the pill's outline (bands above and
+    // below the border). Hover must never read bigger than the control.
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: HollowPressable(
       onTap: onTap,
       borderRadius: BorderRadius.circular(hollow.radiusSm),
-      padding: const EdgeInsets.symmetric(vertical: 6),
       child: Container(
         alignment: Alignment.center,
         padding: const EdgeInsets.symmetric(vertical: 4),
         decoration: BoxDecoration(
-          color: isSelected ? hollow.accent.withValues(alpha: 0.15) : Colors.transparent,
+          color: isSelected ? hollow.accent.withValues(alpha: 0.15) : null,
           borderRadius: BorderRadius.circular(hollow.radiusSm),
           border: Border.all(
             color: isSelected ? hollow.accent.withValues(alpha: 0.3) : hollow.border,
@@ -132,6 +136,7 @@ class _TabPill extends StatelessWidget {
             fontSize: 12,
           ),
         ),
+      ),
       ),
     );
   }
@@ -273,79 +278,72 @@ class _DmRow extends ConsumerWidget {
         profileProvider.select((p) => p[entry.peerId]));
     final name = displayNameForPeer(peerProfile, entry.peerId);
 
+    // ONE box: selection bg lives on the pressable itself, so the hover rect
+    // and the selected rect are the same shape (the old inner Container drew
+    // a smaller selected box inside a larger hover box).
     return Padding(
       padding: const EdgeInsets.only(bottom: 2),
       child: HollowPressable(
         onTap: onTap,
         borderRadius: BorderRadius.circular(hollow.radiusSm),
+        backgroundColor:
+            isSelected ? hollow.accent.withValues(alpha: 0.12) : null,
         padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm,
-          vertical: HollowSpacing.sm,
+          horizontal: HollowSpacing.sm + HollowSpacing.sm,
+          vertical: HollowSpacing.sm + HollowSpacing.xs,
         ),
-        child: Container(
-          decoration: BoxDecoration(
-            color: isSelected
-                ? hollow.accent.withValues(alpha: 0.12)
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-          ),
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.sm,
-            vertical: HollowSpacing.xs,
-          ),
-          child: Row(
-            children: [
-              HollowAvatar(
-                peerId: entry.peerId,
-                size: 28,
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Text(
-                  name,
-                  style: HollowTypography.body.copyWith(
-                    color: isSelected
-                        ? hollow.accent
-                        : hollow.textPrimary,
-                    fontWeight:
-                        isSelected ? FontWeight.w600 : FontWeight.normal,
-                    fontSize: 13,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+        child: Row(
+          children: [
+            HollowAvatar(
+              peerId: entry.peerId,
+              size: 28,
+            ),
+            const SizedBox(width: HollowSpacing.sm),
+            Expanded(
+              child: Text(
+                name,
+                style: HollowTypography.body.copyWith(
+                  color: isSelected
+                      ? hollow.accent
+                      : hollow.textPrimary,
+                  fontWeight:
+                      isSelected ? FontWeight.w600 : FontWeight.normal,
+                  fontSize: 13,
                 ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
-              HollowPressable(
-                onTap: onToggleHidden,
-                semanticLabel: isHidden
-                    ? 'Show conversation'
-                    : 'Hide conversation',
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
-                padding: const EdgeInsets.all(4),
-                child: Icon(
-                  isHidden ? LucideIcons.eye : LucideIcons.eyeOff,
-                  size: 13,
+            ),
+            HollowPressable(
+              onTap: onToggleHidden,
+              semanticLabel: isHidden
+                  ? 'Show conversation'
+                  : 'Hide conversation',
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              padding: const EdgeInsets.all(4),
+              child: Icon(
+                isHidden ? LucideIcons.eye : LucideIcons.eyeOff,
+                size: 13,
+                color: hollow.textSecondary,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Container(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: hollow.elevated,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                '${entry.messageCount}',
+                style: HollowTypography.caption.copyWith(
                   color: hollow.textSecondary,
+                  fontSize: 10,
                 ),
               ),
-              const SizedBox(width: 4),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: hollow.elevated,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(
-                  '${entry.messageCount}',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 10,
-                  ),
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
@@ -538,22 +536,17 @@ class _ChannelList extends ConsumerWidget {
                   ref.read(archiveSelectedDmProvider.notifier).state = null;
                 },
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
+                // ONE box: selection bg on the pressable itself so hover and
+                // selection share the same rect (the inner Container drew a
+                // smaller selected box inside a larger hover box).
+                backgroundColor: isSelected
+                    ? hollow.accent.withValues(alpha: 0.12)
+                    : null,
                 padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm,
-                  vertical: HollowSpacing.xs,
+                  horizontal: HollowSpacing.sm + HollowSpacing.sm,
+                  vertical: HollowSpacing.xs + HollowSpacing.xs,
                 ),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: isSelected
-                        ? hollow.accent.withValues(alpha: 0.12)
-                        : Colors.transparent,
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
-                  ),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.sm,
-                    vertical: HollowSpacing.xs,
-                  ),
-                  child: Row(
+                child: Row(
                     children: [
                       Text(
                         '#',
@@ -599,7 +592,6 @@ class _ChannelList extends ConsumerWidget {
                       ),
                     ],
                   ),
-                ),
               ),
             );
           },

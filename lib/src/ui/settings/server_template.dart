@@ -677,7 +677,9 @@ Future<bool?> _showConfirmationDialog(
             onPressed: () => Navigator.of(ctx).pop(false),
             child: const Text('Cancel'),
           ),
-          HollowButton.danger(
+          // Filled, not danger: applying a template is not destructive —
+          // red misread as "this will delete something".
+          HollowButton.filled(
             onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text('Apply Template'),
           ),

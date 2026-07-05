@@ -249,6 +249,12 @@ The relay KEEPS its `/register`, `/unregister`, `/bootstrap/:room_code` HTTP end
 
 TURN credentials also moved off HTTP: `WsCommand::GetTurnCredentials` → relay `get_turn_credentials` (guest sockets get an error; the credentials sit behind relay auth instead of an open farmable endpoint) → `ServerMsg::TurnCredentials { username, password, ttl, uris }` → `WsEvent::TurnCredentials` → `NetworkEvent::TurnCredentials` → Dart `iceConfigProvider.setTurnCredentials()`. Rust owns the refresh cadence: a request on every `WsEvent::Connected` plus a 50-minute `turn_refresh_timer` (credentials last 1h). This replaced the Dart HTTP fetch whose retry chain dead-ended on a single non-200 (calls silently degraded to STUN-only until app restart). The relay keeps HTTP `/turn-credentials` for old clients.
 
+### Daily byte-budget status over WS (2026-07-05)
+
+Same request/response shape: Dart `request_relay_bandwidth()` FFI → `NodeCommand::GetRelayBandwidth` → `WsCommand::GetBandwidth` → relay `get_bandwidth` → `ServerMsg::BandwidthStatus { used, budget, reset_in_secs }` → `WsEvent::BandwidthStatus` → `NetworkEvent::BandwidthStatus { used_bytes, budget_bytes, reset_in_secs }` → Dart `relayBandwidthProvider`. Deliberately WS not HTTP: the reply rides the exact connection whose bytes the relay counts — a dual-stack client's HTTP poll can resolve to the other address family and read a different IP bucket. Dart owns the cadence (30s while a relay card is visible + on reconnect); no Rust timer.
+
+**Close reasons are now read** (previously discarded via `Message::Close(_)`): ws_client parses the relay's Close frame reason and a `"bandwidth_limit"` close (daily 10 GB budget spent — relay never silently drops) emits `WsEvent::BandwidthLimited` → `NetworkEvent::BandwidthLimited` → Dart error toast + the usage meter pins red. Any future relay close reason that needs UI surfacing follows this path.
+
 ---
 
 ## gossip.rs — Gossip Overlay

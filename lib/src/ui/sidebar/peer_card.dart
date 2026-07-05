@@ -50,8 +50,7 @@ class PeerCard extends ConsumerWidget {
       onTap: onTap,
       subtle: true,
       borderRadius: radius,
-      backgroundColor:
-          isSelected ? hollow.accentMuted : Colors.transparent,
+      backgroundColor: isSelected ? hollow.accentMuted : null,
       hoverColor: hollow.elevated,
         padding: const EdgeInsets.symmetric(
           horizontal: HollowSpacing.md,

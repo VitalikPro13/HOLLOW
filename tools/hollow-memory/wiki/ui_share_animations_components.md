@@ -482,11 +482,13 @@ File: `lib/src/ui/components/hollow_pressable.dart`
 - Opacity: 1.0 to 0.85, both curves `easeOutCubic`.
 - Triggered by `Listener` pointer events (`onPointerDown` → forward, `onPointerUp`/`onPointerCancel` → reverse).
 
-**Hover:**
+**Hover (rewritten 2026-07-05 — see memory `feedback_hover_state_patterns`):**
 - `MouseRegion` sets cursor to click when interactive.
 - `_hovering` state triggers `AnimatedContainer` (duration `HollowDurations.fast`, curve `HollowCurves.subtle`):
-  - Without `backgroundColor`: transitions to `effectiveHoverColor` (default `hollow.elevated`).
-  - With `backgroundColor`: `Color.lerp(backgroundColor, Colors.white, 0.15)` + `BoxShadow` glow.
+  - Without `backgroundColor`: rest = `effectiveHoverColor.withValues(alpha: 0)` → hover = `effectiveHoverColor` (default `hollow.elevated`). The rest color is deliberately NOT `Colors.transparent` (transparent BLACK — the lerp passed through semi-opaque dark, flashing dark on hover/unhover, worst in light mode).
+  - With `backgroundColor`: `_hoverLift(base)` — luminance-aware: dark fills lerp toward white 0.15, light fills toward black 0.08.
+  - NO hover BoxShadow glow (removed — an 8px halo painted outside the control's bounds; hover must never read bigger than the control).
+- **Callers pass `backgroundColor: null` for "no background", NEVER `Colors.transparent`** (a non-null transparent bg routes into the hover-lift branch and muddies).
 
 **Build hierarchy:** `MergeSemantics` (when interactive) > `HollowFocusRing` > `MouseRegion` > `Listener` > `Semantics` (`button`/`label`/`enabled` + mirrored `onTap`) > `GestureDetector` > `AnimatedBuilder` (`FadeTransition` > `ScaleTransition`) > `AnimatedContainer`. The `Semantics(onTap:)` mirrors the gesture handler for VoiceOver/Voice Control activation but does NOT double-fire on a physical tap (one is a pointer event, the other an a11y action — proven in `test/widget/semantics_foundation_test.dart`).
 
@@ -525,10 +527,12 @@ File: `lib/src/ui/components/hollow_button.dart`
 
 | Variant | Background | Text Color | Hover BG | Usage |
 |---------|-----------|------------|----------|-------|
-| `filled` | `hollow.accent` | `hollow.textOnAccent` | `hollow.accentHover` | Primary actions |
-| `ghost` | transparent | `hollow.accent` | `hollow.accentMuted` | Secondary actions |
-| `outline` | transparent + accent border | `hollow.accent` | `hollow.accentMuted` | Tertiary actions |
-| `danger` | `hollow.error` | white | error at 85% | Destructive actions |
+| `filled` | `hollow.accent` | `hollow.textOnAccent` | `hollow.accentHover` | Primary actions (ONE per logical group) |
+| `ghost` | `accentMuted` at alpha 0 | `hollow.accent` | `hollow.accentMuted` | Secondary actions, dialog Cancel |
+| `outline` | `accentMuted` at alpha 0 + accent border | `hollow.accent` | `hollow.accentMuted` | Secondary/alternative (Export, Connect, Enable) |
+| `danger` | `hollow.error` | white | error at 85% | Destructive actions ONLY (never for merely-important) |
+
+Ghost/outline rest bg is the hover color at ZERO ALPHA, not `Colors.transparent` (transparent BLACK — dark flash through the lerp; fixed 2026-07-05, see memory `feedback_hover_state_patterns`). Variant conventions: dialog pairs = ghost Cancel + filled confirm (danger when destructive); selection state uses HollowPressable chips, never `.filled`.
 
 **Named constructors:** `HollowButton.filled()`, `.ghost()`, `.outline()`, `.danger()`.
 
@@ -541,7 +545,7 @@ File: `lib/src/ui/components/hollow_button.dart`
 **Animation:** Same pattern as `HollowPressable` — scale 1.0 to 0.98 + opacity 1.0 to 0.85, 120ms/200ms durations with spring reverse.
 
 **Hover effects:**
-- Non-ghost variants: `BoxShadow` glow (glowColor at 20% alpha, 8px blur).
+- NO hover glow (the old 8px BoxShadow halo painted outside the button's outline — removed 2026-07-05).
 - Outline variant: border alpha increases from 0.4 to 0.6 on hover.
 - Disabled: opacity fixed at 0.4 via `AlwaysStoppedAnimation`.
 
@@ -550,6 +554,15 @@ File: `lib/src/ui/components/hollow_button.dart`
 **Larger Text (a11y Phase 3):** the leading icon box (base 16×16, glyph 14) is scaled by `MediaQuery.textScalerOf(context)` so it grows alongside the scaling label — keeps a labeled icon+text button visually balanced at high OS text scale (both desktop and mobile). This is scoped ON PURPOSE to `HollowButton`'s label-adjacent icon only; standalone icon-only buttons (`HollowPressable` + raw `Icon`) and the app's other ~775 raw icons are NOT scaled (Apple "Larger Text" is about text legibility, not icons). See `project_accessibility_larger_text`.
 
 **Padding:** compact = `HollowSpacing.md` horizontal / `HollowSpacing.sm` vertical; normal = `HollowSpacing.lg` / `HollowSpacing.sm + 2`.
+
+
+## StatBar / DailyUsageMeter
+
+File: `lib/src/ui/components/stat_bar.dart` (promoted 2026-07-05 from `home_dashboard.dart`'s private `_StatBar` so desktop Home and mobile Settings render identical bars).
+
+**StatBar** (`StatelessWidget`): icon (12px) + label (10px w500 `textSecondary`) + spacer + value (10px `textPrimary`), then a 4px track+fill bar (`_ThresholdBar`: `TweenAnimationBuilder` over `HollowDurations.slow`, easeOutCubic). Fill color thresholds: accent < 0.60 ≤ warning < 0.85 ≤ error.
+
+**DailyUsageMeter** (`StatelessWidget`): same visual system for the relay daily byte budget where value + countdown don't fit one header row. Header (icon + label only) → bar → ONE caption line: `usageText` left (9px `textTertiary`), optional `trailing` widget right (callers pass a `StatusCountdown` "resets in Xh Ym"). Used by desktop `_RelayStatsCard` and mobile `_MobileRelayCard` with label "Your File Usage", rendered only when used > 0.
 
 
 ## HollowTextField

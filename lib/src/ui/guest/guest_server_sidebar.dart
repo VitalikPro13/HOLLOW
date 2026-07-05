@@ -350,7 +350,7 @@ class _GuestServerSection extends ConsumerWidget {
               borderRadius: BorderRadius.circular(hollow.radiusMd),
               backgroundColor: isExpanded
                   ? hollow.accent.withValues(alpha: 0.06)
-                  : Colors.transparent,
+                  : null,
               hoverColor: hollow.elevated,
               padding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.sm,
@@ -604,7 +604,7 @@ class _GuestChannelTile extends StatelessWidget {
       onTap: onTap,
       subtle: true,
       borderRadius: radius,
-      backgroundColor: isSelected ? hollow.accentMuted : Colors.transparent,
+      backgroundColor: isSelected ? hollow.accentMuted : null,
       hoverColor: hollow.elevated,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm,

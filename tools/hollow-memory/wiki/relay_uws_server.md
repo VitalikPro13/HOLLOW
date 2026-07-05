@@ -41,6 +41,23 @@ Reads CLI flags sequentially. `TURN_SECRET` is loaded from the environment varia
 | `MAX_GUEST_ROOMS` | 3 | Max rooms a guest can join |
 | `GUEST_IDLE_SECS` | 1800 | Guest idle timeout (30 min no binary activity) |
 | `GUEST_BINARY_PER_MIN` | 10 | Max 0x03 binary frames per minute for guests |
+| `DAILY_BYTE_BUDGET` | 10 GiB | Per-IP daily byte budget (binary frames both directions, fixed UTC-day window) |
+
+### Per-IP keying: `ip_limit_key()` (ws_handler.cpp)
+
+ALL per-IP accounting (connection caps + byte budget) keys through `ip_limit_key(getRemoteAddressAsText())`:
+- IPv4 → the dotted-quad address.
+- **v4-MAPPED addresses are unmapped first** — the relay listens dual-stack on `[::]:443`, so every IPv4 client arrives as `::ffff:a.b.c.d` (uWS prints uncompressed v6 hex; uSockets does NOT unmap). Truncating those to /64 without unmapping collapses ALL IPv4 users into one `::/64` bucket → MAX_CONNS_PER_IP becomes a global cap (caught live 2026-07-05).
+- Real IPv6 → truncated to the **/64 prefix** (`"2001:db8:1:2::/64"`) — one host owns a whole /64, per-address caps are trivially bypassed.
+Any future per-IP feature MUST reuse this helper.
+
+### Daily byte budget (anti-drain backstop)
+
+10 GiB/day per `ip_limit_key` (~300× a heavy chatter's organic relay traffic). Counts BINARY frames BOTH directions: inbound in `.message`, outbound in `send_to_peer()` attributed to the RECIPIENT (download drains count). TEXT frames aren't counted but the budget IS enforced at text entry — commands like `topic_catchup` pull large binary replays. Enforcement = explicit `ws->end(1008, "bandwidth_limit")` (NEVER a silent drop) at the next inbound frame/command; never closes mid-fan-out inside `send_to_peer` (iterator safety). Lazy UTC-day rollover on touch (`roll_budget_day`), no timer. `get_bandwidth` text command returns `{"type":"bandwidth_status","used","budget","reset_in_secs"}` over the counted connection. `sweep_ip_budgets()` (300s timer) purges zero-connection stale-day entries. RAM-only, never logged; a relay restart resets all counters (deliberate).
+
+### IPv6 (2026-07-05)
+
+Relay serves dual-stack natively (uWS binds `[::]:443` by default). coturn listens on all system addresses both families (`listening-ip` pin removed; `external-ip` removed — public v4 is on-interface, no NAT). DNS: `relay.anonlisten.com` has A + AAAA (`2001:41d0:ab01::4:0:d`, the OVH DHCPv6-stable address). Client code is family-agnostic; libwebrtc gathers v6 ICE automatically. See memory `project_relay_ipv6`.
 
 ### PerSocketData (per-connection state)
 
@@ -53,19 +70,22 @@ Attached to every WebSocket via uWebSockets' templated user data. Fields:
 | `auth_timer` | `us_timer_t*` | 10-second auth timeout timer, nulled after auth or on close |
 | `license_key` | `std::string` | The license key this peer authenticated with (empty if license not required) |
 | `is_guest` | `bool` | `true` if auth included `"guest": true` flag. Guests are invisible to members, rate-limited, room-capped |
-| `ip_key` | `std::string` | Raw IP address bytes (stored for decrement on close, never logged) |
+| `ip_key` | `std::string` | Normalized `ip_limit_key` (v4 addr / v6 /64; stored for decrement on close, never logged) |
+| `ip_state` | `IpState*` | Cached pointer into `state.ip_states` for zero-lookup per-frame byte accounting (stable: values survive rehash; entry never erased while `active_count > 0`) |
 | `last_binary_activity` | `steady_clock::time_point` | Last 0x03 binary frame timestamp (for guest idle timeout) |
 | `binary_frames_this_minute` | `uint32_t` | Guest rate limit counter (reset every 60s) |
 | `minute_window_start` | `steady_clock::time_point` | Start of current rate limit window |
 
-### IpState (per-IP connection tracking)
+### IpState (per-IP connection tracking + byte budget)
 
-In-memory only — never logged, never persisted. Erased when `active_count` drops to 0.
+In-memory only — never logged, never persisted. On close, erased only when `active_count == 0` AND `bytes_today == 0` (after day-roll) — an entry that consumed budget today survives its last disconnect so a reconnect can't reset the counter; `sweep_ip_budgets` purges stale-day leftovers.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `active_count` | `uint32_t` | Currently open connections from this IP |
 | `recent_connects` | `deque<steady_clock::time_point>` | Sliding window of connection timestamps for rate limiting |
+| `bytes_today` | `uint64_t` | Daily byte-budget counter (binary frames both directions) |
+| `budget_day` | `uint32_t` | Unix day (secs/86400) the counter belongs to — lazily rolled on touch |
 
 ### PeerEntry (signaling registration)
 

@@ -42,6 +42,7 @@ import 'package:hollow/src/core/providers/recovery_pool_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
+import 'package:hollow/src/core/providers/relay_bandwidth_provider.dart';
 import 'package:hollow/src/core/services/push_hints_cache.dart';
 import 'package:hollow/src/core/providers/license_key_provider.dart';
 import 'package:hollow/src/core/providers/room_budget_provider.dart';
@@ -323,6 +324,29 @@ class EventStreamNotifier extends Notifier<bool> {
           :final username, :final password, :final uris):
         ref.read(iceConfigProvider.notifier).setTurnCredentials(
             username: username, password: password, uris: uris);
+
+      case NetworkEvent_BandwidthStatus(
+          :final usedBytes, :final budgetBytes, :final resetInSecs):
+        ref.read(relayBandwidthProvider.notifier).onStatus(
+            usedBytes: usedBytes.toInt(),
+            budgetBytes: budgetBytes.toInt(),
+            resetInSecs: resetInSecs.toInt());
+
+      case NetworkEvent_BandwidthLimited():
+        ref.read(relayBandwidthProvider.notifier).onLimited();
+        // Best-effort toast via the root navigator's Overlay (`overlayState:`
+        // — a plain context lookup throws from non-widget code). The relay
+        // NEVER silently drops on budget exhaustion; this is the user-visible
+        // surface for its explicit "bandwidth_limit" close.
+        final overlay = hollowNavigatorKey.currentState?.overlay;
+        if (overlay != null) {
+          HollowToast.show(
+            overlay.context,
+            'Daily relay data limit reached — resets at midnight UTC.',
+            type: HollowToastType.error,
+            overlayState: overlay,
+          );
+        }
 
       case NetworkEvent_PeerExpired(:final peerId):
         ref.read(peersProvider.notifier).removePeer(peerId);

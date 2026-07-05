@@ -683,9 +683,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                   final selected = i == _mentionSelectedIndex;
                   return HollowPressable(
                     onTap: () => _acceptMention(c),
+                    borderRadius: BorderRadius.circular(hollow.radiusSm),
                     backgroundColor: selected
                         ? hollow.accent.withValues(alpha: 0.15)
-                        : Colors.transparent,
+                        : null,
                     padding: const EdgeInsets.symmetric(
                       horizontal: HollowSpacing.sm,
                       vertical: HollowSpacing.xs,

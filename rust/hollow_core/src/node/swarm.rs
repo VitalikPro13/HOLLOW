@@ -1652,6 +1652,10 @@ async fn run_event_loop(
                         });
                     }
 
+                    NodeCommand::GetRelayBandwidth => {
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::GetBandwidth);
+                    }
+
                     NodeCommand::AcceptFriendRequest { peer_id: peer_id_str } => {
                         social::handle_accept_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
@@ -3335,6 +3339,14 @@ async fn run_event_loop(
                         let _ = event_tx.send(NetworkEvent::TurnCredentials {
                             username, password, ttl, uris,
                         }).await;
+                    }
+                    WsEvent::BandwidthStatus { used, budget, reset_in_secs } => {
+                        let _ = event_tx.send(NetworkEvent::BandwidthStatus {
+                            used_bytes: used, budget_bytes: budget, reset_in_secs,
+                        }).await;
+                    }
+                    WsEvent::BandwidthLimited => {
+                        let _ = event_tx.send(NetworkEvent::BandwidthLimited).await;
                     }
                     // -- Multi-device link codes (Step 4) --
                     WsEvent::LinkCodeClaimed { code } => {

@@ -167,35 +167,21 @@ Used for "FRIENDS", "RELAY SERVER", and "NEWS" section headers in `_NetworkColum
 
 ## _RelayStatsCard — Relay Server Metrics
 
-`home_dashboard.dart:_RelayStatsCard` is a `StatefulWidget` with `SingleTickerProviderStateMixin`. Displays RAM usage, bandwidth usage, and a poll cycle indicator.
+`home_dashboard.dart:_RelayStatsCard` is a `ConsumerStatefulWidget` with `SingleTickerProviderStateMixin`. Displays RAM usage, bandwidth usage, the user's daily relay byte budget, and a poll cycle indicator.
 
-**Props:** `hollow` (HollowTheme), `stats` (RelayStats).
+**Props:** `hollow` (HollowTheme), `stats` (RelayStats). Also watches `relayBandwidthProvider` internally (keeps its autoDispose 30s WS poll alive exactly while the card is mounted).
 
 **Animation:** `AnimationController` with 7-second duration, auto-forwards on init. Resets (`forward(from: 0.0)`) when `stats.fetchCount` changes (tracked via `_lastFetchCount`), indicating a new relay stats fetch completed.
 
 **Layout:** Full-width container, `hollow.surface` background, `radiusMd` corners, `hollow.border` border, `HollowSpacing.sm + 2` padding.
 
-Contains three elements:
-1. **RAM bar:** `_StatBar(icon: LucideIcons.memoryStick, label: 'RAM', value: stats.memLabel, progress: stats.memUsagePercent)`
-2. **Bandwidth bar:** `_StatBar(icon: LucideIcons.activity, label: 'Bandwidth', value: stats.bandwidthLabel, progress: stats.bandwidthUsagePercent)`
-3. **Poll cycle bar:** `AnimatedBuilder` driven by the animation controller. 3px height `LinearProgressIndicator` with `hollow.border` background and `hollow.accent` at 40% opacity as value color. Value tracks `_controller.value` (0.0 to 1.0 over 7 seconds).
+Contains four elements:
+1. **RAM bar:** `StatBar(icon: LucideIcons.memoryStick, label: 'RAM', value: stats.memLabel, progress: stats.memUsagePercent)`
+2. **Bandwidth bar:** `StatBar(icon: LucideIcons.activity, label: 'Bandwidth', value: stats.bandwidthLabel, progress: stats.bandwidthUsagePercent)`
+3. **"Your File Usage" meter:** `DailyUsageMeter(icon: LucideIcons.gauge, ...)` — this connection's daily relay byte budget from `relayBandwidthProvider`. Rendered ONLY when `usedBytes > 0` (a "0 B of 10 GB" bar is noise). Caption line under the bar: usage text left ("25.7 KB of 10.0 GB"), `StatusCountdown` "resets in Xh Ym" right (`hollow.error` when limited, else `textTertiary`).
+4. **Poll cycle bar:** `AnimatedBuilder` driven by the animation controller. 3px height `LinearProgressIndicator` with `hollow.border` background and `hollow.accent` at 40% opacity as value color. Value tracks `_controller.value` (0.0 to 1.0 over 7 seconds).
 
----
-
-## _StatBar — Single Stat Row with Progress Bar
-
-`home_dashboard.dart:_StatBar` is a `StatelessWidget`. Renders a labeled progress bar with color thresholds.
-
-**Props:** `hollow`, `icon`, `label`, `value` (display string), `progress` (0.0-1.0).
-
-**Color thresholds:**
-- `progress < 0.60`: `hollow.accent` (normal/healthy)
-- `progress < 0.85`: `hollow.warning` (elevated usage)
-- `progress >= 0.85`: `hollow.error` (critical usage)
-
-**Layout:**
-- Top row: icon (12px) + label text (10px, w500, `hollow.textSecondary`) + spacer + value text (10px, `hollow.textPrimary`)
-- Below: 4px height progress bar. Uses `TweenAnimationBuilder<double>` animating from 0 to clamped progress over `HollowDurations.slow` with `Curves.easeOutCubic`. Stack of border-colored background + `FractionallySizedBox` foreground with `barColor` and 2px border radius.
+`StatBar`/`DailyUsageMeter` live in the shared `lib/src/ui/components/stat_bar.dart` (promoted from a private `_StatBar` so the mobile Settings `_MobileRelayCard` renders identical bars). See `ui_share_animations_components.md` → StatBar.
 
 ---
 

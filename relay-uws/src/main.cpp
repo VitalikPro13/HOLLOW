@@ -128,6 +128,7 @@ int main(int argc, char** argv) {
                 auto* s = *reinterpret_cast<RelayState**>(us_timer_ext(t));
                 sweep_offline_buffer(*s);
                 sweep_link_codes(*s);
+                sweep_ip_budgets(*s);
             }, 300000, 300000);
 
             // Shutdown check timer (1s)

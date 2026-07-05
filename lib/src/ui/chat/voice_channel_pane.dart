@@ -1019,8 +1019,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                       .setFocusedSource(peerId, sourceType),
                   borderRadius:
                       BorderRadius.circular(hollow.radiusSm),
-                  backgroundColor:
-                      isFocused ? hollow.accentMuted : Colors.transparent,
+                  backgroundColor: isFocused ? hollow.accentMuted : null,
                   padding: const EdgeInsets.symmetric(
                     horizontal: HollowSpacing.sm,
                     vertical: HollowSpacing.xs,

@@ -15,6 +15,15 @@
 
 static constexpr size_t MAX_CONNS_PER_IP = 34;
 static constexpr size_t MAX_NEW_CONNS_PER_MIN_PER_IP = 10;
+// Per-IP daily byte budget (anti-drain backstop). Counts BINARY frames in
+// BOTH directions per ip_limit_key (v4 address / v6 /64 prefix). ~300x a
+// heavy chatter's organic relay traffic — false positives ~ 0 while capping
+// a 24/7 drain bot at ~10 GB/day instead of ~4 TB. Fixed UTC-day window.
+// RAM only, never logged (same privacy model as the connection caps).
+// On exhaustion: explicit close 1008 "bandwidth_limit" — NEVER silent drops.
+// If CGNAT/campus IPs ever bite, scale the budget by active_count per IP
+// before touching this number.
+static constexpr uint64_t DAILY_BYTE_BUDGET = 10ull * 1024 * 1024 * 1024;
 static constexpr size_t MAX_GUEST_ROOMS = 3;
 static constexpr int GUEST_IDLE_SECS = 1800;
 static constexpr uint32_t GUEST_BINARY_PER_MIN = 10;
@@ -82,6 +91,10 @@ struct PerSocketData {
     bool is_guest = false;
     std::string ip_key;
     bool is_fetch = false;  // Invisible background fetch mode (FCM wake-up)
+    // Cached pointer into state.ip_states for zero-lookup per-frame byte
+    // accounting. Stable while this socket is open: unordered_map values
+    // survive rehash, and an entry is never erased while active_count > 0.
+    struct IpState* ip_state = nullptr;
     // Set when a NEWER socket for the same peer_id authenticates and takes over
     // this peer's room/socket state. A superseded ghost must NOT run the shared
     // peer cleanup on close (it would evict the live successor from every room);
@@ -110,6 +123,11 @@ struct WsRoom {
 struct IpState {
     uint32_t active_count = 0;
     std::deque<std::chrono::steady_clock::time_point> recent_connects;
+    // Daily byte budget (binary frames both directions, UTC-day window).
+    // An entry with bytes_today > 0 survives active_count == 0 so a
+    // reconnect can't reset the counter; sweep_ip_budgets purges stale days.
+    uint64_t bytes_today = 0;
+    uint32_t budget_day = 0;  // unix day (secs/86400) the counter belongs to
 };
 
 struct ServerStatsCache {

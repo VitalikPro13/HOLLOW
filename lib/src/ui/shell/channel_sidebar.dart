@@ -938,8 +938,7 @@ class _ChannelTile extends ConsumerWidget {
       onTap: onTap,
       subtle: true,
       borderRadius: radius,
-      backgroundColor:
-          isSelected ? hollow.accentMuted : Colors.transparent,
+      backgroundColor: isSelected ? hollow.accentMuted : null,
       hoverColor: hollow.elevated,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm + 2,
@@ -1083,7 +1082,7 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
       },
       subtle: true,
       borderRadius: radius,
-      backgroundColor: isConnected ? hollow.accentMuted : Colors.transparent,
+      backgroundColor: isConnected ? hollow.accentMuted : null,
       hoverColor: hollow.elevated,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm + 2,

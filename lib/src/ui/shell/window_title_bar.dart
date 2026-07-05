@@ -170,9 +170,13 @@ class _WindowButtonState extends State<_WindowButton> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final bgColor = _hovering
-        ? (widget.hoverColor ?? hollow.elevated)
-        : Colors.transparent;
+    // Rest color = hover color at zero alpha, NOT Colors.transparent
+    // (transparent BLACK — the animated lerp passed through semi-opaque dark,
+    // flashing dark on hover/unhover; the close button muddied through
+    // dark-red). Same-RGB endpoints make the transition a pure fade.
+    final hoverColor = widget.hoverColor ?? hollow.elevated;
+    final bgColor =
+        _hovering ? hoverColor : hoverColor.withValues(alpha: 0.0);
 
     return Semantics(
       button: true,

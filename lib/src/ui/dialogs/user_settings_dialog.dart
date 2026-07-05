@@ -2493,7 +2493,10 @@ class _BackupCategoryState extends State<_BackupCategory> {
               _checkbox(hollow, _includeVault, 'Include vault shard data',
                   () => setState(() => _includeVault = !_includeVault)),
               const SizedBox(height: HollowSpacing.md),
-              HollowButton.filled(
+              // Outline (not filled): a secondary utility — matches the
+              // mobile Settings "Export Backup"; "Link a device" is the
+              // section's one filled primary.
+              HollowButton.outline(
                 onPressed: _exportBackup,
                 icon: const Icon(LucideIcons.download, size: 16),
                 child: const Text('Export Backup'),
@@ -5834,9 +5837,11 @@ class _BrandIconState extends State<_BrandIcon> {
             duration: HollowDurations.fast,
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
+              // Zero-alpha rest color, not Colors.transparent (transparent
+              // BLACK — the lerp flashed dark on hover/unhover).
               color: _hovering
                   ? hollow.elevated
-                  : Colors.transparent,
+                  : hollow.elevated.withValues(alpha: 0.0),
               borderRadius: BorderRadius.circular(hollow.radiusSm),
             ),
             child: AnimatedScale(
@@ -5895,7 +5900,9 @@ class _SvgBrandIconState extends State<_SvgBrandIcon> {
             duration: HollowDurations.fast,
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              color: _hovering ? hollow.elevated : Colors.transparent,
+              color: _hovering
+                  ? hollow.elevated
+                  : hollow.elevated.withValues(alpha: 0.0),
               borderRadius: BorderRadius.circular(hollow.radiusSm),
             ),
             child: AnimatedScale(

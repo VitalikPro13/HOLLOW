@@ -383,7 +383,7 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
                                   widget.onRenameRequested();
                                 },
                                 subtle: true,
-                                hoverColor: hollow.border.withValues(alpha: 0.15),
+                                
                                 borderRadius: BorderRadius.circular(6),
                                 padding: const EdgeInsets.all(6),
                                 semanticLabel: 'Rename folder',
@@ -481,7 +481,7 @@ class _FolderServerItem extends StatelessWidget {
     return HollowPressable(
       onTap: onTap,
       subtle: true,
-      hoverColor: hollow.border.withValues(alpha: 0.15),
+      
       borderRadius: BorderRadius.circular(hollow.radiusMd),
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: SizedBox(

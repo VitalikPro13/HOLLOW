@@ -40,7 +40,11 @@ class _AnnotationToggleButtonState extends State<AnnotationToggleButton> {
           duration: const Duration(milliseconds: 150),
           curve: Curves.easeOut,
           height: widget.size,
-          color: _hovered ? hollow.elevated : Colors.transparent,
+          // Zero-alpha rest color, not Colors.transparent (transparent BLACK
+          // — the lerp flashed dark on hover/unhover, worst in light mode).
+          color: _hovered
+              ? hollow.elevated
+              : hollow.elevated.withValues(alpha: 0.0),
           padding: EdgeInsets.symmetric(horizontal: _hovered ? 10 : 0),
           child: Row(
             mainAxisSize: MainAxisSize.min,

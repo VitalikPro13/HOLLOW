@@ -121,6 +121,15 @@ class _HollowPressableState extends State<HollowPressable>
     _controller?.reverse();
   }
 
+  /// Hover "lift" for controls with an explicit background: nudge toward
+  /// white on dark fills, toward black on light fills — a fixed lerp toward
+  /// white was invisible on light-theme fills.
+  static Color _hoverLift(Color base) {
+    final toward =
+        base.computeLuminance() > 0.5 ? Colors.black : Colors.white;
+    return Color.lerp(base, toward, base.computeLuminance() > 0.5 ? 0.08 : 0.15)!;
+  }
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
@@ -131,21 +140,21 @@ class _HollowPressableState extends State<HollowPressable>
       duration: HollowDurations.fast,
       curve: HollowCurves.subtle,
       decoration: BoxDecoration(
+        // Resting color is the hover color at ZERO ALPHA, never
+        // Colors.transparent: transparent is 0x00000000 (transparent BLACK),
+        // and AnimatedContainer lerps RGB+alpha together — the transition
+        // passed through semi-opaque DARK colors, reading as a dark flash on
+        // hover AND unhover (worst in light mode). Same-RGB endpoints make
+        // the animation pure fade.
         color: _hovering && isInteractive
             ? (widget.backgroundColor != null
-                  ? Color.lerp(widget.backgroundColor!, Colors.white, 0.15)!
+                  ? _hoverLift(widget.backgroundColor!)
                   : effectiveHoverColor)
-            : (widget.backgroundColor ?? Colors.transparent),
+            : (widget.backgroundColor ??
+                  effectiveHoverColor.withValues(alpha: 0.0)),
         borderRadius: widget.borderRadius,
-        boxShadow: _hovering && isInteractive && widget.backgroundColor != null
-            ? [
-                BoxShadow(
-                  color: widget.backgroundColor!.withValues(alpha: 0.25),
-                  blurRadius: 8,
-                  spreadRadius: 0,
-                ),
-              ]
-            : null,
+        // No hover glow: the 8px blurred halo painted OUTSIDE the control's
+        // bounds — hover must never read bigger than the control's outline.
       ),
       padding: widget.padding,
       child: widget.child,

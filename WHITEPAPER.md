@@ -922,11 +922,12 @@ A further direct frame type carries an Olm-encrypted file header with inlined, e
 
 ### 12.5 Resource Protection
 
-- **No application-level rate limiting.** Soft backpressure and per-peer rate limits were removed because they silently dropped CRDT sync payloads and broke reconnection flows. Authenticated peers are trusted.
+- **No application-level rate limiting.** Soft backpressure and per-peer rate limits were removed because they silently dropped CRDT sync payloads and broke reconnection flows.
+- **Daily byte budget (anti-drain backstop):** each IP address (IPv6 aggregated by /64 prefix — a single host controls an entire /64) may relay a generous fixed volume of binary traffic per UTC day, counted in both directions. The ceiling sits orders of magnitude above organic use — text chat, signaling, and CRDT sync never approach it — and exists solely to bound a modified client streaming bulk data through the relay continuously. On exhaustion the relay **closes the connection with an explicit reason** (`bandwidth_limit`) that the client surfaces to the user; frames are never silently dropped. Counters live only in relay RAM (never logged or persisted — the same privacy model as the connection caps, §12.7) and vanish on relay restart. Clients can query their own counter over the authenticated WebSocket (`get_bandwidth`); the reply travels on the exact connection being counted, so attribution is correct even for dual-stack hosts.
 - **Hard backpressure:** 64 MB per connection (uWebSockets built-in). Catches truly dead connections without interfering with legitimate traffic.
 - **Text frame cap:** 1 MB. Oversized text frames are silently dropped.
 - **Binary frame cap:** 64 MB (uWebSockets `maxPayloadLength`). Connections exceeding this are closed.
-- **DoS protection:** Ed25519 authentication + license key revocation. Only authenticated peers can send messages.
+- **DoS protection:** Ed25519 authentication + license key revocation. Only authenticated peers can send messages. Per-IP connection caps (simultaneous + new-per-minute) use the same /64-aggregated IPv6 keying.
 - **Room membership enforcement:** Messages are only forwarded to peers in the same room. Non-members' messages are silently dropped.
 
 ### 12.6 TURN Credential Management
@@ -1091,6 +1092,7 @@ The WebSocket relay handles signaling (SDP offers/answers, ICE candidates). WebR
 
 - **STUN servers:** Public STUN servers + self-hosted coturn for server-reflexive candidate discovery.
 - **TURN server:** Self-hosted coturn on the VPS for peers behind symmetric NATs.
+- **Dual-stack (IPv4 + IPv6):** The relay, STUN, and TURN infrastructure all listen on both address families, and clients gather IPv6 ICE candidates wherever the OS provides them. When both peers have IPv6 there is no NAT in the path, so connections that would fail IPv4 hole-punching (symmetric NAT, carrier-grade NAT — common on mobile networks) complete directly instead of falling back to TURN. This benefits exactly the peer pairs most likely to need relayed media otherwise.
 - **Share exception:** Hollow Share connections use STUN-only (no TURN) to ensure share traffic never consumes relay bandwidth.
 
 ### 14.3 Signaling Flow
