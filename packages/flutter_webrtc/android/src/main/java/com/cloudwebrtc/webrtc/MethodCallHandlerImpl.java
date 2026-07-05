@@ -151,6 +151,12 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   // Plays on the MEDIA stream, outside the call's voice-comm audio path.
   private com.cloudwebrtc.webrtc.audio.ScreenAudioPlayer screenAudioPlayer;
 
+  // Hollow fork: PCM EventChannel for SENT screen-share audio (system-audio
+  // AudioPlaybackCapture -> Dart -> Rust Opus encode -> 0x03 data channel).
+  // Same channel name + payload contract as the macOS SCK send path.
+  private EventChannel screenShareAudioChannel;
+  private EventChannel.EventSink screenShareAudioSink;
+
   public static class LogSink implements Loggable {
     @Override
     public void onLogMessage(String message, Severity sev, String tag) {
@@ -170,6 +176,29 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     this.context = context;
     this.textures = textureRegistry;
     this.messenger = messenger;
+    // Hollow fork: register eagerly (Dart subscribes BEFORE invoking
+    // startScreenShareAudioCapture — a lazily-registered channel would eat
+    // that first onListen and no PCM would ever flow).
+    ensureScreenShareAudioEventChannel();
+  }
+
+  // Hollow fork: register the send-side screen-audio PCM EventChannel once.
+  // Lazy (first startScreenShareAudioCapture call): Dart subscribes right
+  // after the start method returns, so onListen always finds the handler.
+  private void ensureScreenShareAudioEventChannel() {
+    if (screenShareAudioChannel != null) return;
+    screenShareAudioChannel = new EventChannel(messenger, "FlutterWebRTC/ScreenShareAudio");
+    screenShareAudioChannel.setStreamHandler(new EventChannel.StreamHandler() {
+      @Override
+      public void onListen(Object arguments, EventChannel.EventSink events) {
+        screenShareAudioSink = events;
+      }
+
+      @Override
+      public void onCancel(Object arguments) {
+        screenShareAudioSink = null;
+      }
+    });
   }
 
   static private void resultError(String method, String error, Result result) {
@@ -868,6 +897,23 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
           screenAudioPlayer.stop();
           screenAudioPlayer = null;
         }
+        result.success(null);
+        break;
+      }
+      case "startScreenShareAudioCapture": {
+        // Hollow fork: tap other apps' playback during the active screen share
+        // (AudioPlaybackCapture, API 29+). PCM chunks stream to Dart over the
+        // FlutterWebRTC/ScreenShareAudio EventChannel; Dart encodes in Rust.
+        boolean ok = getUserMediaImpl.startScreenShareAudioCapture(chunk ->
+            mainHandler.post(() -> {
+              EventChannel.EventSink sink = screenShareAudioSink;
+              if (sink != null) sink.success(chunk);
+            }));
+        result.success(ok);
+        break;
+      }
+      case "stopScreenShareAudioCapture": {
+        getUserMediaImpl.stopScreenShareAudioCapture();
         result.success(null);
         break;
       }

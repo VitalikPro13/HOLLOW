@@ -669,9 +669,11 @@ class CallNotifier extends Notifier<CallState> {
             _outgoingScreenShare!.pc!, peerId, isSender: true);
       }
 
-      // Build quality label (e.g. "1080p60", "4K30").
+      // Build quality label (e.g. "1080p60", "4K30"). Use the SHORT side so a
+      // portrait mobile capture (1080x1920) reads "1080p", same as landscape.
       const resLabels = {360: '360p', 480: '480p', 720: '720p', 1080: '1080p', 1440: '1440p', 2160: '4K'};
-      final qualityLabel = '${resLabels[height] ?? '${height}p'}$fps';
+      final shortSide = height < width ? height : width;
+      final qualityLabel = '${resLabels[shortSide] ?? '${shortSide}p'}$fps';
       state = state.copyWith(isScreenSharing: true, screenShareLabel: qualityLabel);
 
       _sendSignal(peerId, 'screen_offer',
@@ -680,10 +682,13 @@ class CallNotifier extends Notifier<CallState> {
           jsonEncode({'call_id': callId, 'enabled': true, 'quality': qualityLabel}));
 
       // Start screen audio capture via data channel on the data-channel-audio
-      // platforms: Windows (WASAPI), Linux (PulseAudio monitor), and
-      // macOS 13.0+ (ScreenCaptureKit).
+      // platforms: Windows (WASAPI), Linux (PulseAudio monitor), macOS 13.0+
+      // (ScreenCaptureKit), Android 10+ (AudioPlaybackCapture), and iOS
+      // (broadcast extension). Mobile failures degrade gracefully (video-only).
       final dcAudio = Platform.isWindows ||
           Platform.isLinux ||
+          Platform.isAndroid ||
+          Platform.isIOS ||
           (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio);
       if (shareAudio && dcAudio) {
         final webrtc = ref.read(webRtcProvider.notifier).service;

@@ -225,6 +225,15 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
         return true;
     }
 
+    /**
+     * Hollow fork: the live projection, shared with the system-audio capturer
+     * (Android 14 forbids a second getMediaProjection from the same grant).
+     * Null until startCapture has run / after stopCapture.
+     */
+    public MediaProjection getMediaProjection() {
+        return mediaProjection;
+    }
+
     public long getNumCapturedFrames() {
         return numCapturedFrames;
     }

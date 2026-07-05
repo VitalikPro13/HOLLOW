@@ -1,3 +1,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
   package="com.cloudwebrtc.webrtc">
+  <!-- Hollow fork: MediaProjection screen capture requires a foreground
+       service of type mediaProjection on API 29+ (hard-enforced on 34+). -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+  <application>
+    <service
+      android:name="com.cloudwebrtc.webrtc.ScreenCaptureForegroundService"
+      android:exported="false"
+      android:foregroundServiceType="mediaProjection" />
+  </application>
 </manifest>

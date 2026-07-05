@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.broadcast-services-upload</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>$(PRODUCT_MODULE_NAME).SampleHandler</string>
+		<!-- DIRECTLY under NSExtension, exactly like Xcode's own Broadcast
+		     Upload Extension template (verified against Xcode 26.3's
+		     TemplateInfo.plist). App Store validation REJECTS the key when
+		     it's nested under NSExtensionAttributes ("The key was not
+		     specified") — device-proven 2026-07-04. -->
+		<key>RPBroadcastProcessMode</key>
+		<string>RPBroadcastProcessModeSampleBuffer</string>
+	</dict>
+</dict>
+</plist>

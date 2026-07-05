@@ -53,3 +53,11 @@ tempfile = "3"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
+
+# The screen-share audio codec must run at REALTIME on phones even in DEBUG
+# app builds (debug APK = dev-profile Rust): unoptimized c2rust-transpiled
+# code is 10-50x slower than -O3, and a debug build couldn't Opus-encode music
+# as fast as it played — device-proven 2026-07-04 ("encode backlog" drops →
+# gappy shared audio). Optimizing just this crate keeps dev build times sane.
+[profile.dev.package.unsafe-libopus]
+opt-level = 3

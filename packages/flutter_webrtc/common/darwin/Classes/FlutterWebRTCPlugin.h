@@ -89,6 +89,11 @@ typedef void (^CapturerStopHandler)(CompletionHandler _Nonnull handler);
 - (void)ensureAudioSession;
 - (void)deactiveRtcAudioSession;
 
+// Hollow fork: post one chunk of screen-share-audio PCM (48 kHz stereo s16le)
+// onto the FlutterWebRTC/ScreenShareAudio EventChannel. Safe from any thread.
+// iOS: called with the broadcast extension's app-audio messages.
+- (void)hollowForwardScreenShareAudioPcm:(NSData* _Nonnull)pcm;
+
 - (RTCRtpReceiver* _Nullable)getRtpReceiverById:(RTCPeerConnection* _Nonnull)peerConnection
                                              Id:(NSString* _Nonnull)Id;
 - (RTCRtpSender* _Nullable)getRtpSenderById:(RTCPeerConnection* _Nonnull)peerConnection

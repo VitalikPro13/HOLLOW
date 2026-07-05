@@ -212,6 +212,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<LabelFfi> dco_decode_list_label_ffi(dynamic raw);
 
   @protected
+  List<Uint8List> dco_decode_list_list_prim_u_8_strict(dynamic raw);
+
+  @protected
   List<MemberFfi> dco_decode_list_member_ffi(dynamic raw);
 
   @protected
@@ -637,6 +640,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<LabelFfi> sse_decode_list_label_ffi(SseDeserializer deserializer);
+
+  @protected
+  List<Uint8List> sse_decode_list_list_prim_u_8_strict(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<MemberFfi> sse_decode_list_member_ffi(SseDeserializer deserializer);
@@ -1190,6 +1198,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_label_ffi(List<LabelFfi> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_list_prim_u_8_strict(
+    List<Uint8List> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_member_ffi(

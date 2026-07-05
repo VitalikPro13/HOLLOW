@@ -8,6 +8,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../rust/api/network.dart' as network_api;
 import 'screen_audio_capturer.dart';
 import 'mac_sck_screen_audio_capturer.dart';
+import 'mobile_screen_audio_capturer.dart';
 import 'macos_version.dart';
 
 /// Method channel exposed by the forked `flutter_webrtc` for the macOS-only
@@ -77,6 +78,8 @@ class ScreenShareService {
   ScreenAudioCapturer? _screenAudioCapturer;
   // --- Screen audio via ScreenCaptureKit (macOS 13.0–14.1) ---
   MacSckScreenAudioCapturer? _macSckAudioCapturer;
+  // --- Screen audio via native mobile capture + Rust Opus encode ---
+  MobileScreenAudioCapturer? _mobileAudioCapturer;
 
 
   ScreenShareService({
@@ -198,9 +201,12 @@ class ScreenShareService {
       }
     }
 
-    // Capture screen (+ optional system audio).
-    await desktopCapturer.getSources(
-        types: [SourceType.Screen, SourceType.Window]);
+    // Capture screen (+ optional system audio). Source enumeration is
+    // desktop-only; mobile captures THE screen (MediaProjection / ReplayKit).
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      await desktopCapturer.getSources(
+          types: [SourceType.Screen, SourceType.Window]);
+    }
 
     // macOS system-audio routing:
     //  - 13.0+ : ScreenCaptureKit audio-only -> data channel (0x03), same as
@@ -211,28 +217,49 @@ class ScreenShareService {
     //    ADM-independent and uniform across all macOS versions.
     //  - <13.0 : no capture API; the UI locks the toggle off, so shareAudio is
     //    false here anyway.
-    // Windows, macOS 13.0+, and Linux send audio via the data channel — never
-    // request it in getDisplayMedia (the WASAPI/AudioSource path crashes on
-    // Windows, isn't available on macOS, and yields nothing on Linux). The
-    // macOS CoreAudio Process Tap is retired (it was ADM-coupled and fed 0
-    // tracks under the CoreAudio ADM).
+    // Windows, macOS 13.0+, Linux, and MOBILE send audio via the data channel —
+    // never request it in getDisplayMedia (the WASAPI/AudioSource path crashes
+    // on Windows, isn't available on macOS, yields nothing on Linux, and on
+    // mobile a WebRTC track would drag music through the voice-comm AEC/AGC).
+    // Android taps AudioPlaybackCapture, iOS the broadcast extension — both
+    // stream PCM to Dart, Rust Opus-encodes, 0x03 data channel.
     final useDataChannelAudio = shareAudio &&
         (Platform.isWindows ||
             Platform.isLinux ||
+            Platform.isAndroid ||
+            Platform.isIOS ||
             (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio));
     final getDisplayAudio = shareAudio && !useDataChannelAudio;
 
-    _screenStream = await navigator.mediaDevices.getDisplayMedia({
-      'video': {
-        'deviceId': {'exact': sourceId},
-        'mandatory': {
-          'frameRate': fps.toDouble(),
-          'width': width,
-          'height': height,
+    if (Platform.isAndroid) {
+      // Constraints are ignored by the Android plugin (MediaProjection
+      // captures the display at native size; the consent dialog handles
+      // permission). The encoder cap below does the downscaling.
+      _screenStream = await navigator.mediaDevices.getDisplayMedia({
+        'video': true,
+        'audio': false,
+      });
+    } else if (Platform.isIOS) {
+      // 'broadcast' selects the ReplayKit Broadcast Upload Extension path
+      // (system-blessed: whole screen + app audio, keeps running when Hollow
+      // is backgrounded) and auto-presents the RPSystemBroadcastPickerView.
+      _screenStream = await navigator.mediaDevices.getDisplayMedia({
+        'video': {'deviceId': 'broadcast'},
+        'audio': false,
+      });
+    } else {
+      _screenStream = await navigator.mediaDevices.getDisplayMedia({
+        'video': {
+          'deviceId': {'exact': sourceId},
+          'mandatory': {
+            'frameRate': fps.toDouble(),
+            'width': width,
+            'height': height,
+          },
         },
-      },
-      'audio': getDisplayAudio,
-    });
+        'audio': getDisplayAudio,
+      });
+    }
 
     // SECURITY (Phase 6.25): Validate stream has video tracks.
     final videoTracks = _screenStream!.getVideoTracks();
@@ -530,6 +557,20 @@ class ScreenShareService {
       }
       return;
     }
+
+    // Mobile: native capture (Android AudioPlaybackCapture / iOS broadcast
+    // extension audio) -> PCM to Dart -> Rust Opus encode -> onPacket.
+    if (Platform.isAndroid || Platform.isIOS) {
+      if (_mobileAudioCapturer?.isActive == true) return;
+      _log('[HOLLOW-AU-SCREEN] Starting mobile screen-audio capture');
+      _mobileAudioCapturer = MobileScreenAudioCapturer();
+      final ok = await _mobileAudioCapturer!.start(onPacket: onPacket);
+      if (!ok) {
+        _log('[HOLLOW-AU-SCREEN] Failed to start mobile audio capturer');
+        _mobileAudioCapturer = null;
+      }
+      return;
+    }
   }
 
   Future<void> _stopScreenAudioCapture() async {
@@ -540,6 +581,10 @@ class ScreenShareService {
     if (_macSckAudioCapturer != null) {
       await _macSckAudioCapturer!.stop();
       _macSckAudioCapturer = null;
+    }
+    if (_mobileAudioCapturer != null) {
+      await _mobileAudioCapturer!.stop();
+      _mobileAudioCapturer = null;
     }
   }
 

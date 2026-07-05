@@ -15,6 +15,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_avatars.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -359,14 +360,36 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     );
   }
 
+  Future<void> _handleScreenShareToggle(CallState call) async {
+    final notifier = ref.read(callProvider.notifier);
+    if (call.isScreenSharing) {
+      await notifier.stopScreenShare();
+      return;
+    }
+    final choice = await showMobileScreenShareSheet(context);
+    if (choice == null || !mounted) return;
+    // Portrait phone capture: cap the long edge at 1920 (1080p-class).
+    // Android ignores the constraints and captures at native display size;
+    // the encoder cap in ScreenShareService does the actual downscaling.
+    await notifier.startScreenShare(
+      sourceId: 'screen',
+      width: 1080,
+      height: 1920,
+      fps: 30,
+      shareAudio: choice.shareAudio,
+    );
+  }
+
   Widget _buildControls(HollowTheme hollow, CallState call) {
-    const iconSize = 26.0;
-    const buttonSize = 56.0;
+    // 6 buttons overflow narrow phones at 56px — same shrink as the voice
+    // channel screen's crowded mode.
+    const iconSize = 21.0;
+    const buttonSize = 46.0;
     final canControl = call.status == CallStatus.active ||
         call.status == CallStatus.connecting;
 
     // Same button order as the voice channel screen:
-    // mute, deafen, speaker, camera, hang up.
+    // mute, deafen, speaker, camera, share screen, hang up.
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
       child: Row(
@@ -421,6 +444,22 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                 : hollow.elevated,
             onTap: call.status == CallStatus.active
                 ? () => ref.read(callProvider.notifier).toggleVideo()
+                : null,
+          ),
+          MobileControlButton(
+            icon: call.isScreenSharing
+                ? LucideIcons.monitorOff
+                : LucideIcons.monitor,
+            iconSize: iconSize,
+            size: buttonSize,
+            color: call.isScreenSharing ? hollow.accent : hollow.textPrimary,
+            backgroundColor: call.isScreenSharing
+                ? hollow.accent.withValues(alpha: 0.15)
+                : hollow.elevated,
+            semanticLabel:
+                call.isScreenSharing ? 'Stop sharing screen' : 'Share screen',
+            onTap: call.status == CallStatus.active
+                ? () => _handleScreenShareToggle(call)
                 : null,
           ),
           MobileControlButton(

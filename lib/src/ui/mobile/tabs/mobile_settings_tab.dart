@@ -1475,8 +1475,96 @@ class _BackupTab extends StatelessWidget {
         ),
         const SizedBox(height: HollowSpacing.sm),
         const _BackupExportButton(),
+        if (Platform.isIOS) ...[
+          const SizedBox(height: HollowSpacing.xl),
+          _SectionLabel(label: 'Diagnostics'),
+          const SizedBox(height: HollowSpacing.sm),
+          const _ExportDiagnosticsButton(),
+        ],
       ],
     );
+  }
+}
+
+// Restores the a114376-removed export button (iOS has no adb — this is the
+// only zero-Mac way to pull logs off a test device). Bundles the push
+// diagnostics files plus a hollow_debug.log tail into one shareable text file.
+class _ExportDiagnosticsButton extends StatelessWidget {
+  const _ExportDiagnosticsButton();
+
+  @override
+  Widget build(BuildContext context) {
+    return HollowButton.outline(
+      onPressed: () => _export(context),
+      expand: true,
+      icon: const Icon(LucideIcons.fileText, size: 16),
+      child: const Text('Export Debug Logs'),
+    );
+  }
+
+  Future<void> _export(BuildContext context) async {
+    final buf = StringBuffer();
+    buf.writeln('=== Hollow Diagnostics ===');
+    buf.writeln('Exported: ${DateTime.now().toIso8601String()}');
+    buf.writeln('Data dir: $hollowDataDir');
+    buf.writeln();
+    // App Group container = parent of the (migrated) data dir.
+    final container = Directory(hollowDataDir).parent.path;
+    void appendFile(String label, String path, {int tailBytes = 0}) {
+      buf.writeln('----- $label ($path) -----');
+      try {
+        final f = File(path);
+        if (f.existsSync()) {
+          if (tailBytes > 0 && f.lengthSync() > tailBytes) {
+            final raf = f.openSync();
+            try {
+              raf.setPositionSync(f.lengthSync() - tailBytes);
+              buf.writeln('(tail, last $tailBytes bytes)');
+              buf.writeln(utf8.decode(raf.readSync(tailBytes),
+                  allowMalformed: true));
+            } finally {
+              raf.closeSync();
+            }
+          } else {
+            buf.writeln(f.readAsStringSync());
+          }
+        } else {
+          buf.writeln('(not found)');
+        }
+      } catch (e) {
+        buf.writeln('(read error: $e)');
+      }
+      buf.writeln();
+    }
+
+    appendFile('NSE metrics', '$container/push_diag/nse_metrics.log');
+    appendFile('App active heartbeat', '$container/push_diag/app_active.txt');
+    appendFile('Dart push log', '$hollowDataDir/push_debug.log');
+    appendFile('Hollow debug log', '$hollowDataDir/hollow_debug.log',
+        tailBytes: 2 * 1024 * 1024);
+    appendFile('Hollow crash log', '$hollowDataDir/hollow_crash.log',
+        tailBytes: 512 * 1024);
+
+    final bytes = Uint8List.fromList(utf8.encode(buf.toString()));
+    try {
+      final saved = await FilePicker.platform.saveFile(
+        dialogTitle: 'Export Debug Logs',
+        fileName: 'hollow_diagnostics.txt',
+        bytes: bytes, // required on iOS/Android
+      );
+      if (context.mounted) {
+        HollowToast.show(
+          context,
+          saved == null ? 'Export cancelled' : 'Diagnostics exported',
+          type: saved == null ? HollowToastType.info : HollowToastType.success,
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        HollowToast.show(context, 'Export failed: $e',
+            type: HollowToastType.error);
+      }
+    }
   }
 }
 

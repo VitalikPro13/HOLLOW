@@ -529,6 +529,19 @@ public class GetUserMediaImpl {
     }
 
     private void getDisplayMedia(final Result result, final MediaStream mediaStream, final Intent mediaProjectionData) {
+        // Hollow fork: API 29+ requires a foreground service of type
+        // mediaProjection to be RUNNING before getMediaProjection() is called
+        // (inside OrientationAwareScreenCapturer.startCapture), else a
+        // SecurityException. Start it and continue once live.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ScreenCaptureForegroundService.start(applicationContext,
+                    () -> getDisplayMediaInner(result, mediaStream, mediaProjectionData));
+        } else {
+            getDisplayMediaInner(result, mediaStream, mediaProjectionData);
+        }
+    }
+
+    private void getDisplayMediaInner(final Result result, final MediaStream mediaStream, final Intent mediaProjectionData) {
         /* Create ScreenCapture */
         VideoTrack displayTrack = null;
         VideoCapturer videoCapturer = null;
@@ -943,6 +956,50 @@ public class GetUserMediaImpl {
         return trackParams;
     }
 
+    // Hollow fork: system-audio capture (AudioPlaybackCapture) riding the
+    // active screen-share MediaProjection. Owned here so removeVideoCapturer
+    // can tear it down alongside the video capture it depends on.
+    private com.cloudwebrtc.webrtc.audio.ScreenShareAudioCapturer screenShareAudioCapturer;
+
+    /** The live MediaProjection of the running screen capture, or null. */
+    private MediaProjection getScreenCaptureProjection() {
+        for (Map.Entry<String, VideoCapturerInfoEx> entry : mVideoCapturers.entrySet()) {
+            VideoCapturerInfoEx info = entry.getValue();
+            if (info.isScreenCapture && info.capturer instanceof OrientationAwareScreenCapturer) {
+                return ((OrientationAwareScreenCapturer) info.capturer).getMediaProjection();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Hollow fork: start capturing other apps' playback during the active
+     * screen share. PCM lands in {@code sink} on the capture thread.
+     * Returns false when there's no live projection, on pre-Q Android, or
+     * when the AudioRecord fails to build.
+     */
+    boolean startScreenShareAudioCapture(
+            com.cloudwebrtc.webrtc.audio.ScreenShareAudioCapturer.PcmSink sink) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false;
+        MediaProjection projection = getScreenCaptureProjection();
+        if (projection == null) {
+            Log.w(TAG, "startScreenShareAudioCapture: no active screen-capture projection");
+            return false;
+        }
+        if (screenShareAudioCapturer == null) {
+            screenShareAudioCapturer = new com.cloudwebrtc.webrtc.audio.ScreenShareAudioCapturer();
+        }
+        return screenShareAudioCapturer.start(projection, sink);
+    }
+
+    void stopScreenShareAudioCapture() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
+        if (screenShareAudioCapturer != null) {
+            screenShareAudioCapturer.stop();
+            screenShareAudioCapturer = null;
+        }
+    }
+
     void removeVideoCapturer(String id) {
         VideoCapturerInfoEx info = mVideoCapturers.get(id);
         if (info == null) return;
@@ -988,6 +1045,12 @@ public class GetUserMediaImpl {
                     + " to primary capturer (was " + id + ")");
         } else {
             // No shared tracks - stop and dispose the capturer normally.
+            // Hollow fork: the system-audio capture + foreground service live
+            // and die with the screen-video capture (its MediaProjection stops
+            // inside stopCapture, so the audio tap must go down FIRST).
+            if (info.isScreenCapture) {
+                stopScreenShareAudioCapture();
+            }
             try {
                 info.capturer.stopCapture();
                 if (info.cameraEventsHandler != null) {
@@ -1003,6 +1066,9 @@ public class GetUserMediaImpl {
                     helper.stopListening();
                     helper.dispose();
                     mSurfaceTextureHelpers.remove(id);
+                }
+                if (info.isScreenCapture) {
+                    ScreenCaptureForegroundService.stop(applicationContext);
                 }
             }
         }

@@ -46,7 +46,15 @@ NSArray<RTCDesktopSource*>* _captureSources;
   id screenCapturer;
 
   if (useBroadcastExtension) {
-    screenCapturer = [[FlutterBroadcastScreenCapturer alloc] initWithDelegate:videoProcessingAdapter];
+    FlutterBroadcastScreenCapturer* broadcastCapturer =
+        [[FlutterBroadcastScreenCapturer alloc] initWithDelegate:videoProcessingAdapter];
+    // Hollow fork: the broadcast extension interleaves app-audio PCM with the
+    // video frames — relay it to Dart (Rust Opus encode -> 0x03 data channel).
+    __weak FlutterWebRTCPlugin* weakSelf = self;
+    broadcastCapturer.onAudioData = ^(NSData* pcm) {
+      [weakSelf hollowForwardScreenShareAudioPcm:pcm];
+    };
+    screenCapturer = broadcastCapturer;
   } else {
     screenCapturer = [[FlutterRPScreenRecorder alloc] initWithDelegate:[videoProcessingAdapter source]];
   }

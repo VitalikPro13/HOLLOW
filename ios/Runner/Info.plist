@@ -37,6 +37,14 @@
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- Screen share: ReplayKit Broadcast Upload Extension. The flutter_webrtc
+	     fork reads these to (a) preselect our extension in the system broadcast
+	     picker and (b) locate the App-Group unix socket the extension streams
+	     frames + app audio through. -->
+	<key>RTCScreenSharingExtension</key>
+	<string>com.anonlisten.hollow.BroadcastExtension</string>
+	<key>RTCAppGroupIdentifier</key>
+	<string>group.com.anonlisten.hollow</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Hollow needs camera access for video calls.</string>
 	<key>NSMicrophoneUsageDescription</key>

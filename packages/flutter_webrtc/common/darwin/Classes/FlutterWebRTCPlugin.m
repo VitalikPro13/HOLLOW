@@ -117,10 +117,11 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
     });
 }
 
-#if TARGET_OS_OSX
-// Dedicated stream handler for the macOS screen-share-audio PCM EventChannel
+// Dedicated stream handler for the screen-share-audio PCM EventChannel
 // ("FlutterWebRTC/ScreenShareAudio"). Holds the Dart sink and forwards raw
-// interleaved s16 PCM (48k stereo) chunks from MacScreenShareAudioCapturer.
+// interleaved s16 PCM (48k stereo) chunks — from MacScreenShareAudioCapturer
+// on macOS, or from the ReplayKit broadcast extension's app-audio messages
+// on iOS (relayed via hollowForwardScreenShareAudioPcm:).
 @interface HollowScreenAudioStreamHandler : NSObject <FlutterStreamHandler>
 @property(nonatomic, copy, nullable) FlutterEventSink sink;
 @end
@@ -136,17 +137,14 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
   return nil;
 }
 @end
-#endif
 
 @implementation FlutterWebRTCPlugin {
 #pragma clang diagnostic pop
   FlutterMethodChannel* _methodChannel;
   FlutterEventSink _eventSink;
   FlutterEventChannel* _eventChannel;
-#if TARGET_OS_OSX
   FlutterEventChannel* _screenAudioEventChannel;
   HollowScreenAudioStreamHandler* _screenAudioStreamHandler;
-#endif
   id _registry;
   id _messenger;
   id _textures;
@@ -248,13 +246,11 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     _speakerOn = NO;
     _speakerOnButPreferBluetooth = NO;
     _eventChannel = eventChannel;
-#if TARGET_OS_OSX
     _screenAudioStreamHandler = [[HollowScreenAudioStreamHandler alloc] init];
     _screenAudioEventChannel =
         [FlutterEventChannel eventChannelWithName:@"FlutterWebRTC/ScreenShareAudio"
                                   binaryMessenger:messenger];
     [_screenAudioEventChannel setStreamHandler:_screenAudioStreamHandler];
-#endif
     _audioManager = AudioManager.sharedInstance;
 
     // Hollow fork: install the post-APM makeup gain + limiter so calls aren't
@@ -267,6 +263,17 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 #if TARGET_OS_IPHONE
     _preferredInput = AVAudioSessionPortHeadphones;
     self.viewController = viewController;
+
+    // Hollow fork: bake MixWithOthers into libwebrtc's own session template
+    // (it re-applies webRTCConfiguration whenever its audio unit restarts,
+    // which would drop the flag set by AudioUtils). Without MixWithOthers,
+    // another app's non-mixable playback (music) INTERRUPTS the call session;
+    // a backgrounded call then has no live audio unit and iOS suspends the
+    // app ~45s later — the whole call collapses (device-proven 2026-07-05).
+    RTCAudioSessionConfiguration* webRTCConfig =
+        [RTCAudioSessionConfiguration webRTCConfiguration];
+    webRTCConfig.categoryOptions |= AVAudioSessionCategoryOptionMixWithOthers;
+    [RTCAudioSessionConfiguration setWebRTCConfiguration:webRTCConfig];
 #endif
 #if TARGET_OS_IPHONE || TARGET_OS_OSX
     _platformViewFactory  = [[FlutterRTCVideoPlatformViewFactory alloc] initWithMessenger:messenger];
@@ -583,12 +590,21 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
                                  message:err.localizedDescription ?: @"Failed to start SCK audio capture"
                                  details:nil]);
     }
+#elif TARGET_OS_IPHONE
+    // iOS: nothing to start here — app audio arrives from the ReplayKit
+    // broadcast extension over the App-Group socket whenever the user starts
+    // the broadcast; FlutterRTCDesktopCapturer wires it onto the same
+    // FlutterWebRTC/ScreenShareAudio EventChannel. Report success so Dart's
+    // MobileScreenAudioCapturer subscribes and waits for the PCM.
+    result(@(YES));
 #else
     result([FlutterError errorWithCode:@"ERROR" message:@"macOS only" details:nil]);
 #endif
   } else if ([@"stopScreenShareAudioCapture" isEqualToString:call.method]) {
 #if TARGET_OS_OSX
     [[MacScreenShareAudioCapturer sharedInstance] stop];
+    result(@(YES));
+#elif TARGET_OS_IPHONE
     result(@(YES));
 #else
     result([FlutterError errorWithCode:@"ERROR" message:@"macOS only" details:nil]);
@@ -2102,6 +2118,20 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
           [self handleDataPacketCryptorMethodCall:call result:result];
       }
     }
+}
+
+// Hollow fork: relay screen-share-audio PCM (48 kHz stereo s16le) to Dart on
+// the FlutterWebRTC/ScreenShareAudio EventChannel. Safe from any thread; on
+// iOS this carries the broadcast extension's app-audio messages.
+- (void)hollowForwardScreenShareAudioPcm:(NSData*)pcm {
+  FlutterEventSink sink = _screenAudioStreamHandler.sink;
+  if (sink == nil || pcm.length == 0) {
+    return;
+  }
+  FlutterStandardTypedData* data = [FlutterStandardTypedData typedDataWithBytes:pcm];
+  dispatch_async(dispatch_get_main_queue(), ^{
+    sink(data);
+  });
 }
 
 - (void)dealloc {

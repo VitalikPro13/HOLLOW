@@ -6,9 +6,9 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `decode`, `decoder`, `new`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ScreenAudioDecoder`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `drop`
+// These functions are ignored because they are not marked as `pub`: `decode`, `decoder`, `encode`, `encoder`, `new`, `new`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ScreenAudioDecoder`, `ScreenAudioEncoder`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `drop`, `drop`
 
 /// (Re)initialize the screen-audio decoder. Called when a mobile player starts,
 /// to clear any inter-packet state left over from a previous share session.
@@ -21,3 +21,23 @@ Future<void> resetScreenAudioDecoder() =>
 /// decoder if [`reset_screen_audio_decoder`] wasn't called first.
 Future<Uint8List> decodeScreenAudio({required List<int> opus}) =>
     RustLib.instance.api.crateApiScreenAudioDecodeScreenAudio(opus: opus);
+
+/// (Re)initialize the screen-audio encoder. Called when a mobile share-audio
+/// capture starts: clears encoder prediction state, the PCM residual buffer,
+/// and resets the wire seq to 0 (matches the desktop exe starting at 0).
+Future<void> resetScreenAudioEncoder() =>
+    RustLib.instance.api.crateApiScreenAudioResetScreenAudioEncoder();
+
+/// Drop the encoder (share-audio capture stopped). Frees the libopus state;
+/// the next capture start recreates it via [`reset_screen_audio_encoder`].
+Future<void> stopScreenAudioEncoder() =>
+    RustLib.instance.api.crateApiScreenAudioStopScreenAudioEncoder();
+
+/// Feed a chunk of interleaved 48 kHz stereo s16le PCM (any length — native
+/// capture callbacks deliver uneven sizes). Buffers internally, encodes every
+/// complete 10 ms frame, and returns zero or more COMPLETE wire packets, each
+/// `[seq:4 LE][opus_bytes...]` — exactly what `sendScreenAudio` puts after the
+/// 0x03 type byte. Leftover PCM stays buffered for the next call. Lazily
+/// creates the encoder if [`reset_screen_audio_encoder`] wasn't called first.
+Future<List<Uint8List>> encodeScreenAudio({required List<int> pcm}) =>
+    RustLib.instance.api.crateApiScreenAudioEncodeScreenAudio(pcm: pcm);

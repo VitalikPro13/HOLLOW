@@ -506,7 +506,8 @@ All FFI-dependent providers are overridden with mock notifiers that return stati
 ### Layout
 - Top bar: chevron-down (pops route) + `# channelName` + duration MM:SS
 - Center: `MobileClusteredAvatars` (audio mode) or video grid (camera/screen share mode)
-- Bottom controls: mute, deafen, camera, flip camera (mobile+camera on), leave (red)
+- Bottom controls: mute, deafen, speaker (mobile), camera, share screen (mobile), flip camera (mobile+camera on), leave (red)
+- Share screen button (also on the DM call screen, `mobile_call_video_view.dart`): toggles `startScreenShare`/`stopScreenShare` via `showMobileScreenShareSheet` (`mobile_screen_share_sheet.dart` — bottom sheet with a "Share device audio" toggle + platform notes; no source picking on mobile, caps passed as 1080x1920@30)
 - Auto-pops when `voiceChannelProvider` changes to different channel or leaves
 
 ### Video Modes
@@ -514,6 +515,8 @@ All FFI-dependent providers are overridden with mock notifiers that return stati
 2. **Single local camera**: full self-view with mirror
 3. **Single remote camera**: full remote + local PiP
 4. **Multi-camera grid**: `Wrap` layout, tiles adapt to count
+
+A SELF screen share is deliberately NOT previewed on mobile (`_hasVideo` ignores a self-share focus) — the phone shares its own screen, so a preview would mirror-recurse; the avatar view + accent share button convey the sharing state.
 
 ### Navigation Pattern
 Voice channel tap in accordion (`mobile_chats_tab.dart`) pushes TWO routes:

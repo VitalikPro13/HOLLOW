@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_avatars.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
@@ -62,7 +63,12 @@ class _MobileVoiceChannelRouteState
   // the old per-second setState rebuilt this ENTIRE Scaffold every second.
 
   bool _hasVideo(VoiceChannelState vcState) {
-    if (vcState.focusedScreenSharePeerId != null) return true;
+    // A SELF share focus doesn't count — mobile never previews its own share
+    // (mirror recursion; see _buildVideoView), so it must not force an empty
+    // video view over the avatars.
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final screenPeer = vcState.focusedScreenSharePeerId;
+    if (screenPeer != null && screenPeer != localPeerId) return true;
     if (vcState.isCameraOn) return true;
     for (final entry in vcState.peerCameraOn.entries) {
       if (entry.value) return true;
@@ -220,7 +226,10 @@ class _MobileVoiceChannelRouteState
       HollowTheme hollow, VoiceChannelState vcState, String localPeerId) {
     final vcNotifier = ref.read(voiceChannelProvider.notifier);
 
-    // Remote screen share takes priority.
+    // Remote screen share takes priority. A SELF share is deliberately not
+    // previewed on mobile: the phone shares its own screen, so a preview
+    // would show the app showing itself (infinite mirror) — the avatar view
+    // + the accent share button convey the sharing state instead.
     final screenPeer = vcState.focusedScreenSharePeerId;
     if (screenPeer != null && screenPeer != localPeerId) {
       final renderer = vcNotifier.getScreenShareRenderer(screenPeer);
@@ -380,13 +389,33 @@ class _MobileVoiceChannelRouteState
     );
   }
 
+  Future<void> _handleScreenShareToggle(VoiceChannelState vcState) async {
+    final vcNotifier = ref.read(voiceChannelProvider.notifier);
+    if (vcState.isScreenSharing) {
+      await vcNotifier.stopScreenShare();
+      return;
+    }
+    final choice = await showMobileScreenShareSheet(context);
+    if (choice == null || !mounted) return;
+    // Portrait phone capture: cap the long edge at 1920 (1080p-class).
+    // Android ignores the constraints and captures at native display size;
+    // the per-peer encoder cap does the actual downscaling.
+    await vcNotifier.startScreenShare(
+      'screen',
+      1080,
+      1920,
+      30,
+      shareAudio: choice.shareAudio,
+    );
+  }
+
   Widget _buildControls(HollowTheme hollow, VoiceChannelState vcState) {
     final vcNotifier = ref.read(voiceChannelProvider.notifier);
     final isMobile = Platform.isAndroid || Platform.isIOS;
-    // 6 buttons (speaker + flip camera visible) overflow narrow phones at
-    // 56px — shrink when crowded.
+    // 6+ buttons (speaker + share + flip camera visible) overflow narrow
+    // phones at 56px — shrink when crowded.
     final buttonCount =
-        4 + (isMobile ? 1 : 0) + (isMobile && vcState.isCameraOn ? 1 : 0);
+        4 + (isMobile ? 2 : 0) + (isMobile && vcState.isCameraOn ? 1 : 0);
     final buttonSize = buttonCount >= 6 ? 46.0 : 56.0;
     final iconSize = buttonCount >= 6 ? 21.0 : 26.0;
 
@@ -449,6 +478,25 @@ class _MobileVoiceChannelRouteState
                 : 'Turn on camera',
             onTap: () => vcNotifier.toggleCamera(),
           ),
+          // Share screen (mobile only)
+          if (isMobile)
+            MobileControlButton(
+              icon: vcState.isScreenSharing
+                  ? LucideIcons.monitorOff
+                  : LucideIcons.monitor,
+              iconSize: iconSize,
+              size: buttonSize,
+              color: vcState.isScreenSharing
+                  ? hollow.accent
+                  : hollow.textPrimary,
+              backgroundColor: vcState.isScreenSharing
+                  ? hollow.accent.withValues(alpha: 0.15)
+                  : hollow.elevated,
+              semanticLabel: vcState.isScreenSharing
+                  ? 'Stop sharing screen'
+                  : 'Share screen',
+              onTap: () => _handleScreenShareToggle(vcState),
+            ),
           // Flip camera (mobile only, when camera is on)
           if (isMobile && vcState.isCameraOn)
             MobileControlButton(

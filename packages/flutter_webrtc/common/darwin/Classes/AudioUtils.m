@@ -13,7 +13,14 @@
   if (recording && session.category != AVAudioSessionCategoryPlayAndRecord &&
       session.category != AVAudioSessionCategoryMultiRoute) {
     config.category = AVAudioSessionCategoryPlayAndRecord;
+    // Hollow fork: MixWithOthers on EVERY call-session mask. Without it,
+    // another app starting non-mixable playback (YouTube Music etc.)
+    // INTERRUPTS this session; a backgrounded call then has no live audio
+    // unit, so iOS suspends the app ~45s later and the whole call collapses
+    // (device-proven 2026-07-05 during iOS screen share + music). With it,
+    // the call coexists with other apps' audio, Discord-style.
     config.categoryOptions =
+        AVAudioSessionCategoryOptionMixWithOthers |
         AVAudioSessionCategoryOptionAllowBluetooth |
         AVAudioSessionCategoryOptionAllowBluetoothA2DP |
         AVAudioSessionCategoryOptionAllowAirPlay;
@@ -74,8 +81,12 @@
   NSError* error = nil;
   if (!enable) {
     [session setMode:config.mode error:&error];
+    // Hollow fork: keep MixWithOthers on every rebuild of the option mask
+    // (see ensureAudioSessionWithRecording) — a speaker toggle must not
+    // silently drop the anti-interruption flag.
     BOOL success = [session setCategory:config.category
-                            withOptions:AVAudioSessionCategoryOptionAllowAirPlay |
+                            withOptions:AVAudioSessionCategoryOptionMixWithOthers |
+                                        AVAudioSessionCategoryOptionAllowAirPlay |
                                         AVAudioSessionCategoryOptionAllowBluetoothA2DP |
                                         AVAudioSessionCategoryOptionAllowBluetooth
                                   error:&error];
@@ -87,7 +98,8 @@
   } else {
     [session setMode:config.mode error:&error];
     BOOL success = [session setCategory:config.category
-                            withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker |
+                            withOptions:AVAudioSessionCategoryOptionMixWithOthers |
+                                        AVAudioSessionCategoryOptionDefaultToSpeaker |
                                         AVAudioSessionCategoryOptionAllowAirPlay |
                                         AVAudioSessionCategoryOptionAllowBluetoothA2DP |
                                         AVAudioSessionCategoryOptionAllowBluetooth
@@ -119,7 +131,8 @@
   NSError* error = nil;
   [session setMode:config.mode error:&error];
   BOOL success = [session setCategory:config.category
-                          withOptions:AVAudioSessionCategoryOptionAllowAirPlay |
+                          withOptions:AVAudioSessionCategoryOptionMixWithOthers |
+                                      AVAudioSessionCategoryOptionAllowAirPlay |
                                       AVAudioSessionCategoryOptionAllowBluetoothA2DP |
                                       AVAudioSessionCategoryOptionAllowBluetooth |
                                       AVAudioSessionCategoryOptionDefaultToSpeaker

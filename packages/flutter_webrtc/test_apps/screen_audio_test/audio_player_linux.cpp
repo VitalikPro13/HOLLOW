@@ -94,26 +94,6 @@ void AudioPlayer::Stop() {
   platform_handle_ = nullptr;
 }
 
-void AudioPlayer::Push(const int16_t* data, size_t frames, int channels) {
-  const size_t total = frames * channels;
-  std::lock_guard<std::mutex> lock(mu_);
-  if (queue_.size() + total > static_cast<size_t>(kSampleRate * kChannels)) {
-    size_t drop = queue_.size() + total - kSampleRate / 5 * kChannels;
-    if (drop > queue_.size()) drop = queue_.size();
-    drop -= drop % channels;
-    for (size_t i = 0; i < drop; ++i) queue_.pop_front();
-  }
-  for (size_t i = 0; i < total; ++i) queue_.push_back(data[i]);
-}
-
-size_t AudioPlayer::FillBuffer(int16_t* out, size_t max_samples) {
-  std::lock_guard<std::mutex> lock(mu_);
-  size_t n = (queue_.size() >= max_samples) ? max_samples : queue_.size();
-  for (size_t i = 0; i < n; ++i) {
-    out[i] = queue_.front();
-    queue_.pop_front();
-  }
-  return n;
-}
+// Push/FillBuffer live in audio_player.h (shared jitter pre-buffer logic).
 
 #endif  // __linux__

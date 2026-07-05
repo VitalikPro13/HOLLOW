@@ -16,6 +16,7 @@ import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
+import 'package:hollow/src/core/services/mobile_screen_audio_capturer.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/voice_channel_service.dart';
@@ -274,6 +275,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   int _screenSharePid = 0;
   int _screenShareHwnd = 0;
   ScreenAudioReceiver? _screenAudioRenderer;
+
+  /// MOBILE share-audio capture — ONE central instance for the whole channel
+  /// (the Rust Opus encoder is a process-global singleton; the desktop
+  /// per-peer-exe pattern would feed it the same PCM N times). Packets fan
+  /// out to every outgoing-share peer at send time.
+  MobileScreenAudioCapturer? _mobileShareAudioCapturer;
 
   /// Entire-screen anti-echo (Windows): the out-of-process voice-render child
   /// pid to EXCLUDE from the screen-audio capture (so the VC voices it plays
@@ -999,35 +1006,55 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _screenSharePid = pid;
     _screenShareHwnd = windowHwnd;
 
-    // Capture screen ONCE.
-    await desktopCapturer.getSources(
-        types: [SourceType.Screen, SourceType.Window]);
-    // On Windows and Linux, audio goes via data channel (not a WebRTC audio
-    // track) so never request audio in getDisplayMedia — the old
-    // WASAPI→AudioSource path crashes on Windows and yields nothing on Linux.
-    final getDisplayAudio =
-        shareAudio && !Platform.isWindows && !Platform.isLinux;
+    // Capture screen ONCE. Source enumeration is desktop-only; mobile
+    // captures THE screen (MediaProjection / ReplayKit broadcast).
+    if (Platform.isAndroid) {
+      // Constraints are ignored by the Android plugin (MediaProjection
+      // captures at native display size; the consent dialog handles
+      // permission). The per-peer encoder cap does the downscaling.
+      _screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
+        'video': true,
+        'audio': false,
+      });
+    } else if (Platform.isIOS) {
+      // 'broadcast' selects the ReplayKit Broadcast Upload Extension path and
+      // auto-presents the RPSystemBroadcastPickerView.
+      _screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
+        'video': {'deviceId': 'broadcast'},
+        'audio': false,
+      });
+    } else {
+      await desktopCapturer.getSources(
+          types: [SourceType.Screen, SourceType.Window]);
+      // On Windows and Linux, audio goes via data channel (not a WebRTC audio
+      // track) so never request audio in getDisplayMedia — the old
+      // WASAPI→AudioSource path crashes on Windows and yields nothing on Linux.
+      final getDisplayAudio =
+          shareAudio && !Platform.isWindows && !Platform.isLinux;
 
-    _screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
-      'video': {
-        'deviceId': {'exact': sourceId},
-        'mandatory': {
-          'frameRate': fps.toDouble(),
-          'width': width,
-          'height': height,
+      _screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
+        'video': {
+          'deviceId': {'exact': sourceId},
+          'mandatory': {
+            'frameRate': fps.toDouble(),
+            'width': width,
+            'height': height,
+          },
         },
-      },
-      'audio': getDisplayAudio,
-    });
+        'audio': getDisplayAudio,
+      });
+    }
 
     // Create local preview renderer so the sharer can see their own screen.
     _localScreenPreviewRenderer = RTCVideoRenderer();
     await _localScreenPreviewRenderer!.initialize();
     _localScreenPreviewRenderer!.srcObject = _screenCaptureStream;
 
-    // Build quality label (e.g. "1080p60", "4K30").
+    // Build quality label (e.g. "1080p60", "4K30"). Use the SHORT side so a
+    // portrait mobile capture (1080x1920) reads "1080p", same as landscape.
     const resLabels = {360: '360p', 480: '480p', 720: '720p', 1080: '1080p', 1440: '1440p', 2160: '4K'};
-    final qualityLabel = '${resLabels[height] ?? '${height}p'}$fps';
+    final shortSide = height < width ? height : width;
+    final qualityLabel = '${resLabels[shortSide] ?? '${shortSide}p'}$fps';
 
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     state = state.copyWith(
@@ -1076,11 +1103,40 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await _sendScreenShareToPeer(peerId);
     }
 
+    // MOBILE: one central audio capture for the whole channel. Fanning at
+    // send time over _outgoingScreenShares.keys picks up late joiners
+    // automatically (their entry is added by _sendScreenShareToPeer).
+    if (shareAudio && (Platform.isAndroid || Platform.isIOS)) {
+      final webrtc = ref.read(webRtcProvider.notifier).service;
+      _mobileShareAudioCapturer = MobileScreenAudioCapturer();
+      final ok = await _mobileShareAudioCapturer!.start(onPacket: (packet) {
+        for (final sharePeerId in _outgoingScreenShares.keys) {
+          webrtc.sendScreenAudio(sharePeerId, packet);
+        }
+      });
+      if (!ok) {
+        debugPrint('[HOLLOW-AU-SCREEN] VC mobile audio capture unavailable');
+        _mobileShareAudioCapturer = null;
+      }
+    }
+
     // Broadcast screen_state(enabled: true) to all peers.
     _broadcastScreenState(true);
 
     // Start track poller (detect window close).
     _startScreenTrackPoller();
+  }
+
+  /// Stop the central mobile share-audio capture (no-op on desktop / when
+  /// not running). Nulls the field FIRST so a re-entrant stop can't double-stop.
+  Future<void> _stopMobileShareAudio() async {
+    final capturer = _mobileShareAudioCapturer;
+    _mobileShareAudioCapturer = null;
+    if (capturer != null) {
+      try {
+        await capturer.stop();
+      } catch (_) {}
+    }
   }
 
   bool _stoppingScreenShare = false;
@@ -1095,9 +1151,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _screenTrackPoller?.cancel();
       _screenTrackPoller = null;
 
-      // Close all outgoing screen share PCs (this stops the screen-audio
-      // capturer) BEFORE disarming the redirect, so the brief window where the
-      // VC voices' in-process volume is restored isn't re-captured.
+      // Stop the central mobile audio capture FIRST (it isn't owned by any
+      // per-peer service), then close all outgoing screen share PCs (which
+      // stops the desktop per-peer capturers) BEFORE disarming the redirect,
+      // so the brief window where the VC voices' in-process volume is
+      // restored isn't re-captured.
+      await _stopMobileShareAudio();
       for (final service in _outgoingScreenShares.values) {
         try { await service.close(); } catch (_) {}
       }
@@ -1247,8 +1306,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       );
 
       // Start screen audio capture via the data channel on the data-channel-audio
-      // platforms: Windows (WASAPI), Linux (PulseAudio monitor), and
-      // macOS 13.0+ (ScreenCaptureKit).
+      // DESKTOP platforms: Windows (WASAPI), Linux (PulseAudio monitor), and
+      // macOS 13.0+ (ScreenCaptureKit) — each peer gets its own capturer exe.
+      // MOBILE is deliberately NOT here: it runs ONE central capture in
+      // startScreenShare (the Rust encoder is a process-global singleton) that
+      // fans packets to _outgoingScreenShares.keys, this peer included.
       // Sends Opus packets via the existing WebRtcService data channel.
       final dcAudio = Platform.isWindows ||
           Platform.isLinux ||
@@ -1558,6 +1620,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _screenTrackPoller?.cancel();
     _screenTrackPoller = null;
 
+    await _stopMobileShareAudio();
     for (final service in _outgoingScreenShares.values) {
       await service.close();
     }

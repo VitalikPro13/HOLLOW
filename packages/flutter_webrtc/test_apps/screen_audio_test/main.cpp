@@ -1010,6 +1010,15 @@ static int RunRenderMode(const Options&) {
   std::vector<uint8_t> frame_buf;
   uint32_t packets_played = 0;
 
+  // Diagnostics: packet-size histogram (tiny = silence-grade frames), max
+  // inter-arrival gap, and short-decode counter per 500-packet (~5s) window.
+  // These turn "the audio stutters" into numbers: a big arrival gap = the
+  // transport clumps; tiny-packet dominance = the CAPTURE feeds silence;
+  // rebuffers (from player stats) = the queue actually ran dry.
+  uint32_t pkts_tiny = 0, pkts_small = 0, pkts_real = 0, short_decodes = 0;
+  auto last_arrival = std::chrono::steady_clock::now();
+  int64_t max_gap_ms = 0;
+
   // Read loop: [uint16_le: payload_len][payload...]
   while (g_running.load()) {
     uint8_t len_hdr[2];
@@ -1026,16 +1035,44 @@ static int RunRenderMode(const Options&) {
         static_cast<size_t>(payload_len))
       break;
 
+    auto now = std::chrono::steady_clock::now();
+    int64_t gap_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         now - last_arrival)
+                         .count();
+    last_arrival = now;
+    if (packets_played > 0 && gap_ms > max_gap_ms) max_gap_ms = gap_ms;
+
     const uint8_t* opus_data = frame_buf.data() + 4;
     int opus_len = static_cast<int>(payload_len) - 4;
+    if (opus_len <= 5) {
+      pkts_tiny++;
+    } else if (opus_len <= 25) {
+      pkts_small++;
+    } else {
+      pkts_real++;
+    }
 
     int samples = decoder.Decode(opus_data, opus_len, pcm_out);
     if (samples > 0) {
+      if (samples != 480) short_decodes++;
       player.Push(pcm_out.data(), samples, 2);
       packets_played++;
 
       if (packets_played <= 5 || packets_played % 500 == 0) {
-        fprintf(stderr, "[RENDER] Played %u packets\n", packets_played);
+        AudioPlayer::Stats st = player.TakeStats();
+        fprintf(stderr,
+                "[RENDER] Played %u packets | sizes tiny/small/real "
+                "%u/%u/%u | shortDec %u | maxArrivalGap %lldms | queue "
+                "now/min/max %zu/%zu/%zu (samples) | rebuffers %u trims %u | "
+                "pushed/filled %llu/%llu\n",
+                packets_played, pkts_tiny, pkts_small, pkts_real,
+                short_decodes, static_cast<long long>(max_gap_ms),
+                st.queue_now, st.queue_min, st.queue_max, st.rebuffers,
+                st.trims, static_cast<unsigned long long>(st.samples_pushed),
+                static_cast<unsigned long long>(st.samples_filled));
+        pkts_tiny = pkts_small = pkts_real = 0;
+        short_decodes = 0;
+        max_gap_ms = 0;
       }
     }
   }

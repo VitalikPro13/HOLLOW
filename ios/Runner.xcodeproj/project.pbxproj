@@ -19,6 +19,7 @@
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
 		D19B65F8751C60A32420B0D9 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B38F3F2FFF3A4891D42E1B13 /* Pods_Runner.framework */; };
 		EF5912CC2FD5FCFB00611547 /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = EF5912CB2FD5FCFB00611547 /* GoogleService-Info.plist */; };
+		BC57B01B2FD750BF00547A2E /* BroadcastExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BC57B0142FD750BF00547A2E /* BroadcastExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		EFFCD11B2FD750BF0054762E /* NotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = EFFCD1142FD750BF0054762E /* NotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
@@ -29,6 +30,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = 97C146ED1CF9000F007C117D;
 			remoteInfo = Runner;
+		};
+		BC57B0192FD750BF00547A2E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 97C146E61CF9000F007C117D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = BC57B0132FD750BF00547A2E;
+			remoteInfo = BroadcastExtension;
 		};
 		EFFCD1192FD750BF0054762E /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -57,6 +65,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				EFFCD11B2FD750BF0054762E /* NotificationService.appex in Embed Foundation Extensions */,
+				BC57B01B2FD750BF00547A2E /* BroadcastExtension.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -94,10 +103,18 @@
 		C512167EA5D1EA9E013372CB /* Pods-Runner.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.profile.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig"; sourceTree = "<group>"; };
 		EF5912CB2FD5FCFB00611547 /* GoogleService-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "GoogleService-Info.plist"; sourceTree = "<group>"; };
 		EFB46F7D2FD5C937002ECEF3 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
+		BC57B0142FD750BF00547A2E /* BroadcastExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BroadcastExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		EFFCD1142FD750BF0054762E /* NotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		BC57B0202FD750BF00547A2E /* Exceptions for "BroadcastExtension" folder in "BroadcastExtension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = BC57B0132FD750BF00547A2E /* BroadcastExtension */;
+		};
 		EFFCD1202FD750BF0054762E /* Exceptions for "NotificationService" folder in "NotificationService" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -108,6 +125,18 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		BC57B0152FD750BF00547A2E /* BroadcastExtension */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				BC57B0202FD750BF00547A2E /* Exceptions for "BroadcastExtension" folder in "BroadcastExtension" target */,
+			);
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = BroadcastExtension;
+			sourceTree = "<group>";
+		};
 		EFFCD1152FD750BF0054762E /* NotificationService */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -137,6 +166,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				08B78A9499EB6D8519117564 /* Pods_RunnerTests.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BC57B0112FD750BF00547A2E /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -188,6 +224,7 @@
 				9740EEB11CF90186004384FC /* Flutter */,
 				97C146F01CF9000F007C117D /* Runner */,
 				EFFCD1152FD750BF0054762E /* NotificationService */,
+				BC57B0152FD750BF00547A2E /* BroadcastExtension */,
 				97C146EF1CF9000F007C117D /* Products */,
 				331C8082294A63A400263BE5 /* RunnerTests */,
 				E045814138A338EBF1636AAF /* Pods */,
@@ -201,6 +238,7 @@
 				97C146EE1CF9000F007C117D /* Runner.app */,
 				331C8081294A63A400263BE5 /* RunnerTests.xctest */,
 				EFFCD1142FD750BF0054762E /* NotificationService.appex */,
+				BC57B0142FD750BF00547A2E /* BroadcastExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -277,6 +315,7 @@
 			);
 			dependencies = (
 				EFFCD11A2FD750BF0054762E /* PBXTargetDependency */,
+				BC57B01A2FD750BF00547A2E /* PBXTargetDependency */,
 			);
 			name = Runner;
 			packageProductDependencies = (
@@ -285,6 +324,26 @@
 			productName = Runner;
 			productReference = 97C146EE1CF9000F007C117D /* Runner.app */;
 			productType = "com.apple.product-type.application";
+		};
+		BC57B0132FD750BF00547A2E /* BroadcastExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BC57B0212FD750BF00547A2E /* Build configuration list for PBXNativeTarget "BroadcastExtension" */;
+			buildPhases = (
+				BC57B0102FD750BF00547A2E /* Sources */,
+				BC57B0112FD750BF00547A2E /* Frameworks */,
+				BC57B0122FD750BF00547A2E /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				BC57B0152FD750BF00547A2E /* BroadcastExtension */,
+			);
+			name = BroadcastExtension;
+			productName = BroadcastExtension;
+			productReference = BC57B0142FD750BF00547A2E /* BroadcastExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 		EFFCD1132FD750BF0054762E /* NotificationService */ = {
 			isa = PBXNativeTarget;
@@ -326,6 +385,9 @@
 						CreatedOnToolsVersion = 7.3.1;
 						LastSwiftMigration = 1100;
 					};
+					BC57B0132FD750BF00547A2E = {
+						CreatedOnToolsVersion = 26.3;
+					};
 					EFFCD1132FD750BF0054762E = {
 						CreatedOnToolsVersion = 26.3;
 					};
@@ -350,6 +412,7 @@
 				97C146ED1CF9000F007C117D /* Runner */,
 				331C8080294A63A400263BE5 /* RunnerTests */,
 				EFFCD1132FD750BF0054762E /* NotificationService */,
+				BC57B0132FD750BF00547A2E /* BroadcastExtension */,
 			);
 		};
 /* End PBXProject section */
@@ -371,6 +434,13 @@
 				EF5912CC2FD5FCFB00611547 /* GoogleService-Info.plist in Resources */,
 				97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */,
 				97C146FC1CF9000F007C117D /* Main.storyboard in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BC57B0122FD750BF00547A2E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -518,6 +588,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		BC57B0102FD750BF00547A2E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		EFFCD1102FD750BF0054762E /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -532,6 +609,11 @@
 			isa = PBXTargetDependency;
 			target = 97C146ED1CF9000F007C117D /* Runner */;
 			targetProxy = 331C8085294A63A400263BE5 /* PBXContainerItemProxy */;
+		};
+		BC57B01A2FD750BF00547A2E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = BC57B0132FD750BF00547A2E /* BroadcastExtension */;
+			targetProxy = BC57B0192FD750BF00547A2E /* PBXContainerItemProxy */;
 		};
 		EFFCD11A2FD750BF0054762E /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -843,6 +925,129 @@
 			};
 			name = Release;
 		};
+		BC57B01D2FD750BF00547A2E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CODE_SIGN_ENTITLEMENTS = BroadcastExtension/BroadcastExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = NWPBHZX7DT;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = BroadcastExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Hollow Screen Share";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.anonlisten.hollow.BroadcastExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		BC57B01E2FD750BF00547A2E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CODE_SIGN_ENTITLEMENTS = BroadcastExtension/BroadcastExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = NWPBHZX7DT;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = BroadcastExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Hollow Screen Share";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.0;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.anonlisten.hollow.BroadcastExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		BC57B01F2FD750BF00547A2E /* Profile */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CODE_SIGN_ENTITLEMENTS = BroadcastExtension/BroadcastExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = NWPBHZX7DT;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = BroadcastExtension/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Hollow Screen Share";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.0;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.anonlisten.hollow.BroadcastExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Profile;
+		};
 		EFFCD11D2FD750BF0054762E /* Debug */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 1596548BFD8479350DDCCEFE /* Pods-NotificationService.debug.xcconfig */;
@@ -1001,6 +1206,16 @@
 				97C147061CF9000F007C117D /* Debug */,
 				97C147071CF9000F007C117D /* Release */,
 				249021D4217E4FDB00AE95B9 /* Profile */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BC57B0212FD750BF00547A2E /* Build configuration list for PBXNativeTarget "BroadcastExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BC57B01D2FD750BF00547A2E /* Debug */,
+				BC57B01E2FD750BF00547A2E /* Release */,
+				BC57B01F2FD750BF00547A2E /* Profile */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

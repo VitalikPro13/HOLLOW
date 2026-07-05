@@ -428,7 +428,7 @@ SFrame E2EE is applied to:
 
 All media types using WebRTC media tracks — audio tracks, video tracks, and screen share video tracks — are encrypted with the same SFrame key for a given session or epoch.
 
-Voice and video calls are available on all platforms, including mobile (Android and iOS), with the same SFrame encryption. Screen-share *sending* and system-audio capture are desktop-only (Windows, macOS, Linux); mobile clients can receive a remote screen-share track but cannot originate one (§23).
+Voice and video calls are available on all platforms, including mobile (Android and iOS), with the same SFrame encryption. Screen-share sending and system-audio capture are likewise available on every platform — Windows, macOS, Linux, Android (MediaProjection + AudioPlaybackCapture), and iOS (a ReplayKit Broadcast Upload Extension) — with the platform-specific capture paths described in §6.8.
 
 ### 6.4 Transport
 
@@ -453,13 +453,15 @@ SFrame keys are zeroed in memory after use. Key bytes are cleared via `fillRange
 
 ### 6.8 Screen Share Audio Transport
 
-Screen share audio uses an **out-of-process data channel transport** on Windows, macOS, and Linux. Capturing system audio inside the libwebrtc process is not viable: libwebrtc's AudioDeviceModule (ADM) is a singleton that contaminates both the capture and render endpoints, producing feedback loops and AGC/AEC artifacts when system audio is routed through a WebRTC audio track. The audio is therefore captured by a separate helper process, encoded with **Opus** (48 kHz stereo), and streamed to the main application, which forwards the framed packets over the **WebRTC data channel** (type `0x03` prefix) rather than as an RTP audio track.
+Screen share audio never travels as a WebRTC audio track on any platform. Routing system audio through a voice track is not viable: libwebrtc's AudioDeviceModule (ADM) is a singleton that contaminates both the capture and render endpoints, and the voice pipeline's AGC/AEC processing audibly degrades music. The audio is instead encoded with **Opus** (48 kHz stereo) and forwarded as framed packets over the **WebRTC data channel** (type `0x03` prefix). On desktop the capture and codec run in a separate helper process; on mobile, where a child process is unavailable, the codec runs in-process in the Rust core while the capture uses the platform's sanctioned system-audio APIs.
 
 **Capture path (sender):**
 
 - **Windows:** the `screen_audio_capturer` helper captures system audio via WASAPI loopback (`--mode pipe`). Per-process window audio capture is supported on Windows 10 2004+ via process loopback INCLUDE mode, allowing capture of a single application's audio output. For a whole-screen share, the capture excludes the application's own audio output so the remote participants' voices are not re-broadcast into the share (the equivalent of the macOS self-exclusion). Because Windows can only filter loopback at the process-tree boundary — and the application's call-voice playback and its own legitimately-played media (e.g. a video opened in a chat) would otherwise share one process — the received call-voice audio is rendered in a separate child process during such a share, so that the call voices can be excluded from the capture while the application's own media is still captured for the viewers.
 - **macOS 13.0+:** an audio-only **ScreenCaptureKit** stream captures system audio; the application excludes its own process output from the capture so the remote participants' voices are not re-broadcast into the share. The captured PCM is piped to the helper in `--mode encode`. macOS versions **below 13.0** expose no public system-audio capture API, so the audio toggle is locked off in the screen-share dialog with an explanatory notice.
 - **Linux:** the helper captures per-application audio streams from the PulseAudio/PipeWire sound server (`--mode pipe`), one monitor stream per playback stream, mixed to a single feed. For a whole-screen share it captures every application's audio *except* the application's own (so remote participants' voices are not re-broadcast — the Windows/macOS self-exclusion equivalent, at the cost of the application's own played media). For a window share it captures *only* the shared application's streams, resolved from the shared window to its owning process tree; a window that cannot be resolved, or an application playing nothing, contributes silence — the capture never silently widens to the full system mix. This matters for privacy: sharing one application's window never leaks audio from other applications (a notification sound, a private call in another app).
+- **Android (10+):** the client captures other applications' playback via **AudioPlaybackCapture** attached to the same MediaProjection session that captures the screen video, and Opus-encodes it in the Rust core. The microphone path is fully independent — the user talks over the shared audio. The application declares its own playback non-capturable (`allowAudioPlaybackCapture=false`), so remote participants' voices can never be re-captured into the share (and third-party apps cannot record Hollow's call audio via the same API). Applications that opt out of playback capture (some DRM media apps) contribute silence.
+- **iOS:** a **ReplayKit Broadcast Upload Extension** — the system-sanctioned path that captures the whole screen and the foreground application's audio even while Hollow is backgrounded — runs in a separate process and streams video frames and app-audio PCM to the client over two unix sockets in the shared App Group container (video and audio deliberately use separate sockets with independent framing). The client Opus-encodes the audio in the Rust core. The microphone buffer type is ignored: the voice call carries the mic.
 
 **Render path (receiver):** on desktop, a separate renderer process reads Opus packets from stdin, decodes, and outputs to platform audio (waveOut on Windows, AudioQueue on macOS, PulseAudio on Linux). On mobile (Android/iOS), the client decodes the Opus packets in-process and plays them through the platform's *media* output path, outside the voice call's audio session, so voice-call echo cancellation and gain control never process the shared audio.
 
@@ -1109,7 +1111,7 @@ The WebSocket relay handles signaling (SDP offers/answers, ICE candidates). WebR
 | Voice calls | RTCPeerConnection audio tracks | DTLS-SRTP + SFrame |
 | Video calls | RTCPeerConnection video tracks | DTLS-SRTP + SFrame |
 | Screen share video | Separate RTCPeerConnection | DTLS-SRTP + SFrame |
-| Screen share audio (Windows + macOS 13.0+) | RTCDataChannel (type 0x03) | DTLS (out-of-process Opus) |
+| Screen share audio (all platforms) | RTCDataChannel (type 0x03) | DTLS (Opus, outside the voice pipeline) |
 
 ### 14.5 Glare Resolution
 
@@ -1388,7 +1390,7 @@ The relay operator is **not trusted** with: message contents, encryption keys, f
 - **Single relay dependency.** Multi-relay support with cross-relay room gossip is designed but not yet deployed. Horizontal scaling to millions of users via a swarm of relay nodes is the planned architecture.
 - **No social recovery.** Shamir's Secret Sharing for key recovery via trusted contacts is designed but not implemented.
 - **No web client.** Windows, macOS, Linux, Android, and iOS are supported. A Flutter Web build is a future target with no working build today.
-- **Mobile media constraints.** Voice and video calls (with SFrame E2EE), file transfer, DMs, MLS servers, vault, and archive all work on mobile. However, mobile clients cannot *originate* screen sharing or capture system audio (no platform equivalent of WASAPI loopback / ScreenCaptureKit audio), and the large-file Share transport (>34 MB, STUN-only) is excluded on mobile because it does not survive carrier-grade NAT. On desktop, screen-share audio uses the same out-of-process Opus over a data channel on both Windows (WASAPI loopback) and macOS 13.0+ (ScreenCaptureKit); macOS below 13.0 cannot send screen-share audio.
+- **Mobile media constraints.** Voice and video calls (with SFrame E2EE), file transfer, DMs, MLS servers, vault, archive, and screen sharing with system audio (§6.8) all work on mobile. The remaining gap: the large-file Share transport (>34 MB, STUN-only) is excluded on mobile because it does not survive carrier-grade NAT. macOS below 13.0 cannot send screen-share audio (no capture API).
 - **Files are not encrypted at rest.** SQLCipher encrypts messages and metadata, but downloaded file attachments (`~/.hollow/files/`), vault shards, and vault cache are stored as plaintext on disk. AES-256-GCM at-rest file encryption keyed from the identity is planned.
 
 ---
