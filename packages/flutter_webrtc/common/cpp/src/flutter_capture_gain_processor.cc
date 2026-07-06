@@ -50,10 +50,18 @@ constexpr float kPeakFreq[4] = {291.0f, 3000.0f, 7005.0f, 12000.0f};
 constexpr float kPeakGainDb[4] = {-3.0f, 2.0f, 3.5f, 1.5f};
 constexpr float kPeakQ[4] = {1.5f, 1.5f, 2.0f, 2.0f};
 
-// Compressor (Audition single-band): threshold -18 dBFS, 3:1, attack 10 ms,
+// Compressor (Audition single-band): threshold -24 dBFS, 3:1, attack 10 ms,
 // release 100 ms, gentle 6 dB soft knee. Makeup gain is RUNTIME-set
 // (makeup_db_, the user's "strength" knob; dynamic mode uses kDynMakeupDb).
-constexpr float kCompThresholdDb = -18.0f;
+//
+// Pass 2 / RVox retune (2026-07-06): threshold LOWERED -18 -> -24 so that the
+// servo's -21 dBFS operating point sits ~+3 dB ABOVE threshold and the
+// compressor does real gain reduction (crest-factor reduction = RVox density),
+// instead of the old -28-below-a-(-18)-threshold config where it barely
+// engaged and the chain topped out ~-24 LUFS. Threshold is a compressor
+// property so it applies to BOTH manual and dynamic modes. See
+// project_voice_agc_loudness_rvox.
+constexpr float kCompThresholdDb = -24.0f;
 constexpr float kCompRatio = 3.0f;
 constexpr float kCompAttackMs = 10.0f;
 constexpr float kCompReleaseMs = 100.0f;
@@ -78,8 +86,17 @@ constexpr float kSafetyRange = kLimCeiling - kSafetyKnee;
 // trim gain toward (target - meter). Frame-rate decisions, dB-domain slew
 // limits, per-sample de-zipper — deliberately NOT a per-sample leveler
 // (that's what crackled in the reverted adaptive chains).
-constexpr float kDynTargetRmsDb = -28.0f;   // speech RMS at compressor input
-constexpr float kDynMakeupDb = 3.6f;        // = the golden 30% strength
+// Pass 2 / RVox retune (2026-07-06): target -28 -> -21 (speech now sits ~+3 dB
+// over the lowered -24 threshold, so the compressor works) and makeup +3.6 ->
+// +9 so output lands at the ~-16 LUFS voice standard. With WebRTC AGC now OFF
+// the raw mic is hotter + more dynamic than when -28 was calibrated, so the
+// servo mostly CUTS to reach -21 (it has -20 dB of cut range — safe).
+constexpr float kDynTargetRmsDb = -21.0f;   // speech RMS at compressor input
+constexpr float kDynMakeupDb = 12.5f;       // RVox makeup -> -16 dBFS RMS out
+// ^ +12.5 verified in the offline g++ harness (scratchpad pass2_harness.cc):
+// speech-band input from -32..-8 dBFS ALL converge to -16.1 dBFS out; a -40
+// whisper only reaches -18.8. (+9 landed ~-20 — the servo + soft-knee comp at
+// only +3 dB over threshold + net-subtractive EQ ate ~4 dB, so makeup carries it.)
 constexpr float kDynSpeechFloorDb = -55.0f; // meter gate: ignore silence
 constexpr float kDynMeterTauSec = 2.0f;     // meter integration time
 constexpr float kDynUpDbPerSec = 3.0f;      // trim slew, boosting

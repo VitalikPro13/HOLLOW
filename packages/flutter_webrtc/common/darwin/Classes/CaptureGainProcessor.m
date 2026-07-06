@@ -32,9 +32,12 @@ static const float kPeakFreq[4] = {291.0f, 3000.0f, 7005.0f, 12000.0f};
 static const float kPeakGainDb[4] = {-3.0f, 2.0f, 3.5f, 1.5f};
 static const float kPeakQ[4] = {1.5f, 1.5f, 2.0f, 2.0f};
 
-// Compressor: -18 dBFS threshold, 3:1, 10/100 ms, 6 dB knee. Makeup gain is
+// Compressor: -24 dBFS threshold, 3:1, 10/100 ms, 6 dB knee. Makeup gain is
 // RUNTIME-set (_makeupDb, the user's "strength" knob); 12 dB is its default.
-static const float kCompThresholdDb = -18.0f;
+// Pass 2 / RVox retune 2026-07-06: -18 -> -24 so the servo's -21 dBFS point
+// sits above threshold and the compressor actually works (crest-factor
+// reduction). project_voice_agc_loudness_rvox. KEEP IN SYNC w/ the C++/Java ports.
+static const float kCompThresholdDb = -24.0f;
 static const float kCompRatio = 3.0f;
 static const float kCompAttackMs = 10.0f;
 static const float kCompReleaseMs = 100.0f;
@@ -51,8 +54,11 @@ static const float kSafetyRange = kLimCeiling - kSafetyKnee;
 // mic lands at the calibrated speech level (~-28 dBFS RMS at the compressor
 // input — the Shure MV6 golden reference, 2026-07-02). Frame-rate decisions,
 // dB slew limits, per-sample de-zipper; manual gain/strength are ignored.
-static const float kDynTargetRmsDb = -28.0f;
-static const float kDynMakeupDb = 3.6f;
+// Pass 2 / RVox retune 2026-07-06: -28 -> -21 target + 3.6 -> 9 makeup -> ~-16
+// LUFS out (voice standard). With WebRTC AGC off the raw mic is hotter so the
+// servo mostly cuts to reach -21 (has -20 dB cut range). KEEP IN SYNC.
+static const float kDynTargetRmsDb = -21.0f;
+static const float kDynMakeupDb = 12.5f;  // -> -16 dBFS out (harness-verified)
 static const float kDynSpeechFloorDb = -55.0f;
 static const float kDynMeterTauSec = 2.0f;
 static const float kDynUpDbPerSec = 3.0f;

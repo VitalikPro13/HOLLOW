@@ -115,6 +115,27 @@ std::string getDeviceIdConstraint(const EncodableMap& mediaConstraints) {
   return "";
 }
 
+// Read a boolean APM flag from the audio constraint map, honoring both the
+// modern ("echoCancellation") and legacy goog-prefixed ("googEchoCancellation")
+// keys. Absent -> `fallback` (which is the pre-existing default so behavior is
+// unchanged unless Dart explicitly sends the flag). This is what lets
+// `getUserMedia({'audio': {'autoGainControl': false, ...}})` actually reach the
+// native APM: without it CreateAudioSource() ran with the all-true default
+// RTCAudioOptions and the constraint was a silent no-op (upstream PR #2068).
+bool getAudioProcessingFlag(const EncodableMap& audioMap,
+                            const std::string& key,
+                            const std::string& googKey, bool fallback) {
+  auto it = audioMap.find(EncodableValue(key));
+  if (it != audioMap.end() && TypeIs<bool>(it->second)) {
+    return GetValue<bool>(it->second);
+  }
+  it = audioMap.find(EncodableValue(googKey));
+  if (it != audioMap.end() && TypeIs<bool>(it->second)) {
+    return GetValue<bool>(it->second);
+  }
+  return fallback;
+}
+
 void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
                                       scoped_refptr<RTCMediaStream> stream,
                                       EncodableMap& params) {
@@ -122,6 +143,11 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
   scoped_refptr<RTCMediaConstraints> audioConstraints;
   std::string sourceId;
   std::string deviceId;
+  // APM flags passed to CreateAudioSource. Default to the historical all-true
+  // (highpass_filter stays at its RTCAudioOptions default) so a plain
+  // `audio: true` or a map without these keys behaves exactly as before; only
+  // an explicit `autoGainControl: false` (etc.) from Dart changes anything.
+  RTCAudioOptions audio_options;
   auto it = constraints.find(EncodableValue("audio"));
   if (it != constraints.end()) {
     EncodableValue audio = it->second;
@@ -137,6 +163,20 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
       sourceId = getSourceIdConstraint(localMap);
       deviceId = getDeviceIdConstraint(localMap);
       audioConstraints = base_->ParseMediaConstraints(localMap);
+      // Map the getUserMedia audio-processing constraints onto the native APM
+      // config. This is the ONLY runtime path (no libwebrtc rebuild) to turn
+      // WebRTC's AGC off while keeping AEC + NS — CreateAudioSource forwards
+      // these to AudioProcessing::Config's gain_controller1/echo_canceller/
+      // noise_suppression. Absent keys keep the prior default (true).
+      audio_options.echo_cancellation = getAudioProcessingFlag(
+          localMap, "echoCancellation", "googEchoCancellation",
+          audio_options.echo_cancellation);
+      audio_options.auto_gain_control = getAudioProcessingFlag(
+          localMap, "autoGainControl", "googAutoGainControl",
+          audio_options.auto_gain_control);
+      audio_options.noise_suppression = getAudioProcessingFlag(
+          localMap, "noiseSuppression", "googNoiseSuppression",
+          audio_options.noise_suppression);
       enable_audio = true;
     }
   }
@@ -181,8 +221,8 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
       }
     }
 
-    scoped_refptr<RTCAudioSource> source =
-        base_->factory_->CreateAudioSource("audio_input");
+    scoped_refptr<RTCAudioSource> source = base_->factory_->CreateAudioSource(
+        "audio_input", RTCAudioSource::SourceType::kMicrophone, audio_options);
     std::string uuid = base_->GenerateUUID();
     scoped_refptr<RTCAudioTrack> track =
         base_->factory_->CreateAudioTrack(source, uuid.c_str());
@@ -201,9 +241,14 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
     settings[EncodableValue("deviceId")] =
         EncodableValue(SanitizeUtf8ForFlutter(sourceId));
     settings[EncodableValue("kind")] = EncodableValue("audioinput");
-    settings[EncodableValue("autoGainControl")] = EncodableValue(true);
-    settings[EncodableValue("echoCancellation")] = EncodableValue(true);
-    settings[EncodableValue("noiseSuppression")] = EncodableValue(true);
+    // Report the ACTUAL applied APM flags (not hardcoded true) so Dart's
+    // track.getSettings() reflects a requested autoGainControl:false etc.
+    settings[EncodableValue("autoGainControl")] =
+        EncodableValue(audio_options.auto_gain_control);
+    settings[EncodableValue("echoCancellation")] =
+        EncodableValue(audio_options.echo_cancellation);
+    settings[EncodableValue("noiseSuppression")] =
+        EncodableValue(audio_options.noise_suppression);
     settings[EncodableValue("channelCount")] = EncodableValue(1);
     settings[EncodableValue("latency")] = EncodableValue(0);
     track_info[EncodableValue("settings")] = EncodableValue(settings);

@@ -55,9 +55,11 @@ public class CaptureGainProcessor
     private static final float[] PEAK_GAIN_DB = {-3.0f, 2.0f, 3.5f, 1.5f};
     private static final float[] PEAK_Q = {1.5f, 1.5f, 2.0f, 2.0f};
 
-    // Compressor: -18 dBFS, 3:1, 10/100 ms, 6 dB knee. Makeup gain is
+    // Compressor: -24 dBFS, 3:1, 10/100 ms, 6 dB knee. Makeup gain is
     // RUNTIME-set (makeupDb, the user's "strength" knob); 12 dB default.
-    private static final float COMP_THRESHOLD_DB = -18.0f;
+    // Pass 2 / RVox retune 2026-07-06: -18 -> -24 so the servo's -21 dBFS point
+    // sits above threshold and the compressor works. KEEP IN SYNC w/ C++/darwin.
+    private static final float COMP_THRESHOLD_DB = -24.0f;
     private static final float COMP_RATIO = 3.0f;
     private static final float COMP_ATTACK_MS = 10.0f;
     private static final float COMP_RELEASE_MS = 100.0f;
@@ -75,8 +77,11 @@ public class CaptureGainProcessor
     // compressor input — the Shure MV6 golden reference, 2026-07-02).
     // Frame-rate decisions, dB slew limits, per-sample de-zipper; the manual
     // gain/strength knobs are ignored while active.
-    private static final float DYN_TARGET_RMS_DB = -28.0f;
-    private static final float DYN_MAKEUP_DB = 3.6f;
+    // Pass 2 / RVox retune 2026-07-06: -28 -> -21 target + 3.6 -> 9 makeup ->
+    // ~-16 LUFS (voice standard). AGC now off -> hotter raw mic -> servo mostly
+    // cuts to reach -21 (has -20 dB cut range). KEEP IN SYNC w/ C++/darwin.
+    private static final float DYN_TARGET_RMS_DB = -21.0f;
+    private static final float DYN_MAKEUP_DB = 12.5f; // -> -16 dBFS (harness-verified)
     private static final float DYN_SPEECH_FLOOR_DB = -55.0f;
     private static final float DYN_METER_TAU_SEC = 2.0f;
     private static final float DYN_UP_DB_PER_SEC = 3.0f;

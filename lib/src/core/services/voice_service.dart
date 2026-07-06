@@ -1105,7 +1105,17 @@ class VoiceService {
     final audioConstraints = <String, dynamic>{
       'echoCancellation': true,
       'noiseSuppression': true,
-      'autoGainControl': true,
+      // AGC OFF: WebRTC's AGC targets a conservative ~-18 dBFS and, on desktop,
+      // rides the OS mic slider DOWN to hold it — fighting (and beating) our
+      // post-APM Voice Enhancement chain's makeup gain, which is why the mic is
+      // "quiet no matter what" and boosting distorts. We own loudness in the
+      // enhancement chain instead (keep AEC+NS). Reaches the native APM via the
+      // RTCAudioOptions plumbing in flutter_media_stream.cc (desktop) /
+      // GetUserMediaImpl (Android, under 'optional'); iOS already forces APM-AGC
+      // off and uses Apple VPIO — do NOT bypass that. See
+      // project_voice_agc_loudness_rvox.
+      'autoGainControl': false,
+      'googAutoGainControl': false,
     };
     // flutter_webrtc on Windows uses 'sourceId' for input device selection
     // (not 'deviceId' — that selects output devices in GetUserAudio).

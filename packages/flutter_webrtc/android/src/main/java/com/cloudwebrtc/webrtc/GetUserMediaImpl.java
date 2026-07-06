@@ -284,6 +284,50 @@ public class GetUserMediaImpl {
     }
 
     /**
+     * Read a boolean audio-processing flag from the TOP LEVEL of the audio
+     * constraint map. MediaConstraintsUtils.parseMediaConstraints only reads the
+     * "mandatory"/"optional" sub-maps, so a top-level `autoGainControl:false`
+     * (how the app sends it, matching desktop/web) never reaches the native APM
+     * on Android. Returns `fallback` when the key is absent so behavior is
+     * unchanged unless the app explicitly sends the flag.
+     */
+    private boolean readAudioFlag(ConstraintsMap audioMap, String key, boolean fallback) {
+        if (audioMap != null && audioMap.hasKey(key)
+                && audioMap.getType(key) == ObjectType.Boolean) {
+            return audioMap.getBoolean(key);
+        }
+        return fallback;
+    }
+
+    /**
+     * Fold the app's top-level echoCancellation / noiseSuppression /
+     * autoGainControl booleans into the native APM optional constraints (the
+     * goog* keys the native createAudioSource honors), so turning WebRTC's AGC
+     * off actually takes effect on Android. See project_voice_agc_loudness_rvox.
+     * Returns the applied AGC value for reporting.
+     */
+    private boolean applyAudioProcessingFlags(ConstraintsMap audioMap,
+                                              MediaConstraints audioConstraints,
+                                              boolean[] outAecNs) {
+        boolean aec = readAudioFlag(audioMap, "echoCancellation", true);
+        boolean ns = readAudioFlag(audioMap, "noiseSuppression", true);
+        boolean agc = readAudioFlag(audioMap, "autoGainControl", true);
+        // Later optional entries win in the native parser, so appending here
+        // overrides any defaults added earlier.
+        audioConstraints.optional.add(
+                new MediaConstraints.KeyValuePair("googAutoGainControl", String.valueOf(agc)));
+        audioConstraints.optional.add(
+                new MediaConstraints.KeyValuePair("googEchoCancellation", String.valueOf(aec)));
+        audioConstraints.optional.add(
+                new MediaConstraints.KeyValuePair("echoCancellation", String.valueOf(aec)));
+        audioConstraints.optional.add(
+                new MediaConstraints.KeyValuePair("googNoiseSuppression", String.valueOf(ns)));
+        outAecNs[0] = aec;
+        outAecNs[1] = ns;
+        return agc;
+    }
+
+    /**
      * Create video capturer via given facing mode
      *
      * @param enumerator a <tt>CameraEnumerator</tt> provided by webrtc it can be Camera1Enumerator or
@@ -383,11 +427,19 @@ public class GetUserMediaImpl {
         AudioSwitchManager.instance.start();
         MediaConstraints audioConstraints = new MediaConstraints();
         String deviceId = null;
+        // Applied APM flags (reported back in settings). Default all-true =
+        // prior behavior. outAecNs = {echoCancellation, noiseSuppression}.
+        boolean appliedAgc = true;
+        boolean[] outAecNs = {true, true};
         if (constraints.getType("audio") == ObjectType.Boolean) {
             addDefaultAudioConstraints(audioConstraints);
         } else {
-            audioConstraints = MediaConstraintsUtils.parseMediaConstraints(constraints.getMap("audio"));
-            deviceId = getSourceIdConstraint(constraints.getMap("audio"));
+            ConstraintsMap audioMap = constraints.getMap("audio");
+            audioConstraints = MediaConstraintsUtils.parseMediaConstraints(audioMap);
+            deviceId = getSourceIdConstraint(audioMap);
+            // Fold top-level AGC/AEC/NS flags in (parseMediaConstraints ignores
+            // top-level keys) so autoGainControl:false reaches the native APM.
+            appliedAgc = applyAudioProcessingFlags(audioMap, audioConstraints, outAecNs);
         }
 
         Log.i(TAG, "getUserMedia(audio): " + audioConstraints);
@@ -417,9 +469,9 @@ public class GetUserMediaImpl {
         ConstraintsMap settings = new ConstraintsMap();
         settings.putString("deviceId", deviceId);
         settings.putString("kind", "audioinput");
-        settings.putBoolean("autoGainControl", true);
-        settings.putBoolean("echoCancellation", true);
-        settings.putBoolean("noiseSuppression", true);
+        settings.putBoolean("autoGainControl", appliedAgc);
+        settings.putBoolean("echoCancellation", outAecNs[0]);
+        settings.putBoolean("noiseSuppression", outAecNs[1]);
         settings.putInt("channelCount", 1);
         settings.putInt("latency", 0);
         trackParams.putMap("settings", settings.toMap());

@@ -160,7 +160,12 @@ class VoiceChannelService {
     final audioConstraints = <String, dynamic>{
       'echoCancellation': true,
       'noiseSuppression': true,
-      'autoGainControl': true,
+      // AGC OFF — see the matching note in voice_service.dart. WebRTC's AGC was
+      // fighting our enhancement chain (conservative -18 dBFS target + desktop
+      // OS-mic-slider riding), leaving the mic quiet. We own loudness in the
+      // post-APM chain; AEC + NS stay on. project_voice_agc_loudness_rvox.
+      'autoGainControl': false,
+      'googAutoGainControl': false,
     };
     if (preferredAudioInputDeviceId != null) {
       audioConstraints['optional'] = [
