@@ -291,6 +291,7 @@ Per-server gossip overlay that manages which peers to maintain WebRTC data chann
 - `avg_latency_ms: f64` — exponential moving average RTT (default 100ms)
 - `bandwidth_score: f64` — EMA of bytes/sec throughput from file transfers
 - `shard_overlap: u32` — number of vault shards this peer holds that we recently accessed
+- `is_direct: Option<bool>` — ICE route class (Tier 3 reachability, 2026-07-06): `Some(true)` = host/srflx/LAN, `Some(false)` = TURN-relayed, `None` = unmeasured. Reported by Dart `_logIceRoute` via `webrtc_route_report()` FFI once per connection.
 - `connected_since: Option<Instant>` — None if currently disconnected
 - `total_connected_secs: f64` — accumulated connection time
 - `total_tracked_secs: f64` — total observation time
@@ -302,8 +303,9 @@ score = (shard_overlap * 0.10)           // each overlap adds 0.10
       + latency_score * 0.30             // 1.0 - (avg_latency_ms / 500).min(1.0)
       + uptime_ratio * 0.20
       + bandwidth_normalized * 0.10      // (bandwidth_score / 10_000_000).min(1.0)
+      + reach_score                      // direct 0.15 / unmeasured 0.075 / TURN 0.0
 ```
-Weights: shard overlap is per-shard additive (40% weight at 4 overlaps), latency 30%, uptime 20%, bandwidth 10%.
+Weights: shard overlap is per-shard additive, latency 30%, uptime 20%, bandwidth 10%, reachability 15%. The direct-vs-TURN spread (0.15) clears the rotation's 10% improvement margin, so the 300s rotation drifts the mesh toward directly-reachable peers.
 
 **Update methods:**
 - `PeerScore::refresh_uptime()` — recalculates `uptime_ratio` from accumulated connected/tracked seconds
@@ -365,6 +367,34 @@ Weights: shard overlap is per-shard additive (40% weight at 4 overlaps), latency
 - `gossip.rs:GossipOverlay::should_relay_broadcast(broadcast_id)` — returns `true` (first time) or `false` (duplicate). Inserts into `seen_broadcasts` on first call.
 - `gossip.rs:GossipOverlay::mark_broadcast_seen(broadcast_id)` — marks as seen without relay decision (used by originator)
 - `gossip.rs:GossipOverlay::evict_stale_broadcasts()` — removes entries older than `BROADCAST_DEDUP_TTL_SECS` (60s). Also evicts `pending_relays` older than `BROADCAST_FALLBACK_TIMEOUT_SECS` (30s).
+
+### Small-Message CRDT-Op Flood (Tier 2 large-server scaling, 2026-07-06)
+
+CRDT ops flood the WebRTC mesh instead of paying the relay's O(N) egress
+(`reports/LARGE_SERVER_SCALING_2026.md` §7). Wire frame: data-channel type byte
+`0x04` carrying `gossip.rs:GossipCrdtOp { broadcast_id, server_id, ttl, op_json }`
+(max `MAX_GOSSIP_OP_BYTES` = 15 KB; bigger ops fall back to the relay).
+
+- **Origin:** `sync_handler.rs:broadcast_crdt_op_to_members()` tries
+  `gossip_relay.rs:flood_crdt_op()` first — targets =
+  `GossipOverlay::connected_relay_targets()` (neighbors whose data channel is
+  LIVE per `PeerScore.connected_since`), emitted as ONE
+  `NetworkEvent::GossipRelayOp { targets, payload }` (Dart fans the frame out).
+  Returns 0 → caller falls back to the per-identity relay `SendDirect` loop.
+  Uses `event_tx.try_send` so it stays callable from sync helpers.
+- **Receive:** Dart hands `0x04` frames to `webrtc_gossip_op_received()` FFI →
+  `NodeCommand::WebRtcGossipOpReceived` → `gossip_relay.rs:accept_gossip_op()`
+  (size cap + broadcast-id dedup) → re-enters `handle_incoming_request` as a
+  synthetic `HavenMessage::CrdtOpBroadcast`, so the op runs the exact same
+  author-permission matrix, op_log dedup, persistence, and UI events as a
+  relay op.
+- **Propagation is bounded by op-newness:** the forward step (inside the
+  `CrdtOpBroadcast` arm) only fires when the op grew the local op_log, so each
+  node re-floods a given op at most once (fresh broadcast_id per hop; `ttl` is
+  a reserved wire field). That arm is also mesh-first now — the historical
+  per-member `SendDirect` re-forward was O(N²) network-wide.
+- The MLS twin (`send_mls_broadcast`, single SendToRoom) is unchanged; nodes
+  without WebRTC (the whole test harness) always take the relay fallback.
 
 ### Pending Relay System
 

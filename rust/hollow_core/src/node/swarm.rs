@@ -1019,7 +1019,7 @@ async fn run_event_loop(
                     NodeCommand::CreateChannel { server_id, name, category, channel_type } => {
                         if sync_handler::handle_create_channel(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, name, category, channel_type,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1028,7 +1028,7 @@ async fn run_event_loop(
                     NodeCommand::RemoveChannel { server_id, channel_id } => {
                         if sync_handler::handle_remove_channel(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, channel_id,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1037,7 +1037,7 @@ async fn run_event_loop(
                     NodeCommand::RenameServer { server_id, new_name } => {
                         if sync_handler::handle_rename_server(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, new_name,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1046,7 +1046,7 @@ async fn run_event_loop(
                     NodeCommand::RenameChannel { server_id, channel_id, new_name } => {
                         if sync_handler::handle_rename_channel(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, channel_id, new_name,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1055,7 +1055,7 @@ async fn run_event_loop(
                     NodeCommand::UpdateServerSetting { server_id, key, value } => {
                         sync_handler::handle_update_server_setting(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, key, value,
                             &crypto_store, &crdt_store,
                         ).await;
@@ -1083,7 +1083,7 @@ async fn run_event_loop(
                         let sid = server_id.clone();
                         let handled = sync_handler::handle_change_role(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, peer_id, new_role,
                             &crdt_store,
                         ).await;
@@ -1190,7 +1190,7 @@ async fn run_event_loop(
                     NodeCommand::ChangeRolePermissions { server_id, role, permissions } => {
                         if sync_handler::handle_change_role_permissions(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, role, permissions,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1208,7 +1208,7 @@ async fn run_event_loop(
                     NodeCommand::UnbanMember { server_id, peer_id } => {
                         if sync_handler::handle_unban_member(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, peer_id,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1222,7 +1222,7 @@ async fn run_event_loop(
                         }));
                         if sync_handler::handle_label_op(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, CrdtPayload::LabelCreated { label_id, name, color },
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1231,7 +1231,7 @@ async fn run_event_loop(
                     NodeCommand::DeleteLabel { server_id, label_id } => {
                         if sync_handler::handle_label_op(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, CrdtPayload::LabelDeleted { label_id },
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1240,7 +1240,7 @@ async fn run_event_loop(
                     NodeCommand::UpdateLabel { server_id, label_id, name, color } => {
                         if sync_handler::handle_label_op(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, CrdtPayload::LabelUpdated { label_id, name, color },
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1249,7 +1249,7 @@ async fn run_event_loop(
                     NodeCommand::AssignLabel { server_id, label_id, peer_id } => {
                         if sync_handler::handle_label_op(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, CrdtPayload::LabelAssigned { label_id, peer_id },
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1258,7 +1258,7 @@ async fn run_event_loop(
                     NodeCommand::UnassignLabel { server_id, label_id, peer_id } => {
                         if sync_handler::handle_label_op(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, CrdtPayload::LabelUnassigned { label_id, peer_id },
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1269,7 +1269,7 @@ async fn run_event_loop(
                         let cid = channel_id.clone();
                         let handled = sync_handler::handle_set_channel_visibility(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, channel_id, visibility,
                             &crypto_store, &crdt_store,
                         ).await;
@@ -1289,7 +1289,7 @@ async fn run_event_loop(
                     NodeCommand::SetChannelPosting { server_id, channel_id, posting } => {
                         if sync_handler::handle_set_channel_posting(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, channel_id, posting,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1298,7 +1298,7 @@ async fn run_event_loop(
                     NodeCommand::SetChannelPublic { server_id, channel_id, is_public } => {
                         if sync_handler::handle_set_channel_public(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, channel_id, is_public,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1307,7 +1307,7 @@ async fn run_event_loop(
                     NodeCommand::MuteMember { server_id, peer_id, expires_at } => {
                         if sync_handler::handle_mute_member(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &local_peer_str,
                             server_id, peer_id, expires_at,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1316,7 +1316,7 @@ async fn run_event_loop(
                     NodeCommand::UnmuteMember { server_id, peer_id } => {
                         if sync_handler::handle_unmute_member(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &local_peer_str,
                             server_id, peer_id,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1325,7 +1325,7 @@ async fn run_event_loop(
                     NodeCommand::SetChannelSlowMode { server_id, channel_id, seconds } => {
                         if sync_handler::handle_set_channel_slow_mode(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &local_peer_str,
                             server_id, channel_id, seconds,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1334,7 +1334,7 @@ async fn run_event_loop(
                     NodeCommand::SetChannelMediaOnly { server_id, channel_id, media_only } => {
                         if sync_handler::handle_set_channel_media_only(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &local_peer_str,
+                            &ws_room_peers, &mut gossip_overlays, &local_peer_str,
                             server_id, channel_id, media_only,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
@@ -1457,7 +1457,7 @@ async fn run_event_loop(
                     NodeCommand::SetNickname { server_id, peer_id, nickname } => {
                         if sync_handler::handle_set_nickname(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, peer_id, nickname,
                             &crdt_store,
                         ).await { continue; }
@@ -1466,7 +1466,7 @@ async fn run_event_loop(
                     NodeCommand::SetTwitchUsername { server_id, peer_id, twitch_username } => {
                         if sync_handler::handle_set_twitch_username(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, peer_id, twitch_username,
                             &crdt_store,
                         ).await { continue; }
@@ -1738,7 +1738,7 @@ async fn run_event_loop(
                     NodeCommand::UpdateChannelLayout { server_id, layout_json } => {
                         if sync_handler::handle_update_channel_layout(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, layout_json,
                             &crdt_store,
                         ).await { continue; }
@@ -1747,7 +1747,7 @@ async fn run_event_loop(
                     NodeCommand::PinMessage { server_id, channel_id, message_id } => {
                         if sync_handler::handle_pin_message(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, channel_id, message_id,
                             &crdt_store,
                         ).await { continue; }
@@ -1756,7 +1756,7 @@ async fn run_event_loop(
                     NodeCommand::UnpinMessage { server_id, channel_id, message_id } => {
                         if sync_handler::handle_unpin_message(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, channel_id, message_id,
                             &crdt_store,
                         ).await { continue; }
@@ -1766,7 +1766,7 @@ async fn run_event_loop(
                     NodeCommand::SetStoragePledge { server_id, pledge_bytes } => {
                         sync_handler::handle_set_storage_pledge(
                             &mut server_states, &event_tx, &ws_cmd_tx,
-                            &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id, pledge_bytes,
                             &crdt_store,
                         ).await;
@@ -1999,6 +1999,12 @@ async fn run_event_loop(
                         );
                     }
 
+                    NodeCommand::WebRtcRouteReport { peer_id, is_direct } => {
+                        voice_handler::handle_webrtc_route_report(
+                            peer_id, is_direct, &mut gossip_overlays,
+                        );
+                    }
+
                     NodeCommand::WebRtcBroadcastReceived {
                         transfer_id: _, broadcast_id, ttl,
                         origin_peer_id, sender_peer_id,
@@ -2010,6 +2016,48 @@ async fn run_event_loop(
                             broadcast_id, ttl, origin_peer_id, sender_peer_id,
                             temp_path, total_size, kind, shard_index,
                         ).await;
+                    }
+
+                    NodeCommand::WebRtcGossipOpReceived { sender_peer_id, payload } => {
+                        // Tier 2 (large-server scaling): a CRDT op arrived over the
+                        // WebRTC mesh instead of the relay. Dedup by broadcast_id,
+                        // then ingest through the EXACT same validated path as a
+                        // relay CrdtOpBroadcast (op.author permission matrix, op_log
+                        // dedup, ServerUpdated events, mesh re-flood on op-newness).
+                        if let Some((server_id, op_json)) =
+                            super::gossip_relay::accept_gossip_op(&mut gossip_overlays, &payload)
+                        {
+                            handle_incoming_request(
+                                &mut olm, &crypto_store, &crdt_store, &event_tx,
+                                &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
+                                &mut server_states, &bundle_keypair,
+                                &master_keypair, &master_peer_str, &device_peer_id,
+                                &mut pending_server_joins,
+                                &mut pending_sync_requests, &mut mls,
+                                &mut mls_bootstrap_requested,
+                                &mut pending_shard_assembly, &mut pending_file_streams,
+                                &mut pending_shard_streams, &mut early_file_streams,
+                                &mut pending_link_snapshots,
+                                &mut decrypt_fail_cooldown,
+                                &mut pending_mls_key_packages, &mut pending_mls_removals,
+                                &mut mls_decrypt_failures,
+                                &ws_cmd_tx, &ws_room_peers,
+                                &webrtc_peers, &mut pending_webrtc_sends,
+                                &mut channel_sync_sent,
+                                &mut gossip_overlays,
+                                &mut voice_channel_participants,
+                                &mut voice_channel_gossip_mode,
+                                &mut vc_signal_rate_tokens,
+                                &mut mls_dirty,
+                                &guest_rooms,
+                                &subscribed_channels,
+                                &db_path, &db_passphrase,
+                                &local_peer_str, &sender_peer_id, is_invisible,
+                                &mut link_snapshot_requested, &mut pending_sibling_challenges,
+                                &mut pending_friend_accepts, &mut pending_friend_requests,
+                                HavenMessage::CrdtOpBroadcast { server_id, op_json },
+                            ).await;
+                        }
                     }
 
                     // -- Recovery pool commands (Evidence Recovery) --
@@ -3768,31 +3816,16 @@ async fn run_event_loop(
                                         }).await;
                                     }
                                     let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
-                                    if let Some(state) = server_states.get(&server_id) {
-                                        let commit_msg = HavenMessage::MlsCommit {
-                                            server_id: server_id.clone(),
-                                            commit: commit_b64.clone(),
-                                            channel_id: channel_id.clone(),
-                                        };
-                                        let commit_data = serde_json::to_vec(&commit_msg).unwrap_or_default();
-                                        // Per-device fan-out; skip self and the exact
-                                        // removed device ids (members are master-keyed).
-                                        // For a subgroup, only fan to members who still
-                                        // qualify for the channel (the others aren't leaves).
-                                        let removed: std::collections::HashSet<&str> = unique.iter().map(|s| s.as_str()).collect();
-                                        let mut sent_devices: std::collections::HashSet<String> = std::collections::HashSet::new();
-                                        for member_peer in state.members.keys() {
-                                            if super::resolver::same_identity(member_peer, &local_peer_str) { continue; }
-                                            if let Some(ref cid) = channel_id {
-                                                if !state.can_see_channel(member_peer, cid) { continue; }
-                                            }
-                                            for dev in crate::node::crypto_handler::online_devices_for(&ws_room_peers, member_peer) {
-                                                if removed.contains(dev.as_str()) { continue; }
-                                                if !sent_devices.insert(dev.clone()) { continue; }
-                                                send_raw_to_peer(&ws_cmd_tx, &ws_room_peers, &dev, commit_data.clone());
-                                            }
-                                        }
-                                    }
+                                    // Tier 1 (large-server scaling): ONE room broadcast
+                                    // replaces the per-device SendDirect loop — the commit
+                                    // bytes are identical for every recipient and the relay
+                                    // fans out. Non-holders (subgroup non-qualifiers, the
+                                    // removed devices) ignore it via has_group / the epoch
+                                    // guard on the receive side.
+                                    crate::node::crypto_handler::broadcast_mls_commit(
+                                        &ws_cmd_tx, &server_id, channel_id.clone(),
+                                        commit_b64, mls_mgr.epoch(&group_key).ok(),
+                                    );
                                 }
                                 Err(e) => hollow_log!("[HOLLOW-MLS] Batch removal failed for {group_key}: {e}"),
                             }
@@ -3854,36 +3887,18 @@ async fn run_event_loop(
                                             }
                                     }
 
-                                    // Broadcast single Commit to all EXISTING leaves
-                                    // (fanned out per-DEVICE — members are master-keyed
-                                    // and the master has no socket). The skip is
-                                    // per-DEVICE, not per-identity: a member may hold
-                                    // several leaves where only ONE was just added
-                                    // (the new sibling B); its already-joined sibling A
-                                    // still needs this Commit for the new epoch. So we
-                                    // send to every online device of every member EXCEPT
-                                    // the exact just-added device ids (they get the
-                                    // Welcome) and our own devices.
-                                    if let Some(state) = server_states.get(&server_id) {
-                                        let commit_data = serde_json::to_vec(&HavenMessage::MlsCommit {
-                                            server_id: server_id.clone(),
-                                            commit: commit_b64,
-                                            channel_id: channel_id.clone(),
-                                        }).unwrap_or_default();
-                                        let mut sent_devices: std::collections::HashSet<String> = std::collections::HashSet::new();
-                                        for member_peer_str in state.members.keys() {
-                                            if super::resolver::same_identity(member_peer_str, &local_peer_str) { continue; }
-                                            // Subgroup: only existing qualifying leaves get the Commit.
-                                            if let Some(ref cid) = channel_id {
-                                                if !state.can_see_channel(member_peer_str, cid) { continue; }
-                                            }
-                                            for dev in crate::node::crypto_handler::online_devices_for(&ws_room_peers, member_peer_str) {
-                                                if added_peers.contains(&dev) { continue; }   // gets the Welcome instead
-                                                if !sent_devices.insert(dev.clone()) { continue; } // already sent
-                                                send_raw_to_peer(&ws_cmd_tx, &ws_room_peers, &dev, commit_data.clone());
-                                            }
-                                        }
-                                    }
+                                    // Tier 1 (large-server scaling): broadcast the single
+                                    // Commit to the whole server room in ONE frame instead
+                                    // of the per-device SendDirect loop. Every existing
+                                    // leaf (including our own siblings and a member's
+                                    // already-joined sibling A when only sibling B was
+                                    // just added) is in the room. The just-added devices
+                                    // receive it too but skip it via the epoch guard —
+                                    // their Welcome already lands them at this epoch.
+                                    crate::node::crypto_handler::broadcast_mls_commit(
+                                        &ws_cmd_tx, &server_id, channel_id.clone(),
+                                        commit_b64, mls_mgr.epoch(&group_key).ok(),
+                                    );
 
                                     hollow_log!("[HOLLOW-MLS] Batch-added {} members to {group_key}: {:?}", added_peers.len(), added_peers);
 
@@ -7680,19 +7695,27 @@ async fn handle_incoming_request(
                         }
                     }
 
-                    // Forward to other connected server members (simple gossip).
-                    // Members are master-keyed → fan to each member's devices; skip
-                    // our own identity and the exact device that sent this to us.
-                    let crdt_msg = HavenMessage::CrdtOpBroadcast {
-                        server_id: server_id.clone(),
-                        op_json: op_json.clone(),
-                    };
-                    let crdt_data = serde_json::to_vec(&crdt_msg).unwrap_or_default();
-                    for member_peer_str in state.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, &local_peer_str) { continue; }
-                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                            if dev == peer_str { continue; } // don't echo back to the sender device
-                            send_raw_to_peer(ws_cmd_tx, ws_room_peers, &dev, crdt_data.clone());
+                    // Forward the (validated, NEW) op onward. Tier 2 (large-server
+                    // scaling): prefer the WebRTC mesh — the historical per-member
+                    // SendDirect re-forward made EVERY receiving node pay
+                    // O(members × devices) relay uploads per op (O(N²) network-wide).
+                    // Op-newness gates this block, so each node re-floods a given op
+                    // at most once and only after the permission checks above passed.
+                    // Falls back to the relay fan-out when the mesh isn't up.
+                    if super::gossip_relay::flood_crdt_op(
+                        gossip_overlays, event_tx, &server_id, &op_json, Some(peer_str),
+                    ) == 0 {
+                        let crdt_msg = HavenMessage::CrdtOpBroadcast {
+                            server_id: server_id.clone(),
+                            op_json: op_json.clone(),
+                        };
+                        let crdt_data = serde_json::to_vec(&crdt_msg).unwrap_or_default();
+                        for member_peer_str in state.members.keys() {
+                            if super::resolver::same_identity(member_peer_str, &local_peer_str) { continue; }
+                            for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                                if dev == peer_str { continue; } // don't echo back to the sender device
+                                send_raw_to_peer(ws_cmd_tx, ws_room_peers, &dev, crdt_data.clone());
+                            }
                         }
                     }
 
@@ -9691,7 +9714,7 @@ async fn handle_incoming_request(
             }
         }
 
-        HavenMessage::MlsCommit { server_id, commit, channel_id: cm_channel_id } => {
+        HavenMessage::MlsCommit { server_id, commit, channel_id: cm_channel_id, epoch: cm_epoch } => {
             let group_key = match &cm_channel_id {
                 Some(cid) => crate::crypto::subgroup_id(&server_id, cid),
                 None => server_id.clone(),
@@ -9705,6 +9728,16 @@ async fn handle_incoming_request(
                 if !mls_mgr.has_group(&group_key) {
                     hollow_log!("[HOLLOW-MLS] Ignoring Commit for group we don't hold: {group_key}");
                     return;
+                }
+                // Tier 1 epoch guard: commits arrive as a room broadcast, so they
+                // also reach fresh joiners (already at the post-commit epoch via
+                // their Welcome) and duplicate deliveries. Skip instead of erroring
+                // into the costly drop-group + re-bootstrap path below.
+                if let Some(wire_epoch) = cm_epoch {
+                    if mls_mgr.epoch(&group_key).is_ok_and(|own| own >= wire_epoch) {
+                        hollow_log!("[HOLLOW-MLS] Skipping commit for {group_key} at epoch {wire_epoch} — already at/past it");
+                        return;
+                    }
                 }
                 let commit_bytes = match base64::engine::general_purpose::STANDARD.decode(&commit) {
                     Ok(b) => b,

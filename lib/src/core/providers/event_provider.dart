@@ -1331,6 +1331,14 @@ class EventStreamNotifier extends Notifier<bool> {
           excludePeerId: excludePeerId,
         );
 
+      case NetworkEvent_GossipRelayOp(:final targets, :final payload):
+        // Tier 2 large-server scaling: fan a small CRDT-op frame to mesh
+        // neighbors over data channels (relay egress stays untouched).
+        ref.read(webRtcProvider.notifier).relayGossipOp(
+              targets: targets,
+              payload: Uint8List.fromList(payload),
+            );
+
       case NetworkEvent_VoiceChannelModeChanged(
             :final serverId, :final channelId,
             :final mode, :final gossipNeighbors):

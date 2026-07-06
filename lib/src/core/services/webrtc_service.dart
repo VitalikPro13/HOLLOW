@@ -25,6 +25,7 @@ const _kTypeShard = 0x01;
 const _kTypeShareChunk = 0x02;
 const _kTypeContinuation = 0xFF;
 const _kTypeScreenAudio = 0x03; // screen share audio (Opus packets)
+const _kTypeGossipOp = 0x04; // small gossip frame (CRDT op JSON, Tier 2 scaling)
 const _kTypePing = 0xFE; // keepalive ping byte
 const _kTypePong = 0xFC; // keepalive pong response byte
 
@@ -535,6 +536,22 @@ class WebRtcService {
     await sendFile(peerId, transferId, filePath, totalSize, kind, shardIndex);
   }
 
+  /// Send a small gossip frame (CRDT op JSON) to a peer: [0x04][payload].
+  /// Tier 2 large-server scaling — best-effort by design: Rust only picks
+  /// targets it believes are connected, and its relay fallback plus the sync
+  /// backstop cover any miss. Returns false if the channel isn't open.
+  bool sendGossipOp(String peerId, Uint8List payload) {
+    final ch = _connections[peerId]?.dataChannel;
+    if (ch == null || ch.state != RTCDataChannelState.RTCDataChannelOpen) {
+      return false;
+    }
+    final frame = Uint8List(payload.length + 1);
+    frame[0] = _kTypeGossipOp;
+    frame.setRange(1, frame.length, payload);
+    ch.send(RTCDataChannelMessage.fromBinary(frame));
+    return true;
+  }
+
   /// Close connection to a peer (intentional — no reconnect).
   Future<void> disconnectPeer(String peerId) async {
     _intentionalClose.add(peerId);
@@ -950,6 +967,12 @@ class WebRtcService {
                       ? 'LAN (direct)'
                       : 'P2P ($localType/$remoteType)';
           _log('[HOLLOW-WEBRTC-DART] ICE route to $peerId: $route (local=$localType remote=$remoteType proto=$localProto)');
+          // Tier 3 reachability-aware overlay: feed the route class into the
+          // gossip peer scorer so rotation drifts toward direct peers.
+          final isDirect = localType != 'relay' && remoteType != 'relay';
+          network_api
+              .webrtcRouteReport(peerId: peerId, isDirect: isDirect)
+              .catchError((_) {});
           return;
         }
       }
@@ -995,6 +1018,18 @@ class WebRtcService {
             _log('[HOLLOW-AU-SCREEN] RX audio packet but no callback set! (#$_screenAudioMissCount)');
           }
         }
+      }
+      return;
+    }
+
+    // Small gossip frame (Tier 2): [0x04][GossipCrdtOp JSON] — hand to Rust,
+    // which validates + applies the op and re-floods it if new.
+    if (typeByte == _kTypeGossipOp) {
+      if (data.length > 1) {
+        network_api
+            .webrtcGossipOpReceived(
+                senderPeerId: peerId, payload: data.sublist(1))
+            .catchError((_) {});
       }
       return;
     }

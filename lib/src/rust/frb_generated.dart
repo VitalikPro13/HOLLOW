@@ -75,7 +75,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -863413075;
+  int get rustContentHash => 852749020;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -1030,6 +1030,11 @@ abstract class RustLibApi extends BaseApi {
     required int shardIndex,
   });
 
+  Future<void> crateApiNetworkWebrtcGossipOpReceived({
+    required String senderPeerId,
+    required List<int> payload,
+  });
+
   Future<void> crateApiNetworkWebrtcPeerConnected({required String peerId});
 
   Future<void> crateApiNetworkWebrtcPeerDisconnected({required String peerId});
@@ -1037,6 +1042,11 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiNetworkWebrtcPingReport({
     required String peerId,
     required int rttMs,
+  });
+
+  Future<void> crateApiNetworkWebrtcRouteReport({
+    required String peerId,
+    required bool isDirect,
   });
 
   Future<void> crateApiNetworkWebrtcSendComplete({required String transferId});
@@ -8995,6 +9005,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiNetworkWebrtcGossipOpReceived({
+    required String senderPeerId,
+    required List<int> payload,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(senderPeerId, serializer);
+          sse_encode_list_prim_u_8_loose(payload, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 241,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNetworkWebrtcGossipOpReceivedConstMeta,
+        argValues: [senderPeerId, payload],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNetworkWebrtcGossipOpReceivedConstMeta =>
+      const TaskConstMeta(
+        debugName: "webrtc_gossip_op_received",
+        argNames: ["senderPeerId", "payload"],
+      );
+
+  @override
   Future<void> crateApiNetworkWebrtcPeerConnected({required String peerId}) {
     return handler.executeNormal(
       NormalTask(
@@ -9004,7 +9049,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 241,
+            funcId: 242,
             port: port_,
           );
         },
@@ -9035,7 +9080,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 242,
+            funcId: 243,
             port: port_,
           );
         },
@@ -9070,7 +9115,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 243,
+            funcId: 244,
             port: port_,
           );
         },
@@ -9092,6 +9137,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiNetworkWebrtcRouteReport({
+    required String peerId,
+    required bool isDirect,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(peerId, serializer);
+          sse_encode_bool(isDirect, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 245,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNetworkWebrtcRouteReportConstMeta,
+        argValues: [peerId, isDirect],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNetworkWebrtcRouteReportConstMeta =>
+      const TaskConstMeta(
+        debugName: "webrtc_route_report",
+        argNames: ["peerId", "isDirect"],
+      );
+
+  @override
   Future<void> crateApiNetworkWebrtcSendComplete({required String transferId}) {
     return handler.executeNormal(
       NormalTask(
@@ -9101,7 +9181,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 244,
+            funcId: 246,
             port: port_,
           );
         },
@@ -9140,7 +9220,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 245,
+            funcId: 247,
             port: port_,
           );
         },
@@ -9179,7 +9259,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 246,
+            funcId: 248,
             port: port_,
           );
         },
@@ -9220,7 +9300,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 247,
+            funcId: 249,
             port: port_,
           );
         },
@@ -9263,7 +9343,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 248,
+            funcId: 250,
             port: port_,
           );
         },
@@ -10609,44 +10689,49 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           channelId: dco_decode_String(raw[10]),
         );
       case 98:
+        return NetworkEvent_GossipRelayOp(
+          targets: dco_decode_list_String(raw[1]),
+          payload: dco_decode_list_prim_u_8_strict(raw[2]),
+        );
+      case 99:
         return NetworkEvent_VoiceChannelModeChanged(
           serverId: dco_decode_String(raw[1]),
           channelId: dco_decode_String(raw[2]),
           mode: dco_decode_String(raw[3]),
           gossipNeighbors: dco_decode_list_String(raw[4]),
         );
-      case 99:
+      case 100:
         return NetworkEvent_MlsEpochChanged(
           serverId: dco_decode_String(raw[1]),
           epoch: dco_decode_u_64(raw[2]),
           sframeKey: dco_decode_list_prim_u_8_strict(raw[3]),
           channelId: dco_decode_opt_String(raw[4]),
         );
-      case 100:
+      case 101:
         return NetworkEvent_RecoveryPoolCreated(
           serverId: dco_decode_String(raw[1]),
           inviteLink: dco_decode_String(raw[2]),
         );
-      case 101:
+      case 102:
         return NetworkEvent_RecoveryPoolJoined(
           serverId: dco_decode_String(raw[1]),
         );
-      case 102:
+      case 103:
         return NetworkEvent_RecoveryPoolJoinFailed(
           serverId: dco_decode_String(raw[1]),
           reason: dco_decode_String(raw[2]),
         );
-      case 103:
+      case 104:
         return NetworkEvent_RecoveryPoolMemberJoined(
           serverId: dco_decode_String(raw[1]),
           peerId: dco_decode_String(raw[2]),
         );
-      case 104:
+      case 105:
         return NetworkEvent_RecoveryPoolMemberLeft(
           serverId: dco_decode_String(raw[1]),
           peerId: dco_decode_String(raw[2]),
         );
-      case 105:
+      case 106:
         return NetworkEvent_RecoveryPoolStatus(
           serverId: dco_decode_String(raw[1]),
           totalFiles: dco_decode_u_32(raw[2]),
@@ -10655,30 +10740,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           noShards: dco_decode_u_32(raw[5]),
           progressPct: dco_decode_f_32(raw[6]),
         );
-      case 106:
+      case 107:
         return NetworkEvent_RecoveryPoolShardTransferred(
           serverId: dco_decode_String(raw[1]),
           contentId: dco_decode_String(raw[2]),
           shardIndex: dco_decode_u_16(raw[3]),
         );
-      case 107:
+      case 108:
         return NetworkEvent_RecoveryPoolFileRecovered(
           serverId: dco_decode_String(raw[1]),
           contentId: dco_decode_String(raw[2]),
           diskPath: dco_decode_String(raw[3]),
         );
-      case 108:
+      case 109:
         return NetworkEvent_RecoveryPoolStopped(
           serverId: dco_decode_String(raw[1]),
         );
-      case 109:
+      case 110:
         return NetworkEvent_ShareManifestReady(
           rootHash: dco_decode_String(raw[1]),
           fileName: dco_decode_String(raw[2]),
           totalSize: dco_decode_u_64(raw[3]),
           chunkCount: dco_decode_u_32(raw[4]),
         );
-      case 110:
+      case 111:
         return NetworkEvent_ShareProgress(
           rootHash: dco_decode_String(raw[1]),
           chunksHave: dco_decode_u_32(raw[2]),
@@ -10687,17 +10772,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           leechers: dco_decode_u_8(raw[5]),
           bytesPerSec: dco_decode_u_64(raw[6]),
         );
-      case 111:
+      case 112:
         return NetworkEvent_ShareCompleted(
           rootHash: dco_decode_String(raw[1]),
           diskPath: dco_decode_String(raw[2]),
         );
-      case 112:
+      case 113:
         return NetworkEvent_ShareFailed(
           rootHash: dco_decode_String(raw[1]),
           error: dco_decode_String(raw[2]),
         );
-      case 113:
+      case 114:
         return NetworkEvent_ShareSeedingChanged(
           rootHash: dco_decode_String(raw[1]),
           seeding: dco_decode_bool(raw[2]),
@@ -10705,51 +10790,51 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           leechers: dco_decode_u_8(raw[4]),
           bytesUploaded: dco_decode_u_64(raw[5]),
         );
-      case 114:
+      case 115:
         return NetworkEvent_ShareCreated(
           rootHash: dco_decode_String(raw[1]),
           link: dco_decode_String(raw[2]),
           fileName: dco_decode_String(raw[3]),
           totalSize: dco_decode_u_64(raw[4]),
         );
-      case 115:
+      case 116:
         return NetworkEvent_ShareCreatedHidden(
           rootHash: dco_decode_String(raw[1]),
           keyHex: dco_decode_String(raw[2]),
           fileName: dco_decode_String(raw[3]),
           totalSize: dco_decode_u_64(raw[4]),
         );
-      case 116:
+      case 117:
         return NetworkEvent_ShareList(
           entries: dco_decode_list_share_entry(raw[1]),
         );
-      case 117:
+      case 118:
         return NetworkEvent_ShareNeedWebRtc(
           peerId: dco_decode_String(raw[1]),
           hidden: dco_decode_bool(raw[2]),
         );
-      case 118:
-        return NetworkEvent_LicenseError(reason: dco_decode_String(raw[1]));
       case 119:
+        return NetworkEvent_LicenseError(reason: dco_decode_String(raw[1]));
+      case 120:
         return NetworkEvent_TwitchJoinRejected(
           serverId: dco_decode_String(raw[1]),
           reason: dco_decode_String(raw[2]),
         );
-      case 120:
+      case 121:
         return NetworkEvent_RoomBudgetUpdate(
           joined: dco_decode_u_32(raw[1]),
           limit: dco_decode_u_32(raw[2]),
         );
-      case 121:
-        return NetworkEvent_RoomCapHit(room: dco_decode_String(raw[1]));
       case 122:
+        return NetworkEvent_RoomCapHit(room: dco_decode_String(raw[1]));
+      case 123:
         return NetworkEvent_PublicChannelListReceived(
           serverId: dco_decode_String(raw[1]),
           serverName: dco_decode_String(raw[2]),
           channels: dco_decode_list_public_channel_entry_ffi(raw[3]),
           serverAvatar: dco_decode_opt_list_prim_u_8_strict(raw[4]),
         );
-      case 123:
+      case 124:
         return NetworkEvent_PublicChannelSyncReceived(
           serverId: dco_decode_String(raw[1]),
           channelId: dco_decode_String(raw[2]),
@@ -10757,7 +10842,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           hasMore: dco_decode_bool(raw[4]),
           senderProfiles: dco_decode_list_sync_sender_profile_ffi(raw[5]),
         );
-      case 124:
+      case 125:
         return NetworkEvent_PublicChannelConfigChanged(
           serverId: dco_decode_String(raw[1]),
           channelId: dco_decode_String(raw[2]),
@@ -13180,6 +13265,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           channelId: var_channelId,
         );
       case 98:
+        var var_targets = sse_decode_list_String(deserializer);
+        var var_payload = sse_decode_list_prim_u_8_strict(deserializer);
+        return NetworkEvent_GossipRelayOp(
+          targets: var_targets,
+          payload: var_payload,
+        );
+      case 99:
         var var_serverId = sse_decode_String(deserializer);
         var var_channelId = sse_decode_String(deserializer);
         var var_mode = sse_decode_String(deserializer);
@@ -13190,7 +13282,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           mode: var_mode,
           gossipNeighbors: var_gossipNeighbors,
         );
-      case 99:
+      case 100:
         var var_serverId = sse_decode_String(deserializer);
         var var_epoch = sse_decode_u_64(deserializer);
         var var_sframeKey = sse_decode_list_prim_u_8_strict(deserializer);
@@ -13201,38 +13293,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sframeKey: var_sframeKey,
           channelId: var_channelId,
         );
-      case 100:
+      case 101:
         var var_serverId = sse_decode_String(deserializer);
         var var_inviteLink = sse_decode_String(deserializer);
         return NetworkEvent_RecoveryPoolCreated(
           serverId: var_serverId,
           inviteLink: var_inviteLink,
         );
-      case 101:
+      case 102:
         var var_serverId = sse_decode_String(deserializer);
         return NetworkEvent_RecoveryPoolJoined(serverId: var_serverId);
-      case 102:
+      case 103:
         var var_serverId = sse_decode_String(deserializer);
         var var_reason = sse_decode_String(deserializer);
         return NetworkEvent_RecoveryPoolJoinFailed(
           serverId: var_serverId,
           reason: var_reason,
         );
-      case 103:
+      case 104:
         var var_serverId = sse_decode_String(deserializer);
         var var_peerId = sse_decode_String(deserializer);
         return NetworkEvent_RecoveryPoolMemberJoined(
           serverId: var_serverId,
           peerId: var_peerId,
         );
-      case 104:
+      case 105:
         var var_serverId = sse_decode_String(deserializer);
         var var_peerId = sse_decode_String(deserializer);
         return NetworkEvent_RecoveryPoolMemberLeft(
           serverId: var_serverId,
           peerId: var_peerId,
         );
-      case 105:
+      case 106:
         var var_serverId = sse_decode_String(deserializer);
         var var_totalFiles = sse_decode_u_32(deserializer);
         var var_reconstructable = sse_decode_u_32(deserializer);
@@ -13247,7 +13339,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           noShards: var_noShards,
           progressPct: var_progressPct,
         );
-      case 106:
+      case 107:
         var var_serverId = sse_decode_String(deserializer);
         var var_contentId = sse_decode_String(deserializer);
         var var_shardIndex = sse_decode_u_16(deserializer);
@@ -13256,7 +13348,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           contentId: var_contentId,
           shardIndex: var_shardIndex,
         );
-      case 107:
+      case 108:
         var var_serverId = sse_decode_String(deserializer);
         var var_contentId = sse_decode_String(deserializer);
         var var_diskPath = sse_decode_String(deserializer);
@@ -13265,10 +13357,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           contentId: var_contentId,
           diskPath: var_diskPath,
         );
-      case 108:
+      case 109:
         var var_serverId = sse_decode_String(deserializer);
         return NetworkEvent_RecoveryPoolStopped(serverId: var_serverId);
-      case 109:
+      case 110:
         var var_rootHash = sse_decode_String(deserializer);
         var var_fileName = sse_decode_String(deserializer);
         var var_totalSize = sse_decode_u_64(deserializer);
@@ -13279,7 +13371,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           totalSize: var_totalSize,
           chunkCount: var_chunkCount,
         );
-      case 110:
+      case 111:
         var var_rootHash = sse_decode_String(deserializer);
         var var_chunksHave = sse_decode_u_32(deserializer);
         var var_chunksTotal = sse_decode_u_32(deserializer);
@@ -13294,21 +13386,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           leechers: var_leechers,
           bytesPerSec: var_bytesPerSec,
         );
-      case 111:
+      case 112:
         var var_rootHash = sse_decode_String(deserializer);
         var var_diskPath = sse_decode_String(deserializer);
         return NetworkEvent_ShareCompleted(
           rootHash: var_rootHash,
           diskPath: var_diskPath,
         );
-      case 112:
+      case 113:
         var var_rootHash = sse_decode_String(deserializer);
         var var_error = sse_decode_String(deserializer);
         return NetworkEvent_ShareFailed(
           rootHash: var_rootHash,
           error: var_error,
         );
-      case 113:
+      case 114:
         var var_rootHash = sse_decode_String(deserializer);
         var var_seeding = sse_decode_bool(deserializer);
         var var_seeders = sse_decode_u_8(deserializer);
@@ -13321,7 +13413,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           leechers: var_leechers,
           bytesUploaded: var_bytesUploaded,
         );
-      case 114:
+      case 115:
         var var_rootHash = sse_decode_String(deserializer);
         var var_link = sse_decode_String(deserializer);
         var var_fileName = sse_decode_String(deserializer);
@@ -13332,7 +13424,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           fileName: var_fileName,
           totalSize: var_totalSize,
         );
-      case 115:
+      case 116:
         var var_rootHash = sse_decode_String(deserializer);
         var var_keyHex = sse_decode_String(deserializer);
         var var_fileName = sse_decode_String(deserializer);
@@ -13343,37 +13435,37 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           fileName: var_fileName,
           totalSize: var_totalSize,
         );
-      case 116:
+      case 117:
         var var_entries = sse_decode_list_share_entry(deserializer);
         return NetworkEvent_ShareList(entries: var_entries);
-      case 117:
+      case 118:
         var var_peerId = sse_decode_String(deserializer);
         var var_hidden = sse_decode_bool(deserializer);
         return NetworkEvent_ShareNeedWebRtc(
           peerId: var_peerId,
           hidden: var_hidden,
         );
-      case 118:
+      case 119:
         var var_reason = sse_decode_String(deserializer);
         return NetworkEvent_LicenseError(reason: var_reason);
-      case 119:
+      case 120:
         var var_serverId = sse_decode_String(deserializer);
         var var_reason = sse_decode_String(deserializer);
         return NetworkEvent_TwitchJoinRejected(
           serverId: var_serverId,
           reason: var_reason,
         );
-      case 120:
+      case 121:
         var var_joined = sse_decode_u_32(deserializer);
         var var_limit = sse_decode_u_32(deserializer);
         return NetworkEvent_RoomBudgetUpdate(
           joined: var_joined,
           limit: var_limit,
         );
-      case 121:
+      case 122:
         var var_room = sse_decode_String(deserializer);
         return NetworkEvent_RoomCapHit(room: var_room);
-      case 122:
+      case 123:
         var var_serverId = sse_decode_String(deserializer);
         var var_serverName = sse_decode_String(deserializer);
         var var_channels = sse_decode_list_public_channel_entry_ffi(
@@ -13388,7 +13480,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           channels: var_channels,
           serverAvatar: var_serverAvatar,
         );
-      case 123:
+      case 124:
         var var_serverId = sse_decode_String(deserializer);
         var var_channelId = sse_decode_String(deserializer);
         var var_messages = sse_decode_list_guest_sync_message_ffi(deserializer);
@@ -13403,7 +13495,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           hasMore: var_hasMore,
           senderProfiles: var_senderProfiles,
         );
-      case 124:
+      case 125:
         var var_serverId = sse_decode_String(deserializer);
         var var_channelId = sse_decode_String(deserializer);
         var var_isPublic = sse_decode_bool(deserializer);
@@ -15827,13 +15919,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_String(excludePeerId, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(channelId, serializer);
+      case NetworkEvent_GossipRelayOp(
+        targets: final targets,
+        payload: final payload,
+      ):
+        sse_encode_i_32(98, serializer);
+        sse_encode_list_String(targets, serializer);
+        sse_encode_list_prim_u_8_strict(payload, serializer);
       case NetworkEvent_VoiceChannelModeChanged(
         serverId: final serverId,
         channelId: final channelId,
         mode: final mode,
         gossipNeighbors: final gossipNeighbors,
       ):
-        sse_encode_i_32(98, serializer);
+        sse_encode_i_32(99, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(channelId, serializer);
         sse_encode_String(mode, serializer);
@@ -15844,7 +15943,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sframeKey: final sframeKey,
         channelId: final channelId,
       ):
-        sse_encode_i_32(99, serializer);
+        sse_encode_i_32(100, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_u_64(epoch, serializer);
         sse_encode_list_prim_u_8_strict(sframeKey, serializer);
@@ -15853,31 +15952,31 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         serverId: final serverId,
         inviteLink: final inviteLink,
       ):
-        sse_encode_i_32(100, serializer);
+        sse_encode_i_32(101, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(inviteLink, serializer);
       case NetworkEvent_RecoveryPoolJoined(serverId: final serverId):
-        sse_encode_i_32(101, serializer);
+        sse_encode_i_32(102, serializer);
         sse_encode_String(serverId, serializer);
       case NetworkEvent_RecoveryPoolJoinFailed(
         serverId: final serverId,
         reason: final reason,
       ):
-        sse_encode_i_32(102, serializer);
+        sse_encode_i_32(103, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(reason, serializer);
       case NetworkEvent_RecoveryPoolMemberJoined(
         serverId: final serverId,
         peerId: final peerId,
       ):
-        sse_encode_i_32(103, serializer);
+        sse_encode_i_32(104, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(peerId, serializer);
       case NetworkEvent_RecoveryPoolMemberLeft(
         serverId: final serverId,
         peerId: final peerId,
       ):
-        sse_encode_i_32(104, serializer);
+        sse_encode_i_32(105, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(peerId, serializer);
       case NetworkEvent_RecoveryPoolStatus(
@@ -15888,7 +15987,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         noShards: final noShards,
         progressPct: final progressPct,
       ):
-        sse_encode_i_32(105, serializer);
+        sse_encode_i_32(106, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_u_32(totalFiles, serializer);
         sse_encode_u_32(reconstructable, serializer);
@@ -15900,7 +15999,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         contentId: final contentId,
         shardIndex: final shardIndex,
       ):
-        sse_encode_i_32(106, serializer);
+        sse_encode_i_32(107, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(contentId, serializer);
         sse_encode_u_16(shardIndex, serializer);
@@ -15909,12 +16008,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         contentId: final contentId,
         diskPath: final diskPath,
       ):
-        sse_encode_i_32(107, serializer);
+        sse_encode_i_32(108, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(contentId, serializer);
         sse_encode_String(diskPath, serializer);
       case NetworkEvent_RecoveryPoolStopped(serverId: final serverId):
-        sse_encode_i_32(108, serializer);
+        sse_encode_i_32(109, serializer);
         sse_encode_String(serverId, serializer);
       case NetworkEvent_ShareManifestReady(
         rootHash: final rootHash,
@@ -15922,7 +16021,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         totalSize: final totalSize,
         chunkCount: final chunkCount,
       ):
-        sse_encode_i_32(109, serializer);
+        sse_encode_i_32(110, serializer);
         sse_encode_String(rootHash, serializer);
         sse_encode_String(fileName, serializer);
         sse_encode_u_64(totalSize, serializer);
@@ -15935,7 +16034,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         leechers: final leechers,
         bytesPerSec: final bytesPerSec,
       ):
-        sse_encode_i_32(110, serializer);
+        sse_encode_i_32(111, serializer);
         sse_encode_String(rootHash, serializer);
         sse_encode_u_32(chunksHave, serializer);
         sse_encode_u_32(chunksTotal, serializer);
@@ -15946,14 +16045,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         rootHash: final rootHash,
         diskPath: final diskPath,
       ):
-        sse_encode_i_32(111, serializer);
+        sse_encode_i_32(112, serializer);
         sse_encode_String(rootHash, serializer);
         sse_encode_String(diskPath, serializer);
       case NetworkEvent_ShareFailed(
         rootHash: final rootHash,
         error: final error,
       ):
-        sse_encode_i_32(112, serializer);
+        sse_encode_i_32(113, serializer);
         sse_encode_String(rootHash, serializer);
         sse_encode_String(error, serializer);
       case NetworkEvent_ShareSeedingChanged(
@@ -15963,7 +16062,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         leechers: final leechers,
         bytesUploaded: final bytesUploaded,
       ):
-        sse_encode_i_32(113, serializer);
+        sse_encode_i_32(114, serializer);
         sse_encode_String(rootHash, serializer);
         sse_encode_bool(seeding, serializer);
         sse_encode_u_8(seeders, serializer);
@@ -15975,7 +16074,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         fileName: final fileName,
         totalSize: final totalSize,
       ):
-        sse_encode_i_32(114, serializer);
+        sse_encode_i_32(115, serializer);
         sse_encode_String(rootHash, serializer);
         sse_encode_String(link, serializer);
         sse_encode_String(fileName, serializer);
@@ -15986,40 +16085,40 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         fileName: final fileName,
         totalSize: final totalSize,
       ):
-        sse_encode_i_32(115, serializer);
+        sse_encode_i_32(116, serializer);
         sse_encode_String(rootHash, serializer);
         sse_encode_String(keyHex, serializer);
         sse_encode_String(fileName, serializer);
         sse_encode_u_64(totalSize, serializer);
       case NetworkEvent_ShareList(entries: final entries):
-        sse_encode_i_32(116, serializer);
+        sse_encode_i_32(117, serializer);
         sse_encode_list_share_entry(entries, serializer);
       case NetworkEvent_ShareNeedWebRtc(
         peerId: final peerId,
         hidden: final hidden,
       ):
-        sse_encode_i_32(117, serializer);
+        sse_encode_i_32(118, serializer);
         sse_encode_String(peerId, serializer);
         sse_encode_bool(hidden, serializer);
       case NetworkEvent_LicenseError(reason: final reason):
-        sse_encode_i_32(118, serializer);
+        sse_encode_i_32(119, serializer);
         sse_encode_String(reason, serializer);
       case NetworkEvent_TwitchJoinRejected(
         serverId: final serverId,
         reason: final reason,
       ):
-        sse_encode_i_32(119, serializer);
+        sse_encode_i_32(120, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(reason, serializer);
       case NetworkEvent_RoomBudgetUpdate(
         joined: final joined,
         limit: final limit,
       ):
-        sse_encode_i_32(120, serializer);
+        sse_encode_i_32(121, serializer);
         sse_encode_u_32(joined, serializer);
         sse_encode_u_32(limit, serializer);
       case NetworkEvent_RoomCapHit(room: final room):
-        sse_encode_i_32(121, serializer);
+        sse_encode_i_32(122, serializer);
         sse_encode_String(room, serializer);
       case NetworkEvent_PublicChannelListReceived(
         serverId: final serverId,
@@ -16027,7 +16126,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         channels: final channels,
         serverAvatar: final serverAvatar,
       ):
-        sse_encode_i_32(122, serializer);
+        sse_encode_i_32(123, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(serverName, serializer);
         sse_encode_list_public_channel_entry_ffi(channels, serializer);
@@ -16039,7 +16138,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         hasMore: final hasMore,
         senderProfiles: final senderProfiles,
       ):
-        sse_encode_i_32(123, serializer);
+        sse_encode_i_32(124, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(channelId, serializer);
         sse_encode_list_guest_sync_message_ffi(messages, serializer);
@@ -16052,7 +16151,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         channelName: final channelName,
         category: final category,
       ):
-        sse_encode_i_32(124, serializer);
+        sse_encode_i_32(125, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(channelId, serializer);
         sse_encode_bool(isPublic, serializer);

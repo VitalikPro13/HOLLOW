@@ -1523,17 +1523,13 @@ pub(crate) fn reconcile_subgroups_for_server(
 /// Used by kick/ban/leave so a removed human loses access to restricted channels,
 /// not just the server-wide group. Mirrors the server-group removal in the
 /// kick handler. No-op for subgroups we don't hold or where the target has no leaf.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn remove_identity_from_subgroups(
     mls: &mut MlsManager,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     crypto_store: &CryptoStore,
     server: &crate::crdt::server_state::ServerState,
     server_id: &str,
-    local_peer: &str,
-    local_device_id: &str,
     target_master: &str,
 ) {
     // credential ids of the removed human = {master} ∪ all known devices.
@@ -1570,20 +1566,12 @@ pub(crate) async fn remove_identity_from_subgroups(
                     }).await;
                 }
                 let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
-                let data = serde_json::to_vec(&HavenMessage::MlsCommit {
-                    server_id: server_id.to_string(),
-                    commit: commit_b64,
-                    channel_id: Some(cid.clone()),
-                }).unwrap_or_default();
-                // Broadcast to remaining qualifying members (skip the removed identity).
-                for member in server.members.keys() {
-                    if super::resolver::same_identity(member, target_master) { continue; }
-                    if super::resolver::same_identity(member, local_peer) { continue; }
-                    if !server.can_see_channel(member, &cid) { continue; }
-                    send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data.clone());
-                }
-                // Our own siblings hold their own leaves — forward the commit (excl. us).
-                super::sync_handler::fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer, local_device_id, data);
+                // Tier 1: single room broadcast (covers qualifying members AND our
+                // siblings); non-qualifiers ignore it via has_group on receive.
+                broadcast_mls_commit(
+                    ws_cmd_tx, server_id, Some(cid.clone()), commit_b64,
+                    mls.epoch(&group_key).ok(),
+                );
                 hollow_log!("[HOLLOW-MLS] Removed {target_master}'s leaves from subgroup {group_key}");
             }
             Err(e) => hollow_log!("[HOLLOW-MLS] subgroup remove failed for {group_key}: {e}"),
@@ -1934,6 +1922,38 @@ pub(crate) fn send_raw_to_peer(
             data,
         });
     }
+}
+
+/// Broadcast an MLS Commit to the ENTIRE server WS room in ONE 0x03 frame.
+///
+/// Large-server scaling Tier 1 (`reports/LARGE_SERVER_SCALING_2026.md`): commit
+/// bytes are byte-identical for every recipient, so the historical per-device
+/// `SendDirect` loop was O(N) coordinator upload per membership change — the
+/// relay fans a single room broadcast out instead. Over-delivery is harmless:
+/// receivers that don't hold the group ignore it (`has_group`), receivers
+/// already at/past the commit's epoch skip it (wire `epoch` guard — including
+/// fresh joiners whose Welcome lands them at the post-commit epoch), and a
+/// kicked/removed identity that errors into re-bootstrap is refused by the
+/// MlsKeyPackage non-member check. Our own siblings are in the room and now
+/// get the commit for free (the relay excludes only this device's socket).
+pub(crate) fn broadcast_mls_commit(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    server_id: &str,
+    channel_id: Option<String>,
+    commit_b64: String,
+    epoch: Option<u64>,
+) {
+    let data = serde_json::to_vec(&HavenMessage::MlsCommit {
+        server_id: server_id.to_string(),
+        commit: commit_b64,
+        channel_id,
+        epoch,
+    })
+    .unwrap_or_default();
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
+        room_code: server_id.to_string(),
+        data,
+    });
 }
 
 /// Send pre-serialized bytes to EVERY online device of an identity.

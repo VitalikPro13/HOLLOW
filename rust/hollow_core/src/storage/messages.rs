@@ -985,6 +985,11 @@ impl MessageStore {
         order_us: Option<i64>,
     ) -> Result<i64, String> {
         let order_us = order_us.unwrap_or(timestamp.saturating_mul(1000));
+        // Lamport chat clock: every persisted stamp (live, backfill, push
+        // fetch, our own echo) advances the send clock so our NEXT send stamps
+        // after everything we've seen — cross-machine clock skew can no longer
+        // sort a reply above the message it answers (see chat_clock.rs).
+        crate::chat_clock::observe(order_us.max(timestamp.saturating_mul(1000)));
         let rows = self.conn
             .execute(
                 "INSERT OR IGNORE INTO messages (peer_id, text, is_mine, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -1540,6 +1545,8 @@ impl MessageStore {
         order_us: Option<i64>,
     ) -> Result<usize, String> {
         let order_us = order_us.unwrap_or(timestamp.saturating_mul(1000));
+        // Lamport chat clock — see [`Self::insert`] and chat_clock.rs.
+        crate::chat_clock::observe(order_us.max(timestamp.saturating_mul(1000)));
         let rows = self.conn
             .execute(
                 "INSERT OR IGNORE INTO channel_messages (server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, reply_to_mid, file_id, order_us)
@@ -1640,6 +1647,23 @@ impl MessageStore {
             )
             .ok()
             .flatten()
+    }
+
+    /// Highest chat send-stamp (µs) across DMs + channel messages. Seeds the
+    /// Lamport chat clock at node start (see chat_clock.rs) so a restart can't
+    /// mint stamps below already-stored ones from a peer whose clock runs
+    /// ahead of ours — without the seed, our first post-restart reply would
+    /// sort above the message it answers until the next inbound bump.
+    pub fn max_chat_stamp_us(&self) -> i64 {
+        let q = |sql: &str| {
+            self.conn
+                .query_row(sql, [], |row| row.get::<_, Option<i64>>(0))
+                .ok()
+                .flatten()
+                .unwrap_or(0)
+        };
+        q("SELECT MAX(COALESCE(order_us, timestamp * 1000)) FROM messages")
+            .max(q("SELECT MAX(COALESCE(order_us, timestamp * 1000)) FROM channel_messages"))
     }
 
     /// Whether `sender_id` already has a channel message in the open interval

@@ -764,6 +764,28 @@ Future<void> webrtcPingReport({required String peerId, required int rttMs}) =>
       rttMs: rttMs,
     );
 
+/// Report the ICE route class of a live data-channel connection (Tier 3
+/// reachability-aware overlay): `is_direct` = host/srflx/LAN vs TURN-relayed.
+Future<void> webrtcRouteReport({
+  required String peerId,
+  required bool isDirect,
+}) => RustLib.instance.api.crateApiNetworkWebrtcRouteReport(
+  peerId: peerId,
+  isDirect: isDirect,
+);
+
+/// Hand back a gossip CRDT-op frame (type byte 0x04) received on a data
+/// channel. Tier 2 large-server scaling: the op is ingested through the same
+/// validated path as a relay CrdtOpBroadcast and re-flooded to our own mesh
+/// neighbors only if it was new.
+Future<void> webrtcGossipOpReceived({
+  required String senderPeerId,
+  required List<int> payload,
+}) => RustLib.instance.api.crateApiNetworkWebrtcGossipOpReceived(
+  senderPeerId: senderPeerId,
+  payload: payload,
+);
+
 /// Notify Rust that a broadcast file was received via gossip data channel.
 Future<void> webrtcBroadcastReceived({
   required String transferId,
@@ -1540,6 +1562,14 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String serverId,
     required String channelId,
   }) = NetworkEvent_GossipRelayFile;
+
+  /// Send a small gossip frame (type byte 0x04 on 'hollow-data') to each
+  /// target's open data channel. Tier 2 large-server scaling: CRDT ops
+  /// flood peer-to-peer instead of paying the relay's O(N) egress.
+  const factory NetworkEvent.gossipRelayOp({
+    required List<String> targets,
+    required Uint8List payload,
+  }) = NetworkEvent_GossipRelayOp;
   const factory NetworkEvent.voiceChannelModeChanged({
     required String serverId,
     required String channelId,

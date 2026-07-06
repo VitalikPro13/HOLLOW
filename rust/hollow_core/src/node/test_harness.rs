@@ -62,6 +62,37 @@ struct RelayInner {
     /// SendToRoomTopic frames tee in, TopicCatchup replays them to the
     /// requester (skipping the requester's own frames). Caps/TTL not modeled.
     topic_buffers: HashMap<(String, String), Vec<(String, Vec<u8>)>>,
+    /// Optional load meter (scaling benchmark). When `Some`, every command the
+    /// relay handles and every frame the relay DELIVERS to a socket is tallied
+    /// here — the ground truth for "what does one server operation cost the
+    /// relay + the coordinator". `None` in normal tests (zero overhead).
+    meter: Option<RelayMeter>,
+}
+
+/// Frame accounting for the scaling benchmark. Counts are cumulative from the
+/// last [`MockRelay::reset_meter`]. The distinction that matters:
+///   * `*_cmds`  = inbound commands a NODE issued (coordinator/sender-side work).
+///   * `deliveries` = outbound frames the RELAY copied to a socket (relay egress
+///                    — the O(N) fan-out and the true bandwidth bottleneck).
+#[derive(Default, Clone, Debug)]
+pub(crate) struct RelayMeter {
+    /// SendDirect / SendDirectImage commands issued (the per-device targeted
+    /// fan-out — MLS commits/welcomes ride this; O(N) on the coordinator).
+    pub send_direct_cmds: u64,
+    /// SendToRoom commands issued (single-frame broadcast; O(1) sender work).
+    pub send_to_room_cmds: u64,
+    /// SendToRoomTopic commands issued (single-frame topic broadcast).
+    pub send_topic_cmds: u64,
+    /// Total outbound frames the relay actually delivered to a socket, across
+    /// ALL command types. This IS relay egress — the bottleneck the 400 Mbps
+    /// pipe caps. `bytes_out` weights it by payload size.
+    pub deliveries: u64,
+    pub bytes_out: u64,
+    /// Deliveries attributable to broadcast fan-out (SendToRoom + topic), so we
+    /// can separate "one post → N copies" egress from targeted-send egress.
+    pub broadcast_deliveries: u64,
+    /// Deliveries attributable to targeted SendDirect fan-out (commit/welcome).
+    pub direct_deliveries: u64,
 }
 
 struct BufferedMsg {
@@ -108,6 +139,18 @@ impl MockRelay {
         });
         // Tell the node it's connected (mirrors WsEvent::Connected on real auth).
         let _ = event_tx.send(WsEvent::Connected);
+    }
+
+    /// Enable the load meter (scaling benchmark). Resets counts to zero. After
+    /// this, every command + delivery is tallied until [`Self::take_meter`].
+    pub(crate) fn reset_meter(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.meter = Some(RelayMeter::default());
+    }
+
+    /// Snapshot the current meter (leaves it running). `None` if never enabled.
+    pub(crate) fn meter(&self) -> Option<RelayMeter> {
+        self.inner.lock().unwrap().meter.clone()
     }
 
     /// The set of DEVICE peer_ids the relay currently considers online (a live
@@ -239,15 +282,29 @@ impl MockRelay {
                 }
             }
             WsCommand::SendToRoom { room_code, data } => {
-                inner.broadcast_except(&room_code, from, WsEvent::Message {
+                if let Some(m) = inner.meter.as_mut() { m.send_to_room_cmds += 1; }
+                let n = data.len() as u64;
+                let delivered = inner.broadcast_except(&room_code, from, WsEvent::Message {
                     room: room_code.clone(),
                     from: from.to_string(),
                     data,
                 });
+                if let Some(m) = inner.meter.as_mut() {
+                    m.deliveries += delivered;
+                    m.broadcast_deliveries += delivered;
+                    m.bytes_out += delivered * n;
+                }
             }
             WsCommand::SendDirect { room_code, target_peer, data }
             | WsCommand::SendDirectImage { room_code, target_peer, data } => {
-                inner.deliver_direct(&room_code, from, &target_peer, data, true);
+                if let Some(m) = inner.meter.as_mut() { m.send_direct_cmds += 1; }
+                let n = data.len() as u64;
+                let delivered = inner.deliver_direct(&room_code, from, &target_peer, data, true);
+                if let Some(m) = inner.meter.as_mut() {
+                    m.deliveries += delivered;
+                    m.direct_deliveries += delivered;
+                    m.bytes_out += delivered * n;
+                }
             }
             WsCommand::SendBinaryDirect { room_code, target_peer, data } => {
                 // Delivered as BinaryDirect when present; not buffered (matches
@@ -268,13 +325,20 @@ impl MockRelay {
                 if let Some(buf) = inner.topic_buffers.get_mut(&key) {
                     buf.push((from.to_string(), data.clone()));
                 }
+                if let Some(m) = inner.meter.as_mut() { m.send_topic_cmds += 1; }
+                let n = data.len() as u64;
                 // Simplify topic routing to a plain room broadcast (no test
                 // exercises topic filtering yet).
-                inner.broadcast_except(&room_code, from, WsEvent::Message {
+                let delivered = inner.broadcast_except(&room_code, from, WsEvent::Message {
                     room: room_code.clone(),
                     from: from.to_string(),
                     data,
                 });
+                if let Some(m) = inner.meter.as_mut() {
+                    m.deliveries += delivered;
+                    m.broadcast_deliveries += delivered;
+                    m.bytes_out += delivered * n;
+                }
             }
             WsCommand::SetTopicBuffer { room_code, channels, clear, .. } => {
                 if clear {
@@ -337,23 +401,31 @@ impl RelayInner {
         self.rooms.get(room).map(|s| s.contains(peer)).unwrap_or(false)
     }
 
-    fn broadcast_except(&self, room: &str, from: &str, event: WsEvent) {
+    /// Broadcast to every online room member except the sender. Returns the
+    /// number of frames actually delivered to a socket (the relay egress for
+    /// this one command — this is the O(N) fan-out the benchmark measures).
+    fn broadcast_except(&self, room: &str, from: &str, event: WsEvent) -> u64 {
         let members: Vec<String> = self
             .rooms
             .get(room)
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default();
+        let mut delivered = 0u64;
         for m in members {
             if m == from {
                 continue; // no self-echo (matches relay)
             }
             if let Some(conn) = self.conns.get(&m).filter(|c| c.online) {
                 let _ = conn.event_tx.send(event.clone());
+                delivered += 1;
             }
         }
+        delivered
     }
 
-    fn deliver_direct(&mut self, room: &str, from: &str, target: &str, data: Vec<u8>, direct: bool) {
+    /// Deliver (or buffer) a direct frame. Returns 1 if it was delivered to a
+    /// live socket, 0 if buffered offline (no egress now).
+    fn deliver_direct(&mut self, room: &str, from: &str, target: &str, data: Vec<u8>, direct: bool) -> u64 {
         let online = self.conns.get(target).map(|c| c.online).unwrap_or(false);
         if online && self.peer_in_room(room, target) {
             if let Some(conn) = self.conns.get(target) {
@@ -363,6 +435,7 @@ impl RelayInner {
                     data,
                 });
             }
+            return 1;
         } else {
             // Target offline (or connected but not in the room): buffer for
             // replay on the target's next join of this room. This is the
@@ -373,6 +446,7 @@ impl RelayInner {
                 data,
                 direct,
             });
+            0
         }
     }
 
@@ -5691,3 +5765,187 @@ async fn channel_relay_catchup_delivers_file_message_and_header() {
     drop(o);
     drop(j);
 }
+
+// ---------------------------------------------------------------------------
+// SCALING BENCHMARK (large-server MLS viability, 2026-07-06).
+//
+// Question: can MLS server groups scale to thousands / tens-of-thousands of
+// members without a plaintext downgrade? The investigation identified TWO
+// O(N) fan-out points; this benchmark MEASURES them on the real join/commit/
+// message code so the slope is fact, not estimate, then extrapolates.
+//
+// Metric source of truth: the MockRelay load meter (RelayMeter) â€” it counts
+// exactly what the production relay would copy to sockets, plus the targeted
+// SendDirect commit/welcome fan-out the coordinator issues. We drive the REAL
+// spawn_node event loops, the REAL JoinServer -> KeyPackage -> 2s-batch ->
+// Welcome MLS handshake, and the REAL MLS-encrypted channel send.
+//
+// We measure at increasing member counts, isolate the PER-MEMBER incremental
+// cost of (a) a join/commit and (b) one channel message, confirm both are
+// linear, and print the extrapolation to 1k / 50k. Run with:
+//   cargo test --lib scaling_benchmark_mls_fanout -- --nocapture --ignored
+// Marked ignore so it never runs in the normal fast suite (it spawns many real
+// nodes and sleeps for MLS batch timers).
+// ---------------------------------------------------------------------------
+
+/// One measured data point: the relay/coordinator load for a server that grew
+/// to `members` total members.
+#[derive(Debug, Clone)]
+struct ScalePoint {
+    members: usize,
+    /// SendDirect commands issued for the joins in THIS round (commit + welcome
+    /// + sync targeted fan-out â€” the O(N) coordinator path).
+    join_direct_cmds: u64,
+    /// Total relay deliveries for the joins in this round.
+    join_deliveries: u64,
+    /// Relay deliveries for ONE channel message broadcast at this size (the
+    /// steady-state O(N) egress per post).
+    per_msg_deliveries: u64,
+    /// SendToRoom/topic broadcast commands the sender issued for that one
+    /// message (should stay O(1) regardless of size â€” the good path).
+    per_msg_broadcast_cmds: u64,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "scaling benchmark: spawns many real nodes, sleeps for MLS batch timers. Run with --ignored --nocapture."]
+#[allow(clippy::await_holding_lock)]
+async fn scaling_benchmark_mls_fanout() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 100;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+
+    // Checkpoints where we snapshot the meter. Kept modest â€” each real node runs
+    // a full event loop + Olm handshake + MLS batch commit. Three checkpoints
+    // confirm linearity and give the slope.
+    let checkpoints = [4usize, 8, 12];
+    let max_joiners = *checkpoints.iter().max().unwrap();
+
+    let joiner_masters: Vec<String> = (0..max_joiners)
+        .map(|i| NativeKeypair::from_secret_bytes(&seed_bytes(101 + i as u8)).peer_id())
+        .collect();
+    let joiner_master_refs: Vec<&str> = joiner_masters.iter().map(|s| s.as_str()).collect();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &joiner_master_refs).await;
+    sleep_ms(1500).await;
+
+    let server_id = create_server_and_wait(&mut o, "Scale Server").await;
+    let general = general_channel_of(&server_id);
+    sleep_ms(300).await;
+    println!("\n=== MLS SCALING BENCHMARK ===");
+    println!("server={} channel={}", &server_id[..8], &general);
+
+    let mut points: Vec<ScalePoint> = Vec::new();
+    let mut joiners: Vec<TestNode> = Vec::new();
+
+    for target in checkpoints {
+        let round_start = joiners.len();
+        while joiners.len() < target {
+            let i = joiners.len();
+            let tag = 101 + i as u8;
+            let mut j = spawn_node_with_friends(&relay, tag, tag, &[o_master.as_str()]).await;
+            sleep_ms(1200).await;
+            drain_events(&mut j);
+            joiners.push(j);
+        }
+
+        // Meter the commit/welcome fan-out for the joiners added THIS round.
+        relay.reset_meter();
+        for j in joiners.iter_mut().skip(round_start) {
+            j.cmd_tx
+                .send(NodeCommand::JoinServer {
+                    server_id: server_id.clone(),
+                    twitch_proof_json: None,
+                    nsfw_confirmed: false,
+                })
+                .await
+                .unwrap();
+            sleep_ms(400).await;
+        }
+        sleep_ms(7000).await;
+        let join_meter = relay.meter().expect("meter enabled");
+        let members = target + 1; // + owner
+
+        // Measure ONE channel message broadcast at this size.
+        for j in joiners.iter_mut() { drain_events(j); }
+        drain_events(&mut o);
+        relay.reset_meter();
+        o.cmd_tx
+            .send(NodeCommand::SendChannelMessage {
+                server_id: server_id.clone(),
+                channel_id: general.clone(),
+                text: format!("scale-msg-at-{}", members),
+                message_id: format!("scale-{}", members),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+        sleep_ms(2500).await;
+        let msg_meter = relay.meter().expect("meter enabled");
+
+        let point = ScalePoint {
+            members,
+            join_direct_cmds: join_meter.send_direct_cmds,
+            join_deliveries: join_meter.deliveries,
+            per_msg_deliveries: msg_meter.deliveries,
+            per_msg_broadcast_cmds: msg_meter.send_to_room_cmds + msg_meter.send_topic_cmds,
+        };
+        println!(
+            "[checkpoint] members={:>3} | this-round joins: SendDirect_cmds={:>5} deliveries={:>5} | \
+             1 msg: deliveries={:>4} broadcast_cmds={:>3}",
+            point.members, point.join_direct_cmds, point.join_deliveries,
+            point.per_msg_deliveries, point.per_msg_broadcast_cmds,
+        );
+        points.push(point);
+    }
+
+    println!("\n--- PER-MESSAGE EGRESS (the steady-state bottleneck) ---");
+    for p in &points {
+        let per_member = p.per_msg_deliveries as f64 / (p.members.saturating_sub(1)).max(1) as f64;
+        println!(
+            "  members={:>3}: {:>4} relay deliveries/msg  ({:.2} per other-member)  broadcast_cmds={}",
+            p.members, p.per_msg_deliveries, per_member, p.per_msg_broadcast_cmds,
+        );
+    }
+
+    if let Some(last) = points.last() {
+        assert!(
+            last.per_msg_broadcast_cmds <= 2,
+            "sender should issue ~1 broadcast command per message regardless of size (got {})",
+            last.per_msg_broadcast_cmds,
+        );
+        let others = (last.members - 1) as u64;
+        assert!(
+            last.per_msg_deliveries >= others / 2,
+            "relay egress should scale O(N) with members (got {} deliveries for {} others)",
+            last.per_msg_deliveries, others,
+        );
+    }
+
+    let slope = points
+        .last()
+        .map(|p| p.per_msg_deliveries as f64 / (p.members.saturating_sub(1)).max(1) as f64)
+        .unwrap_or(1.0);
+    println!("\n--- EXTRAPOLATION (measured slope = {:.3} relay deliveries per other-member) ---", slope);
+    for &n in &[1_000usize, 10_000, 50_000] {
+        let deliveries = slope * (n as f64 - 1.0);
+        let mb_per_msg = deliveries * 2_048.0 / 1_048_576.0;
+        let secs_per_msg = mb_per_msg / 50.0;
+        let max_msgs_per_sec = if secs_per_msg > 0.0 { 1.0 / secs_per_msg } else { f64::INFINITY };
+        println!(
+            "  {:>6} members: {:>8.0} deliveries/msg = {:>7.1} MB egress/msg  |  \
+             1 hot channel saturates 400Mbps at ~{:.2} msg/s",
+            n, deliveries, mb_per_msg, max_msgs_per_sec,
+        );
+    }
+    println!("=== END BENCHMARK ===\n");
+
+    drop(o);
+    for j in joiners { drop(j); }
+}
+

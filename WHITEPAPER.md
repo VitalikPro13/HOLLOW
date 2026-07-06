@@ -340,6 +340,9 @@ MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
 3. The epoch advances, rotating all group keys. The removed member cannot derive the new group secret.
 4. Batch removal: when multiple members are removed simultaneously (e.g., recovery after prolonged offline), removals are batched into a single Commit (2 epoch advances total instead of 2 per member).
 
+**Commit distribution (large-server scaling):**
+A Commit is byte-identical for every recipient, so it is distributed as a *single* room broadcast through the relay rather than one targeted send per member device — the coordinator's network work per membership change is constant, independent of server size. Welcomes remain targeted (each carries the group secrets for one joiner). Because a room broadcast also reaches members who do not need the commit — a fresh joiner whose Welcome already placed it at the post-commit epoch, or a duplicate delivery — every Commit carries its post-merge epoch number, and a receiver already at or past that epoch skips it silently instead of misclassifying its own state as stale. A receiver that does not hold the group at all ignores the commit. Recipients that fall genuinely behind recover through the normal re-bootstrap path, and a removed member attempting to re-bootstrap is refused by the membership check on incoming KeyPackages.
+
 **Rejoining after removal (ban/unban cycle):**
 A peer who was removed and later re-invited must drop its stale MLS group state and bootstrap from scratch. The rejoining peer sends a fresh KeyPackage to the coordinator. Without this, the rejoining peer's stale epoch causes one-way decryption failure.
 
@@ -1154,9 +1157,11 @@ If any step fails, the message is rejected. This prevents impersonation: even if
 
 Because the signed sender is the author's *master* identity (§3.3), verification doubles as an **attribution-convergence** mechanism. When a node holds a stored message whose locally-recorded sender disagrees with an incoming, signature-verified copy of the same message (delivered via channel synchronization from any member that holds the authentic copy), the node repairs the stored attribution to the verified sender. This is unforgeable by construction — the repair is gated on the same full verification above, so it can only ever replace an attribution with one that the master's key has signed, never introduce a forged one. The mechanism exists so that a record stored before per-person attribution was applied (for example, one keyed under a specific device rather than its master) self-corrects on the next sync rather than remaining permanently misattributed.
 
-### 15.3 Timestamp Integrity
+### 15.3 Timestamp Integrity and Causal Ordering
 
 The timestamp in the signature payload is authoritative. The UI hydrates its display timestamp from the Rust-signed value, not from the local clock. This prevents timestamp manipulation on the receiver side.
+
+**Causal ordering (Lamport stamping).** In a serverless system, message order is determined by sender-issued timestamps, and wall clocks on different machines are never perfectly synchronized — naively stamping from the local clock lets a reply sort *before* the message it answers whenever the replier's clock runs behind. Each device therefore maintains a Lamport clock over chat messages: every message it stores (received live, via synchronization, or its own) advances the clock to at least that message's stamp, and every message it sends is stamped strictly greater than everything it has seen (`max(local clock, highest seen + 1)`). Since a reply can only be composed after its antecedent was received, replies always order after their antecedents, on every device, regardless of clock skew. The signed timestamp and the microsecond ordering key derive from the same stamp, so no two ordering keys can disagree. A clamp bounds how far a peer's future-dated stamp can advance the clock, so a device with a wildly wrong clock (or a malicious stamp) cannot drag other members' subsequent messages into the future. Truly concurrent messages — neither sender having seen the other's — have no canonical order by construction; devices converge on the deterministic stamp order.
 
 ### 15.4 Edit and Delete Signing
 
@@ -1217,11 +1222,12 @@ For large servers, maintaining a full mesh of WebRTC connections is impractical.
 
 ### 17.2 Peer Scoring
 
-Peers are scored on four metrics:
+Peers are scored on five metrics:
 - **Uptime ratio:** Connection duration relative to total time.
 - **Average latency:** Round-trip time measured via data channel pings.
 - **Bandwidth score:** Observed throughput on data transfers.
 - **Shard overlap:** Number of shared vault shards (high overlap = high value for shard retrieval).
+- **Reachability:** Whether the established connection runs peer-to-peer (host, server-reflexive, or LAN ICE route) or through a TURN relay. Directly-reachable peers score higher — a mesh that leans on TURN still consumes relay-class bandwidth, so neighbor rotation drifts toward peers that genuinely offload the infrastructure.
 
 Neighbor rotation runs every 300 seconds (5 minutes). The lowest-scoring peer is dropped and the highest-scoring unconnected peer is added. Max 1 rotation per cycle for stability. Separately, peer list exchange runs at adaptive intervals (120s/180s/240s, scaled by server member count) to share known peers with neighbors.
 
@@ -1232,6 +1238,8 @@ When a peer receives data tagged as broadcast (files, images), it re-forwards to
 - **Broadcast deduplication:** Each broadcast carries a unique ID. Peers track recent IDs and drop duplicates.
 - **TTL / hop limit:** 4 hops maximum to prevent infinite propagation. Default TTL is included in the broadcast metadata.
 - **Fallback:** Fewer than 6 reachable peers → connect to all available.
+
+**Server-state operation flooding.** Server-state (CRDT) operations also flood the overlay instead of transiting the relay. Because these operations are idempotent (an operation log deduplicates re-application) and self-validating (every receiver re-checks the *author's* permission before applying, regardless of who forwarded it), they are safe to flood by construction. A node re-forwards an operation to its neighbors only when that operation was *new* to its own log — so each node forwards a given operation at most once, propagation is bounded without global coordination, and only operations that passed validation spread. This removes both the relay's per-operation fan-out and the plaintext visibility the relay previously had into these operations; the relay path remains as an automatic fallback whenever a node's mesh links are not yet established, and offline members converge through normal state synchronization.
 
 ### 17.4 Peer Exchange
 

@@ -720,6 +720,24 @@ pub(crate) fn handle_webrtc_ping_report(
     }
 }
 
+// ── WebRtcRouteReport ────────────────────────────────────────────────
+
+/// Tier 3 (reachability-aware overlay): record the ICE route class Dart
+/// measured for a live connection. Direct (host/srflx/LAN) peers score above
+/// TURN-relayed ones in `PeerScore::composite`, so the 300s rotation drifts
+/// the mesh toward peers that offload the relay instead of leaning on TURN.
+pub(crate) fn handle_webrtc_route_report(
+    peer_id: String,
+    is_direct: bool,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
+) {
+    for overlay in gossip_overlays.values_mut() {
+        if let Some(score) = overlay.peer_scores.get_mut(&peer_id) {
+            score.is_direct = Some(is_direct);
+        }
+    }
+}
+
 // ── check_voice_mode_transition ──────────────────────────────────────
 
 /// Check if a voice channel should transition between mesh and gossip mode.

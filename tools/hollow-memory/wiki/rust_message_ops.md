@@ -60,7 +60,7 @@ Parameters: `olm`, `crypto_store`, `event_tx`, `ws_cmd_tx`, `ws_room_peers`, `pe
 
 ### Flow
 
-1. **Generate timestamp** — `SystemTime::now()` as millis-since-epoch `i64`.
+1. **Generate send stamp** — `chat_clock::next_send_stamp_us()` (Lamport clock, 2026-07-06): `max(now_us, highest stamp seen + 1)`. `ts` (signed, ms) = stamp/1000; `order_us` = stamp. NEVER raw `SystemTime` — a reply must stamp after everything this device has seen, or cross-machine clock skew sorts it above the message it answers (see `src/chat_clock.rs`).
 2. **Sign** — `message_signing_payload("dm", &peer_id_str, &local_peer, dm_timestamp, &text)` then `sign_message()`.
 3. **Build envelope** — `MessageEnvelope::DirectMessage { text, ts, sig, pk, mid, reply_to, file_id: None, link_preview, convo }`. Two variants built via `build_dm(convo)`: the recipient copy (`convo:None`) and the sibling self-echo copy (`convo:Some(recipient_master)`).
 4. **Serialize** — both envelopes to JSON for Olm encryption input.
@@ -96,7 +96,7 @@ Parameters: `olm`, `crypto_store`, `mls`, `server_states`, `event_tx`, `ws_cmd_t
 
 1. **Server lookup** — `server_states.get(&server_id)`. Emits `NetworkEvent::Error` if not found.
 2. **Permission check** — `server.can_post_in_channel(local_peer_str, &channel_id)`. Emits error and returns early if denied.
-3. **Generate timestamp** — millis-since-epoch `i64`.
+3. **Generate send stamp** — `chat_clock::next_send_stamp_us()` (same Lamport rule as the DM send; `ts` = stamp/1000, `order_us` = stamp).
 4. **Sign** — `message_signing_payload("ch", &format!("{}:{}", server_id, channel_id), &local_peer, timestamp, &text)`.
 5. **Build envelope** — `MessageEnvelope::ChannelMessage { sid, cid, text, ts, sig, pk, mid, reply_to, file_id: None, link_preview }`.
 6. **Encrypt and broadcast:**

@@ -67,14 +67,28 @@ pub(crate) fn fan_to_own_siblings(
 
 /// Convenience: broadcast a `CrdtOpBroadcast` (plaintext fallback) to all members'
 /// devices. Used by every sync-handler CRDT op whose MLS broadcast failed/absent.
+///
+/// Tier 2 (large-server scaling, `reports/LARGE_SERVER_SCALING_2026.md`): when
+/// the server's gossip overlay has live data channels, the op floods over the
+/// P2P mesh instead — the sender stops paying O(members × devices) relay
+/// uploads AND the relay stops seeing plaintext op JSON. The MLS twin (single
+/// SendToRoom, sent by the caller) still reaches every online member; mesh
+/// stragglers converge via the sync backstop. Falls back to the per-identity
+/// relay fan-out whenever the mesh can't carry it (small server, channels
+/// still dialing, oversized op).
 fn broadcast_crdt_op_to_members(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
     state: &ServerState,
     local_peer_str: &str,
     server_id: &str,
     op_json: &str,
 ) {
+    if super::gossip_relay::flood_crdt_op(gossip_overlays, event_tx, server_id, op_json, None) > 0 {
+        return;
+    }
     let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
         server_id: server_id.to_string(),
         op_json: op_json.to_string(),
@@ -254,6 +268,7 @@ pub(crate) async fn handle_create_channel(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
@@ -321,7 +336,7 @@ pub(crate) async fn handle_create_channel(
                 let _ = sent_via_mls;
                 let local_peer = local_peer_str.to_string();
 broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             )
             }
         }
@@ -346,6 +361,7 @@ pub(crate) async fn handle_remove_channel(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
@@ -410,7 +426,7 @@ pub(crate) async fn handle_remove_channel(
                 let _ = sent_via_mls;
                 let local_peer = local_peer_str.to_string();
 broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             )
             }
         }
@@ -426,6 +442,7 @@ pub(crate) async fn handle_rename_server(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
@@ -479,7 +496,7 @@ pub(crate) async fn handle_rename_server(
                 let _ = sent_via_mls;
                 let local_peer = local_peer_str.to_string();
 broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             )
             }
         }
@@ -495,6 +512,7 @@ pub(crate) async fn handle_rename_channel(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
@@ -552,7 +570,7 @@ pub(crate) async fn handle_rename_channel(
                 let _ = sent_via_mls;
                 let local_peer = local_peer_str.to_string();
 broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             )
             }
         }
@@ -568,6 +586,7 @@ pub(crate) async fn handle_update_server_setting(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
@@ -628,7 +647,7 @@ pub(crate) async fn handle_update_server_setting(
                 let _ = sent_via_mls;
                 let local_peer = local_peer_str.to_string();
 broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             )
             }
         }
@@ -802,6 +821,7 @@ pub(crate) async fn handle_change_role(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     local_device_id: &str,
@@ -848,7 +868,7 @@ pub(crate) async fn handle_change_role(
         // Broadcast to connected server members only.
         if let Ok(op_json) = serde_json::to_string(&op) {
             broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             );
             // Also fan to our OWN online siblings (role-change is plaintext-only —
             // no MLS path — so the remaining-member broadcast skips our identity).
@@ -962,21 +982,15 @@ pub(crate) async fn handle_kick_member(
                                     }).await;
                                 }
                                 let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
-                                // Broadcast MLS commit to remaining members (per-device).
-                                let data = serde_json::to_vec(&HavenMessage::MlsCommit {
-                                    server_id: server_id.clone(),
-                                    commit: commit_b64.clone(),
-                                    channel_id: None,
-                                }).unwrap_or_default();
-                                for member_peer_str in &broadcast_targets {
-                                    if member_peer_str == &peer_id { continue; }
-                                    send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
-                                }
-                                // Our OWN siblings each hold their own leaf at the prior epoch —
-                                // forward them the commit too (excluding this device, which already
-                                // merged it) so they rotate to the new epoch instead of falling
-                                // behind and self-dropping the group on the next channel message.
-                                                                fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
+                                // Tier 1: ONE room broadcast replaces the per-identity
+                                // fan-out AND the sibling fan (our siblings are in the
+                                // room too). The kicked identity's devices receive it
+                                // but can't rejoin — the MlsKeyPackage non-member check
+                                // rejects their re-bootstrap.
+                                crate::node::crypto_handler::broadcast_mls_commit(
+                                    ws_cmd_tx, &server_id, None, commit_b64,
+                                    mls_mgr.epoch(&server_id).ok(),
+                                );
                                 hollow_log!("[HOLLOW-MLS] Removed all leaves of {peer_id} from MLS group, epoch rotated");
                             }
                             Err(e) => hollow_log!("[HOLLOW-MLS] Failed to merge remove commit: {e}"),
@@ -990,8 +1004,8 @@ pub(crate) async fn handle_kick_member(
             // subgroup so it loses access there too (not just the server group).
             let target_master = super::resolver::resolve(&peer_id);
             crate::node::crypto_handler::remove_identity_from_subgroups(
-                mls_mgr, event_tx, ws_cmd_tx, ws_room_peers, crypto_store,
-                state, &server_id, local_peer_str, local_device_id, &target_master,
+                mls_mgr, event_tx, ws_cmd_tx, crypto_store,
+                state, &server_id, &target_master,
             ).await;
         }
     }
@@ -1198,14 +1212,11 @@ pub(crate) async fn handle_leave_server(
                             Ok(()) => {
                                 persist_mls_state(mls_mgr, crypto_store);
                                 let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
-                                let data = serde_json::to_vec(&HavenMessage::MlsCommit {
-                                    server_id: server_id.clone(),
-                                    commit: commit_b64.clone(),
-                                    channel_id: None,
-                                }).unwrap_or_default();
-                                for member_peer_str in &broadcast_targets {
-                                    send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
-                                }
+                                // Tier 1: single room broadcast (see broadcast_mls_commit).
+                                crate::node::crypto_handler::broadcast_mls_commit(
+                                    ws_cmd_tx, &server_id, None, commit_b64,
+                                    mls_mgr.epoch(&server_id).ok(),
+                                );
                                 hollow_log!("[HOLLOW-MLS] Left MLS group for {server_id}");
                             }
                             Err(e) => hollow_log!("[HOLLOW-MLS] Failed to merge leave commit: {e}"),
@@ -1339,18 +1350,13 @@ pub(crate) async fn handle_ban_member(
                                     }).await;
                                 }
                                 let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
-                                let data = serde_json::to_vec(&HavenMessage::MlsCommit {
-                                    server_id: server_id.clone(),
-                                    commit: commit_b64.clone(),
-                                    channel_id: None,
-                                }).unwrap_or_default();
-                                for member_peer_str in &broadcast_targets {
-                                    if member_peer_str == &peer_id { continue; }
-                                    send_raw_to_identity(ws_cmd_tx, ws_room_peers, member_peer_str, data.clone());
-                                }
-                                // Forward the epoch-rotating commit to our OWN siblings too
-                                // (excluding this device, which already merged it).
-                                                                fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data);
+                                // Tier 1: single room broadcast (covers siblings too);
+                                // the banned identity can't rejoin — MlsKeyPackage
+                                // non-member check rejects its re-bootstrap.
+                                crate::node::crypto_handler::broadcast_mls_commit(
+                                    ws_cmd_tx, &server_id, None, commit_b64,
+                                    mls_mgr.epoch(&server_id).ok(),
+                                );
                                 hollow_log!("[HOLLOW-MLS] Removed all leaves of banned {peer_id} from MLS group");
                             }
                             Err(e) => hollow_log!("[HOLLOW-MLS] Failed to merge ban remove commit: {e}"),
@@ -1363,8 +1369,8 @@ pub(crate) async fn handle_ban_member(
             // Option B: also drop the banned identity from every restricted-channel subgroup.
             let target_master = super::resolver::resolve(&peer_id);
             crate::node::crypto_handler::remove_identity_from_subgroups(
-                mls_mgr, event_tx, ws_cmd_tx, ws_room_peers, crypto_store,
-                state, &server_id, local_peer_str, local_device_id, &target_master,
+                mls_mgr, event_tx, ws_cmd_tx, crypto_store,
+                state, &server_id, &target_master,
             ).await;
         }
     }
@@ -1379,6 +1385,7 @@ pub(crate) async fn handle_unban_member(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
@@ -1432,7 +1439,7 @@ pub(crate) async fn handle_unban_member(
             {
                 let _ = sent_via_mls;
 broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             )
             }
         }
@@ -1450,6 +1457,7 @@ pub(crate) async fn handle_mute_member(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     local_peer_str: &str,
     server_id: String,
     peer_id: String,
@@ -1501,7 +1509,7 @@ pub(crate) async fn handle_mute_member(
             {
                 let _ = sent_via_mls;
                 broadcast_crdt_op_to_members(
-                    ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                    ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
                 )
             }
         }
@@ -1516,6 +1524,7 @@ pub(crate) async fn handle_unmute_member(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     local_peer_str: &str,
     server_id: String,
     peer_id: String,
@@ -1562,7 +1571,7 @@ pub(crate) async fn handle_unmute_member(
             {
                 let _ = sent_via_mls;
                 broadcast_crdt_op_to_members(
-                    ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                    ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
                 )
             }
         }
@@ -1579,6 +1588,7 @@ async fn handle_channel_moderation_change(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     local_peer_str: &str,
     server_id: String,
     payload: CrdtPayload,
@@ -1622,7 +1632,7 @@ async fn handle_channel_moderation_change(
             {
                 let _ = sent_via_mls;
                 broadcast_crdt_op_to_members(
-                    ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                    ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
                 )
             }
         }
@@ -1637,6 +1647,7 @@ pub(crate) async fn handle_set_channel_slow_mode(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     local_peer_str: &str,
     server_id: String,
     channel_id: String,
@@ -1645,7 +1656,7 @@ pub(crate) async fn handle_set_channel_slow_mode(
     crdt_store: &CrdtStore,
 ) -> bool {
     handle_channel_moderation_change(
-        server_states, mls, event_tx, ws_cmd_tx, ws_room_peers, local_peer_str,
+        server_states, mls, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
         server_id,
         CrdtPayload::ChannelSlowModeChanged { channel_id: channel_id.clone(), seconds },
         &format!("slow_mode={seconds}s on {channel_id}"),
@@ -1660,6 +1671,7 @@ pub(crate) async fn handle_set_channel_media_only(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     local_peer_str: &str,
     server_id: String,
     channel_id: String,
@@ -1668,7 +1680,7 @@ pub(crate) async fn handle_set_channel_media_only(
     crdt_store: &CrdtStore,
 ) -> bool {
     handle_channel_moderation_change(
-        server_states, mls, event_tx, ws_cmd_tx, ws_room_peers, local_peer_str,
+        server_states, mls, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
         server_id,
         CrdtPayload::ChannelMediaOnlyChanged { channel_id: channel_id.clone(), media_only },
         &format!("media_only={media_only} on {channel_id}"),
@@ -1684,6 +1696,7 @@ pub(crate) async fn handle_label_op(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
@@ -1740,7 +1753,7 @@ pub(crate) async fn handle_label_op(
             {
                 let _ = sent_via_mls;
 broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             )
             }
         }
@@ -1756,6 +1769,7 @@ pub(crate) async fn handle_set_channel_visibility(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
@@ -1823,7 +1837,7 @@ pub(crate) async fn handle_set_channel_visibility(
             {
                 let _ = sent_via_mls;
 broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             )
             }
         }
@@ -1839,6 +1853,7 @@ pub(crate) async fn handle_set_channel_posting(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
@@ -1891,7 +1906,7 @@ pub(crate) async fn handle_set_channel_posting(
             {
                 let _ = sent_via_mls;
 broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             )
             }
         }
@@ -1907,6 +1922,7 @@ pub(crate) async fn handle_set_channel_public(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
@@ -1959,7 +1975,7 @@ pub(crate) async fn handle_set_channel_public(
             {
                 let _ = sent_via_mls;
 broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             )
             }
         }
@@ -2000,6 +2016,7 @@ pub(crate) async fn handle_change_role_permissions(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
@@ -2058,7 +2075,7 @@ pub(crate) async fn handle_change_role_permissions(
             {
                 let _ = sent_via_mls;
 broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             )
             }
         }
@@ -2073,6 +2090,7 @@ pub(crate) async fn handle_set_nickname(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     local_device_id: &str,
@@ -2110,7 +2128,7 @@ pub(crate) async fn handle_set_nickname(
         // Broadcast to connected server members
         if let Ok(op_json) = serde_json::to_string(&op) {
             broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             );
             // Also fan to our OWN siblings (plaintext-only op skips our identity).
             let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
@@ -2129,6 +2147,7 @@ pub(crate) async fn handle_set_twitch_username(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     local_device_id: &str,
@@ -2160,7 +2179,7 @@ pub(crate) async fn handle_set_twitch_username(
 
         if let Ok(op_json) = serde_json::to_string(&op) {
             broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             );
             // Also fan to our OWN siblings (plaintext-only op skips our identity).
             let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
@@ -2225,6 +2244,7 @@ pub(crate) async fn handle_update_channel_layout(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     local_device_id: &str,
@@ -2257,7 +2277,7 @@ pub(crate) async fn handle_update_channel_layout(
 
         if let Ok(op_json) = serde_json::to_string(&op) {
             broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             );
             // Also fan to our OWN siblings (plaintext-only op skips our identity).
             let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
@@ -2276,6 +2296,7 @@ pub(crate) async fn handle_pin_message(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     local_device_id: &str,
@@ -2310,7 +2331,7 @@ pub(crate) async fn handle_pin_message(
 
         if let Ok(op_json) = serde_json::to_string(&op) {
             broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             );
             // Also fan to our OWN siblings (plaintext-only op skips our identity).
             let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
@@ -2329,6 +2350,7 @@ pub(crate) async fn handle_unpin_message(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     local_device_id: &str,
@@ -2363,7 +2385,7 @@ pub(crate) async fn handle_unpin_message(
 
         if let Ok(op_json) = serde_json::to_string(&op) {
             broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             );
             // Also fan to our OWN siblings (plaintext-only op skips our identity).
             let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {
@@ -2382,6 +2404,7 @@ pub(crate) async fn handle_set_storage_pledge(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     local_device_id: &str,
@@ -2408,7 +2431,7 @@ pub(crate) async fn handle_set_storage_pledge(
 
         if let Ok(op_json) = serde_json::to_string(&op) {
             broadcast_crdt_op_to_members(
-                ws_cmd_tx, ws_room_peers, state, local_peer_str, &server_id, &op_json,
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
             );
             // Also fan to our OWN siblings (plaintext-only op skips our identity).
             let data = serde_json::to_vec(&HavenMessage::CrdtOpBroadcast {

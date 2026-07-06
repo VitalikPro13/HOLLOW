@@ -347,6 +347,14 @@ pub(crate) enum NetworkEvent {
         server_id: String,
         channel_id: String,
     },
+    /// Tell Dart to send a small gossip frame (`GossipCrdtOp` JSON, framed as
+    /// type byte 0x04 on 'hollow-data') to each target's open data channel.
+    /// Tier 2 large-server scaling: CRDT ops flood peer-to-peer instead of
+    /// paying the relay's O(N) egress (`reports/LARGE_SERVER_SCALING_2026.md`).
+    GossipRelayOp {
+        targets: Vec<String>,
+        payload: Vec<u8>,
+    },
     /// Voice channel mode changed (mesh <-> gossip).
     VoiceChannelModeChanged {
         server_id: String,
@@ -713,6 +721,9 @@ pub(crate) enum NodeCommand {
     CheckPendingJoinTimeout { server_id: String },
     /// Dart reports data channel keepalive RTT for peer scoring.
     WebRtcPingReport { peer_id: String, rtt_ms: u32 },
+    /// Dart reports the ICE route class of a live connection (Tier 3
+    /// reachability-aware overlay): `is_direct` = host/srflx/LAN vs TURN.
+    WebRtcRouteReport { peer_id: String, is_direct: bool },
     /// Dart reports a completed broadcast file transfer for relay decision.
     WebRtcBroadcastReceived {
         transfer_id: String,
@@ -725,6 +736,11 @@ pub(crate) enum NodeCommand {
         kind: String,
         shard_index: u16,
     },
+    /// Dart hands back a gossip CRDT-op frame (type 0x04) received on a data
+    /// channel. Ingested through the same validated path as a relay
+    /// `CrdtOpBroadcast`; re-flooded to our own mesh neighbors only if the op
+    /// is NEW to our op_log (op-newness bounds propagation).
+    WebRtcGossipOpReceived { sender_peer_id: String, payload: Vec<u8> },
     // -- Recovery pool commands (Evidence Recovery) --
     InitiateRecoveryPool { server_id: String, token: String },
     JoinRecoveryPool { server_id: String, token: String },
@@ -956,6 +972,13 @@ pub(crate) enum HavenMessage {
         commit: String, // base64 serialized Commit
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel_id: Option<String>,
+        /// POST-merge epoch of this commit (large-server Tier 1 broadcast guard).
+        /// Commits ride a single room broadcast, so they also reach fresh joiners
+        /// (already at this epoch via their Welcome) and duplicate deliveries —
+        /// receivers at/past this epoch skip processing instead of erroring into
+        /// the drop-group + re-bootstrap path. Absent from legacy senders.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
     },
 
     /// Request peers to send their KeyPackages for MLS group bootstrap.

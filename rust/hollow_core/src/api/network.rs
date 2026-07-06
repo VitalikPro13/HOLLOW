@@ -320,6 +320,13 @@ pub enum NetworkEvent {
         server_id: String,
         channel_id: String,
     },
+    /// Send a small gossip frame (type byte 0x04 on 'hollow-data') to each
+    /// target's open data channel. Tier 2 large-server scaling: CRDT ops
+    /// flood peer-to-peer instead of paying the relay's O(N) egress.
+    GossipRelayOp {
+        targets: Vec<String>,
+        payload: Vec<u8>,
+    },
     VoiceChannelModeChanged {
         server_id: String,
         channel_id: String,
@@ -1025,6 +1032,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::GossipRelayFile { broadcast_id, ttl, origin_peer_id, file_path, total_size, kind, shard_index, exclude_peer_id, server_id, channel_id } => {
             NetworkEvent::GossipRelayFile { broadcast_id, ttl, origin_peer_id, file_path, total_size, kind, shard_index, exclude_peer_id, server_id, channel_id }
         }
+        node::NetworkEvent::GossipRelayOp { targets, payload } => {
+            NetworkEvent::GossipRelayOp { targets, payload }
+        }
         node::NetworkEvent::VoiceChannelModeChanged { server_id, channel_id, mode, gossip_neighbors } => {
             NetworkEvent::VoiceChannelModeChanged { server_id, channel_id, mode, gossip_neighbors }
         }
@@ -1269,6 +1279,10 @@ pub fn start_node() -> Result<String, String> {
     // Load Olm state from DB (synchronous, on FFI thread).
     let olm = {
         let store = MessageStore::open(&db_path, &passphrase)?;
+        // Seed the Lamport chat clock from the highest stored send stamp so a
+        // restart can't mint stamps below messages we already hold (see
+        // chat_clock.rs — cross-machine ordering fix).
+        crate::chat_clock::observe(store.max_chat_stamp_us());
         match store.load_olm_account()? {
             Some(account_json) => {
                 let sessions = store.load_all_olm_sessions()?;
@@ -3174,6 +3188,44 @@ pub fn webrtc_ping_report(peer_id: String, rtt_ms: u32) -> Result<(), String> {
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::WebRtcPingReport {
         peer_id, rtt_ms,
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Report the ICE route class of a live data-channel connection (Tier 3
+/// reachability-aware overlay): `is_direct` = host/srflx/LAN vs TURN-relayed.
+#[frb]
+pub fn webrtc_route_report(peer_id: String, is_direct: bool) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::WebRtcRouteReport {
+        peer_id, is_direct,
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Hand back a gossip CRDT-op frame (type byte 0x04) received on a data
+/// channel. Tier 2 large-server scaling: the op is ingested through the same
+/// validated path as a relay CrdtOpBroadcast and re-flooded to our own mesh
+/// neighbors only if it was new.
+#[frb]
+pub fn webrtc_gossip_op_received(sender_peer_id: String, payload: Vec<u8>) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::WebRtcGossipOpReceived {
+        sender_peer_id, payload,
     }))
     .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())

@@ -354,12 +354,9 @@ pub(crate) async fn finish_send_file(
     }
 
     let local_peer = local_peer_str.to_string();
-    let now_dur = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let timestamp = now_dur.as_millis() as i64;
-    // Microsecond send timestamp for stable ordering (Step 9C/C4).
-    let order_us = now_dur.as_micros() as i64;
+    // Lamport-bumped send stamp — see message_ops DM send / chat_clock.rs.
+    let order_us = crate::chat_clock::next_send_stamp_us();
+    let timestamp = order_us / 1000;
 
     // 7. Save file metadata to DB.
     let ctx_type;

@@ -91,6 +91,7 @@ macro_rules! hollow_log {
 
 pub mod api;
 mod archive;
+mod chat_clock;
 /// C-ABI entry point for the iOS Notification Service Extension (disposable-NSE
 /// Tier B). Raw `extern "C"`, intentionally OUTSIDE `api` so flutter_rust_bridge
 /// codegen never scans it.

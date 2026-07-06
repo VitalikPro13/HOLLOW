@@ -174,6 +174,16 @@ class WebRtcNotifier extends Notifier<WebRtcState> {
     }
   }
 
+  /// Send a small gossip CRDT-op frame to mesh targets (Tier 2 scaling).
+  /// Rust already picked connected neighbors; a closed channel just skips
+  /// (its relay fallback + sync backstop cover the miss).
+  void relayGossipOp({required List<String> targets, required Uint8List payload}) {
+    final s = service;
+    for (final target in targets) {
+      s.sendGossipOp(target, payload);
+    }
+  }
+
   /// Dispose all connections (app shutdown).
   Future<void> disposeAll() async {
     await _service?.dispose();

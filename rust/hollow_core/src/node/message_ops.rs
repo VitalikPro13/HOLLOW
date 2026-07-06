@@ -38,14 +38,13 @@ pub(crate) async fn handle_send_message(
 
     // Wrap DM in signed envelope.
     let local_peer = local_peer_str.to_string();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let dm_timestamp = now.as_millis() as i64;
-    // Microsecond send timestamp for stable ordering (Step 9C/C4). Carried over the
-    // wire + persisted so a same-millisecond burst sorts in true send order on every
-    // device (the signed `ts` stays millis — order_us is NOT part of the signature).
-    let dm_order_us = now.as_micros() as i64;
+    // Lamport-bumped send stamp (chat_clock.rs): strictly after every message
+    // this device has seen, so cross-machine clock skew can't sort our reply
+    // above the message it answers. The signed ms `ts` and the `order_us`
+    // ordering key both derive from the ONE stamp (order_us is NOT signed;
+    // it's carried over the wire + persisted for same-ms burst ordering).
+    let dm_order_us = crate::chat_clock::next_send_stamp_us();
+    let dm_timestamp = dm_order_us / 1000;
     let signing_payload = message_signing_payload(
         "dm", &peer_id_str, &local_peer, dm_timestamp, &text,
     );
@@ -518,9 +517,9 @@ pub(crate) async fn handle_send_channel_message(
         }
     }
 
-    let timestamp = now.as_millis() as i64;
-    // Microsecond send timestamp for stable ordering (Step 9C/C4) — see the DM send.
-    let order_us = now.as_micros() as i64;
+    // Lamport-bumped send stamp — see the DM send / chat_clock.rs.
+    let order_us = crate::chat_clock::next_send_stamp_us();
+    let timestamp = order_us / 1000;
 
     // Sign the message before encryption.
     let signing_payload = message_signing_payload(

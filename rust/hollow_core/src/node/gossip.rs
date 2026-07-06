@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Minimum gossip neighbors per server overlay.
@@ -42,6 +44,29 @@ pub fn gossip_exchange_interval_secs(max_member_count: usize) -> u64 {
     }
 }
 
+/// Max serialized `GossipCrdtOp` payload the mesh will carry in one frame.
+/// CRDT ops are typically well under 2 KB; anything bigger falls back to the
+/// relay path rather than fighting the data channel's chunking conventions.
+pub const MAX_GOSSIP_OP_BYTES: usize = 15_000;
+
+// ── Small-message gossip frame (Tier 2 large-server scaling) ────────────────
+
+/// Wire frame for a CRDT op flooded over the WebRTC data-channel mesh
+/// (type byte 0x04 on 'hollow-data'). See `reports/LARGE_SERVER_SCALING_2026.md`.
+///
+/// Propagation model: a receiving node re-floods ONLY when the op was NEW to
+/// its own op_log (validated + applied first), so each node forwards a given
+/// op at most once — the flood is bounded by op-newness, not by `ttl`.
+/// `broadcast_id` suppresses re-ingest of exact duplicate frames; `ttl` is a
+/// reserved safety bound carried on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GossipCrdtOp {
+    pub broadcast_id: String,
+    pub server_id: String,
+    pub ttl: u8,
+    pub op_json: String,
+}
+
 // ── Peer Scoring ─────────────────────────────────────────────────────────────
 
 /// Scoring data for a known peer in a server overlay.
@@ -55,6 +80,12 @@ pub struct PeerScore {
     pub bandwidth_score: f64,
     /// Number of vault shards this peer holds that we recently accessed.
     pub shard_overlap: u32,
+    /// ICE route reachability (Tier 3, `reports/LARGE_SERVER_SCALING_2026.md`):
+    /// `Some(true)` = direct route (host/srflx/LAN), `Some(false)` = TURN-relayed,
+    /// `None` = not yet measured. Reported by Dart from `getStats()` once per
+    /// connection. Direct peers are preferred neighbors — a TURN-relayed mesh
+    /// "offload" still burns relay-class bandwidth.
+    pub is_direct: Option<bool>,
     /// When this peer's data channel connected (None if not currently connected).
     pub connected_since: Option<Instant>,
     /// Total time connected (accumulated across sessions).
@@ -73,6 +104,7 @@ impl PeerScore {
             avg_latency_ms: 100.0, // default assumption
             bandwidth_score: 0.0,
             shard_overlap: 0,
+            is_direct: None,
             connected_since: None,
             total_connected_secs: 0.0,
             total_tracked_secs: 0.0,
@@ -97,11 +129,24 @@ impl PeerScore {
 
         let bw_score = (self.bandwidth_score / 10_000_000.0).min(1.0); // normalize to 10 MB/s
 
-        // Weights: shard_overlap(40%) + latency(30%) + uptime(20%) + bandwidth(10%)
+        // Reachability (Tier 3): known-direct > unmeasured > TURN-relayed.
+        // The neutral midpoint keeps unmeasured peers from being starved of
+        // the connection they need to GET measured; the ±0.075 spread clears
+        // the rotation's 10% improvement margin for otherwise-similar peers,
+        // so the mesh drifts toward directly-reachable neighbors.
+        let reach_score = match self.is_direct {
+            Some(true) => 0.15,
+            None => 0.075,
+            Some(false) => 0.0,
+        };
+
+        // Weights: shard_overlap(0.10 each) + latency(30%) + uptime(20%)
+        //          + bandwidth(10%) + reachability(15%)
         (self.shard_overlap as f64 * 0.10) // each shard overlap adds 0.10
             + latency_score * 0.30
             + self.uptime_ratio * 0.20
             + bw_score * 0.10
+            + reach_score
     }
 
     /// Update uptime ratio based on accumulated tracking time.
@@ -420,6 +465,24 @@ impl GossipOverlay {
             .iter()
             .filter(|(_, relay)| relay.created <= cutoff)
             .map(|(fid, _)| fid.clone())
+            .collect()
+    }
+
+    /// Gossip neighbors with a LIVE data channel right now (`mark_connected`
+    /// fired, no disconnect since), excluding a specific peer (the sender).
+    /// Flood targets for small-message gossip: a neighbor whose channel is
+    /// still dialing can't carry a frame, and the caller falls back to the
+    /// relay when this comes back empty.
+    pub fn connected_relay_targets(&self, exclude_peer: Option<&str>) -> Vec<String> {
+        self.neighbors
+            .iter()
+            .filter(|p| exclude_peer != Some(p.as_str()))
+            .filter(|p| {
+                self.peer_scores
+                    .get(p.as_str())
+                    .is_some_and(|s| s.connected_since.is_some())
+            })
+            .cloned()
             .collect()
     }
 
@@ -744,6 +807,51 @@ mod tests {
         bad_score.shard_overlap = 0;
         let bad_composite = bad_score.composite();
         assert!(bad_composite < great_composite);
+    }
+
+    #[test]
+    fn test_peer_score_reachability_ordering() {
+        // Tier 3: for otherwise-identical peers, direct > unmeasured > TURN,
+        // and the direct-vs-TURN spread clears the rotation's 10% margin.
+        let mut direct = PeerScore::new();
+        direct.is_direct = Some(true);
+        let unknown = PeerScore::new(); // is_direct: None
+        let mut turn = PeerScore::new();
+        turn.is_direct = Some(false);
+
+        assert!(direct.composite() > unknown.composite());
+        assert!(unknown.composite() > turn.composite());
+        assert!(
+            direct.composite() > turn.composite() * 1.1,
+            "direct must beat TURN by more than the 10% rotation margin"
+        );
+    }
+
+    #[test]
+    fn test_connected_relay_targets_filters_live_channels() {
+        let mut overlay = make_overlay(8);
+        overlay.select_initial_neighbors(0);
+        assert!(!overlay.neighbors.is_empty());
+
+        // No channel has connected yet — nothing can carry a gossip frame.
+        assert!(overlay.connected_relay_targets(None).is_empty());
+
+        // Mark two neighbors' channels live.
+        let live: Vec<String> = overlay.neighbors.iter().take(2).cloned().collect();
+        for p in &live {
+            overlay.peer_scores.get_mut(p).unwrap().mark_connected();
+        }
+        let targets = overlay.connected_relay_targets(None);
+        assert_eq!(targets.len(), 2);
+
+        // Excluding the frame's sender drops it from the target set.
+        let targets = overlay.connected_relay_targets(Some(&live[0]));
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0], live[1]);
+
+        // A disconnect removes the peer from flood targets again.
+        overlay.peer_scores.get_mut(&live[1]).unwrap().mark_disconnected();
+        assert_eq!(overlay.connected_relay_targets(None).len(), 1);
     }
 
     #[test]

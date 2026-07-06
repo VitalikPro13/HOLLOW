@@ -371,9 +371,11 @@ After MLS decryption in the `MlsChannelMessage` handler, the inner envelope is m
 
 ### mls_batch_timer (2 seconds)
 Two-phase processing per server:
-1. **Batch removals** — drains `pending_mls_removals` queue (stale members + recovery re-adds), calls `remove_members_batch()` for a single commit, broadcasts commit to remaining members.
-2. **Batch additions** — drains `pending_mls_key_packages` queue, deduplicates by peer_id, calls `add_members_batch()` for a single commit, sends Welcome to new members, broadcasts commit to existing members.
+1. **Batch removals** — drains `pending_mls_removals` queue (stale members + recovery re-adds), calls `remove_members_batch()` for a single commit.
+2. **Batch additions** — drains `pending_mls_key_packages` queue, deduplicates by peer_id, calls `add_members_batch()` for a single commit, sends Welcome to new members (targeted `SendDirect` per joiner — each Welcome carries the ratchet tree).
 Result: N recovering peers = 2 total epoch advances instead of 2N.
+
+**Commit fan-out (Tier 1 large-server scaling, 2026-07-06):** both phases broadcast the commit as ONE `SendToRoom` frame via `crypto_handler::broadcast_mls_commit()` — never a per-device `SendDirect` loop (commit bytes are identical for every recipient; the relay fans out). The wire `MlsCommit` carries a `#[serde(default)] epoch` (POST-merge): receivers at/past that epoch SKIP processing instead of erroring into the drop-group + re-bootstrap path (a room broadcast also lands on fresh Welcome joiners and duplicates). Kick/leave/ban and `remove_identity_from_subgroups` use the same helper; commit-path `fan_to_own_siblings` was removed (siblings are in the room). See `reports/LARGE_SERVER_SCALING_2026.md` §7.
 
 ### rebootstrap_timer (30 seconds)
 Sends `WsCommand::DiscoverPeers` for the active DM room + all server rooms — WS-native peer discovery over the live socket (the HTTP signaling task this used to re-register with was RETIRED 2026-07; the relay answers `discovered_peers` from its live room map). Also hosts the Olm session reconciliation sweep.

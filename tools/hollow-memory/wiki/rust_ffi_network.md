@@ -476,6 +476,18 @@ Sends `NodeCommand::WebRtcPingReport`. Reports data channel keepalive RTT for go
 
 Sends `NodeCommand::WebRtcBroadcastReceived`. Notifies Rust that a broadcast file was received via a gossip data channel. Rust processes the file and may re-broadcast to other gossip neighbors (decrementing TTL).
 
+### webrtc_route_report()
+
+`network.rs:webrtc_route_report(peer_id, is_direct: bool)` -> `Result<(), String>`
+
+Sends `NodeCommand::WebRtcRouteReport` (Tier 3 reachability, 2026-07-06). Dart's `_logIceRoute` classifies each connected pair via `getStats()` (host/srflx = direct, relay = TURN) and reports it once per connection; `voice_handler::handle_webrtc_route_report` writes `PeerScore.is_direct`, biasing neighbor rotation toward directly-reachable peers.
+
+### webrtc_gossip_op_received()
+
+`network.rs:webrtc_gossip_op_received(sender_peer_id, payload: Vec<u8>)` -> `Result<(), String>`
+
+Sends `NodeCommand::WebRtcGossipOpReceived` (Tier 2, 2026-07-06). Dart hands back a `0x04` gossip CRDT-op frame received on the 'hollow-data' channel; Rust ingests it through the same validated path as a relay `CrdtOpBroadcast` and re-floods to its own mesh neighbors only if the op was new. See rust_networking.md § Small-Message CRDT-Op Flood.
+
 ## Dart-Side Call Flow
 
 The complete call chain from Dart UI to Rust processing:

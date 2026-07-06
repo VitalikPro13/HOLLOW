@@ -53,6 +53,75 @@ pub(crate) async fn handle_webrtc_broadcast_received(
     }
 }
 
+/// Tier 2 (large-server scaling, `reports/LARGE_SERVER_SCALING_2026.md`):
+/// flood a plaintext CRDT op to this server's gossip neighbors over WebRTC
+/// data channels instead of the relay. Returns the number of neighbors the
+/// frame was dispatched to — 0 means the mesh isn't usable here (no overlay /
+/// no live channels / oversized op) and the caller MUST fall back to the
+/// relay path so the op still gets out.
+///
+/// Uses `try_send` so this stays callable from sync send helpers; a full
+/// event channel returns 0 and the relay fallback carries the op instead.
+pub(crate) fn flood_crdt_op(
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    server_id: &str,
+    op_json: &str,
+    exclude_peer: Option<&str>,
+) -> usize {
+    let Some(overlay) = gossip_overlays.get_mut(server_id) else {
+        return 0;
+    };
+    let targets = overlay.connected_relay_targets(exclude_peer);
+    if targets.is_empty() {
+        return 0;
+    }
+    let frame = super::gossip::GossipCrdtOp {
+        broadcast_id: super::gossip::generate_broadcast_id(),
+        server_id: server_id.to_string(),
+        ttl: super::gossip::DEFAULT_BROADCAST_TTL,
+        op_json: op_json.to_string(),
+    };
+    let payload = match serde_json::to_vec(&frame) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    if payload.len() > super::gossip::MAX_GOSSIP_OP_BYTES {
+        return 0;
+    }
+    overlay.mark_broadcast_seen(&frame.broadcast_id);
+    let n = targets.len();
+    match event_tx.try_send(NetworkEvent::GossipRelayOp { targets, payload }) {
+        Ok(()) => {
+            hollow_log!("[HOLLOW-GOSSIP] Flooded CRDT op for {server_id} to {n} mesh neighbor(s)");
+            n
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Ingest gate for a gossip CRDT-op frame received on a data channel (0x04).
+/// Parses + dedups by broadcast_id. Returns `Some((server_id, op_json))` when
+/// the frame is fresh — the caller ingests it through the SAME validated path
+/// as a relay `CrdtOpBroadcast` (permission checks on op.author, op_log dedup,
+/// mesh re-flood gated on op-newness). A missing overlay still ingests: the
+/// op_log dedups, and refusing would drop valid ops during overlay churn.
+pub(crate) fn accept_gossip_op(
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
+    payload: &[u8],
+) -> Option<(String, String)> {
+    if payload.len() > super::gossip::MAX_GOSSIP_OP_BYTES {
+        return None;
+    }
+    let frame: super::gossip::GossipCrdtOp = serde_json::from_slice(payload).ok()?;
+    if let Some(overlay) = gossip_overlays.get_mut(&frame.server_id) {
+        if !overlay.should_relay_broadcast(&frame.broadcast_id) {
+            return None; // exact duplicate frame — already ingested
+        }
+    }
+    Some((frame.server_id, frame.op_json))
+}
+
 /// Handle gossip overlay rotation timer tick.
 /// Rotates neighbors for large servers and emits connect/disconnect events.
 pub(crate) async fn handle_gossip_rotation(
