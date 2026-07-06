@@ -373,7 +373,7 @@ class _MobileRelayCard extends ConsumerWidget {
             DailyUsageMeter(
               hollow: hollow,
               icon: LucideIcons.gauge,
-              label: 'Your File Usage',
+              label: 'Daily Relay Data',
               usageText: bandwidth.usageLabel,
               progress: bandwidth.usagePercent,
               trailing: showReset

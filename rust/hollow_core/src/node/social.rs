@@ -523,8 +523,10 @@ pub(crate) async fn handle_update_profile(
         Some(b) => base64::engine::general_purpose::STANDARD.encode(b),
     };
 
-    // Save our own profile to DB.
-    {
+    // Save our own profile to DB, then hash the STORED blobs — the params may be
+    // None = "unchanged", so the advertised hashes must describe what's persisted.
+    let (avatar_hash, banner_hash) = {
+        let mut hashes = (String::new(), String::new());
         if let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             if let Err(e) = db.save_profile(
                 &local_peer_str, &display_name, &status, &about_me, now,
@@ -532,8 +534,15 @@ pub(crate) async fn handle_update_profile(
             ) {
                 hollow_log!("[HOLLOW-SWARM] Failed to save own profile: {e}");
             }
+            if let Ok(Some(p)) = db.load_profile(local_peer_str) {
+                hashes = (
+                    profile_blob_hash(p.avatar_bytes.as_deref()),
+                    profile_blob_hash(p.banner_bytes.as_deref()),
+                );
+            }
         }
-    }
+        hashes
+    };
 
     // Build our master-signed device list so friends learn (tamper-proof) which
     // device peer_ids resolve to us (multi-device, Phase 6).
@@ -552,6 +561,8 @@ pub(crate) async fn handle_update_profile(
         is_invisible,
         twitch_username: twitch_username.clone(),
         device_list: device_list.clone(),
+        avatar_hash: avatar_hash.clone(),
+        banner_hash: banner_hash.clone(),
     };
     let mut mls_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Send via MLS to each server we're in.
@@ -579,6 +590,8 @@ pub(crate) async fn handle_update_profile(
         is_invisible,
         twitch_username: twitch_username.clone(),
         device_list,
+        avatar_hash,
+        banner_hash,
     };
     hollow_log!("[HOLLOW-SWARM] Broadcasting profile update");
     {
@@ -663,7 +676,27 @@ pub(crate) fn save_incoming_profile(
     (master, true)
 }
 
+/// Hex SHA-256 of a profile blob; empty string when there is no blob.
+pub(crate) fn profile_blob_hash(bytes: Option<&[u8]>) -> String {
+    match bytes {
+        Some(b) if !b.is_empty() => {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(b))
+        }
+        _ => String::new(),
+    }
+}
+
 /// Send our own profile to a specific peer (used after session establishment, on PeerJoined, etc.).
+///
+/// LIGHT by default: avatar/banner ride as EMPTY strings ("no change" under the
+/// receiver's COALESCE save) plus content hashes. A receiver whose cached blobs
+/// don't match the hashes pulls the full profile ONCE via ProfileRequest. This
+/// keeps the many re-announce paths (first RoomMembers, PeerJoined/is_new,
+/// sibling merge, revocation pushes, friend handshakes) at ~1 KB instead of
+/// re-shipping megabytes of unchanged avatar+banner on every reconnect — which
+/// counted against the relay per-IP byte budget in BOTH directions and was the
+/// "File Usage jumps on every restart" leak.
 pub(crate) fn send_own_profile_to_peer(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -674,6 +707,44 @@ pub(crate) fn send_own_profile_to_peer(
     is_invisible: bool,
     db_path: &str,
     db_passphrase: &str,
+) {
+    send_own_profile_inner(
+        ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id,
+        target_peer, is_invisible, db_path, db_passphrase, false,
+    );
+}
+
+/// Full-blob variant — ONLY for answering an explicit ProfileRequest (the pull
+/// half of the light-announce protocol), so blobs still converge on demand.
+pub(crate) fn send_own_profile_full_to_peer(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    target_peer: &str,
+    is_invisible: bool,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    send_own_profile_inner(
+        ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id,
+        target_peer, is_invisible, db_path, db_passphrase, true,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_own_profile_inner(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    target_peer: &str,
+    is_invisible: bool,
+    db_path: &str,
+    db_passphrase: &str,
+    include_blobs: bool,
 ) {
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         // CRITICAL (presence collapse): ALWAYS attach + send the device list, even
@@ -688,20 +759,30 @@ pub(crate) fn send_own_profile_to_peer(
         // (swarm.rs) and the receive-side empty-profile guard that ignores blank
         // names so this never clobbers a real cached profile.
         let profile = store.load_profile(local_peer_str).ok().flatten();
-        let (display_name, status, about_me, updated_at, avatar_b64, banner_b64, twitch_username) =
+        let (display_name, status, about_me, updated_at, avatar_bytes, banner_bytes, twitch_username) =
             match profile {
                 Some(p) => (
                     p.display_name, p.status, p.about_me, p.updated_at,
-                    p.avatar_bytes.as_ref()
-                        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
-                        .unwrap_or_default(),
-                    p.banner_bytes.as_ref()
-                        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
-                        .unwrap_or_default(),
-                    p.twitch_username,
+                    p.avatar_bytes, p.banner_bytes, p.twitch_username,
                 ),
-                None => (String::new(), String::new(), String::new(), 0, String::new(), String::new(), String::new()),
+                None => (String::new(), String::new(), String::new(), 0, None, None, String::new()),
             };
+        let avatar_hash = profile_blob_hash(avatar_bytes.as_deref());
+        let banner_hash = profile_blob_hash(banner_bytes.as_deref());
+        // Light sends leave the b64 fields EMPTY (= "no change" on the receiver);
+        // the hashes above let a stale receiver pull the blobs once.
+        let (avatar_b64, banner_b64) = if include_blobs {
+            (
+                avatar_bytes.as_ref()
+                    .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+                    .unwrap_or_default(),
+                banner_bytes.as_ref()
+                    .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+                    .unwrap_or_default(),
+            )
+        } else {
+            (String::new(), String::new())
+        };
         let device_list = super::crypto_handler::build_local_device_list(
             master_keypair, device_peer_id, db_path, db_passphrase,
         );
@@ -709,9 +790,67 @@ pub(crate) fn send_own_profile_to_peer(
             display_name, status, about_me, updated_at,
             avatar_b64, banner_b64, is_invisible, twitch_username,
             device_list,
+            avatar_hash, banner_hash,
         };
         send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, msg);
     }
+}
+
+/// If a LIGHT ProfileUpdate (no blob payload) advertises avatar/banner hashes
+/// that don't match our cached blobs for this identity, pull the full profile
+/// once via ProfileRequest.
+///
+/// Cooldown-deduped per identity (10 min, process-global keyed by OUR device id
+/// so harness nodes sharing one process don't share buckets) — an oversized or
+/// undeliverable blob must not turn into a request loop on announce churn.
+/// An EMPTY incoming hash while we cache a blob is deliberately NOT treated as
+/// stale: blob clears propagate via the live full broadcast, same as before.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn maybe_request_full_profile(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    sender_peer_id: &str,
+    profile_master: &str,
+    avatar_b64: &str,
+    banner_b64: &str,
+    avatar_hash: &str,
+    banner_hash: &str,
+    local_device_peer_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    // Only light updates can leave us stale; a full payload already delivered blobs.
+    if !avatar_b64.is_empty() || !banner_b64.is_empty() {
+        return;
+    }
+    // Old clients (no hash fields) always send full payloads — nothing to compare.
+    if avatar_hash.is_empty() && banner_hash.is_empty() {
+        return;
+    }
+    let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return;
+    };
+    let cached = db.load_profile(profile_master).ok().flatten();
+    let cached_avatar = profile_blob_hash(cached.as_ref().and_then(|p| p.avatar_bytes.as_deref()));
+    let cached_banner = profile_blob_hash(cached.as_ref().and_then(|p| p.banner_bytes.as_deref()));
+    let stale = (!avatar_hash.is_empty() && avatar_hash != cached_avatar)
+        || (!banner_hash.is_empty() && banner_hash != cached_banner);
+    if !stale {
+        return;
+    }
+
+    static PULLS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    let pulls = PULLS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let key = format!("{local_device_peer_id}:{profile_master}");
+    if let Ok(mut m) = pulls.lock() {
+        if m.get(&key).is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(600)) {
+            return;
+        }
+        m.insert(key, std::time::Instant::now());
+    }
+    hollow_log!("[HOLLOW-PROFILE] Cached avatar/banner stale for {profile_master} — pulling full profile from {sender_peer_id}");
+    send_message_to_peer(ws_cmd_tx, ws_room_peers, sender_peer_id, HavenMessage::ProfileRequest);
 }
 
 /// Handle `MessageEnvelope::Typing` — emit `TypingStarted` event.
@@ -747,6 +886,8 @@ pub(crate) async fn handle_envelope_profile_update(
     banner_b64: String,
     twitch_username: String,
     device_list: Option<SignedDeviceList>,
+    avatar_hash: String,
+    banner_hash: String,
     db_path: &str,
     db_passphrase: &str,
 ) -> Vec<String> {
@@ -790,6 +931,12 @@ pub(crate) async fn handle_envelope_profile_update(
         &sender_peer_id, &display_name, &status, &about_me, updated_at,
         avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
         db_path, db_passphrase,
+    );
+    // Light announce with hashes we don't match → pull the full profile once.
+    maybe_request_full_profile(
+        ws_cmd_tx, ws_room_peers, &sender_peer_id, &profile_master,
+        &avatar_b64, &banner_b64, &avatar_hash, &banner_hash,
+        local_device_peer_id, db_path, db_passphrase,
     );
     // Update display_name in server member lists (local-only, not a CRDT op).
     // Members are master-keyed (multi-device); update under the resolved master.

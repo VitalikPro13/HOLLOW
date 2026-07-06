@@ -153,7 +153,7 @@ The `avatar_bytes` and `banner_bytes` parameters use `Option<Vec<u8>>` with thre
 
 1. **Persist own profile:** Opens MessageStore, calls `store.save_profile(local_peer, display_name, status, about_me, now, avatar_bytes, banner_bytes)`. The timestamp `updated_at` is the current Unix time in milliseconds.
 
-2. **MLS broadcast to servers:** Constructs `MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible }`. Iterates all `server_states` and for each server with an active MLS group, calls `send_mls_broadcast()`. Tracks which peer IDs were reached via MLS in `mls_reached: HashSet<String>`.
+2. **MLS broadcast to servers:** Constructs `MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible, avatar_hash, banner_hash }` — this user-initiated path is the one place blobs still ride a broadcast; hashes are computed from the STORED row post-save (the params use None = "unchanged"). Iterates all `server_states` and for each server with an active MLS group, calls `send_mls_broadcast()`. Tracks which peer IDs were reached via MLS in `mls_reached: HashSet<String>`.
 
 3. **Plaintext fallback for remaining peers:** Constructs `HavenMessage::ProfileUpdate` with the same fields. Serializes once via `serde_json::to_vec()`, then sends pre-serialized bytes to each peer via `send_raw_to_peer()` (NOT `send_message_to_peer()`). This avoids O(N) deep clones and re-serializations of the potentially 200KB+ avatar/banner payload. Covers DM peers and peers in servers where MLS is not yet established.
 
@@ -163,20 +163,24 @@ Logging: Outputs the count of plaintext recipients vs MLS-reached peers for debu
 
 ---
 
-## send_own_profile_to_peer()
+## send_own_profile_to_peer() — LIGHT announce (2026-07-06)
 
-`social.rs:send_own_profile_to_peer(ws_cmd_tx, ws_room_peers, bundle_keypair, local_peer_str, target_peer, is_invisible)`
+`social.rs:send_own_profile_to_peer(ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id, target_peer, is_invisible, db_path, db_passphrase)`
 
-Sends the local user's current profile to a specific peer. Called proactively in swarm.rs when:
-- A new peer joins a WS room (`PeerJoined` event)
-- A new peer appears in a room member list (`RoomMembers` event)
+Sends the local user's profile to a specific peer. Called proactively in swarm.rs when:
+- A new peer joins a WS room (`PeerJoined` event) / appears in `RoomMembers`
+- First RoomMembers after connect (broadcast to room peers)
+- Sibling merges, revocation tombstone pushes, friend request/accept handshakes
 
-Steps:
-1. Opens MessageStore, loads own profile via `store.load_profile(local_peer_str)`
-2. If a profile exists, encodes avatar/banner bytes as base64 strings
-3. Sends `HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible }` to the target peer
+**LIGHT by default (bandwidth-critical invariant):** the message carries display name / status / about / `updated_at` / device_list / `is_invisible`, with `avatar_b64`/`banner_b64` sent as EMPTY strings ("no change" under `save_profile`'s COALESCE) plus `avatar_hash`/`banner_hash` (hex SHA-256 via `profile_blob_hash()`, empty = no blob). A receiver whose cached blobs don't match the hashes pulls the full profile once via `ProfileRequest`. Before this, every reconnect re-shipped full avatar+banner base64 to every peer — counted against the relay per-IP byte budget in BOTH directions, the "File Usage jumps ~6 MB on every restart" leak (see memory `feedback_profile_light_announce_bandwidth_leak`).
 
-This ensures every peer receives the local user's profile data as soon as connectivity is established, without waiting for a profile change. The `is_invisible` flag is included so the receiving peer knows the sender's visibility status from the first message.
+`send_own_profile_full_to_peer()` is the blob-carrying variant — used ONLY by the `HavenMessage::ProfileRequest` response arm in swarm.rs (the pull half of the protocol). Never use it on an announce path.
+
+### maybe_request_full_profile()
+
+`social.rs:maybe_request_full_profile(ws_cmd_tx, ws_room_peers, sender_peer_id, profile_master, avatar_b64, banner_b64, avatar_hash, banner_hash, local_device_peer_id, db_path, db_passphrase)`
+
+Receive-side staleness check, called by BOTH incoming ProfileUpdate handlers after `save_incoming_profile`. Fires a single `ProfileRequest` to the sender when: the update was light (both b64 fields empty), at least one incoming hash is non-empty, and it differs from the SHA-256 of our cached blob for that master. Deduped by a process-global 10-minute cooldown map keyed `{local_device}:{master}` (keyed by local device so harness nodes in one process don't share buckets). An empty incoming hash while we cache a blob is NOT treated as stale — blob clears propagate only via the live full `handle_update_profile` broadcast (pre-existing behavior, preserved).
 
 ---
 
@@ -218,9 +222,10 @@ Processes `MessageEnvelope::ProfileUpdate` received via MLS decryption.
 
 Steps:
 1. **Decode avatar/banner:** Empty string = no change (None). `"CLEAR"` = clear signal (Some(empty vec)). Otherwise, base64-decode with a 2 MB size limit per field (rejects payloads > 2,000,000 bytes after decoding).
-2. **Persist profile:** Opens MessageStore, calls `save_profile(sender_peer_id, display_name, status, about_me, updated_at, avatar_bytes, banner_bytes)`.
-3. **Update server member display names:** Iterates ALL server states and updates `member.display_name` for this peer in every server's member list. This is a local-only update (not a CRDT operation) — it just keeps the in-memory display names fresh for the UI.
-4. **Emit event:** `NetworkEvent::ProfileUpdated { peer_id: sender_peer_id }`.
+2. **Persist profile:** Opens MessageStore, calls `save_incoming_profile(...)` (master-keyed, empty-profile guard).
+3. **Staleness pull:** calls `maybe_request_full_profile()` — a light update whose `avatar_hash`/`banner_hash` doesn't match our cached blobs triggers ONE `ProfileRequest` to the sender (10-min cooldown).
+4. **Update server member display names:** Iterates ALL server states and updates `member.display_name` for this peer in every server's member list. This is a local-only update (not a CRDT operation) — it just keeps the in-memory display names fresh for the UI.
+5. **Emit event:** `NetworkEvent::ProfileUpdated { peer_id: sender_peer_id }`.
 
 ### HavenMessage::ProfileUpdate (plaintext, swarm.rs)
 
@@ -230,7 +235,8 @@ Processed directly in `swarm.rs:handle_incoming_request()`. More detailed than t
 2. **Field truncation (security):** Truncates display_name to 64 chars, status to 96 chars, about_me to 256 chars. These limits are slightly above the UI's input limits (32/48/128) as a safety backstop against malicious peers.
 3. **Avatar/banner decoding:** Same base64 decode with three-state semantics, but with a 1 MB limit for avatars (to allow GIF support) and standard base64 error handling for banners. The MLS path uses 2 MB limit; the plaintext path uses 1 MB — a minor discrepancy.
 4. **Persist and update display names:** Same as MLS path — saves to MessageStore and updates in-memory server member display names.
-5. **Emit event:** `NetworkEvent::ProfileUpdated { peer_id }`.
+5. **Staleness pull:** same `maybe_request_full_profile()` call as the MLS path (light update + hash mismatch → one deduped `ProfileRequest`).
+6. **Emit event:** `NetworkEvent::ProfileUpdated { peer_id }`.
 
 ---
 

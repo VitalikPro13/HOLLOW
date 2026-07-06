@@ -855,6 +855,25 @@ pub fn get_missing_file_ids() -> Result<Vec<String>, String> {
     ms.get_missing_file_ids()
 }
 
+/// Missing file_ids scoped to ONE DM conversation (friend's MASTER peer id).
+/// The chat-open sweep must never re-request account-wide ids from a DM peer.
+#[frb]
+pub fn get_missing_file_ids_for_dm(peer_id: String) -> Result<Vec<String>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    ms.get_missing_file_ids_for_dm(&peer_id)
+}
+
+/// Missing file_ids scoped to ONE server's channels.
+#[frb]
+pub fn get_missing_file_ids_for_server(server_id: String) -> Result<Vec<String>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    ms.get_missing_file_ids_for_server(&server_id)
+}
+
 /// Reset completed files whose disk_path no longer exists on disk.
 /// Returns the count of reset entries. They'll be re-requested from peers.
 #[frb]

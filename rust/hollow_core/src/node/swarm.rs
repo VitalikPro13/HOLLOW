@@ -9007,7 +9007,7 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list } => {
+                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash } => {
                                 if peer_invisible {
                                     let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
                                         peer_id: sender_peer_id.clone(),
@@ -9019,7 +9019,7 @@ async fn handle_incoming_request(
                                     device_peer_id, master_keypair, ws_cmd_tx, ws_room_peers,
                                     sender_peer_id, display_name, status, about_me,
                                     updated_at, avatar_b64, banner_b64, twitch_username,
-                                    device_list, db_path, db_passphrase,
+                                    device_list, avatar_hash, banner_hash, db_path, db_passphrase,
                                 ).await;
                                 // Step 7: enforce revocations learned via the MLS
                                 // server-member profile path too (Olm drop + single
@@ -10091,16 +10091,14 @@ async fn handle_incoming_request(
                         let profile = crate::storage::MessageStore::open(db_path, db_passphrase)
                             .ok()
                             .and_then(|s| s.load_profile(local_peer_str).ok().flatten());
-                        let (display_name, status, about_me, updated_at, avatar_b64, banner_b64, twitch_username) =
+                        // LIGHT announce (device list is the payload here) — blobs
+                        // ride as hashes; a stale friend pulls via ProfileRequest.
+                        let (display_name, status, about_me, updated_at, avatar_hash, banner_hash, twitch_username) =
                             match profile {
                                 Some(p) => (
                                     p.display_name, p.status, p.about_me, p.updated_at,
-                                    p.avatar_bytes.as_ref()
-                                        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
-                                        .unwrap_or_default(),
-                                    p.banner_bytes.as_ref()
-                                        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
-                                        .unwrap_or_default(),
+                                    social::profile_blob_hash(p.avatar_bytes.as_deref()),
+                                    social::profile_blob_hash(p.banner_bytes.as_deref()),
                                     p.twitch_username,
                                 ),
                                 None => (String::new(), String::new(), String::new(), 0, String::new(), String::new(), String::new()),
@@ -10111,8 +10109,10 @@ async fn handle_incoming_request(
                         let dev_count = device_list.as_ref().map(|d| d.devices.len()).unwrap_or(0);
                         let msg = HavenMessage::ProfileUpdate {
                             display_name, status, about_me, updated_at,
-                            avatar_b64, banner_b64, is_invisible, twitch_username,
+                            avatar_b64: String::new(), banner_b64: String::new(),
+                            is_invisible, twitch_username,
                             device_list,
+                            avatar_hash, banner_hash,
                         };
                         let json = serde_json::to_string(&msg).unwrap_or_default();
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
@@ -10553,7 +10553,7 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list } => {
+        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash } => {
             // If the profile carries an invisible flag, emit PeerStatusChanged so the
             // UI treats this peer as offline from the very first event.
             if peer_invisible {
@@ -10648,6 +10648,13 @@ async fn handle_incoming_request(
                 &peer_str, &display_name, &status, &about_me, updated_at,
                 avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
                 db_path, db_passphrase,
+            );
+
+            // Light announce advertising blobs we don't match → pull once.
+            social::maybe_request_full_profile(
+                ws_cmd_tx, ws_room_peers, peer_str, &profile_master,
+                &avatar_b64, &banner_b64, &avatar_hash, &banner_hash,
+                device_peer_id, db_path, db_passphrase,
             );
 
             // Update display_name in server member lists (local-only, not a CRDT
@@ -11034,7 +11041,8 @@ async fn handle_incoming_request(
         // -- Profile request (Phase profile-sync) --
         HavenMessage::ProfileRequest => {
             hollow_log!("[HOLLOW-PROFILE] ProfileRequest from {peer_str} — sending our profile");
-            social::send_own_profile_to_peer(
+            // FULL send — this is the pull half of the light-announce protocol.
+            social::send_own_profile_full_to_peer(
                 ws_cmd_tx, ws_room_peers,
                 local_peer_str, master_keypair, device_peer_id, peer_str,
                 is_invisible,

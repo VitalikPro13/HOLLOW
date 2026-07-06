@@ -292,6 +292,17 @@ Future<void> markFileComplete({
 Future<List<String>> getMissingFileIds() =>
     RustLib.instance.api.crateApiStorageGetMissingFileIds();
 
+/// Missing file_ids scoped to ONE DM conversation (friend's MASTER peer id).
+/// The chat-open sweep must never re-request account-wide ids from a DM peer.
+Future<List<String>> getMissingFileIdsForDm({required String peerId}) =>
+    RustLib.instance.api.crateApiStorageGetMissingFileIdsForDm(peerId: peerId);
+
+/// Missing file_ids scoped to ONE server's channels.
+Future<List<String>> getMissingFileIdsForServer({required String serverId}) =>
+    RustLib.instance.api.crateApiStorageGetMissingFileIdsForServer(
+      serverId: serverId,
+    );
+
 /// Reset completed files whose disk_path no longer exists on disk.
 /// Returns the count of reset entries. They'll be re-requested from peers.
 Future<int> resetStaleFiles() =>

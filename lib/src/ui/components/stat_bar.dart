@@ -4,6 +4,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 
 /// Single stat row with icon + label + right-aligned value + animated
 /// progress bar. Promoted from the desktop Home `_RelayStatsCard` so the
@@ -80,6 +81,10 @@ class DailyUsageMeter extends StatelessWidget {
   final double progress;
   final Widget? trailing;
 
+  /// Optional hover explanation for the header row (what counts toward the
+  /// meter). Desktop-only affordance — pick a label that stands on its own.
+  final String? tooltip;
+
   const DailyUsageMeter({
     super.key,
     required this.hollow,
@@ -88,6 +93,7 @@ class DailyUsageMeter extends StatelessWidget {
     required this.usageText,
     required this.progress,
     this.trailing,
+    this.tooltip,
   });
 
   @override
@@ -101,23 +107,28 @@ class DailyUsageMeter extends StatelessWidget {
       barColor = hollow.error;
     }
 
+    final header = Row(
+      children: [
+        Icon(icon, size: 12, color: hollow.textSecondary),
+        const SizedBox(width: HollowSpacing.xs),
+        Text(
+          label,
+          style: HollowTypography.caption.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 10,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Icon(icon, size: 12, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.xs),
-            Text(
-              label,
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 10,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
+        if (tooltip != null)
+          HollowTooltip(message: tooltip!, child: header)
+        else
+          header,
         const SizedBox(height: 4),
         _ThresholdBar(hollow: hollow, progress: progress, color: barColor),
         const SizedBox(height: 3),

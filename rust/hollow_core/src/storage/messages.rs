@@ -4182,21 +4182,84 @@ impl MessageStore {
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(|e| format!("Failed to query missing files: {e}"))?;
 
+        let disk_file_ids = Self::disk_file_stems();
+        let mut ids = Vec::new();
+        for row in rows {
+            if let Ok(id) = row {
+                if !disk_file_ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        Ok(ids)
+    }
+
+    /// File-id stems present in the files dir (read dir once). Files are stored
+    /// as {file_id}.{ext} — a stem hit means the bytes exist regardless of the
+    /// DB `completed_at` state.
+    fn disk_file_stems() -> std::collections::HashSet<String> {
         let files_dir = crate::identity::data_dir()
             .unwrap_or_default()
             .join("files");
-
-        // Build a set of file_id prefixes present on disk (read dir once).
-        let disk_file_ids: std::collections::HashSet<String> = std::fs::read_dir(&files_dir)
+        std::fs::read_dir(&files_dir)
             .map(|entries| {
                 entries.filter_map(|e| e.ok()).filter_map(|e| {
                     let name = e.file_name().to_string_lossy().to_string();
-                    // Files are stored as {file_id}.{ext} — extract the stem.
                     name.split('.').next().map(|s| s.to_string())
                 }).collect()
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
 
+    /// Like `get_missing_file_ids`, but scoped to ONE DM conversation (messages
+    /// are keyed on the friend's MASTER peer_id). Opening a DM must only
+    /// re-request files belonging to that thread — the account-global sweep
+    /// re-requested every missing id from the DM peer on every open (bandwidth
+    /// leak, and it leaked unrelated file ids to the friend).
+    pub fn get_missing_file_ids_for_dm(&self, peer_id: &str) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT m.file_id FROM messages m
+                 WHERE m.peer_id = ?1
+                 AND m.file_id IS NOT NULL
+                 AND m.file_id NOT IN (SELECT file_id FROM files WHERE completed_at IS NOT NULL)",
+            )
+            .map_err(|e| format!("Failed to prepare missing DM files query: {e}"))?;
+
+        let rows = stmt
+            .query_map([peer_id], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query missing DM files: {e}"))?;
+
+        let disk_file_ids = Self::disk_file_stems();
+        let mut ids = Vec::new();
+        for row in rows {
+            if let Ok(id) = row {
+                if !disk_file_ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Like `get_missing_file_ids`, but scoped to ONE server's channels.
+    pub fn get_missing_file_ids_for_server(&self, server_id: &str) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT cm.file_id FROM channel_messages cm
+                 WHERE cm.server_id = ?1
+                 AND cm.file_id IS NOT NULL
+                 AND cm.file_id NOT IN (SELECT file_id FROM files WHERE completed_at IS NOT NULL)",
+            )
+            .map_err(|e| format!("Failed to prepare missing server files query: {e}"))?;
+
+        let rows = stmt
+            .query_map([server_id], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query missing server files: {e}"))?;
+
+        let disk_file_ids = Self::disk_file_stems();
         let mut ids = Vec::new();
         for row in rows {
             if let Ok(id) = row {
@@ -4211,11 +4274,18 @@ impl MessageStore {
     /// Scan completed files for stale disk_paths (file no longer exists on disk).
     /// Resets those entries to incomplete so they get re-requested from peers.
     /// Returns the number of entries reset.
+    ///
+    /// A stale ABSOLUTE path is not proof the bytes are gone: the data dir can
+    /// move (iOS container rotation, drive/profile changes) while the file is
+    /// still at the CURRENT `data_dir/files/{file_id}.{ext}`. Those rows are
+    /// HEALED (disk_path re-pointed) instead of nulled — nulling them marked
+    /// perfectly good files "missing" and made chat-open sweeps re-download
+    /// bytes we already hold.
     pub fn reset_stale_file_paths(&self) -> Result<u32, String> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT file_id, disk_path FROM files
+                "SELECT file_id, file_ext, disk_path FROM files
                  WHERE completed_at IS NOT NULL AND disk_path IS NOT NULL",
             )
             .map_err(|e| format!("Failed to prepare stale files query: {e}"))?;
@@ -4225,25 +4295,50 @@ impl MessageStore {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
                 ))
             })
             .map_err(|e| format!("Failed to query completed files: {e}"))?;
 
+        let files_dir = crate::identity::data_dir().ok().map(|d| d.join("files"));
         let mut stale_ids = Vec::new();
+        let mut healed: Vec<(String, String)> = Vec::new();
         for row in rows {
-            if let Ok((file_id, disk_path)) = row {
-                if !std::path::Path::new(&disk_path).exists() {
-                    stale_ids.push(file_id);
+            if let Ok((file_id, file_ext, disk_path)) = row {
+                if std::path::Path::new(&disk_path).exists() {
+                    continue;
+                }
+                // Stored path is stale — check the current canonical location
+                // before declaring the bytes missing.
+                let current = files_dir
+                    .as_ref()
+                    .map(|d| d.join(format!("{file_id}.{file_ext}")));
+                match current {
+                    Some(p) if p.exists() => {
+                        healed.push((file_id, p.to_string_lossy().to_string()));
+                    }
+                    _ => stale_ids.push(file_id),
                 }
             }
         }
 
-        if stale_ids.is_empty() {
+        if stale_ids.is_empty() && healed.is_empty() {
             return Ok(0);
         }
 
         let count = stale_ids.len() as u32;
         self.conn.execute_batch("BEGIN").map_err(|e| format!("BEGIN: {e}"))?;
+        for (file_id, new_path) in &healed {
+            self.conn
+                .execute(
+                    "UPDATE files SET disk_path = ?2 WHERE file_id = ?1",
+                    rusqlite::params![file_id, new_path],
+                )
+                .map_err(|e| {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    format!("Failed to heal stale file path {file_id}: {e}")
+                })?;
+        }
         for file_id in &stale_ids {
             self.conn
                 .execute(

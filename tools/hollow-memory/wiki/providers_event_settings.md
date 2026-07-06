@@ -207,7 +207,7 @@ The entire body is wrapped in `try-catch` to prevent unhandled exceptions from k
 - Cancels sync timeout timer.
 - Clears syncing peers and sync progress for the server.
 - Sets sync status to `synced`.
-- If `newMessageCount > 0`: clears channel chat cache for the server (unconditional), merges from DB if currently viewing, calls `_requestMissingFiles(serverId)`.
+- If `newMessageCount > 0`: clears channel chat cache for the server (unconditional), merges from DB if currently viewing. (It does NOT call `_requestMissingFiles` — that helper is currently dead code, no call sites; channel file bytes arrive via the per-message request-on-open path.)
 - If `newMessageCount == 0` but viewing: reloads reactions only.
 - Always refreshes pins for the viewed channel.
 - Always recomputes unread counts from DB for non-viewed servers.
@@ -450,9 +450,9 @@ The entire body is wrapped in `try-catch` to prevent unhandled exceptions from k
 
 ### Helper Methods
 
-**`_requestMissingFiles(String serverId)`** -- Called after message sync completes with new messages. Queries DB for file IDs with no completed file on disk. For 6+ member servers, only auto-requests images (non-images use vault erasure shards). Delays 1-1.5s to let sync settle. Skips files already in active transfer. Iterates through peers to find one that can serve each file.
+**`_requestMissingFiles(String serverId)`** -- CURRENTLY DEAD CODE (defined, no call sites — the MessageSyncCompleted hook that used to call it was removed at some point). Kept scoped + throttled (2026-07-06) in case it gets re-wired: queries `getMissingFileIdsForServer(serverId)` (scoped, not account-global), applies the shared `_throttleFileRequest` cooldown, for 6+ member servers only auto-requests images (non-images use vault erasure shards).
 
-**`_requestMissingFilesForDm(String peerId)`** -- Same pattern as above but for DM messages. Delays 1s, queries all missing file IDs, requests from the specific DM peer.
+**`_requestMissingFilesForDm(String peerId)`** -- The live missing-file sweep: fires on DM chat open (`requestMissingDmFilesOnOpen` from ChatPane / MobileChatRoute) and on message-bearing `DmSyncCompleted`. Since 2026-07-06 (bandwidth leak fix, see memory `feedback_profile_light_announce_bandwidth_leak`): queries `getMissingFileIdsForDm(peerId)` — THIS conversation only, never account-global (which also leaked unrelated file ids to the friend); requests each id from exactly ONE source (the friend if any of their devices is online, else the first online sibling — parallel sources trigger the AES-key-mismatch decrypt loop documented in `handle_request_file`); and applies `_throttleFileRequest` — per-file 10-min cooldown + 3 attempts per app run (both cleared on `FileCompleted`), so ids nobody holds stop re-firing on every open.
 
 **`_reloadChatForFile(String fileId)`** -- Looks up file metadata to determine context (DM or channel), then reloads the appropriate chat history so image previews render.
 
@@ -975,7 +975,7 @@ Provider: `nodeProvider` -- `NotifierProvider<NodeNotifier, NodeState>`
 2. Calls `networkService.startNode()` which returns the local peerId.
 3. Updates `identityProvider` with the peerId.
 4. Sets status to `connected`.
-5. Calls `storage_api.resetStaleFiles()` to clear files marked complete but missing on disk. These will be picked up by `_requestMissingFiles()` when sync events fire.
+5. Calls `storage_api.resetStaleFiles()` — since 2026-07-06 this first tries to HEAL a stale absolute `disk_path` by checking the current `data_dir/files/{file_id}.{ext}` (data-dir moves must not manufacture "missing" files); only files truly absent from disk get `completed_at` nulled, to be re-requested by the DM chat-open sweep.
 6. Calls `eventStreamProvider.notifier.start()` to begin event polling.
 
 **`stop()`**
@@ -1024,7 +1024,7 @@ This connection's daily relay byte budget (10 GB/day per IP, relay-RAM counter, 
 - Demand-driven autoDispose: 30s `Timer.periodic` fire-and-forgets `request_relay_bandwidth()` FFI (`.catchError((_) {})` — node may not be running) ONLY while a relay card watches. Lifecycle-gated like relayStatsProvider.
 - ALSO re-requests on `overallConnectionProvider` offline→online — at app launch the card mounts before the relay WS is up, so without this the meter only appeared at the first 30s tick.
 - Data arrives via the event stream: event_provider dispatches `NetworkEvent_BandwidthStatus` → `onStatus(...)`; `NetworkEvent_BandwidthLimited` → `onLimited()` + error toast (overlayState pattern).
-- Consumers: desktop `_RelayStatsCard` (Home) + mobile `_MobileRelayCard` (Settings, gated on tab 3) — both render `DailyUsageMeter` "Your File Usage" only when `usedBytes > 0`.
+- Consumers: desktop `_RelayStatsCard` (Home) + mobile `_MobileRelayCard` (Settings, gated on tab 3) — both render `DailyUsageMeter` "Daily Relay Data" (renamed 2026-07-06; desktop adds a tooltip: per-IP, shared across the network, both directions, P2P excluded) only when `usedBytes > 0`.
 
 ## Relay Stats Provider
 

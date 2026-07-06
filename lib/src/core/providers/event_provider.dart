@@ -1129,6 +1129,10 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_FileCompleted(:final fileId, :final diskPath):
         debugPrint('[HOLLOW] File completed: $fileId at $diskPath');
+        // Completed bytes reset the missing-file request throttle, so a file
+        // that later goes stale again gets fresh retry attempts.
+        _fileRequestLast.remove(fileId);
+        _fileRequestAttempts.remove(fileId);
         ref.read(fileTransferProvider.notifier).onFileCompleted(
               fileId, diskPath);
         // Reload the chat that contains this file to show the image.
@@ -1693,8 +1697,35 @@ class EventStreamNotifier extends Notifier<bool> {
     }
   }
 
+  /// Per-file throttle for the missing-file sweeps: a request that produced no
+  /// bytes must not re-fire on every chat open / sync. RAM-only (fresh attempts
+  /// after an app restart); cleared per file on FileCompleted. Without this, an
+  /// id nobody holds anymore loops forever — and every answered ask makes the
+  /// holder re-stream the FULL file, which counts against the relay byte
+  /// budget in both directions.
+  static final Map<String, DateTime> _fileRequestLast = {};
+  static final Map<String, int> _fileRequestAttempts = {};
+  static const _fileRequestCooldown = Duration(minutes: 10);
+  static const _fileRequestMaxAttempts = 3;
+
+  /// Returns true when this file id should NOT be requested right now.
+  /// Records the attempt otherwise.
+  bool _throttleFileRequest(String fileId) {
+    final now = DateTime.now();
+    final last = _fileRequestLast[fileId];
+    if (last != null && now.difference(last) < _fileRequestCooldown) {
+      return true;
+    }
+    final attempts = _fileRequestAttempts[fileId] ?? 0;
+    if (attempts >= _fileRequestMaxAttempts) return true;
+    _fileRequestLast[fileId] = now;
+    _fileRequestAttempts[fileId] = attempts + 1;
+    return false;
+  }
+
   /// Request missing files after message sync completes.
-  /// Queries messages with file_id that have no completed file on disk.
+  /// Queries messages with file_id that have no completed file on disk —
+  /// scoped to THIS server's channels only.
   /// Delayed to let sync pipeline settle.
   /// For 6+ member servers: only auto-requests images (non-images use vault shards).
   Future<void> _requestMissingFiles(String serverId) async {
@@ -1714,7 +1745,8 @@ class EventStreamNotifier extends Notifier<bool> {
     } else {
       await Future.delayed(const Duration(seconds: 1));
       try {
-        missingIds = await storage_api.getMissingFileIds();
+        missingIds =
+            await storage_api.getMissingFileIdsForServer(serverId: serverId);
       } catch (e) {
         debugPrint('[HOLLOW] Failed to get missing file ids: $e');
         return;
@@ -1722,17 +1754,18 @@ class EventStreamNotifier extends Notifier<bool> {
     }
 
     if (missingIds.isEmpty) return;
+    final peers = ref.read(peersProvider);
+    if (peers.isEmpty) return;
 
-    // Skip files that already have an active stream transfer in flight.
+    // Skip files that already have an active stream transfer in flight, then
+    // apply the request throttle (records an attempt per surviving id).
     final activeTransfers = ref.read(fileTransferProvider);
     final toRequest = missingIds.where((id) {
       final t = activeTransfers[id];
       return t == null || (!t.isDownloading && !t.isComplete);
-    }).toList();
+    }).where((id) => !_throttleFileRequest(id)).toList();
     if (toRequest.isEmpty) return;
     debugPrint('[HOLLOW] ${toRequest.length} missing files found, requesting...');
-    final peers = ref.read(peersProvider);
-    if (peers.isEmpty) return;
     for (final fileId in toRequest) {
       for (final peerId in peers.keys) {
         try {
@@ -1780,36 +1813,48 @@ class EventStreamNotifier extends Notifier<bool> {
   Future<void> requestMissingDmFilesOnOpen(String peerId) =>
       _requestMissingFilesForDm(peerId);
 
-  /// Request missing files after DM sync completes.
+  /// Request missing files after DM sync completes — scoped to THIS
+  /// conversation only (the account-global sweep re-requested every missing id
+  /// from the DM peer on every chat open, and leaked unrelated file ids to
+  /// them).
   Future<void> _requestMissingFilesForDm(String peerId) async {
     await Future.delayed(const Duration(seconds: 1));
     try {
-      final missingIds = await storage_api.getMissingFileIds();
+      final missingIds =
+          await storage_api.getMissingFileIdsForDm(peerId: peerId);
       if (missingIds.isEmpty) return;
+      // ONE source per sweep: the conversation peer (friend) when reachable —
+      // the canonical holder — else an online sibling device that backfilled
+      // the file (it holds the same bytes; covers the friend-offline gap where
+      // a synced image card stayed a placeholder forever). NEVER both in
+      // parallel: each holder re-encrypts its stream with its OWN AES key, so
+      // a second stream can only fail decrypt (see Rust handle_request_file),
+      // and every duplicate full-byte stream counts against the relay byte
+      // budget twice.
+      final links = ref.read(deviceLinkProvider);
+      final onlinePeers = ref.read(peersProvider);
+      final friendOnline = onlinePeers.keys
+          .any((d) => d == peerId || links.identityOf(d) == peerId);
+      final siblings = _onlineSiblingDevices();
+      final source =
+          friendOnline ? peerId : (siblings.isEmpty ? null : siblings.first);
+      if (source == null) return;
       final activeTransfers = ref.read(fileTransferProvider);
       final toRequest = missingIds.where((id) {
         final t = activeTransfers[id];
         return t == null || (!t.isDownloading && !t.isComplete);
-      }).toList();
+      }).where((id) => !_throttleFileRequest(id)).toList();
       if (toRequest.isEmpty) return;
-      // Source candidates: the conversation peer (friend) FIRST — the canonical
-      // holder — then our own online sibling devices (Step 5.1). A sibling that
-      // backfilled the file's metadata also holds its bytes, so it can serve the
-      // image even when the friend is offline (the gap where a synced image card
-      // stayed a placeholder forever).
-      final sources = <String>[peerId, ..._onlineSiblingDevices()];
       debugPrint('[HOLLOW] ${toRequest.length} missing DM files, '
-          'requesting from ${sources.length} source(s) (friend + siblings)');
+          'requesting from ${friendOnline ? "friend" : "sibling"}');
       for (final fileId in toRequest) {
-        for (final source in sources) {
-          try {
-            await requestFileFromPeer(
-              fileId: fileId,
-              peerId: source,
-              chunks: [],
-            );
-          } catch (_) {}
-        }
+        try {
+          await requestFileFromPeer(
+            fileId: fileId,
+            peerId: source,
+            chunks: [],
+          );
+        } catch (_) {}
         await Future.delayed(const Duration(milliseconds: 100));
       }
     } catch (e) {

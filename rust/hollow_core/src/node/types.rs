@@ -1011,6 +1011,14 @@ pub(crate) enum HavenMessage {
         /// `None` from older clients → sender is treated as single-device.
         #[serde(default)]
         device_list: Option<SignedDeviceList>,
+        /// Hex SHA-256 of the sender's current avatar/banner blob; empty = no blob.
+        /// Re-announces send LIGHT updates (empty b64 fields = "no change") plus these
+        /// hashes so a receiver with a stale cache pulls once via ProfileRequest —
+        /// instead of every reconnect re-shipping megabytes of unchanged blobs.
+        #[serde(default)]
+        avatar_hash: String,
+        #[serde(default)]
+        banner_hash: String,
     },
 
     // -- Multi-peer fan-out sync (Phase 3.5) --
@@ -2107,6 +2115,11 @@ pub(crate) enum MessageEnvelope {
         /// Multi-device: the sender's master-signed device list (Phase 6).
         #[serde(default)]
         device_list: Option<SignedDeviceList>,
+        /// Blob staleness hashes — see HavenMessage::ProfileUpdate.
+        #[serde(default)]
+        avatar_hash: String,
+        #[serde(default)]
+        banner_hash: String,
     },
 
     /// CRDT sync request (replaces HavenMessage::SyncRequest for MLS path).

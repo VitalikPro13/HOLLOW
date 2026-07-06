@@ -1534,7 +1534,11 @@ class _RelayStatsCardState extends ConsumerState<_RelayStatsCard>
             DailyUsageMeter(
               hollow: hollow,
               icon: LucideIcons.gauge,
-              label: 'Your File Usage',
+              label: 'Daily Relay Data',
+              tooltip: 'Relay traffic for your connection today — uploads and '
+                  'downloads (files, images, sync). Shared by every device on '
+                  'your network (counted per IP). Direct P2P transfers don\'t '
+                  'count.',
               usageText: bandwidth.usageLabel,
               progress: bandwidth.usagePercent,
               trailing: showReset

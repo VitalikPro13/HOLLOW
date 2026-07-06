@@ -562,7 +562,7 @@ File: `lib/src/ui/components/stat_bar.dart` (promoted 2026-07-05 from `home_dash
 
 **StatBar** (`StatelessWidget`): icon (12px) + label (10px w500 `textSecondary`) + spacer + value (10px `textPrimary`), then a 4px track+fill bar (`_ThresholdBar`: `TweenAnimationBuilder` over `HollowDurations.slow`, easeOutCubic). Fill color thresholds: accent < 0.60 ≤ warning < 0.85 ≤ error.
 
-**DailyUsageMeter** (`StatelessWidget`): same visual system for the relay daily byte budget where value + countdown don't fit one header row. Header (icon + label only) → bar → ONE caption line: `usageText` left (9px `textTertiary`), optional `trailing` widget right (callers pass a `StatusCountdown` "resets in Xh Ym"). Used by desktop `_RelayStatsCard` and mobile `_MobileRelayCard` with label "Your File Usage", rendered only when used > 0.
+**DailyUsageMeter** (`StatelessWidget`): same visual system for the relay daily byte budget where value + countdown don't fit one header row. Header (icon + label, optionally wrapped in `HollowTooltip` via the `tooltip` param — desktop hover explanation of what counts toward the meter) → bar → ONE caption line: `usageText` left (9px `textTertiary`), optional `trailing` widget right (callers pass a `StatusCountdown` "resets in Xh Ym"). Used by desktop `_RelayStatsCard` and mobile `_MobileRelayCard` with label "Daily Relay Data" (renamed 2026-07-06), rendered only when used > 0.
 
 
 ## HollowTextField
