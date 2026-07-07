@@ -1,15 +1,25 @@
 <?php
-// Hollow — IGDB game search with a full write-through cache.
+// Hollow — IGDB game search + per-game card details, fully write-through
+// cached. TWO MODES:
+//
+//   ?q=<text>  FAST search: ONE IGDB query, basic rows only (name, year,
+//              type, genres, rating, summary, cover). No Steam, no
+//              companies, no artwork — a cache miss costs one IGDB round
+//              trip plus cover thumbnails. (v6 enriched all 12 results
+//              inline = 12 sequential Steam calls ≈ 10-20s. Never again.)
+//   ?id=<igdb> CARD DETAILS for ONE game, fetched when the user actually
+//              picks it: Steam appdetails + dev/publisher credits (deduped,
+//              logos as PNG) + social links + key art + per-platform store
+//              links + copyright. One pick = one IGDB query + one Steam
+//              query, then cached forever (30d TTL).
 //
 // The ONLY place the Twitch/IGDB app credential lives. Hollow clients call
 // this at AUTHORING time (composing a showcase board). EVERYTHING is cached
-// on our side: covers into ./covers/ as static files, and all game METADATA
-// (title, year, type, genres, rating, summary) into a local SQLite DB
-// (games.db) keyed per game, plus a search→results index. A repeated or
-// previously-seen search is answered from OUR database with ZERO IGDB
-// traffic — the 4 req/s app cap only ever sees brand-new searches.
-// Display in the app is pure P2P off replicated profile data: viewers
-// never hit this endpoint, IGDB, or anything else.
+// on our side: images into ./covers/ as static files, metadata into a local
+// SQLite DB (games.db). Repeated searches/picks are answered from OUR
+// database with ZERO upstream traffic (neither IGDB nor Steam). Display in
+// the app is pure P2P off replicated profile data: viewers never hit this
+// endpoint, IGDB, Steam, or anything else.
 //
 // Deploy: upload this folder to /public_html/hollow/igdb/ (config.php holds
 // the real credentials and is NOT in git — see config.php.example).
@@ -24,10 +34,21 @@ const COVERS_DIR = __DIR__ . '/covers';
 const COVERS_URL = 'https://hollow.anonlisten.com/igdb/covers/';
 const TOKEN_FILE = __DIR__ . '/token.json';
 const DB_FILE    = __DIR__ . '/games.db';
-const SEARCH_TTL = 30 * 24 * 3600; // re-ask IGDB for a query after 30 days
-// Bump when the response schema grows — cached searches from older versions
-// refetch so new fields (e.g. `type`) backfill instead of serving nulls.
-const SEARCH_VER = 2;
+const SEARCH_TTL = 30 * 24 * 3600; // re-ask upstream after 30 days
+// Bump when the response schema grows — cached rows from older versions
+// refetch so new fields backfill instead of serving nulls. The app appends
+// this as a `v` query param (value ignored here) so every bump also busts
+// any CDN-cached URLs from older versions (Hostinger hCDN rewrites
+// Cache-Control and can serve year-stale responses for old URLs).
+// v2: type. v3: Steam enrichment. v4: key art + PNG logos. v5: IGDB enum
+// deprecation fixes. v6: minimal payload. v7: split search/details modes;
+// stores matched by SOURCE NAME (Nintendo eShop etc.); full card restored.
+// v8: search rows stripped to exactly what the picker shows (id/name/year/
+// type/cover); "Twitch" no longer matches the itch store (substring bug);
+// console chips get store-SEARCH fallback URLs when IGDB has no direct one.
+// v9: genres ride the DETAILS payload (card Info section — they left the
+// search rows in v8); company links deduped by KIND (no double globes).
+const SEARCH_VER = 9;
 
 // IGDB legacy `category` enum → human tag (fallback; `game_type.type` is
 // the current source — `category` is deprecated and returns empty).
@@ -44,6 +65,34 @@ const TYPE_SHORT = [
     'Standalone Expansion' => 'Standalone',
     'Expanded Game' => 'Expanded',
 ];
+
+// IGDB website-type id → a stable link "kind" the client maps to an icon.
+// `company_website.category` is DEPRECATED (returns nothing) — the current
+// source is the `type` reference; we request `websites.type.type` so each
+// link carries {id, type-name} and match on BOTH (ids mirror the legacy
+// enum). (10/11/12 = iphone/ipad/android app-store links — skipped.)
+const WEBSITE_KINDS = [
+    1  => 'official',
+    2  => 'wikia',
+    3  => 'wikipedia',
+    4  => 'facebook',
+    5  => 'twitter',
+    6  => 'twitch',
+    8  => 'instagram',
+    9  => 'youtube',
+    13 => 'steam',
+    14 => 'reddit',
+    15 => 'itch',
+    16 => 'epicgames',
+    17 => 'gog',
+    18 => 'discord',
+    19 => 'bluesky',
+];
+
+// IGDB external game source id for Steam (uid = Steam appid). The current
+// field is `external_game_source` (reference; expanded name "Steam"); the
+// legacy `category` enum used the same value and is kept as a fallback.
+const EXTERNAL_STEAM = 1;
 
 function fail(int $code, string $msg): void {
     http_response_code($code);
@@ -73,8 +122,34 @@ function db(): PDO {
             game_ids TEXT NOT NULL,
             fetched_at INTEGER NOT NULL
         )');
-        // Additive migration (idempotent — duplicate-column errors ignored).
+        // Per-game card details, fetched on PICK (?id=), not on search.
+        $pdo->exec('CREATE TABLE IF NOT EXISTS game_details (
+            id INTEGER PRIMARY KEY,
+            steam_appid INTEGER,
+            description TEXT,
+            req_min TEXT,
+            req_rec TEXT,
+            platforms TEXT,      -- JSON array of platform slugs
+            metacritic INTEGER,
+            release_date TEXT,
+            achievements INTEGER,
+            companies TEXT,      -- JSON array of {name, role, logo?, links[]}
+            artwork TEXT,        -- IGDB artwork image_id (landscape key art)
+            developer TEXT,      -- legacy (v6), superseded by companies
+            legal TEXT,          -- cleaned Steam legal_notice (one line)
+            stores TEXT,         -- JSON {steam|playstation|xbox|nintendo|...: url}
+            genres TEXT,         -- JSON array of genre names (card Info row)
+            ver INTEGER NOT NULL DEFAULT 0,
+            fetched_at INTEGER NOT NULL
+        )');
+        // Additive migrations (idempotent — duplicate-column errors ignored).
         try { $pdo->exec('ALTER TABLE searches ADD COLUMN ver INTEGER NOT NULL DEFAULT 0'); } catch (Throwable $e) {}
+        try { $pdo->exec('ALTER TABLE game_details ADD COLUMN artwork TEXT'); } catch (Throwable $e) {}
+        try { $pdo->exec('ALTER TABLE game_details ADD COLUMN developer TEXT'); } catch (Throwable $e) {}
+        try { $pdo->exec('ALTER TABLE game_details ADD COLUMN legal TEXT'); } catch (Throwable $e) {}
+        try { $pdo->exec('ALTER TABLE game_details ADD COLUMN stores TEXT'); } catch (Throwable $e) {}
+        try { $pdo->exec('ALTER TABLE game_details ADD COLUMN genres TEXT'); } catch (Throwable $e) {}
+        try { $pdo->exec('ALTER TABLE game_details ADD COLUMN ver INTEGER NOT NULL DEFAULT 0'); } catch (Throwable $e) {}
     }
     return $pdo;
 }
@@ -125,51 +200,507 @@ function app_token(): string {
     return $j['access_token'];
 }
 
-/// Ensure the cover for $imageId sits in ./covers/; return its URL or null.
-function cached_cover(?string $imageId): ?string {
+function igdb_query(string $endpoint, string $body): ?array {
+    $resp = curl_req("https://api.igdb.com/v4/$endpoint", [
+        'Client-ID: ' . IGDB_CLIENT_ID,
+        'Authorization: Bearer ' . app_token(),
+        'Accept: application/json',
+    ], $body);
+    if ($resp === null) return null;
+    $j = json_decode($resp, true);
+    return is_array($j) ? $j : null;
+}
+
+/// Ensure an IGDB image (cover / key art / company logo) sits in ./covers/;
+/// return its URL or null. $size is an IGDB image size slug (t_cover_big /
+/// t_720p / t_logo_med). $ext: 'jpg' for photos, 'png' for logos — IGDB
+/// flattens transparency onto white when serving JPG, so logos MUST be PNG.
+function cached_image(?string $imageId, string $size = 't_cover_big', string $ext = 'jpg'): ?string {
     if (!is_string($imageId) || !preg_match('/^[a-z0-9]+$/i', $imageId)) {
         return null;
     }
-    $local = COVERS_DIR . "/$imageId.jpg";
+    $local = COVERS_DIR . "/$imageId.$ext";
     if (!is_file($local)) {
         if (!is_dir(COVERS_DIR)) @mkdir(COVERS_DIR, 0755, true);
-        $img = curl_req("https://images.igdb.com/igdb/image/upload/t_cover_big/$imageId.jpg");
+        $img = curl_req("https://images.igdb.com/igdb/image/upload/$size/$imageId.$ext");
         if ($img !== null && strlen($img) > 0 && strlen($img) < 2_000_000) {
             @file_put_contents($local, $img, LOCK_EX);
         }
     }
-    return is_file($local) ? COVERS_URL . "$imageId.jpg" : null;
+    return is_file($local) ? COVERS_URL . "$imageId.$ext" : null;
 }
 
-function game_row_to_json(array $row): array {
-    return [
-        'id'      => (int)$row['id'],
-        'name'    => (string)$row['name'],
-        'year'    => $row['year'] !== null ? (int)$row['year'] : null,
-        'type'    => $row['type'] !== null && $row['type'] !== '' ? (string)$row['type'] : null,
-        'cover'   => cached_cover($row['cover_image_id'] ?? null),
-        'genres'  => json_decode((string)($row['genres'] ?? '[]'), true) ?: [],
-        'rating'  => $row['rating'] !== null ? (int)$row['rating'] : null,
-        'summary' => $row['summary'] !== null && $row['summary'] !== '' ? (string)$row['summary'] : null,
+/// Steam ships requirements as an HTML blob (<strong>OS:</strong> …<br>). Flatten
+/// to readable plain text: list items / <br> → newlines, tags stripped, entities
+/// decoded, capped. Returns null for empty/absent input.
+function clean_requirements($html): ?string {
+    if (!is_string($html) || $html === '') return null;
+    // Turn structural tags into line breaks before stripping.
+    $html = preg_replace('#<\s*/?(li|br|p|div|ul)[^>]*>#i', "\n", $html);
+    $text = html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    // Steam prefixes with "Minimum:" / "Recommended:" — drop leading label.
+    $text = preg_replace('/^\s*(minimum|recommended)\s*:?\s*/iu', '', $text);
+    // Collapse whitespace runs, one item per line, trim blank lines.
+    $lines = [];
+    foreach (preg_split('/\R+/u', $text) as $line) {
+        $line = trim(preg_replace('/\s+/u', ' ', $line));
+        if ($line !== '') $lines[] = $line;
+    }
+    if (!$lines) return null;
+    $out = implode("\n", array_slice($lines, 0, 12));
+    return mb_substr($out, 0, 800);
+}
+
+/// Steam's `legal_notice` is an HTML-laced paragraph (often several lines of
+/// trademark boilerplate). Keep just the copyright line: strip tags, take the
+/// first line (preferring one that starts with ©), cap it short.
+function clean_legal($html): ?string {
+    if (!is_string($html) || $html === '') return null;
+    $html = preg_replace('#<\s*br[^>]*>#i', "\n", $html);
+    $text = html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $lines = [];
+    foreach (preg_split('/\R+/u', $text) as $line) {
+        $line = trim(preg_replace('/\s+/u', ' ', $line));
+        if ($line !== '') $lines[] = $line;
+    }
+    if (!$lines) return null;
+    $pick = $lines[0];
+    foreach ($lines as $line) {
+        if (str_starts_with($line, '©') || stripos($line, 'copyright') === 0) {
+            $pick = $line;
+            break;
+        }
+    }
+    return mb_substr($pick, 0, 160);
+}
+
+/// Fetch + normalize Steam appdetails for one appid. Returns a partial detail
+/// array (only the fields Steam supplies), or [] on any failure — enrichment
+/// is best-effort and never blocks the IGDB result.
+function steam_details(int $appid): array {
+    // `l=english` for stable English requirements/description; cc omitted (no price).
+    $resp = curl_req("https://store.steampowered.com/api/appdetails?appids=$appid&l=english");
+    if ($resp === null) return [];
+    $j = json_decode($resp, true);
+    $node = $j[$appid] ?? $j[(string)$appid] ?? null;
+    if (!is_array($node) || empty($node['success']) || !is_array($node['data'] ?? null)) {
+        return [];
+    }
+    $d = $node['data'];
+    $out = ['steam_appid' => $appid];
+
+    if (!empty($d['short_description']) && is_string($d['short_description'])) {
+        $out['description'] = mb_substr($d['short_description'], 0, 1000);
+    }
+    // Requirements: platform-specific arrays each with minimum/recommended HTML.
+    $reqMin = $reqRec = null;
+    foreach (['pc_requirements', 'mac_requirements', 'linux_requirements'] as $rk) {
+        $r = $d[$rk] ?? null;
+        if (is_array($r)) {
+            $reqMin = $reqMin ?? clean_requirements($r['minimum'] ?? null);
+            $reqRec = $reqRec ?? clean_requirements($r['recommended'] ?? null);
+        }
+        if ($reqMin && $reqRec) break;
+    }
+    if ($reqMin !== null) $out['req_min'] = $reqMin;
+    if ($reqRec !== null) $out['req_rec'] = $reqRec;
+
+    $legal = clean_legal($d['legal_notice'] ?? null);
+    if ($legal !== null) $out['legal'] = $legal;
+
+    if (isset($d['metacritic']['score'])) {
+        $out['metacritic'] = (int)$d['metacritic']['score'];
+    }
+    if (!empty($d['release_date']['date']) && is_string($d['release_date']['date'])
+            && empty($d['release_date']['coming_soon'])) {
+        $out['release_date'] = mb_substr($d['release_date']['date'], 0, 40);
+    }
+    if (isset($d['achievements']['total'])) {
+        $out['achievements'] = (int)$d['achievements']['total'];
+    }
+    // Platform booleans for platform_slugs().
+    foreach (['windows', 'mac', 'linux'] as $pk) {
+        if (!empty($d['platforms'][$pk])) $out[$pk] = true;
+    }
+    return $out;
+}
+
+/// Build the platform slug list. Prefer Steam's booleans (clean PC/Mac/Linux),
+/// merge in IGDB platform names (consoles etc.) mapped to stable slugs.
+function platform_slugs(array $steam, array $igdbPlatforms): array {
+    $slugs = [];
+    if (!empty($steam['windows'])) $slugs['pc'] = true;
+    if (!empty($steam['mac']))     $slugs['mac'] = true;
+    if (!empty($steam['linux']))   $slugs['linux'] = true;
+    // IGDB platform names → coarse slug the client has an icon for.
+    $map = [
+        '/windows|pc \(microsoft|microsoft windows/i' => 'pc',
+        '/\bmac\b|mac os|macos/i'                      => 'mac',
+        '/linux/i'                                     => 'linux',
+        '/playstation|ps[1-5]\b|psp|ps vita/i'         => 'playstation',
+        '/xbox/i'                                      => 'xbox',
+        '/nintendo|switch|wii|game boy|3ds|\bds\b/i'   => 'nintendo',
+        '/android/i'                                   => 'android',
+        '/\bios\b|iphone|ipad/i'                       => 'ios',
     ];
+    foreach ($igdbPlatforms as $p) {
+        if (!is_string($p) || $p === '') continue;
+        foreach ($map as $re => $slug) {
+            if (preg_match($re, $p)) { $slugs[$slug] = true; break; }
+        }
+    }
+    // Stable display order.
+    $order = ['pc', 'mac', 'linux', 'playstation', 'xbox', 'nintendo', 'android', 'ios'];
+    $out = [];
+    foreach ($order as $s) if (isset($slugs[$s])) $out[] = $s;
+    return $out;
 }
 
-$q = trim((string)($_GET['q'] ?? ''));
-if ($q === '' || mb_strlen($q) > 100) {
-    echo '[]';
+/// Numeric source id of an external_games row (expanded reference or legacy
+/// numeric category, which is deprecated and empty on new data).
+function external_source_id(array $ext): int {
+    $src = $ext['external_game_source'] ?? null;
+    if (is_array($src)) {
+        $id = (int)($src['id'] ?? 0);
+        if ($id > 0) return $id;
+    } elseif (is_int($src) || (is_string($src) && ctype_digit($src))) {
+        return (int)$src;
+    }
+    return (int)($ext['category'] ?? 0);
+}
+
+/// Expanded source NAME of an external_games row ('' when unexpanded).
+function external_source_name(array $ext): string {
+    $src = $ext['external_game_source'] ?? null;
+    if (is_array($src) && is_string($src['name'] ?? null)) {
+        return $src['name'];
+    }
+    return '';
+}
+
+/// Map an external_games row to the store slug the card's platform chips
+/// link to. Matched by SOURCE NAME first (robust — the new
+/// external_game_sources ids are NOT guaranteed to mirror the legacy enum,
+/// and the legacy enum never had Nintendo at all), numeric id as fallback.
+function store_slug(array $ext): ?string {
+    $name = strtolower(external_source_name($ext));
+    if ($name !== '') {
+        // Twitch FIRST — "Twitch" contains "itch", and Twitch directory
+        // links are not a store (live-data bug, v8).
+        if (str_contains($name, 'twitch'))      return null;
+        if (str_contains($name, 'steam'))       return 'steam';
+        if (str_contains($name, 'playstation')) return 'playstation';
+        if (str_contains($name, 'xbox') || str_contains($name, 'microsoft')) return 'xbox';
+        if (str_contains($name, 'nintendo') || str_contains($name, 'eshop')) return 'nintendo';
+        if (str_contains($name, 'gog'))         return 'gog';
+        if (str_contains($name, 'epic'))        return 'epicgames';
+        if (str_contains($name, 'itch'))        return 'itch';
+        return null;
+    }
+    return match (external_source_id($ext)) {
+        1  => 'steam',
+        5  => 'gog',
+        26 => 'epicgames',
+        30 => 'itch',
+        11, 31 => 'xbox',
+        36 => 'playstation',
+        default => null,
+    };
+}
+
+/// Per-store URLs for the card's clickable platform chips. First seen wins;
+/// Steam composed from the appid when IGDB carries no URL. https only.
+function extract_stores(array $externals, ?int $steamAppid): array {
+    $stores = [];
+    foreach ($externals as $ext) {
+        if (!is_array($ext)) continue;
+        $slug = store_slug($ext);
+        if ($slug === null || isset($stores[$slug])) continue;
+        $url = $ext['url'] ?? null;
+        if (is_string($url) && preg_match('#^https://#i', $url)) {
+            $stores[$slug] = mb_substr($url, 0, 300);
+        }
+    }
+    if (!isset($stores['steam']) && $steamAppid !== null) {
+        $stores['steam'] = "https://store.steampowered.com/app/$steamAppid";
+    }
+    return $stores;
+}
+
+/// Console chips should still be clickable when IGDB carries no direct
+/// store entry (its eShop/PS/Xbox coverage is spotty — live-verified:
+/// Zelda TOTK has NO eShop external). Fall back to the store's own SEARCH
+/// page for the game — honest and useful, never a fabricated product URL.
+/// Only for platforms the game is actually on.
+function store_search_fallbacks(string $name, array $platforms, array $stores): array {
+    if ($name === '') return $stores;
+    $n = rawurlencode($name);
+    $fallbacks = [
+        'playstation' => "https://store.playstation.com/en-us/search/$n",
+        'xbox'        => "https://www.xbox.com/en-us/search/results/games?q=$n",
+        'nintendo'    => "https://www.nintendo.com/us/search/#q=$n",
+    ];
+    foreach ($fallbacks as $slug => $url) {
+        if (!isset($stores[$slug]) && in_array($slug, $platforms, true)) {
+            $stores[$slug] = $url;
+        }
+    }
+    return $stores;
+}
+
+/// Resolve a link "kind" from a company website row (expanded `type`
+/// reference {id, type}; legacy numeric `category` as fallback).
+function website_kind(array $w): ?string {
+    $t = $w['type'] ?? null;
+    if (is_array($t)) {
+        $kind = WEBSITE_KINDS[(int)($t['id'] ?? 0)] ?? null;
+        if ($kind !== null) return $kind;
+        $name = strtolower(trim((string)($t['type'] ?? '')));
+        if ($name !== '' && in_array($name, WEBSITE_KINDS, true)) return $name;
+    } elseif (is_int($t) || (is_string($t) && ctype_digit($t))) {
+        $kind = WEBSITE_KINDS[(int)$t] ?? null;
+        if ($kind !== null) return $kind;
+    }
+    return WEBSITE_KINDS[(int)($w['category'] ?? 0)] ?? null;
+}
+
+/// Extract dev/publisher credits from IGDB involved_companies — DEDUPED by
+/// company name (a company that both develops and publishes appears ONCE
+/// with role "devpub", not twice — looking at you, Valve). Logos cached as
+/// PNG (alpha kept), links deduped by URL.
+function extract_companies(array $involved): array {
+    $byName = [];
+    foreach ($involved as $ic) {
+        if (!is_array($ic)) continue;
+        $co = $ic['company'] ?? null;
+        if (!is_array($co) || empty($co['name'])) continue;
+        $isDev = !empty($ic['developer']);
+        $isPub = !empty($ic['publisher']);
+        if (!$isDev && !$isPub) continue; // skip porting/supporting-only
+        $name = mb_substr((string)$co['name'], 0, 80);
+        $key = mb_strtolower($name);
+
+        if (!isset($byName[$key])) {
+            $logoUrl = null;
+            if (!empty($co['logo']['image_id']) && is_string($co['logo']['image_id'])) {
+                $logoUrl = cached_image($co['logo']['image_id'], 't_logo_med', 'png');
+            }
+            $links = [];
+            $seenKinds = [];
+            foreach (($co['websites'] ?? []) as $w) {
+                if (!is_array($w) || empty($w['url']) || !is_string($w['url'])) continue;
+                $kind = website_kind($w);
+                if ($kind === null) continue;
+                if (!preg_match('#^https?://#i', $w['url'])) continue;
+                // ONE link per kind — IGDB often lists near-duplicate URLs
+                // (http/https, trailing slash) which rendered as twin globes.
+                if (isset($seenKinds[$kind])) continue;
+                $seenKinds[$kind] = true;
+                $links[] = ['kind' => $kind, 'url' => mb_substr($w['url'], 0, 300)];
+                if (count($links) >= 8) break;
+            }
+            $entry = ['name' => $name, 'dev' => false, 'pub' => false];
+            if ($logoUrl !== null) $entry['logo'] = $logoUrl;
+            if ($links) $entry['links'] = $links;
+            $byName[$key] = $entry;
+        }
+        if ($isDev) $byName[$key]['dev'] = true;
+        if ($isPub) $byName[$key]['pub'] = true;
+    }
+
+    $companies = [];
+    foreach ($byName as $c) {
+        $role = $c['dev'] && $c['pub'] ? 'devpub' : ($c['dev'] ? 'dev' : 'pub');
+        $entry = ['name' => $c['name'], 'role' => $role];
+        if (!empty($c['logo']))  $entry['logo'] = $c['logo'];
+        if (!empty($c['links'])) $entry['links'] = $c['links'];
+        $companies[] = $entry;
+        if (count($companies) >= 6) break; // credit a handful, not a phone book
+    }
+    // Developers first, then dev+pub, then publishers.
+    $rank = ['dev' => 0, 'devpub' => 1, 'pub' => 2];
+    usort($companies, fn($a, $b) => $rank[$a['role']] <=> $rank[$b['role']]);
+    return $companies;
+}
+
+/// Full card payload from a game_details row (or the equivalent synthetic
+/// array on the fetch path — single source of truth for the JSON shape).
+function details_row_to_json(?array $row): ?array {
+    if ($row === null) return null;
+    $platforms = json_decode((string)($row['platforms'] ?? '[]'), true);
+    $companies = json_decode((string)($row['companies'] ?? '[]'), true);
+    $stores    = json_decode((string)($row['stores'] ?? '{}'), true);
+    $genres = json_decode((string)($row['genres'] ?? '[]'), true);
+    $out = [];
+    // Landscape key art (IGDB artworks, t_720p) — the card's hero image.
+    $art = cached_image($row['artwork'] ?? null, 't_720p');
+    if ($art !== null) $out['artwork'] = $art;
+    if (!empty($row['description'])) $out['description'] = (string)$row['description'];
+    if (is_array($genres) && $genres) $out['genres'] = array_values($genres);
+    if (!empty($row['req_min']))     $out['req_min'] = (string)$row['req_min'];
+    if (!empty($row['req_rec']))     $out['req_rec'] = (string)$row['req_rec'];
+    if (is_array($platforms) && $platforms) $out['platforms'] = array_values($platforms);
+    if ($row['metacritic'] !== null) $out['metacritic'] = (int)$row['metacritic'];
+    if (!empty($row['release_date'])) $out['release_date'] = (string)$row['release_date'];
+    if ($row['achievements'] !== null) $out['achievements'] = (int)$row['achievements'];
+    if (is_array($companies) && $companies) $out['companies'] = $companies;
+    if (!empty($row['legal'])) $out['legal'] = (string)$row['legal'];
+    if (is_array($stores) && $stores) $out['stores'] = $stores;
+    return $out ?: null;
+}
+
+function emit(array|string $payload): void {
+    echo json_encode($payload, JSON_INVALID_UTF8_SUBSTITUTE);
     exit;
 }
-// Normalized cache key: case/whitespace variants share one entry.
-$qkey = mb_strtolower(preg_replace('/\s+/', ' ', $q));
 
 $pdo = db();
+$now = time();
+
+// ═══ MODE B: ?id= — card details for ONE game, fetched on pick. ═══
+$idParam = trim((string)($_GET['id'] ?? ''));
+if ($idParam !== '') {
+    if (!ctype_digit($idParam)) emit(['id' => 0, 'details' => null]);
+    $gameId = (int)$idParam;
+
+    // 1. Serve from OUR database when fresh and same schema version.
+    $stmt = $pdo->prepare('SELECT * FROM game_details WHERE id = ?');
+    $stmt->execute([$gameId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($row && (int)$row['ver'] === SEARCH_VER
+            && (int)$row['fetched_at'] > $now - SEARCH_TTL) {
+        emit(['id' => $gameId, 'details' => details_row_to_json($row)]);
+    }
+
+    // 2. Miss → ONE IGDB query for this game + ONE Steam query.
+    $games = igdb_query('games',
+        'fields name,summary,genres.name,platforms.name,artworks.image_id,'
+        . 'external_games.category,external_games.uid,external_games.url,'
+        . 'external_games.external_game_source.name,'
+        . 'involved_companies.developer,involved_companies.publisher,'
+        . 'involved_companies.company.name,'
+        . 'involved_companies.company.logo.image_id,'
+        . 'involved_companies.company.websites.category,'
+        . 'involved_companies.company.websites.type.type,'
+        . 'involved_companies.company.websites.url; '
+        . "where id = $gameId; limit 1;"
+    );
+    if ($games === null) fail(502, 'igdb_query_failed');
+    $g = $games[0] ?? null;
+    if (!is_array($g)) emit(['id' => $gameId, 'details' => null]);
+
+    $externals = array_filter(($g['external_games'] ?? []), 'is_array');
+    $steamAppid = null;
+    foreach ($externals as $ext) {
+        if (store_slug($ext) === 'steam'
+                && !empty($ext['uid']) && ctype_digit((string)$ext['uid'])) {
+            $steamAppid = (int)$ext['uid'];
+            break;
+        }
+    }
+    $steam = $steamAppid !== null ? steam_details($steamAppid) : [];
+
+    $igdbPlatforms = [];
+    foreach (($g['platforms'] ?? []) as $p) {
+        if (is_array($p) && !empty($p['name'])) $igdbPlatforms[] = (string)$p['name'];
+    }
+    $platforms = platform_slugs($steam, $igdbPlatforms);
+    $stores = store_search_fallbacks(
+        (string)($g['name'] ?? ''),
+        $platforms,
+        extract_stores($externals, $steamAppid),
+    );
+    $companies = extract_companies($g['involved_companies'] ?? []);
+
+    $artworkId = null;
+    foreach (($g['artworks'] ?? []) as $aw) {
+        if (is_array($aw) && !empty($aw['image_id']) && is_string($aw['image_id'])) {
+            $artworkId = $aw['image_id'];
+            break;
+        }
+    }
+
+    $summary = isset($g['summary']) ? mb_substr((string)$g['summary'], 0, 1000) : null;
+    $description = $steam['description'] ?? $summary;
+    $genres = [];
+    foreach (($g['genres'] ?? []) as $gen) {
+        if (is_array($gen) && !empty($gen['name'])) $genres[] = (string)$gen['name'];
+        if (count($genres) >= 4) break;
+    }
+
+    $pdo->prepare('INSERT INTO game_details
+        (id, steam_appid, description, req_min, req_rec, platforms, metacritic,
+         release_date, achievements, companies, artwork, legal, stores, genres, ver, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            steam_appid=excluded.steam_appid, description=excluded.description,
+            req_min=excluded.req_min, req_rec=excluded.req_rec,
+            platforms=excluded.platforms, metacritic=excluded.metacritic,
+            release_date=excluded.release_date, achievements=excluded.achievements,
+            companies=excluded.companies, artwork=excluded.artwork,
+            legal=excluded.legal, stores=excluded.stores,
+            genres=excluded.genres, ver=excluded.ver, fetched_at=excluded.fetched_at')
+        ->execute([
+            $gameId,
+            $steamAppid,
+            $description,
+            $steam['req_min'] ?? null,
+            $steam['req_rec'] ?? null,
+            json_encode($platforms),
+            $steam['metacritic'] ?? null,
+            $steam['release_date'] ?? null,
+            $steam['achievements'] ?? null,
+            json_encode($companies),
+            $artworkId,
+            $steam['legal'] ?? null,
+            json_encode($stores),
+            json_encode($genres),
+            SEARCH_VER,
+            $now,
+        ]);
+
+    emit(['id' => $gameId, 'details' => details_row_to_json([
+        'description'  => $description,
+        'req_min'      => $steam['req_min'] ?? null,
+        'req_rec'      => $steam['req_rec'] ?? null,
+        'platforms'    => json_encode($platforms),
+        'metacritic'   => $steam['metacritic'] ?? null,
+        'release_date' => $steam['release_date'] ?? null,
+        'achievements' => $steam['achievements'] ?? null,
+        'companies'    => json_encode($companies),
+        'artwork'      => $artworkId,
+        'legal'        => $steam['legal'] ?? null,
+        'stores'       => json_encode($stores),
+        'genres'       => json_encode($genres),
+    ])]);
+}
+
+// ═══ MODE A: ?q= — fast search, basic rows only. ═══
+$q = trim((string)($_GET['q'] ?? ''));
+if ($q === '' || mb_strlen($q) > 100) {
+    emit([]);
+}
+// Normalized cache key: case/whitespace variants share one entry.
+$qkey = mb_strtolower(preg_replace('/\s+/u', ' ', $q));
+
+// Search rows carry EXACTLY what the picker renders: name, year, type
+// badge, cover thumbnail. Nothing else rides the search path (v8).
+function game_row_to_json(array $row): array {
+    return [
+        'id'    => (int)$row['id'],
+        'name'  => (string)$row['name'],
+        'year'  => $row['year'] !== null ? (int)$row['year'] : null,
+        'type'  => $row['type'] !== null && $row['type'] !== '' ? (string)$row['type'] : null,
+        'cover' => cached_image($row['cover_image_id'] ?? null),
+    ];
+}
 
 // ── 1. Serve from OUR database when we've seen this search before. ──
 $stmt = $pdo->prepare('SELECT game_ids, fetched_at, ver FROM searches WHERE q = ?');
 $stmt->execute([$qkey]);
 $hit = $stmt->fetch(PDO::FETCH_ASSOC);
 if ($hit && (int)$hit['ver'] === SEARCH_VER
-        && (int)$hit['fetched_at'] > time() - SEARCH_TTL) {
+        && (int)$hit['fetched_at'] > $now - SEARCH_TTL) {
     $ids = json_decode((string)$hit['game_ids'], true) ?: [];
     $out = [];
     if ($ids) {
@@ -181,28 +712,22 @@ if ($hit && (int)$hit['ver'] === SEARCH_VER
             $byId[(int)$row['id']] = $row;
         }
         foreach ($ids as $id) { // preserve IGDB's relevance order
-            if (isset($byId[(int)$id])) $out[] = game_row_to_json($byId[(int)$id]);
+            if (isset($byId[(int)$id])) {
+                $out[] = game_row_to_json($byId[(int)$id]);
+            }
         }
     }
-    echo json_encode($out);
-    exit;
+    emit($out);
 }
 
-// ── 2. Cache miss → ONE IGDB query, then persist everything. ──
-$token = app_token();
+// ── 2. Cache miss → ONE IGDB query (exactly the picker's fields), persist. ──
 $body = 'search "' . str_replace(['\\', '"'], ['\\\\', '\\"'], $q) . '"; '
-      . 'fields name,cover.image_id,first_release_date,game_type.type,category,genres.name,total_rating,summary; '
+      . 'fields name,cover.image_id,first_release_date,game_type.type,category; '
       . 'limit 12;';
-$resp = curl_req('https://api.igdb.com/v4/games', [
-    'Client-ID: ' . IGDB_CLIENT_ID,
-    'Authorization: Bearer ' . $token,
-    'Accept: application/json',
-], $body);
-if ($resp === null) fail(502, 'igdb_query_failed');
-$games = json_decode($resp, true);
-if (!is_array($games)) fail(502, 'igdb_bad_response');
+$games = igdb_query('games', $body);
+if ($games === null) fail(502, 'igdb_query_failed');
 
-$upsert = $pdo->prepare('INSERT INTO games (id, name, year, type, cover_image_id, genres, rating, summary, fetched_at)
+$upsertGame = $pdo->prepare('INSERT INTO games (id, name, year, type, cover_image_id, genres, rating, summary, fetched_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
         name=excluded.name, year=excluded.year, type=excluded.type,
@@ -212,7 +737,6 @@ $upsert = $pdo->prepare('INSERT INTO games (id, name, year, type, cover_image_id
 
 $out = [];
 $ids = [];
-$now = time();
 foreach ($games as $g) {
     if (!is_array($g) || empty($g['name']) || empty($g['id'])) continue;
     $id = (int)$g['id'];
@@ -225,28 +749,20 @@ foreach ($games as $g) {
         $type = GAME_TYPES[(int)$g['category']] ?? null;
     }
     $imageId = $g['cover']['image_id'] ?? null;
-    $genres = [];
-    foreach (($g['genres'] ?? []) as $gen) {
-        if (!empty($gen['name'])) $genres[] = (string)$gen['name'];
-    }
-    $rating = isset($g['total_rating']) ? (int)round((float)$g['total_rating']) : null;
-    $summary = isset($g['summary']) ? mb_substr((string)$g['summary'], 0, 1000) : null;
 
-    $upsert->execute([
+    $upsertGame->execute([
         $id, (string)$g['name'], $year, $type,
         is_string($imageId) ? $imageId : null,
-        json_encode($genres), $rating, $summary, $now,
+        '[]', null, null, $now,
     ]);
+
     $ids[] = $id;
     $out[] = [
-        'id'      => $id,
-        'name'    => (string)$g['name'],
-        'year'    => $year,
-        'type'    => $type,
-        'cover'   => cached_cover(is_string($imageId) ? $imageId : null),
-        'genres'  => $genres,
-        'rating'  => $rating,
-        'summary' => $summary,
+        'id'    => $id,
+        'name'  => (string)$g['name'],
+        'year'  => $year,
+        'type'  => $type,
+        'cover' => cached_image(is_string($imageId) ? $imageId : null),
     ];
 }
 
@@ -254,4 +770,4 @@ $pdo->prepare('INSERT INTO searches (q, game_ids, fetched_at, ver) VALUES (?, ?,
     ON CONFLICT(q) DO UPDATE SET game_ids=excluded.game_ids, fetched_at=excluded.fetched_at, ver=excluded.ver')
     ->execute([$qkey, json_encode($ids), $now, SEARCH_VER]);
 
-echo json_encode($out);
+emit($out);

@@ -6,16 +6,28 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `decode_asset_bundle`, `encode_asset_bundle`, `make_asset`
+// These functions are ignored because they are not marked as `pub`: `decode_asset_bundle`, `encode_asset_bundle`, `fetch_cdn_image`, `make_asset`
 
 /// Search IGDB via the website's write-through cache. Authoring-time only.
 Future<List<GameSearchResult>> showcaseGameSearch({required String query}) =>
     RustLib.instance.api.crateApiShowcaseShowcaseGameSearch(query: query);
 
-/// Download a game cover FROM OUR CDN (authoring-time only) and process it
-/// into a content-addressed showcase asset.
+/// Fetch card details for ONE game (authoring-time, on pick). Returns None
+/// when the endpoint has nothing for this game.
+Future<GameCardDetails?> showcaseGameDetails({required PlatformInt64 gameId}) =>
+    RustLib.instance.api.crateApiShowcaseShowcaseGameDetails(gameId: gameId);
+
+/// Download a game cover / company logo FROM OUR CDN (authoring-time only)
+/// and process it into a content-addressed showcase asset (≤400px lossy
+/// WebP — alpha survives, so transparent logos stay transparent).
 Future<ShowcaseAsset> showcaseFetchCover({required String url}) =>
     RustLib.instance.api.crateApiShowcaseShowcaseFetchCover(url: url);
+
+/// Download landscape key art FROM OUR CDN (authoring-time only). Processed
+/// at the artwork budget (≤800px lossy WebP) — it's the card's hero image,
+/// so the cover's 400px thumbnail cap would visibly blur it.
+Future<ShowcaseAsset> showcaseFetchKeyArt({required String url}) =>
+    RustLib.instance.api.crateApiShowcaseShowcaseFetchKeyArt(url: url);
 
 /// Process user-picked artwork (image or GIF) into a showcase asset.
 Future<ShowcaseAsset> processShowcaseArtwork({required List<int> rawBytes}) =>
@@ -27,6 +39,41 @@ Future<ShowcaseAsset> processShowcaseArtwork({required List<int> rawBytes}) =>
 Future<List<ShowcaseAsset>> getShowcaseAssets({required String peerId}) =>
     RustLib.instance.api.crateApiShowcaseGetShowcaseAssets(peerId: peerId);
 
+/// Card details for ONE picked game (?id= mode). [details_json] is the
+/// endpoint's `details` object verbatim (description, requirements,
+/// platforms, metacritic, release date, achievements, deduped dev/publisher
+/// credits with logo URLs + social links, copyright, store links, key-art
+/// URL) — baked into the block at authoring so a viewer fetches NOTHING.
+/// [logo_urls]/[artwork_url] are surfaced (CDN-filtered) so the composer can
+/// fetch + bundle the images and rewrite the baked JSON to asset hashes.
+class GameCardDetails {
+  final String detailsJson;
+  final List<String> logoUrls;
+  final String? artworkUrl;
+
+  const GameCardDetails({
+    required this.detailsJson,
+    required this.logoUrls,
+    this.artworkUrl,
+  });
+
+  @override
+  int get hashCode =>
+      detailsJson.hashCode ^ logoUrls.hashCode ^ artworkUrl.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is GameCardDetails &&
+          runtimeType == other.runtimeType &&
+          detailsJson == other.detailsJson &&
+          logoUrls == other.logoUrls &&
+          artworkUrl == other.artworkUrl;
+}
+
+/// One row of the FAST search response (?q=) — basics only. Card details
+/// are fetched separately via [showcase_game_details] when the user actually
+/// picks a game (one pick = one enrichment request; searching stays instant).
 class GameSearchResult {
   final PlatformInt64 id;
   final String name;

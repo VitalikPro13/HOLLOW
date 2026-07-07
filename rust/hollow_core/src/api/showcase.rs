@@ -18,6 +18,11 @@ use super::storage::get_store;
 const ENDPOINT_BASE: &str = "https://hollow.anonlisten.com/igdb";
 /// Covers must come from here and nowhere else.
 const COVER_BASE: &str = "https://hollow.anonlisten.com/igdb/covers/";
+/// Endpoint response-schema version (keep in sync with SEARCH_VER in
+/// search.php). Sent as a `v` query param — the endpoint ignores it, but it
+/// changes the URL on every schema bump so CDN-cached responses from older
+/// versions can never be served to a newer client.
+const ENDPOINT_SCHEMA_VER: &str = "9";
 
 /// One processed showcase image, content-addressed by its hash. The board
 /// JSON references assets by [hash]; the bytes replicate in the profile's
@@ -27,6 +32,9 @@ pub struct ShowcaseAsset {
     pub bytes: Vec<u8>,
 }
 
+/// One row of the FAST search response (?q=) — basics only. Card details
+/// are fetched separately via [showcase_game_details] when the user actually
+/// picks a game (one pick = one enrichment request; searching stays instant).
 pub struct GameSearchResult {
     pub id: i64,
     pub name: String,
@@ -34,6 +42,19 @@ pub struct GameSearchResult {
     /// "Main Game" / "Mod" / "DLC" / "Update" / … (endpoint-mapped IGDB category).
     pub game_type: Option<String>,
     pub cover_url: Option<String>,
+}
+
+/// Card details for ONE picked game (?id= mode). [details_json] is the
+/// endpoint's `details` object verbatim (description, requirements,
+/// platforms, metacritic, release date, achievements, deduped dev/publisher
+/// credits with logo URLs + social links, copyright, store links, key-art
+/// URL) — baked into the block at authoring so a viewer fetches NOTHING.
+/// [logo_urls]/[artwork_url] are surfaced (CDN-filtered) so the composer can
+/// fetch + bundle the images and rewrite the baked JSON to asset hashes.
+pub struct GameCardDetails {
+    pub details_json: String,
+    pub logo_urls: Vec<String>,
+    pub artwork_url: Option<String>,
 }
 
 fn make_asset(bytes: Vec<u8>) -> ShowcaseAsset {
@@ -53,7 +74,7 @@ pub fn showcase_game_search(query: String) -> Result<Vec<GameSearchResult>, Stri
         let client = reqwest::Client::new();
         let resp = client
             .get(format!("{ENDPOINT_BASE}/search.php"))
-            .query(&[("q", q.as_str())])
+            .query(&[("q", q.as_str()), ("v", ENDPOINT_SCHEMA_VER)])
             .timeout(std::time::Duration::from_secs(20))
             .send()
             .await
@@ -87,35 +108,109 @@ pub fn showcase_game_search(query: String) -> Result<Vec<GameSearchResult>, Stri
     })
 }
 
-/// Download a game cover FROM OUR CDN (authoring-time only) and process it
-/// into a content-addressed showcase asset.
+/// Fetch card details for ONE game (authoring-time, on pick). Returns None
+/// when the endpoint has nothing for this game.
 #[frb]
-pub fn showcase_fetch_cover(url: String) -> Result<ShowcaseAsset, String> {
-    if !url.starts_with(COVER_BASE) {
-        return Err("Cover URL is not on the Hollow CDN".into());
+pub fn showcase_game_details(game_id: i64) -> Result<Option<GameCardDetails>, String> {
+    if game_id <= 0 {
+        return Ok(None);
     }
     let rt = get_runtime();
-    let raw = rt.block_on(async move {
+    rt.block_on(async move {
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{ENDPOINT_BASE}/search.php"))
+            .query(&[
+                ("id", game_id.to_string().as_str()),
+                ("v", ENDPOINT_SCHEMA_VER),
+            ])
+            .timeout(std::time::Duration::from_secs(25))
+            .send()
+            .await
+            .map_err(|e| format!("Game details failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("Game details failed: HTTP {}", resp.status()));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Game details returned invalid JSON: {e}"))?;
+        let Some(details) = body.get("details").filter(|d| d.is_object()) else {
+            return Ok(None);
+        };
+        // Image URLs surfaced for the composer; any non-CDN URL is dropped
+        // (this can never become a generic fetcher).
+        let logo_urls: Vec<String> = details
+            .get("companies")
+            .and_then(|c| c.as_array())
+            .map(|cos| {
+                cos.iter()
+                    .filter_map(|co| co.get("logo").and_then(|l| l.as_str()))
+                    .filter(|u| u.starts_with(COVER_BASE))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let artwork_url = details
+            .get("artwork")
+            .and_then(|a| a.as_str())
+            .filter(|u| u.starts_with(COVER_BASE))
+            .map(String::from);
+        Ok(Some(GameCardDetails {
+            details_json: serde_json::to_string(details)
+                .map_err(|e| format!("Game details re-encode failed: {e}"))?,
+            logo_urls,
+            artwork_url,
+        }))
+    })
+}
+
+/// Download an image FROM OUR CDN (authoring-time only). The allowlist is the
+/// privacy boundary — this can never be abused as a generic fetcher.
+fn fetch_cdn_image(url: String) -> Result<Vec<u8>, String> {
+    if !url.starts_with(COVER_BASE) {
+        return Err("Image URL is not on the Hollow CDN".into());
+    }
+    let rt = get_runtime();
+    rt.block_on(async move {
         let client = reqwest::Client::new();
         let resp = client
             .get(&url)
             .timeout(std::time::Duration::from_secs(20))
             .send()
             .await
-            .map_err(|e| format!("Cover download failed: {e}"))?;
+            .map_err(|e| format!("Image download failed: {e}"))?;
         if !resp.status().is_success() {
-            return Err(format!("Cover download failed: HTTP {}", resp.status()));
+            return Err(format!("Image download failed: HTTP {}", resp.status()));
         }
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| format!("Cover download failed: {e}"))?;
+            .map_err(|e| format!("Image download failed: {e}"))?;
         if bytes.len() > 2_000_000 {
-            return Err("Cover download too large".into());
+            return Err("Image download too large".into());
         }
         Ok(bytes.to_vec())
-    })?;
+    })
+}
+
+/// Download a game cover / company logo FROM OUR CDN (authoring-time only)
+/// and process it into a content-addressed showcase asset (≤400px lossy
+/// WebP — alpha survives, so transparent logos stay transparent).
+#[frb]
+pub fn showcase_fetch_cover(url: String) -> Result<ShowcaseAsset, String> {
+    let raw = fetch_cdn_image(url)?;
     let processed = crate::node::image_convert::process_showcase_cover(&raw)?;
+    Ok(make_asset(processed))
+}
+
+/// Download landscape key art FROM OUR CDN (authoring-time only). Processed
+/// at the artwork budget (≤800px lossy WebP) — it's the card's hero image,
+/// so the cover's 400px thumbnail cap would visibly blur it.
+#[frb]
+pub fn showcase_fetch_key_art(url: String) -> Result<ShowcaseAsset, String> {
+    let raw = fetch_cdn_image(url)?;
+    let processed = crate::node::image_convert::process_showcase_artwork(&raw)?;
     Ok(make_asset(processed))
 }
 

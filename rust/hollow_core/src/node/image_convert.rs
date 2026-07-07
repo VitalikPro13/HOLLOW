@@ -712,11 +712,13 @@ pub fn process_showcase_cover(data: &[u8]) -> Result<Vec<u8>, String> {
     } else {
         img
     };
-    let mut buf = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut buf);
-    resized
-        .write_to(&mut cursor, ImageFormat::WebP)
-        .map_err(|e| format!("Failed to encode cover WebP: {e}"))?;
+    // Lossy encode (alpha survives — logos stay transparent). NEVER the
+    // `image` crate's lossless WebP here: lossless size is content-dependent,
+    // so noisy/photographic covers randomly blew the size cap and FAILED
+    // SILENTLY at authoring while flat cartoon art sailed through.
+    let rgba = resized.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), w, h, 75.0)?;
     if buf.len() > 150_000 {
         return Err("Cover too large after processing (>150KB)".into());
     }
@@ -741,11 +743,11 @@ pub fn process_showcase_artwork(data: &[u8]) -> Result<Vec<u8>, String> {
     } else {
         img
     };
-    let mut buf = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut buf);
-    resized
-        .write_to(&mut cursor, ImageFormat::WebP)
-        .map_err(|e| format!("Failed to encode artwork WebP: {e}"))?;
+    // Lossy for the same reason as covers: lossless WebP size is
+    // content-dependent and busts the cap on noisy images.
+    let rgba = resized.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), w, h, 75.0)?;
     if buf.len() > 400_000 {
         return Err("Artwork too large after processing (>400KB)".into());
     }

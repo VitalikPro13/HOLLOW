@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -41,6 +43,11 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
   /// Working asset set: existing replicated assets + anything added this
   /// session. Pruned to referenced hashes at save.
   final Map<String, Uint8List> _assets = {};
+
+  /// In-flight background bakes (cover/art/details per picked game). Blocks
+  /// appear instantly with name+year; each bake patches its block in place
+  /// when done. Save AWAITS these so nothing ships half-baked.
+  final Set<Future<BakedGame>> _pendingBakes = {};
   bool _busy = false;
 
   @override
@@ -60,6 +67,16 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
   }
 
   Future<void> _save() async {
+    // Let in-flight background bakes land first (usually already done —
+    // they run while the user composes). Their .then patches registered
+    // earlier fire before this await resumes, so the board is enriched.
+    if (_pendingBakes.isNotEmpty) {
+      setState(() => _busy = true);
+      await Future.wait(_pendingBakes.toList());
+      if (!mounted) return;
+      setState(() => _busy = false);
+    }
+
     final encoded = _board.encode();
     if (encoded.length > ShowcaseBoard.maxEncodedLength) {
       HollowToast.show(
@@ -70,8 +87,16 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
       return;
     }
     // The board is the source of truth: ship exactly the assets it
-    // references (pruning anything orphaned by removed blocks).
-    final referenced = _board.referencedAssetHashes();
+    // references (pruning anything orphaned by removed blocks). Company
+    // logos are referenced from INSIDE details assets — expand one level so
+    // they survive the prune.
+    final referenced = {..._board.referencedAssetHashes()};
+    for (final h in referenced.toList()) {
+      final bytes = _assets[h];
+      if (bytes != null) {
+        referenced.addAll(GameDetails.logoHashesFromBytes(bytes));
+      }
+    }
     final assets = [
       for (final e in _assets.entries)
         if (referenced.contains(e.key))
@@ -105,12 +130,54 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
     _assets[asset.hash] = Uint8List.fromList(asset.bytes);
   }
 
+  /// Register a background bake for a just-placed game block: when it
+  /// completes, stash its assets and patch the block in place (found by
+  /// identity — reorders keep instances, deletion just drops the patch).
+  void _trackBake(ShowcaseBlock placed, Future<BakedGame> bake) {
+    _pendingBakes.add(bake);
+    bake.then((baked) {
+      _pendingBakes.remove(bake);
+      if (!mounted) return;
+      setState(() {
+        for (final a in baked.allAssets) {
+          _stashAsset(a);
+        }
+        _patchGameBlock(placed, baked);
+      });
+    });
+  }
+
+  void _patchGameBlock(ShowcaseBlock placed, BakedGame baked) {
+    ShowcaseBlock enrich(ShowcaseBlock b) => ShowcaseBlock(type: b.type, data: {
+          ...b.data,
+          if (baked.cover != null) 'cover': baked.cover!.hash,
+          if (baked.art != null) 'art': baked.art!.hash,
+          if (baked.detailsAsset != null) 'details': baked.detailsAsset!.hash,
+        });
+    final li = _board.left.indexOf(placed);
+    if (li >= 0) {
+      final next = [..._board.left];
+      next[li] = enrich(placed);
+      _board = _board.copyWith(left: next);
+      return;
+    }
+    final ri = _board.right.indexOf(placed);
+    if (ri >= 0) {
+      final next = [..._board.right];
+      next[ri] = enrich(placed);
+      _board = _board.copyWith(right: next);
+    }
+    // Block deleted meanwhile → nothing to patch; orphaned assets are
+    // pruned at save.
+  }
+
   /// The full add-block flow for one side: picker → type-specific editor.
   Future<void> _addBlockTo({required bool left}) async {
     final type = await _showBlockPicker(context);
     if (type == null || !mounted) return;
 
     ShowcaseBlock? block;
+    Future<BakedGame>? pendingBake;
     switch (type) {
       case ShowcaseBlockType.text:
         block = await showTextBlockEditor(context);
@@ -119,6 +186,9 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
       case ShowcaseBlockType.favoriteGame:
         final game = await showGamePickerDialog(context);
         if (game == null || !mounted) break;
+        // Enrichment starts NOW and downloads while the user types their
+        // blurb; the block lands instantly and gets patched when ready.
+        pendingBake = bakeGame(game);
         String blurb = '';
         if (type == ShowcaseBlockType.favoriteGame) {
           blurb = (await _promptText(
@@ -130,10 +200,8 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
               '';
           if (!mounted) break;
         }
-        if (game.asset != null) _stashAsset(game.asset!);
         block = ShowcaseBlock(type: type, data: {
           'name': game.name,
-          if (game.asset != null) 'cover': game.asset!.hash,
           if (game.year != null) 'year': game.year,
           if (blurb.isNotEmpty) 'blurb': blurb,
         });
@@ -162,6 +230,7 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
           ? _board.copyWith(left: [..._board.left, block!])
           : _board.copyWith(right: [..._board.right, block!]);
     });
+    if (pendingBake != null) _trackBake(block, pendingBake);
   }
 
   Future<ShowcaseBlock?> _pickArtwork() async {
@@ -213,6 +282,7 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
     final block = side[index];
 
     ShowcaseBlock? edited;
+    Future<BakedGame>? pendingBake;
     switch (block.type) {
       case ShowcaseBlockType.text:
         edited = await showTextBlockEditor(context, existing: block);
@@ -220,16 +290,17 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
       case ShowcaseBlockType.nowPlaying:
         final game = await showGamePickerDialog(context);
         if (game == null) break;
-        if (game.asset != null) _stashAsset(game.asset!);
+        pendingBake = bakeGame(game);
         edited = ShowcaseBlock(type: block.type, data: {
           'name': game.name,
-          if (game.asset != null) 'cover': game.asset!.hash,
           if (game.year != null) 'year': game.year,
         });
 
       case ShowcaseBlockType.favoriteGame:
         final game = await showGamePickerDialog(context);
         if (game == null || !mounted) break;
+        // Bake in parallel with the blurb prompt.
+        pendingBake = bakeGame(game);
         final blurb = (await _promptText(
               context,
               title: 'Why this game?',
@@ -238,10 +309,8 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
               initial: block.gameBlurb,
             )) ??
             block.gameBlurb;
-        if (game.asset != null) _stashAsset(game.asset!);
         edited = ShowcaseBlock(type: block.type, data: {
           'name': game.name,
-          if (game.asset != null) 'cover': game.asset!.hash,
           if (game.year != null) 'year': game.year,
           if (blurb.isNotEmpty) 'blurb': blurb,
         });
@@ -285,6 +354,7 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
           ? _board.copyWith(left: next)
           : _board.copyWith(right: next);
     });
+    if (pendingBake != null) _trackBake(edited, pendingBake);
   }
 
   @override
@@ -628,12 +698,120 @@ Widget _pickerOption(BuildContext ctx, ShowcaseBlockType type, String title,
 
 // ── Game picker (IGDB search via the website's cached endpoint) ───────
 
+/// The instant result of tapping a search row — basics only, so the picker
+/// closes with ZERO latency. Everything heavier (cover, key art, details,
+/// logos) is baked in the background via [bakeGame] and patched into the
+/// placed block when ready.
 class PickedGame {
+  final int id;
   final String name;
   final int? year;
-  final showcase_api.ShowcaseAsset? asset;
+  final String? coverUrl;
 
-  const PickedGame({required this.name, this.year, this.asset});
+  const PickedGame({
+    required this.id,
+    required this.name,
+    this.year,
+    this.coverUrl,
+  });
+}
+
+/// Everything fetched for one picked game. Baked in the BACKGROUND after
+/// the picker closes; every stage is best-effort, so the future NEVER
+/// throws — a failed stage just leaves its field null.
+class BakedGame {
+  final showcase_api.ShowcaseAsset? cover;
+
+  /// Landscape key art — the card's hero image.
+  final showcase_api.ShowcaseAsset? art;
+
+  /// The details JSON as a content-addressed bundle asset. Company logo
+  /// URLs inside are already rewritten to asset hashes ([logoAssets]).
+  final showcase_api.ShowcaseAsset? detailsAsset;
+  final List<showcase_api.ShowcaseAsset> logoAssets;
+
+  const BakedGame({
+    this.cover,
+    this.art,
+    this.detailsAsset,
+    this.logoAssets = const [],
+  });
+
+  Iterable<showcase_api.ShowcaseAsset> get allAssets sync* {
+    if (cover != null) yield cover!;
+    if (art != null) yield art!;
+    if (detailsAsset != null) yield detailsAsset!;
+    yield* logoAssets;
+  }
+}
+
+/// Fetch + content-address everything a game block replicates: cover, key
+/// art, the details JSON, company logos. Called right after the picker pops
+/// (it downloads while the user types their blurb); callers patch the placed
+/// block when it completes. All CDN-only fetches; never throws.
+Future<BakedGame> bakeGame(PickedGame game) async {
+  showcase_api.ShowcaseAsset? cover;
+  if (game.coverUrl != null) {
+    try {
+      cover = await showcase_api.showcaseFetchCover(url: game.coverUrl!);
+    } catch (_) {}
+  }
+
+  showcase_api.ShowcaseAsset? art;
+  showcase_api.ShowcaseAsset? detailsAsset;
+  final logoAssets = <showcase_api.ShowcaseAsset>[];
+  try {
+    final card = await showcase_api.showcaseGameDetails(gameId: game.id);
+    if (card != null) {
+      final decoded = jsonDecode(card.detailsJson);
+      if (decoded is Map<String, dynamic>) {
+        final details = decoded;
+
+        // Key art rides the block as its own asset (`data['art']`) —
+        // never bake a remote URL into replicated data.
+        details.remove('artwork');
+        if (card.artworkUrl != null) {
+          try {
+            art = await showcase_api.showcaseFetchKeyArt(url: card.artworkUrl!);
+          } catch (_) {}
+        }
+
+        // Company logos: CDN URL → content-addressed asset hash.
+        final companies = details['companies'];
+        if (companies is List) {
+          for (final co in companies) {
+            if (co is! Map) continue;
+            final logoUrl = co['logo'];
+            if (logoUrl is! String || logoUrl.isEmpty) continue;
+            try {
+              final asset = await showcase_api.showcaseFetchCover(url: logoUrl);
+              logoAssets.add(asset);
+              co['logo'] = asset.hash;
+            } catch (_) {
+              co.remove('logo'); // credit still shows name + links
+            }
+          }
+        }
+
+        // The details JSON itself becomes a content-addressed bundle
+        // asset — the block stores just the hash, keeping the board tiny.
+        final bytes = Uint8List.fromList(utf8.encode(jsonEncode(details)));
+        detailsAsset = showcase_api.ShowcaseAsset(
+          hash: sha256.convert(bytes).toString(),
+          bytes: bytes,
+        );
+      }
+    }
+  } catch (_) {
+    // Enrichment is best-effort — the game stays usable as name+cover.
+  }
+
+  return BakedGame(
+    cover: cover,
+    art: art,
+    detailsAsset: detailsAsset,
+    logoAssets: logoAssets,
+  );
 }
 
 Future<PickedGame?> showGamePickerDialog(BuildContext context) {
@@ -655,7 +833,6 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
   Timer? _debounce;
   List<showcase_api.GameSearchResult> _results = const [];
   bool _searching = false;
-  bool _fetching = false;
   String? _error;
 
   @override
@@ -689,27 +866,15 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
     }
   }
 
-  Future<void> _pick(showcase_api.GameSearchResult game) async {
-    if (_fetching) return;
-    final year = game.year;
-    if (game.coverUrl == null) {
-      Navigator.of(context)
-          .pop(PickedGame(name: game.name, year: year));
-      return;
-    }
-    setState(() => _fetching = true);
-    try {
-      final asset =
-          await showcase_api.showcaseFetchCover(url: game.coverUrl!);
-      if (!mounted) return;
-      Navigator.of(context)
-          .pop(PickedGame(name: game.name, year: year, asset: asset));
-    } catch (_) {
-      if (!mounted) return;
-      // Cover fetch failed — still usable without art.
-      Navigator.of(context)
-          .pop(PickedGame(name: game.name, year: year));
-    }
+  /// Instant: the heavy enrichment happens in the BACKGROUND after the
+  /// picker closes (see [bakeGame]) — no spinner between tap and editor.
+  void _pick(showcase_api.GameSearchResult game) {
+    Navigator.of(context).pop(PickedGame(
+      id: game.id,
+      name: game.name,
+      year: game.year,
+      coverUrl: game.coverUrl,
+    ));
   }
 
   @override
@@ -728,7 +893,7 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
             onChanged: _onQueryChanged,
           ),
           const SizedBox(height: HollowSpacing.sm),
-          if (_searching || _fetching)
+          if (_searching)
             const Padding(
               padding: EdgeInsets.all(HollowSpacing.lg),
               child: Center(
@@ -899,10 +1064,15 @@ class _ShelfEditorDialog extends StatefulWidget {
 class _ShelfEditorDialogState extends State<_ShelfEditorDialog> {
   late final TextEditingController _labelController;
 
-  /// `{name, cover?}` maps — prefilled from an existing block; new picks
-  /// append here and their bytes to [_newAssets].
+  /// `{name, cover?, year?, details?}` maps — prefilled from an existing
+  /// block; new picks append here and their bytes to [_newAssets].
   late final List<Map<String, dynamic>> _games;
   final List<showcase_api.ShowcaseAsset> _newAssets = [];
+
+  /// In-flight background bakes; games land instantly (name+year) and each
+  /// map is patched in place when its bake completes. Save awaits these.
+  final Set<Future<BakedGame>> _pendingBakes = {};
+  bool _saving = false;
 
   @override
   void initState() {
@@ -921,15 +1091,47 @@ class _ShelfEditorDialogState extends State<_ShelfEditorDialog> {
   Future<void> _addGame() async {
     final game = await showGamePickerDialog(context);
     if (game == null || !mounted) return;
-    if (game.asset != null) _newAssets.add(game.asset!);
-    setState(() => _games.add({
-          'name': game.name,
-          if (game.asset != null) 'cover': game.asset!.hash,
-        }));
+    // Land instantly; the bake patches this map in place (the map keeps its
+    // identity through reorders). Shelf entries carry the FULL card payload
+    // — details, logos AND key art — so a shelf tap opens the exact same
+    // card as a game block. The save-time 1.4MB bundle check is the budget
+    // backstop for very art-heavy shelves.
+    final map = <String, dynamic>{
+      'name': game.name,
+      if (game.year != null) 'year': game.year,
+    };
+    setState(() => _games.add(map));
+    final bake = bakeGame(game);
+    _pendingBakes.add(bake);
+    bake.then((baked) {
+      _pendingBakes.remove(bake);
+      if (!mounted) return;
+      setState(() {
+        if (baked.cover != null) {
+          map['cover'] = baked.cover!.hash;
+          _newAssets.add(baked.cover!);
+        }
+        if (baked.art != null) {
+          map['art'] = baked.art!.hash;
+          _newAssets.add(baked.art!);
+        }
+        if (baked.detailsAsset != null) {
+          map['details'] = baked.detailsAsset!.hash;
+          _newAssets.add(baked.detailsAsset!);
+          _newAssets.addAll(baked.logoAssets);
+        }
+      });
+    });
   }
 
-  void _save() {
-    if (_games.isEmpty) return;
+  Future<void> _save() async {
+    if (_games.isEmpty || _saving) return;
+    // Wait for in-flight bakes so covers/details ship with the shelf.
+    if (_pendingBakes.isNotEmpty) {
+      setState(() => _saving = true);
+      await Future.wait(_pendingBakes.toList());
+      if (!mounted) return;
+    }
     Navigator.of(context).pop(ShelfResult(
       label: _labelController.text.trim(),
       games: _games,

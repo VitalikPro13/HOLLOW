@@ -9,6 +9,8 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/message_text_parser.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
+import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/dialogs/game_card_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// One side of a showcase board: the composed blocks stacked vertically.
@@ -180,6 +182,40 @@ class _Cover extends StatelessWidget {
   }
 }
 
+/// Opens the game-card detail dialog for a game block. Details resolve from
+/// the replicated asset bundle (or a legacy inline map); blocks without any
+/// still open — the card renders what it has and omits the details panel.
+void _openGameCard(
+    BuildContext context, ShowcaseBlock block, Map<String, Uint8List> assets) {
+  showGameCardDialog(
+    context,
+    name: block.gameName,
+    year: block.gameYear,
+    blurb: block.gameBlurb,
+    coverBytes: assets[block.coverHash],
+    artBytes: assets[block.artHash],
+    details:
+        GameDetails.resolve(block.detailsField, assets) ?? const GameDetails(),
+    assets: assets,
+  );
+}
+
+/// Wraps a game body in the tap-for-card affordance.
+Widget _tappableGame(
+  BuildContext context,
+  ShowcaseBlock block,
+  Map<String, Uint8List> assets,
+  Widget child,
+) {
+  final hollow = HollowTheme.of(context);
+  return HollowPressable(
+    onTap: () => _openGameCard(context, block, assets),
+    semanticLabel: 'View ${block.gameName} details',
+    borderRadius: BorderRadius.circular(hollow.radiusSm),
+    child: child,
+  );
+}
+
 /// Now Playing: cover beside name/year.
 class _GameRow extends StatelessWidget {
   final ShowcaseBlock block;
@@ -190,39 +226,46 @@ class _GameRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        _Cover(bytes: assets[block.coverHash], width: 64),
-        const SizedBox(width: HollowSpacing.md),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                block.gameName,
-                style: HollowTypography.body.copyWith(
-                  color: hollow.textPrimary,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 14,
-                ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              if (block.gameYear != null) ...[
-                const SizedBox(height: 2),
+    return _tappableGame(
+      context,
+      block,
+      assets,
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          _Cover(bytes: assets[block.coverHash], width: 64),
+          const SizedBox(width: HollowSpacing.md),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
                 Text(
-                  '${block.gameYear}',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 11,
+                  block.gameName,
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
                   ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                 ),
+                if (block.gameYear != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    '${block.gameYear}',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
               ],
-            ],
+            ),
           ),
-        ),
-      ],
+          Icon(LucideIcons.chevronRight,
+              size: 16, color: hollow.textSecondary.withValues(alpha: 0.6)),
+        ],
+      ),
     );
   }
 }
@@ -237,36 +280,41 @@ class _FavoriteGameBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Center(child: _Cover(bytes: assets[block.coverHash], width: 140)),
-        const SizedBox(height: HollowSpacing.sm),
-        Text(
-          block.gameName,
-          textAlign: TextAlign.center,
-          style: HollowTypography.body.copyWith(
-            color: hollow.textPrimary,
-            fontWeight: FontWeight.w700,
-            fontSize: 14,
-          ),
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-        ),
-        if (block.gameBlurb.isNotEmpty) ...[
-          const SizedBox(height: HollowSpacing.xs),
+    return _tappableGame(
+      context,
+      block,
+      assets,
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Center(child: _Cover(bytes: assets[block.coverHash], width: 140)),
+          const SizedBox(height: HollowSpacing.sm),
           Text(
-            block.gameBlurb,
+            block.gameName,
             textAlign: TextAlign.center,
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 12,
-              fontStyle: FontStyle.italic,
-              height: 1.4,
+            style: HollowTypography.body.copyWith(
+              color: hollow.textPrimary,
+              fontWeight: FontWeight.w700,
+              fontSize: 14,
             ),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
           ),
+          if (block.gameBlurb.isNotEmpty) ...[
+            const SizedBox(height: HollowSpacing.xs),
+            Text(
+              block.gameBlurb,
+              textAlign: TextAlign.center,
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+                fontSize: 12,
+                fontStyle: FontStyle.italic,
+                height: 1.4,
+              ),
+            ),
+          ],
         ],
-      ],
+      ),
     );
   }
 }
@@ -286,27 +334,43 @@ class _GameShelfBody extends StatelessWidget {
       runSpacing: HollowSpacing.sm,
       children: [
         for (final game in block.shelfGames)
-          SizedBox(
-            width: 68,
-            child: Column(
-              children: [
-                _Cover(
-                  bytes: assets[(game['cover'] as String?) ?? ''],
-                  width: 68,
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  (game['name'] as String?) ?? '',
-                  textAlign: TextAlign.center,
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 9,
-                    height: 1.2,
+          HollowPressable(
+            onTap: () => showGameCardDialog(
+              context,
+              name: (game['name'] as String?) ?? '',
+              year: game['year'] as int?,
+              blurb: '',
+              coverBytes: assets[(game['cover'] as String?) ?? ''],
+              artBytes: assets[(game['art'] as String?) ?? ''],
+              details: GameDetails.resolve(game['details'], assets) ??
+                  const GameDetails(),
+              assets: assets,
+            ),
+            semanticLabel: 'View ${(game['name'] as String?) ?? 'game'} details',
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            padding: const EdgeInsets.all(2),
+            child: SizedBox(
+              width: 68,
+              child: Column(
+                children: [
+                  _Cover(
+                    bytes: assets[(game['cover'] as String?) ?? ''],
+                    width: 68,
                   ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
+                  const SizedBox(height: 3),
+                  Text(
+                    (game['name'] as String?) ?? '',
+                    textAlign: TextAlign.center,
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                      fontSize: 9,
+                      height: 1.2,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
             ),
           ),
       ],

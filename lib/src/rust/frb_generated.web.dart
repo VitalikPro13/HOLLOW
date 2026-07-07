@@ -88,6 +88,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DiscoveredPeer dco_decode_box_autoadd_discovered_peer(dynamic raw);
 
   @protected
+  GameCardDetails dco_decode_box_autoadd_game_card_details(dynamic raw);
+
+  @protected
   PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
 
   @protected
@@ -137,6 +140,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   FriendFfi dco_decode_friend_ffi(dynamic raw);
+
+  @protected
+  GameCardDetails dco_decode_game_card_details(dynamic raw);
 
   @protected
   GameSearchResult dco_decode_game_search_result(dynamic raw);
@@ -306,6 +312,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   bool? dco_decode_opt_box_autoadd_bool(dynamic raw);
+
+  @protected
+  GameCardDetails? dco_decode_opt_box_autoadd_game_card_details(dynamic raw);
 
   @protected
   PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
@@ -503,6 +512,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  GameCardDetails sse_decode_box_autoadd_game_card_details(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
@@ -562,6 +576,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   FriendFfi sse_decode_friend_ffi(SseDeserializer deserializer);
+
+  @protected
+  GameCardDetails sse_decode_game_card_details(SseDeserializer deserializer);
 
   @protected
   GameSearchResult sse_decode_game_search_result(SseDeserializer deserializer);
@@ -775,6 +792,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   bool? sse_decode_opt_box_autoadd_bool(SseDeserializer deserializer);
+
+  @protected
+  GameCardDetails? sse_decode_opt_box_autoadd_game_card_details(
+    SseDeserializer deserializer,
+  );
 
   @protected
   PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
@@ -1029,6 +1051,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_game_card_details(
+    GameCardDetails self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_i_64(
     PlatformInt64 self,
     SseSerializer serializer,
@@ -1111,6 +1139,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_friend_ffi(FriendFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_game_card_details(
+    GameCardDetails self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_game_search_result(
@@ -1396,6 +1430,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_bool(bool? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_game_card_details(
+    GameCardDetails? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_i_64(

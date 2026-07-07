@@ -4418,16 +4418,29 @@ async fn showcase_board_replicates_preserves_and_clears() {
         showcase_assets: assets,
     };
 
-    // --- 1. A composes a board (+ an asset bundle) → B stores both under
-    // A's MASTER. The bundle rides the live full broadcast like avatar bytes. ---
-    let board = r#"{"v":1,"right":[{"t":"text","d":{"title":"Now","body":"testing"}}]}"#;
-    let asset_bytes = vec![7u8; 512];
-    let asset_hash = {
-        use sha2::{Digest, Sha256};
-        hex::encode(Sha256::digest(&asset_bytes))
-    };
-    let bundle = crate::api::showcase::encode_asset_bundle(&[(asset_hash.clone(), asset_bytes.clone())]);
-    a.cmd_tx.send(send_update("hi", Some(board.to_string()), Some(bundle.clone()))).await.unwrap();
+    // --- 1. A composes an ENRICHED game-block board (+ a two-asset bundle:
+    // cover + company logo) → B stores both under A's MASTER. The baked game
+    // card (Steam/IGDB details, dev credit with a logo asset) replicates
+    // exactly like any board: JSON is opaque, images ride the bundle. This
+    // exercises the multi-asset (cover + logo) replication path. ---
+    use sha2::{Digest, Sha256};
+    let cover_bytes = vec![7u8; 512];
+    let cover_hash = hex::encode(Sha256::digest(&cover_bytes));
+    let logo_bytes = vec![9u8; 256];
+    let logo_hash = hex::encode(Sha256::digest(&logo_bytes));
+    // A favorite-game block carrying baked details: the cover hash, and a
+    // company whose logo references the logo asset hash (URL already rewritten
+    // to a hash at authoring, per the composer).
+    let board = format!(
+        r#"{{"v":1,"right":[{{"t":"favorite_game","d":{{"name":"Hollow Knight","cover":"{cover}","year":2017,"blurb":"peak","details":{{"description":"A hand-drawn Metroidvania.","platforms":["pc","mac","linux","nintendo"],"metacritic":90,"achievements":63,"req_min":"OS: Win10\nRAM: 4 GB","companies":[{{"name":"Team Cherry","role":"dev","logo":"{logo}","links":[{{"kind":"twitter","url":"https://x.com/teamcherry"}}]}}]}}}}}}]}}"#,
+        cover = cover_hash,
+        logo = logo_hash,
+    );
+    let bundle = crate::api::showcase::encode_asset_bundle(&[
+        (cover_hash.clone(), cover_bytes.clone()),
+        (logo_hash.clone(), logo_bytes.clone()),
+    ]);
+    a.cmd_tx.send(send_update("hi", Some(board.clone()), Some(bundle.clone()))).await.unwrap();
     let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
         matches!(ev, NetworkEvent::ProfileUpdated { .. })
     })
@@ -4436,14 +4449,21 @@ async fn showcase_board_replicates_preserves_and_clears() {
     sleep_ms(300).await;
     let p = b.store().load_profile(&a_master).unwrap()
         .expect("B must hold A's profile keyed by A's MASTER (device != master)");
-    assert_eq!(p.showcase_board, board, "board JSON must replicate to B");
+    assert_eq!(p.showcase_board, board, "enriched board JSON must replicate to B");
     assert_eq!(
         p.showcase_assets.as_deref(), Some(bundle.as_slice()),
-        "asset bundle must replicate to B byte-exact"
+        "two-asset bundle (cover + company logo) must replicate to B byte-exact"
     );
-    let decoded = crate::api::showcase::decode_asset_bundle(p.showcase_assets.as_deref().unwrap());
-    assert_eq!(decoded, vec![(asset_hash.clone(), asset_bytes.clone())],
-        "replicated bundle must decode with hashes verifying");
+    let mut decoded = crate::api::showcase::decode_asset_bundle(p.showcase_assets.as_deref().unwrap());
+    decoded.sort();
+    let mut expected = vec![
+        (cover_hash.clone(), cover_bytes.clone()),
+        (logo_hash.clone(), logo_bytes.clone()),
+    ];
+    expected.sort();
+    assert_eq!(decoded, expected,
+        "replicated bundle must decode both cover + logo with hashes verifying");
+    let board = board.as_str();
 
     // --- 2. A board-untouched update (input None): the handler rebroadcasts the
     // STORED board, and B's COALESCE save preserves it either way. ---

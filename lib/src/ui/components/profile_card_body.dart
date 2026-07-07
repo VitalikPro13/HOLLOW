@@ -185,6 +185,31 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                     ),
                   ),
                 ),
+              )
+            else if (!_compact)
+              // The full dialog's counterpart of the popup's expand arrows:
+              // same chip, inward arrows, closes the dialog.
+              Positioned(
+                top: HollowSpacing.xs + 2,
+                right: HollowSpacing.xs + 2,
+                child: HollowPressable(
+                  onTap: widget.dismissHost,
+                  semanticLabel: 'Close profile',
+                  borderRadius: BorderRadius.circular(13),
+                  child: Container(
+                    width: 26,
+                    height: 26,
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.4),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      LucideIcons.minimize2,
+                      size: 13,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
               ),
             Positioned(
               left: hPad,

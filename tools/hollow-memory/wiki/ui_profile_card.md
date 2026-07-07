@@ -11,7 +11,10 @@ surfaces cannot drift. The HOST owns the outer container and passes
 compact, `onExpand` (opens the full dialog).
 
 Sections in order: banner Stack (avatar breaking its bottom edge at left,
-compact-only expand button top-right) → corner band (Twitch/integration chip
+corner chip top-right: compact = maximize2 expand, full = minimize2 CLOSE
+via `dismissHost` — same fixed 26×26 scrimmed circle, borderRadius 13, NO
+HollowPressable padding so hover paint stays inside; the game card's X
+reuses this structure) → corner band (Twitch/integration chip
 ALONE, right-aligned under the banner, both densities) → identity block
 (name, secondary name, presence StatusDot row via `identityIsOnline`, italic
 custom status) → ONE merged chip row (role incl. Member + cosmetic labels) →

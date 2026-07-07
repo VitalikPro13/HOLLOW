@@ -65,7 +65,7 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 ## Download
 
-| Platform | Download |
+| Platform | Links |
 |----------|------|
 | Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.7.1-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.7.1-win64.zip) |
 | macOS (10.15+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.7.1.dmg) |

@@ -34,6 +34,9 @@ dependencies:
   lucide_icons_flutter: ^3.1.14
   atlas_icons: ^0.0.12
   flutter_svg: ^2.0.17
+  # Content-addressing showcase details assets (sha256, same hex format as
+  # the Rust bundle codec).
+  crypto: ^3.0.3
   hollow_core:
     path: rust_builder
   flutter_rust_bridge: 2.11.1
