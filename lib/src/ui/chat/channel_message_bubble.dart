@@ -265,6 +265,7 @@ class ChannelMessageBubble extends ConsumerWidget {
                 peerId: senderMaster,
                 nickname:
                     (senderNickname?.isNotEmpty ?? false) ? senderNickname : null,
+                serverId: serverId,
                 child: HollowAvatar(peerId: senderMaster, size: avatarSize),
               ),
             ),
@@ -281,6 +282,7 @@ class ChannelMessageBubble extends ConsumerWidget {
                           nickname: (senderNickname?.isNotEmpty ?? false)
                               ? senderNickname
                               : null,
+                          serverId: serverId,
                           child: Text(
                             senderName,
                             maxLines: 1,

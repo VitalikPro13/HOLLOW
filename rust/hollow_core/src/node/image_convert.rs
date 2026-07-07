@@ -702,6 +702,56 @@ pub fn process_sync_avatar(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+/// Process an IGDB game cover for the showcase board: keep aspect (covers are
+/// ~3:4), cap the longest side at 400px, encode as WebP.
+pub fn process_showcase_cover(data: &[u8]) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(data)
+        .map_err(|e| format!("Failed to decode cover: {e}"))?;
+    let resized = if img.width().max(img.height()) > 400 {
+        img.resize(400, 400, FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let mut buf = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut buf);
+    resized
+        .write_to(&mut cursor, ImageFormat::WebP)
+        .map_err(|e| format!("Failed to encode cover WebP: {e}"))?;
+    if buf.len() > 150_000 {
+        return Err("Cover too large after processing (>150KB)".into());
+    }
+    Ok(buf)
+}
+
+/// Process user-uploaded showcase artwork: animated GIFs become animated
+/// WebP (Balanced), stills keep their aspect capped at 800px on the longest
+/// side. Per-asset ceiling keeps the replicated bundle sane.
+pub fn process_showcase_artwork(data: &[u8]) -> Result<Vec<u8>, String> {
+    if data.starts_with(b"GIF8") {
+        let (webp, _w, _h) = convert_gif_to_animated_webp(data, WebpQuality::Balanced)?;
+        if webp.len() > 600_000 {
+            return Err("Animated artwork too large after processing (>600KB)".into());
+        }
+        return Ok(webp);
+    }
+    let img = image::load_from_memory(data)
+        .map_err(|e| format!("Failed to decode artwork: {e}"))?;
+    let resized = if img.width().max(img.height()) > 800 {
+        img.resize(800, 800, FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let mut buf = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut buf);
+    resized
+        .write_to(&mut cursor, ImageFormat::WebP)
+        .map_err(|e| format!("Failed to encode artwork WebP: {e}"))?;
+    if buf.len() > 400_000 {
+        return Err("Artwork too large after processing (>400KB)".into());
+    }
+    Ok(buf)
+}
+
 /// Process a raw image into banner format: center-crop to 3:1 aspect, resize to 600x200, encode as WebP.
 /// Accepts any image — crops the widest 3:1 region it can find, or stretches if very small.
 pub fn process_banner_image(data: &[u8]) -> Result<Vec<u8>, String> {

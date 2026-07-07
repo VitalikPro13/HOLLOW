@@ -23,6 +23,10 @@ pub(crate) struct StoredProfile {
     pub avatar_bytes: Option<Vec<u8>>,
     pub banner_bytes: Option<Vec<u8>>,
     pub twitch_username: String,
+    /// Showcase board JSON (profile blocks; empty = no board).
+    pub showcase_board: String,
+    /// Showcase asset bundle blob (game covers/artwork keyed by hash).
+    pub showcase_assets: Option<Vec<u8>>,
 }
 
 /// A stored chat message.
@@ -655,6 +659,12 @@ impl MessageStore {
         ).unwrap_or(());
         conn.execute_batch(
             "ALTER TABLE user_profiles ADD COLUMN twitch_username TEXT NOT NULL DEFAULT '';"
+        ).unwrap_or(());
+        conn.execute_batch(
+            "ALTER TABLE user_profiles ADD COLUMN showcase_board TEXT NOT NULL DEFAULT '';"
+        ).unwrap_or(());
+        conn.execute_batch(
+            "ALTER TABLE user_profiles ADD COLUMN showcase_assets BLOB;"
         ).unwrap_or(());
 
         // -- Migration: content_id column on files (vault ↔ file_id link) --
@@ -2464,6 +2474,8 @@ impl MessageStore {
     /// Upsert a user profile (ours or a peer's).
     /// `avatar` and `banner` are optional: `None` preserves the existing image, `Some(bytes)` overwrites
     /// (pass empty slice to clear).
+    /// `showcase_board` is optional: `None` preserves the existing board (e.g. an update from an
+    /// old client that predates boards), `Some("")` clears, `Some(json)` sets.
     pub fn save_profile(
         &self,
         peer_id: &str,
@@ -2474,6 +2486,8 @@ impl MessageStore {
         avatar: Option<&[u8]>,
         banner: Option<&[u8]>,
         twitch_username: &str,
+        showcase_board: Option<&str>,
+        showcase_assets: Option<&[u8]>,
     ) -> Result<(), String> {
         // For avatar/banner: None = no change (use COALESCE), Some(empty) = clear (store NULL), Some(data) = set.
         // Normalize Some(empty) to an explicit NULL for SQL.
@@ -2481,11 +2495,13 @@ impl MessageStore {
         let banner_val: Option<&[u8]> = banner.and_then(|b| if b.is_empty() { None } else { Some(b) });
         let avatar_is_clear = avatar.is_some() && avatar.unwrap().is_empty();
         let banner_is_clear = banner.is_some() && banner.unwrap().is_empty();
+        let assets_val: Option<&[u8]> = showcase_assets.and_then(|b| if b.is_empty() { None } else { Some(b) });
+        let assets_is_clear = showcase_assets.is_some() && showcase_assets.unwrap().is_empty();
 
         self.conn
             .execute(
-                "INSERT INTO user_profiles (peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO user_profiles (peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, ''), ?10)
                  ON CONFLICT(peer_id) DO UPDATE SET
                     display_name = excluded.display_name,
                     status = excluded.status,
@@ -2493,11 +2509,13 @@ impl MessageStore {
                     updated_at = excluded.updated_at,
                     avatar = COALESCE(excluded.avatar, user_profiles.avatar),
                     banner = COALESCE(excluded.banner, user_profiles.banner),
-                    twitch_username = excluded.twitch_username
+                    twitch_username = excluded.twitch_username,
+                    showcase_board = COALESCE(?9, user_profiles.showcase_board),
+                    showcase_assets = COALESCE(excluded.showcase_assets, user_profiles.showcase_assets)
                  WHERE excluded.updated_at >= user_profiles.updated_at
                     OR (excluded.updated_at < user_profiles.updated_at
                         AND ABS(excluded.updated_at - user_profiles.updated_at) < 86400000)",
-                params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val, twitch_username],
+                params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val, twitch_username, showcase_board, assets_val],
             )
             .map_err(|e| format!("Failed to save profile: {e}"))?;
 
@@ -2514,6 +2532,12 @@ impl MessageStore {
                 params![peer_id],
             ).map_err(|e| format!("Failed to clear banner: {e}"))?;
         }
+        if assets_is_clear {
+            self.conn.execute(
+                "UPDATE user_profiles SET showcase_assets = NULL WHERE peer_id = ?1",
+                params![peer_id],
+            ).map_err(|e| format!("Failed to clear showcase assets: {e}"))?;
+        }
         Ok(())
     }
 
@@ -2522,7 +2546,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username
+                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets
                  FROM user_profiles WHERE peer_id = ?1",
             )
             .map_err(|e| format!("Failed to prepare profile query: {e}"))?;
@@ -2537,6 +2561,8 @@ impl MessageStore {
                     avatar_bytes: row.get(5)?,
                     banner_bytes: row.get(6)?,
                     twitch_username: row.get::<_, String>(7).unwrap_or_default(),
+                    showcase_board: row.get::<_, String>(8).unwrap_or_default(),
+                    showcase_assets: row.get(9).unwrap_or(None),
                 })
             })
             .map_err(|e| format!("Failed to query profile: {e}"))?;
@@ -2552,7 +2578,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username
+                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets
                  FROM user_profiles",
             )
             .map_err(|e| format!("Failed to prepare all profiles query: {e}"))?;
@@ -2567,6 +2593,8 @@ impl MessageStore {
                     avatar_bytes: row.get(5)?,
                     banner_bytes: row.get(6)?,
                     twitch_username: row.get::<_, String>(7).unwrap_or_default(),
+                    showcase_board: row.get::<_, String>(8).unwrap_or_default(),
+                    showcase_assets: row.get(9).unwrap_or(None),
                 })
             })
             .map_err(|e| format!("Failed to query all profiles: {e}"))?;
@@ -2582,7 +2610,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username
+                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board
                  FROM user_profiles",
             )
             .map_err(|e| format!("Failed to prepare light profiles query: {e}"))?;
@@ -2597,6 +2625,8 @@ impl MessageStore {
                     avatar_bytes: None,
                     banner_bytes: None,
                     twitch_username: row.get::<_, String>(5).unwrap_or_default(),
+                    showcase_board: row.get::<_, String>(6).unwrap_or_default(),
+                    showcase_assets: None,
                 })
             })
             .map_err(|e| format!("Failed to query light profiles: {e}"))?;
@@ -2612,7 +2642,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username
+                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board
                  FROM user_profiles WHERE peer_id = ?1",
             )
             .map_err(|e| format!("Failed to prepare light profile query: {e}"))?;
@@ -2627,6 +2657,8 @@ impl MessageStore {
                     avatar_bytes: None,
                     banner_bytes: None,
                     twitch_username: row.get::<_, String>(5).unwrap_or_default(),
+                    showcase_board: row.get::<_, String>(6).unwrap_or_default(),
+                    showcase_assets: None,
                 })
             })
             .map_err(|e| format!("Failed to query light profile: {e}"))?;
@@ -2648,6 +2680,20 @@ impl MessageStore {
             .or_else(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
                 _ => Err(format!("Failed to load avatar: {e}")),
+            })
+    }
+
+    /// Load only the showcase asset bundle blob for a peer.
+    pub fn load_showcase_assets(&self, peer_id: &str) -> Result<Option<Vec<u8>>, String> {
+        self.conn
+            .query_row(
+                "SELECT showcase_assets FROM user_profiles WHERE peer_id = ?1",
+                params![peer_id],
+                |row| row.get(0),
+            )
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                _ => Err(format!("Failed to load showcase assets: {e}")),
             })
     }
 

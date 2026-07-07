@@ -1481,13 +1481,14 @@ async fn run_event_loop(
                             &db_path, &db_passphrase,
                         ).await { continue; }
                     }
-                    NodeCommand::UpdateProfile { display_name, status, about_me, avatar_bytes, banner_bytes, twitch_username } => {
+                    NodeCommand::UpdateProfile { display_name, status, about_me, avatar_bytes, banner_bytes, twitch_username, showcase_board, showcase_assets } => {
                         social::handle_update_profile(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut mls, &server_states,
                             &crypto_store, &local_peer_str, &master_keypair, &device_peer_id,
                             display_name, status, about_me,
                             avatar_bytes, banner_bytes, is_invisible, twitch_username,
+                            showcase_board, showcase_assets,
                             &db_path, &db_passphrase,
                         ).await;
                     }
@@ -9007,7 +9008,7 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash } => {
+                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash } => {
                                 if peer_invisible {
                                     let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
                                         peer_id: sender_peer_id.clone(),
@@ -9019,7 +9020,9 @@ async fn handle_incoming_request(
                                     device_peer_id, master_keypair, ws_cmd_tx, ws_room_peers,
                                     sender_peer_id, display_name, status, about_me,
                                     updated_at, avatar_b64, banner_b64, twitch_username,
-                                    device_list, avatar_hash, banner_hash, db_path, db_passphrase,
+                                    device_list, avatar_hash, banner_hash, showcase_board,
+                                    showcase_assets_b64, showcase_assets_hash,
+                                    db_path, db_passphrase,
                                 ).await;
                                 // Step 7: enforce revocations learned via the MLS
                                 // server-member profile path too (Olm drop + single
@@ -10093,15 +10096,16 @@ async fn handle_incoming_request(
                             .and_then(|s| s.load_profile(local_peer_str).ok().flatten());
                         // LIGHT announce (device list is the payload here) — blobs
                         // ride as hashes; a stale friend pulls via ProfileRequest.
-                        let (display_name, status, about_me, updated_at, avatar_hash, banner_hash, twitch_username) =
+                        let (display_name, status, about_me, updated_at, avatar_hash, banner_hash, twitch_username, showcase_board, showcase_assets_hash) =
                             match profile {
                                 Some(p) => (
                                     p.display_name, p.status, p.about_me, p.updated_at,
                                     social::profile_blob_hash(p.avatar_bytes.as_deref()),
                                     social::profile_blob_hash(p.banner_bytes.as_deref()),
-                                    p.twitch_username,
+                                    p.twitch_username, p.showcase_board,
+                                    social::profile_blob_hash(p.showcase_assets.as_deref()),
                                 ),
-                                None => (String::new(), String::new(), String::new(), 0, String::new(), String::new(), String::new()),
+                                None => (String::new(), String::new(), String::new(), 0, String::new(), String::new(), String::new(), String::new(), String::new()),
                             };
                         let device_list = super::crypto_handler::build_local_device_list(
                             master_keypair, device_peer_id, db_path, db_passphrase,
@@ -10113,6 +10117,9 @@ async fn handle_incoming_request(
                             is_invisible, twitch_username,
                             device_list,
                             avatar_hash, banner_hash,
+                            showcase_board: Some(showcase_board),
+                            showcase_assets_b64: String::new(),
+                            showcase_assets_hash,
                         };
                         let json = serde_json::to_string(&msg).unwrap_or_default();
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
@@ -10553,7 +10560,7 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash } => {
+        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash } => {
             // If the profile carries an invisible flag, emit PeerStatusChanged so the
             // UI treats this peer as offline from the very first event.
             if peer_invisible {
@@ -10644,9 +10651,21 @@ async fn handle_incoming_request(
             // device of one person updates the ONE identity profile), with the
             // empty-profile guard (a profile-less sibling must not blank a good
             // row). Single-device: master == sender, so this is a no-op rename.
+            // Showcase asset bundle: same CLEAR/b64 semantics as the blobs.
+            let showcase_assets_bytes: Option<Vec<u8>> = if showcase_assets_b64.is_empty() {
+                None
+            } else if showcase_assets_b64 == "CLEAR" {
+                Some(vec![])
+            } else {
+                base64::engine::general_purpose::STANDARD.decode(&showcase_assets_b64).ok()
+                    .filter(|b| b.len() <= 2_000_000)
+            };
+
             let (profile_master, _saved) = social::save_incoming_profile(
                 &peer_str, &display_name, &status, &about_me, updated_at,
                 avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
+                social::sanitize_incoming_showcase(showcase_board.as_deref()),
+                showcase_assets_bytes.as_deref(),
                 db_path, db_passphrase,
             );
 
@@ -10654,6 +10673,7 @@ async fn handle_incoming_request(
             social::maybe_request_full_profile(
                 ws_cmd_tx, ws_room_peers, peer_str, &profile_master,
                 &avatar_b64, &banner_b64, &avatar_hash, &banner_hash,
+                &showcase_assets_b64, &showcase_assets_hash,
                 device_peer_id, db_path, db_passphrase,
             );
 

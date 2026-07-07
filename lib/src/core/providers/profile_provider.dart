@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/rust/api/showcase.dart' as showcase_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// In-memory profile cache: peer_id → UserProfile.
@@ -37,6 +38,8 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
 
   /// Update our own profile — sends command to Rust which saves + broadcasts.
   /// Pass avatarBytes/bannerBytes to update images. null = no change. Empty Uint8List = clear.
+  /// showcaseBoard: null = no change, '' = clear, else the board JSON.
+  /// showcaseAssets: null = no change, [] = clear, else the full asset set.
   Future<void> updateMyProfile({
     required String displayName,
     String status = '',
@@ -44,6 +47,8 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
     Uint8List? avatarBytes,
     Uint8List? bannerBytes,
     String twitchUsername = '',
+    String? showcaseBoard,
+    List<showcase_api.ShowcaseAsset>? showcaseAssets,
   }) async {
     try {
       await network_api.updateProfile(
@@ -53,9 +58,47 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
         avatarBytes: avatarBytes,
         bannerBytes: bannerBytes,
         twitchUsername: twitchUsername,
+        showcaseBoard: showcaseBoard,
+        showcaseAssets: showcaseAssets,
       );
     } catch (e) {
       debugPrint('[HOLLOW] Failed to update profile: $e');
+    }
+  }
+
+  /// Save ONLY the showcase board, carrying the current profile fields through
+  /// unchanged. Optimistically patches the cache — the Rust save is
+  /// fire-and-forget via the node command channel, so the DB may be stale when
+  /// the dialog re-reads (the ProfileUpdated event converges it afterwards).
+  Future<void> updateShowcaseBoard(
+    String peerId,
+    String encoded, {
+    List<showcase_api.ShowcaseAsset>? assets,
+  }) async {
+    final current = state[peerId];
+    await updateMyProfile(
+      displayName: current?.displayName ?? '',
+      status: current?.status ?? '',
+      aboutMe: current?.aboutMe ?? '',
+      twitchUsername: current?.twitchUsername ?? '',
+      showcaseBoard: encoded,
+      showcaseAssets: assets,
+    );
+    if (current != null) {
+      state = {
+        ...state,
+        peerId: storage_api.UserProfile(
+          peerId: current.peerId,
+          displayName: current.displayName,
+          status: current.status,
+          aboutMe: current.aboutMe,
+          updatedAt: current.updatedAt,
+          avatarBytes: current.avatarBytes,
+          bannerBytes: current.bannerBytes,
+          twitchUsername: current.twitchUsername,
+          showcaseBoard: encoded,
+        ),
+      };
     }
   }
 }

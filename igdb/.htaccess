@@ -1,0 +1,11 @@
+# Never serve the credential, token, or database files.
+<FilesMatch "^(config\.php|config\.php\.example|token\.json|games\.db|games\.db-wal|games\.db-shm)$">
+    Require all denied
+</FilesMatch>
+
+# Cached covers are immutable — cache hard.
+<IfModule mod_headers.c>
+    <FilesMatch "\.jpg$">
+        Header set Cache-Control "public, max-age=31536000, immutable"
+    </FilesMatch>
+</IfModule>

@@ -1,0 +1,6 @@
+<?php
+// Copy to config.php and fill in the Twitch app credentials
+// (dev.twitch.tv console → the Hollow IGDB application).
+// config.php is gitignored — NEVER commit the real values.
+const IGDB_CLIENT_ID = 'YOUR_CLIENT_ID';
+const IGDB_CLIENT_SECRET = 'YOUR_CLIENT_SECRET';

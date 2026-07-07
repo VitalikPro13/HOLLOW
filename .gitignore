@@ -151,3 +151,9 @@ tools/hollow-memory/models/
 tools/hollow-memory/*.db
 
 tools/hollow-memory/wiki/web_public_viewer.md
+
+# IGDB endpoint: source is tracked, secrets/runtime state never
+igdb/config.php
+igdb/token.json
+igdb/games.db*
+igdb/covers/

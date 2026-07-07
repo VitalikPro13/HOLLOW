@@ -2726,6 +2726,9 @@ pub fn request_channel_sync(server_id: String, channel_id: String) -> Result<(),
 #[frb]
 /// Update our display name, status, about me, and optionally avatar/banner —
 /// saves to DB and broadcasts to all connected peers.
+/// `showcase_board`: None = unchanged, Some("") = clear, Some(json) = set.
+/// `showcase_assets`: None = unchanged, Some(empty list) = clear, else the
+/// full replacement asset set for the board.
 #[frb]
 pub fn update_profile(
     display_name: String,
@@ -2734,6 +2737,8 @@ pub fn update_profile(
     avatar_bytes: Option<Vec<u8>>,
     banner_bytes: Option<Vec<u8>>,
     twitch_username: String,
+    showcase_board: Option<String>,
+    showcase_assets: Option<Vec<super::showcase::ShowcaseAsset>>,
 ) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -2741,6 +2746,23 @@ pub fn update_profile(
     // Release the global node mutex BEFORE the (possibly waiting) send —
     // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
+
+    // Encode the asset set into the opaque replicated bundle. Empty list →
+    // empty bytes = the blob "clear" signal (mirrors avatar semantics).
+    let showcase_assets_bundle: Option<Vec<u8>> = showcase_assets.map(|assets| {
+        if assets.is_empty() {
+            Vec::new()
+        } else {
+            let pairs: Vec<(String, Vec<u8>)> =
+                assets.into_iter().map(|a| (a.hash, a.bytes)).collect();
+            super::showcase::encode_asset_bundle(&pairs)
+        }
+    });
+    if let Some(bundle) = &showcase_assets_bundle {
+        if bundle.len() > 1_500_000 {
+            return Err("Showcase assets too large (1.5MB max) — remove an artwork or game".into());
+        }
+    }
 
     let rt = get_runtime();
     rt.block_on(
@@ -2751,6 +2773,8 @@ pub fn update_profile(
             avatar_bytes,
             banner_bytes,
             twitch_username,
+            showcase_board,
+            showcase_assets: showcase_assets_bundle,
         }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;

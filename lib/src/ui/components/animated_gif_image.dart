@@ -126,6 +126,15 @@ class _AnimatedGifImageState extends State<AnimatedGifImage>
     if (_elapsed >= _nextFrameAt) {
       final nextIdx = (_currentFrame + 1) % _frames!.length;
       _nextFrameAt += _frames![nextIdx].duration;
+      // NEVER play catch-up after a stall. When a dialog is pushed on top,
+      // TickerMode MUTES this ticker: ticks stop but `elapsed` keeps
+      // accruing, so on resume the schedule is seconds in the past and
+      // advancing one frame per 60fps tick fast-forwards the GIF until it
+      // "catches up" to wall clock. Resync the schedule to now instead —
+      // playback just continues at normal speed from the current frame.
+      if (_nextFrameAt <= _elapsed) {
+        _nextFrameAt = _elapsed + _frames![nextIdx].duration;
+      }
       setState(() => _currentFrame = nextIdx);
     }
   }

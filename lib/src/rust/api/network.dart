@@ -6,6 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
+import 'showcase.dart';
 part 'network.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_license_key`, `get_node`, `get_proxy_config`, `get_proxy_socks_addr`, `get_relay_domain`, `get_runtime`, `open_local_store`, `send_node_command`, `set_proxy_socks_addr`, `to_ffi_event`
@@ -540,6 +541,9 @@ Future<void> requestChannelSync({
 /// Call this before closing the app so peers can immediately update their state.
 /// Update our display name, status, about me, and optionally avatar/banner —
 /// saves to DB and broadcasts to all connected peers.
+/// `showcase_board`: None = unchanged, Some("") = clear, Some(json) = set.
+/// `showcase_assets`: None = unchanged, Some(empty list) = clear, else the
+/// full replacement asset set for the board.
 Future<void> updateProfile({
   required String displayName,
   required String status,
@@ -547,6 +551,8 @@ Future<void> updateProfile({
   Uint8List? avatarBytes,
   Uint8List? bannerBytes,
   required String twitchUsername,
+  String? showcaseBoard,
+  List<ShowcaseAsset>? showcaseAssets,
 }) => RustLib.instance.api.crateApiNetworkUpdateProfile(
   displayName: displayName,
   status: status,
@@ -554,6 +560,8 @@ Future<void> updateProfile({
   avatarBytes: avatarBytes,
   bannerBytes: bannerBytes,
   twitchUsername: twitchUsername,
+  showcaseBoard: showcaseBoard,
+  showcaseAssets: showcaseAssets,
 );
 
 /// Process a raw image into avatar format (128x128 WebP). Returns processed bytes.

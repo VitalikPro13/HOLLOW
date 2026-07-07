@@ -503,6 +503,8 @@ pub(crate) async fn handle_update_profile(
     banner_bytes: Option<Vec<u8>>,
     is_invisible: bool,
     twitch_username: String,
+    showcase_board: Option<String>,
+    showcase_assets: Option<Vec<u8>>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -522,26 +524,36 @@ pub(crate) async fn handle_update_profile(
         Some(b) if b.is_empty() => "CLEAR".to_string(),
         Some(b) => base64::engine::general_purpose::STANDARD.encode(b),
     };
+    let showcase_assets_b64 = match &showcase_assets {
+        None => String::new(),
+        Some(b) if b.is_empty() => "CLEAR".to_string(),
+        Some(b) => base64::engine::general_purpose::STANDARD.encode(b),
+    };
 
     // Save our own profile to DB, then hash the STORED blobs — the params may be
     // None = "unchanged", so the advertised hashes must describe what's persisted.
-    let (avatar_hash, banner_hash) = {
-        let mut hashes = (String::new(), String::new());
+    // Same for the showcase board: broadcast the STORED value so receivers
+    // converge even when this update didn't touch the board.
+    let (avatar_hash, banner_hash, stored_showcase, stored_assets_hash) = {
+        let mut stored = (String::new(), String::new(), String::new(), String::new());
         if let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             if let Err(e) = db.save_profile(
                 &local_peer_str, &display_name, &status, &about_me, now,
                 avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
+                showcase_board.as_deref(), showcase_assets.as_deref(),
             ) {
                 hollow_log!("[HOLLOW-SWARM] Failed to save own profile: {e}");
             }
             if let Ok(Some(p)) = db.load_profile(local_peer_str) {
-                hashes = (
+                stored = (
                     profile_blob_hash(p.avatar_bytes.as_deref()),
                     profile_blob_hash(p.banner_bytes.as_deref()),
+                    p.showcase_board,
+                    profile_blob_hash(p.showcase_assets.as_deref()),
                 );
             }
         }
-        hashes
+        stored
     };
 
     // Build our master-signed device list so friends learn (tamper-proof) which
@@ -563,6 +575,9 @@ pub(crate) async fn handle_update_profile(
         device_list: device_list.clone(),
         avatar_hash: avatar_hash.clone(),
         banner_hash: banner_hash.clone(),
+        showcase_board: Some(stored_showcase.clone()),
+        showcase_assets_b64: showcase_assets_b64.clone(),
+        showcase_assets_hash: stored_assets_hash.clone(),
     };
     let mut mls_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Send via MLS to each server we're in.
@@ -592,6 +607,9 @@ pub(crate) async fn handle_update_profile(
         device_list,
         avatar_hash,
         banner_hash,
+        showcase_board: Some(stored_showcase),
+        showcase_assets_b64,
+        showcase_assets_hash: stored_assets_hash,
     };
     hollow_log!("[HOLLOW-SWARM] Broadcasting profile update");
     {
@@ -647,6 +665,8 @@ pub(crate) fn save_incoming_profile(
     avatar_bytes: Option<&[u8]>,
     banner_bytes: Option<&[u8]>,
     twitch_username: &str,
+    showcase_board: Option<&str>,
+    showcase_assets: Option<&[u8]>,
     db_path: &str,
     db_passphrase: &str,
 ) -> (String, bool) {
@@ -668,12 +688,24 @@ pub(crate) fn save_incoming_profile(
     }
     if let Err(e) = db.save_profile(
         &master, display_name, status, about_me, updated_at,
-        avatar_bytes, banner_bytes, twitch_username,
+        avatar_bytes, banner_bytes, twitch_username, showcase_board,
+        showcase_assets,
     ) {
         hollow_log!("[HOLLOW-PROFILE] Failed to save incoming profile for {master}: {e}");
         return (master, false);
     }
     (master, true)
+}
+
+/// Receive-side backstop for the showcase board JSON (UI cap is 8 KB; this is
+/// "slightly above" per the profile-field cap pattern). Truncating JSON would
+/// corrupt it, so an oversized board is treated as ABSENT — the receiver keeps
+/// whatever it already stored.
+pub(crate) fn sanitize_incoming_showcase(showcase_board: Option<&str>) -> Option<&str> {
+    match showcase_board {
+        Some(s) if s.len() > 16 * 1024 => None,
+        other => other,
+    }
 }
 
 /// Hex SHA-256 of a profile blob; empty string when there is no blob.
@@ -759,19 +791,21 @@ fn send_own_profile_inner(
         // (swarm.rs) and the receive-side empty-profile guard that ignores blank
         // names so this never clobbers a real cached profile.
         let profile = store.load_profile(local_peer_str).ok().flatten();
-        let (display_name, status, about_me, updated_at, avatar_bytes, banner_bytes, twitch_username) =
+        let (display_name, status, about_me, updated_at, avatar_bytes, banner_bytes, twitch_username, showcase_board, showcase_assets) =
             match profile {
                 Some(p) => (
                     p.display_name, p.status, p.about_me, p.updated_at,
-                    p.avatar_bytes, p.banner_bytes, p.twitch_username,
+                    p.avatar_bytes, p.banner_bytes, p.twitch_username, p.showcase_board,
+                    p.showcase_assets,
                 ),
-                None => (String::new(), String::new(), String::new(), 0, None, None, String::new()),
+                None => (String::new(), String::new(), String::new(), 0, None, None, String::new(), String::new(), None),
             };
         let avatar_hash = profile_blob_hash(avatar_bytes.as_deref());
         let banner_hash = profile_blob_hash(banner_bytes.as_deref());
+        let showcase_assets_hash = profile_blob_hash(showcase_assets.as_deref());
         // Light sends leave the b64 fields EMPTY (= "no change" on the receiver);
         // the hashes above let a stale receiver pull the blobs once.
-        let (avatar_b64, banner_b64) = if include_blobs {
+        let (avatar_b64, banner_b64, showcase_assets_b64) = if include_blobs {
             (
                 avatar_bytes.as_ref()
                     .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
@@ -779,18 +813,25 @@ fn send_own_profile_inner(
                 banner_bytes.as_ref()
                     .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
                     .unwrap_or_default(),
+                showcase_assets.as_ref()
+                    .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+                    .unwrap_or_default(),
             )
         } else {
-            (String::new(), String::new())
+            (String::new(), String::new(), String::new())
         };
         let device_list = super::crypto_handler::build_local_device_list(
             master_keypair, device_peer_id, db_path, db_passphrase,
         );
+        // The board is small capped text — it rides the LIGHT announce too
+        // (only blobs are hash-pulled).
         let msg = HavenMessage::ProfileUpdate {
             display_name, status, about_me, updated_at,
             avatar_b64, banner_b64, is_invisible, twitch_username,
             device_list,
             avatar_hash, banner_hash,
+            showcase_board: Some(showcase_board),
+            showcase_assets_b64, showcase_assets_hash,
         };
         send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, msg);
     }
@@ -815,16 +856,18 @@ pub(crate) fn maybe_request_full_profile(
     banner_b64: &str,
     avatar_hash: &str,
     banner_hash: &str,
+    showcase_assets_b64: &str,
+    showcase_assets_hash: &str,
     local_device_peer_id: &str,
     db_path: &str,
     db_passphrase: &str,
 ) {
     // Only light updates can leave us stale; a full payload already delivered blobs.
-    if !avatar_b64.is_empty() || !banner_b64.is_empty() {
+    if !avatar_b64.is_empty() || !banner_b64.is_empty() || !showcase_assets_b64.is_empty() {
         return;
     }
     // Old clients (no hash fields) always send full payloads — nothing to compare.
-    if avatar_hash.is_empty() && banner_hash.is_empty() {
+    if avatar_hash.is_empty() && banner_hash.is_empty() && showcase_assets_hash.is_empty() {
         return;
     }
     let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
@@ -833,8 +876,10 @@ pub(crate) fn maybe_request_full_profile(
     let cached = db.load_profile(profile_master).ok().flatten();
     let cached_avatar = profile_blob_hash(cached.as_ref().and_then(|p| p.avatar_bytes.as_deref()));
     let cached_banner = profile_blob_hash(cached.as_ref().and_then(|p| p.banner_bytes.as_deref()));
+    let cached_assets = profile_blob_hash(cached.as_ref().and_then(|p| p.showcase_assets.as_deref()));
     let stale = (!avatar_hash.is_empty() && avatar_hash != cached_avatar)
-        || (!banner_hash.is_empty() && banner_hash != cached_banner);
+        || (!banner_hash.is_empty() && banner_hash != cached_banner)
+        || (!showcase_assets_hash.is_empty() && showcase_assets_hash != cached_assets);
     if !stale {
         return;
     }
@@ -888,6 +933,9 @@ pub(crate) async fn handle_envelope_profile_update(
     device_list: Option<SignedDeviceList>,
     avatar_hash: String,
     banner_hash: String,
+    showcase_board: Option<String>,
+    showcase_assets_b64: String,
+    showcase_assets_hash: String,
     db_path: &str,
     db_passphrase: &str,
 ) -> Vec<String> {
@@ -925,17 +973,28 @@ pub(crate) async fn handle_envelope_profile_update(
         base64::engine::general_purpose::STANDARD.decode(&banner_b64).ok()
             .filter(|b| b.len() <= 2_000_000)
     };
+    let showcase_assets_bytes: Option<Vec<u8>> = if showcase_assets_b64.is_empty() {
+        None
+    } else if showcase_assets_b64 == "CLEAR" {
+        Some(vec![])
+    } else {
+        base64::engine::general_purpose::STANDARD.decode(&showcase_assets_b64).ok()
+            .filter(|b| b.len() <= 2_000_000)
+    };
     // Multi-device: persist under the sender's MASTER (any device updates the one
     // identity profile) + empty-profile guard. Single-device: master == sender.
     let (profile_master, _saved) = save_incoming_profile(
         &sender_peer_id, &display_name, &status, &about_me, updated_at,
         avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
+        sanitize_incoming_showcase(showcase_board.as_deref()),
+        showcase_assets_bytes.as_deref(),
         db_path, db_passphrase,
     );
     // Light announce with hashes we don't match → pull the full profile once.
     maybe_request_full_profile(
         ws_cmd_tx, ws_room_peers, &sender_peer_id, &profile_master,
         &avatar_b64, &banner_b64, &avatar_hash, &banner_hash,
+        &showcase_assets_b64, &showcase_assets_hash,
         local_device_peer_id, db_path, db_passphrase,
     );
     // Update display_name in server member lists (local-only, not a CRDT op).
@@ -1024,9 +1083,10 @@ pub(crate) async fn handle_profile_relay(
             Err(_) => true,
         };
         if should_save {
+            // Relay carries no showcase board/assets — None preserves stored ones.
             let _ = store.save_profile(
                 &source_peer_id, &display_name, &status, &about_me, updated_at,
-                avatar_bytes.as_deref(), None, &twitch_username,
+                avatar_bytes.as_deref(), None, &twitch_username, None, None,
             );
             hollow_log!("[HOLLOW-PROFILE] Saved relayed profile for {source_peer_id}");
         } else {

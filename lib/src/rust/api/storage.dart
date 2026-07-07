@@ -927,6 +927,9 @@ class UserProfile {
   final Uint8List? bannerBytes;
   final String twitchUsername;
 
+  /// Showcase board JSON (profile blocks; empty = no board).
+  final String showcaseBoard;
+
   const UserProfile({
     required this.peerId,
     required this.displayName,
@@ -936,6 +939,7 @@ class UserProfile {
     this.avatarBytes,
     this.bannerBytes,
     required this.twitchUsername,
+    required this.showcaseBoard,
   });
 
   @override
@@ -947,7 +951,8 @@ class UserProfile {
       updatedAt.hashCode ^
       avatarBytes.hashCode ^
       bannerBytes.hashCode ^
-      twitchUsername.hashCode;
+      twitchUsername.hashCode ^
+      showcaseBoard.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -961,5 +966,6 @@ class UserProfile {
           updatedAt == other.updatedAt &&
           avatarBytes == other.avatarBytes &&
           bannerBytes == other.bannerBytes &&
-          twitchUsername == other.twitchUsername;
+          twitchUsername == other.twitchUsername &&
+          showcaseBoard == other.showcaseBoard;
 }

@@ -593,7 +593,7 @@ pub(crate) enum NodeCommand {
     SetTwitchUsername { server_id: String, peer_id: String, twitch_username: String },
     NotifyShutdown,
     // -- Profile commands (Phase 3.5) --
-    UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>>, twitch_username: String },
+    UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>>, twitch_username: String, showcase_board: Option<String>, showcase_assets: Option<Vec<u8>> },
     // -- Message editing (Phase 3.5) --
     EditChannelMessage { server_id: String, channel_id: String, message_id: String, new_text: String },
     EditDmMessage { peer_id: String, message_id: String, new_text: String },
@@ -1019,6 +1019,18 @@ pub(crate) enum HavenMessage {
         avatar_hash: String,
         #[serde(default)]
         banner_hash: String,
+        /// Showcase board JSON. `None` from clients that predate boards —
+        /// receivers PRESERVE their stored board (a status edit from an old
+        /// client must not wipe it). `Some("")` = explicit clear.
+        #[serde(default)]
+        showcase_board: Option<String>,
+        /// Showcase asset bundle (game covers/artwork), avatar-style blob
+        /// semantics: "" = no change, "CLEAR" = clear, else base64. Rides
+        /// ONLY full sends; light announces carry the hash below.
+        #[serde(default)]
+        showcase_assets_b64: String,
+        #[serde(default)]
+        showcase_assets_hash: String,
     },
 
     // -- Multi-peer fan-out sync (Phase 3.5) --
@@ -2120,6 +2132,15 @@ pub(crate) enum MessageEnvelope {
         avatar_hash: String,
         #[serde(default)]
         banner_hash: String,
+        /// Showcase board JSON — None from old clients preserves the stored
+        /// board; see HavenMessage::ProfileUpdate.
+        #[serde(default)]
+        showcase_board: Option<String>,
+        /// Showcase asset bundle — see HavenMessage::ProfileUpdate.
+        #[serde(default)]
+        showcase_assets_b64: String,
+        #[serde(default)]
+        showcase_assets_hash: String,
     },
 
     /// CRDT sync request (replaces HavenMessage::SyncRequest for MLS path).

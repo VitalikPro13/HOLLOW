@@ -12,6 +12,7 @@ import 'api/identity.dart';
 import 'api/network.dart';
 import 'api/screen_audio.dart';
 import 'api/share.dart';
+import 'api/showcase.dart';
 import 'api/simple.dart';
 import 'api/storage.dart';
 import 'api/twitch.dart';
@@ -138,6 +139,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FriendFfi dco_decode_friend_ffi(dynamic raw);
 
   @protected
+  GameSearchResult dco_decode_game_search_result(dynamic raw);
+
+  @protected
   GuestReactionFfi dco_decode_guest_reaction_ffi(dynamic raw);
 
   @protected
@@ -205,6 +209,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<FriendFfi> dco_decode_list_friend_ffi(dynamic raw);
 
   @protected
+  List<GameSearchResult> dco_decode_list_game_search_result(dynamic raw);
+
+  @protected
   List<GuestReactionFfi> dco_decode_list_guest_reaction_ffi(dynamic raw);
 
   @protected
@@ -250,6 +257,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ShareEntry> dco_decode_list_share_entry(dynamic raw);
+
+  @protected
+  List<ShowcaseAsset> dco_decode_list_showcase_asset(dynamic raw);
 
   @protected
   List<StorageContextUsage> dco_decode_list_storage_context_usage(dynamic raw);
@@ -328,6 +338,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<ShowcaseAsset>? dco_decode_opt_list_showcase_asset(dynamic raw);
+
+  @protected
   ProtectionStatus dco_decode_protection_status(dynamic raw);
 
   @protected
@@ -356,6 +369,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ShareLinkInfo dco_decode_share_link_info(dynamic raw);
+
+  @protected
+  ShowcaseAsset dco_decode_showcase_asset(dynamic raw);
 
   @protected
   StorageBreakdown dco_decode_storage_breakdown(dynamic raw);
@@ -548,6 +564,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FriendFfi sse_decode_friend_ffi(SseDeserializer deserializer);
 
   @protected
+  GameSearchResult sse_decode_game_search_result(SseDeserializer deserializer);
+
+  @protected
   GuestReactionFfi sse_decode_guest_reaction_ffi(SseDeserializer deserializer);
 
   @protected
@@ -631,6 +650,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<FriendFfi> sse_decode_list_friend_ffi(SseDeserializer deserializer);
 
   @protected
+  List<GameSearchResult> sse_decode_list_game_search_result(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<GuestReactionFfi> sse_decode_list_guest_reaction_ffi(
     SseDeserializer deserializer,
   );
@@ -688,6 +712,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ShareEntry> sse_decode_list_share_entry(SseDeserializer deserializer);
+
+  @protected
+  List<ShowcaseAsset> sse_decode_list_showcase_asset(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<StorageContextUsage> sse_decode_list_storage_context_usage(
@@ -792,6 +821,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<ShowcaseAsset>? sse_decode_opt_list_showcase_asset(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ProtectionStatus sse_decode_protection_status(SseDeserializer deserializer);
 
   @protected
@@ -826,6 +860,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ShareLinkInfo sse_decode_share_link_info(SseDeserializer deserializer);
+
+  @protected
+  ShowcaseAsset sse_decode_showcase_asset(SseDeserializer deserializer);
 
   @protected
   StorageBreakdown sse_decode_storage_breakdown(SseDeserializer deserializer);
@@ -1076,6 +1113,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_friend_ffi(FriendFfi self, SseSerializer serializer);
 
   @protected
+  void sse_encode_game_search_result(
+    GameSearchResult self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_guest_reaction_ffi(
     GuestReactionFfi self,
     SseSerializer serializer,
@@ -1187,6 +1230,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_game_search_result(
+    List<GameSearchResult> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_guest_reaction_ffi(
     List<GuestReactionFfi> self,
     SseSerializer serializer,
@@ -1267,6 +1316,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_share_entry(
     List<ShareEntry> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_showcase_asset(
+    List<ShowcaseAsset> self,
     SseSerializer serializer,
   );
 
@@ -1400,6 +1455,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_list_showcase_asset(
+    List<ShowcaseAsset>? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_protection_status(
     ProtectionStatus self,
     SseSerializer serializer,
@@ -1443,6 +1504,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_share_link_info(ShareLinkInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_showcase_asset(ShowcaseAsset self, SseSerializer serializer);
 
   @protected
   void sse_encode_storage_breakdown(

@@ -269,6 +269,8 @@ pub struct UserProfile {
     pub avatar_bytes: Option<Vec<u8>>,
     pub banner_bytes: Option<Vec<u8>>,
     pub twitch_username: String,
+    /// Showcase board JSON (profile blocks; empty = no board).
+    pub showcase_board: String,
 }
 
 /// Get a profile for a specific peer (or ourselves). Returns None if no profile stored.
@@ -288,6 +290,7 @@ pub fn get_profile(peer_id: String) -> Result<Option<UserProfile>, String> {
             avatar_bytes: p.avatar_bytes,
             banner_bytes: p.banner_bytes,
             twitch_username: p.twitch_username,
+            showcase_board: p.showcase_board,
         })),
         None => Ok(None),
     }
@@ -312,6 +315,7 @@ pub fn get_all_profiles() -> Result<Vec<UserProfile>, String> {
             avatar_bytes: p.avatar_bytes,
             banner_bytes: p.banner_bytes,
             twitch_username: p.twitch_username,
+            showcase_board: p.showcase_board,
         })
         .collect())
 }
@@ -335,6 +339,7 @@ pub fn get_all_profiles_light() -> Result<Vec<UserProfile>, String> {
             avatar_bytes: None,
             banner_bytes: None,
             twitch_username: p.twitch_username,
+            showcase_board: p.showcase_board,
         })
         .collect())
 }
@@ -356,6 +361,7 @@ pub fn get_profile_light(peer_id: String) -> Result<Option<UserProfile>, String>
             avatar_bytes: None,
             banner_bytes: None,
             twitch_username: p.twitch_username,
+            showcase_board: p.showcase_board,
         })),
         None => Ok(None),
     }

@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
+import 'package:hollow/src/core/providers/showcase_assets_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/device_link_sync_provider.dart';
@@ -803,6 +804,7 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(profileProvider.notifier).reloadProfile(peerId);
         ref.read(avatarProvider.notifier).invalidate(peerId);
         ref.invalidate(bannerProvider(peerId));
+        ref.invalidate(showcaseAssetsProvider(peerId));
         _refreshPushHints();
 
       case NetworkEvent_DeviceListUpdated(:final masterPeerId):
@@ -1665,6 +1667,7 @@ class EventStreamNotifier extends Notifier<bool> {
                 avatarBytes: null,
                 bannerBytes: null,
                 twitchUsername: existing?.twitchUsername ?? '',
+                showcaseBoard: existing?.showcaseBoard ?? '',
               );
             }
           }

@@ -1,233 +1,61 @@
-# ProfileCardPopup and UserBar
-
-## ProfileCardPopup Overview
-
-Source: `lib/src/ui/components/profile_card_popup.dart` (810 lines)
-
-The profile card is a floating overlay that shows detailed information about a user. It is the primary inspection surface for both peers and server members across the entire app.
-
-## showProfileCardPopup() — Entry Point
-
-`showProfileCardPopup()` is the top-level function that creates and inserts an `OverlayEntry` containing a `_ProfileCardOverlay`.
-
-### Parameters
-- `context` (BuildContext) — for accessing `Overlay.of(context)`
-- `ref` (WidgetRef) — passed through to the overlay widget
-- `peerId` (String, required) — the user to display
-- `nickname` (String?) — server nickname, if applicable
-- `role` (String?) — server power role ("owner", "admin", "moderator", "member")
-- `twitchUsername` (String?) — Twitch username from OAuth verification
-- `labels` (List<crdt_api.LabelFfi>?) — cosmetic label badges
-- `anchor` (Offset, required) — screen position to anchor the card near
-- `anchorBottom` (bool, default false) — when true, `anchor.dy` represents where the card's bottom edge should be (used by UserBar to show card above itself)
-
-### Dismiss Mechanism
-The `OverlayEntry` captures a `late final` reference to itself. The `onDismiss` callback calls `entry.remove()` then `entry.dispose()`.
-
-## Trigger Sources
-
-The profile card is shown from these locations:
-1. **`_ServerMemberTile` (member_panel.dart):** On tap. Anchor is `Offset(pos.dx - 290, pos.dy - 100)` — positions card ~290px to the left and ~100px above the tap point. Passes `nickname`, `role`, `twitchUsername`, `labels`.
-2. **`_MemberTile` (member_panel.dart):** On tap. Same anchor offset. No server-specific fields passed.
-3. **`UserBar` (user_bar.dart):** On tap of the user identity area. Anchor is `Offset(pos.dx, pos.dy - 8)` with `anchorBottom: true` — card bottom aligns just above the user bar.
-4. **Chat message sender name/avatar (`profile_tap.dart`):** `ProfileTapTarget` wraps the sender avatar + name in DM (`message_bubble.dart`) and channel (`channel_message_bubble.dart`) bubbles. `showChatProfile()` branches by platform: mobile → `showMobileProfileSheet` (bottom sheet — SelectionArea-safe), desktop → `showProfileCardPopup` anchored at `Offset(pos.dx, pos.dy + 24)` (just below the tapped element). Chat is inside `SelectionArea`, so the tap target is a full `GestureDetector + MouseRegion` widget (the proven URL/reply-tap pattern), never a raw `OverlayEntry`.
-
-## _ProfileCardOverlay — Overlay Container
-
-`_ProfileCardOverlay` is a `ConsumerStatefulWidget` with `SingleTickerProviderStateMixin`.
-
-### Parameters (from showProfileCardPopup)
-- `peerId`, `nickname`, `role`, `twitchUsername`, `labels`, `anchor`, `anchorBottom`, `onDismiss`
-
-### Animation
-`AnimationController` with 180ms duration (or `Duration.zero` when animations disabled).
-- `_scaleAnim`: 0.92 -> 1.0, `Curves.easeOutCubic`
-- `_fadeAnim`: 0.0 -> 1.0, `Curves.easeOut`
-
-Card enters with simultaneous scale-up and fade-in. Dismissal reverses both animations before removing the overlay.
-
-### Twitch Username Resolution
-On `initState`, `_resolvedTwitchUsername` is initialized from `widget.twitchUsername` (passed from caller). If still null/empty, `_resolveTwitchUsername()` runs asynchronously with two fallback tiers: (1) if the card is for the local user, calls `twitchGetUsername()` (Rust FFI) to fetch the locally-authenticated Twitch username; (2) for any peer, checks `profileProvider` for the peer's stored `twitchUsername` from the profile DB (synced via `HavenMessage::ProfileUpdate`). This ensures the badge appears even when CRDT member data hasn't synced.
-
-### Providers Read
-- `profileProvider` — all user profiles (avatar, banner, displayName, status, aboutMe)
-- `identityProvider` — local peer ID (to determine if card is for self)
-- `localNicknameProvider` — local nicknames map (for name priority resolution)
-- `friendsProvider` (via `_FriendActionButton`) — friend relationship state
-
-## Screen Positioning Logic
-
-Card width is fixed at 280px.
-
-### Horizontal Clamping
-- `left = anchor.dx`, clamped to `[8, screenWidth - cardWidth - 8]` to prevent overflow off either screen edge.
-
-### Vertical Positioning
-- **`anchorBottom == false` (default):** opens downward (`top = anchor.dy`, clamped ≥ 8). **Auto-flip:** if `anchor.dy + estimatedCardHeight (380)` would overflow the bottom edge, the card instead opens UPWARD (`bottom = screenHeight - anchor.dy`, clamped ≥ 8). This prevents the card from running off-screen when triggered near the bottom (e.g. a chat message low in the viewport) — without it, a tap below the fold pushed the card off-screen instead of popping up higher.
-- **`anchorBottom == true`:** `bottom = screenHeight - anchor.dy`, clamped to minimum 8px from bottom edge. Card grows upward. Used by UserBar.
-
-## Dismiss Barrier
-
-A `Positioned.fill` `GestureDetector` with `HitTestBehavior.opaque` covers the entire screen behind the card. Tapping anywhere outside the card triggers `_dismiss()`.
-
-`_dismiss()` reverses the animation controller, then calls `widget.onDismiss()` (which removes and disposes the overlay entry) in the `.then()` callback.
-
-## Profile Card Content Layout
-
-The card is a `Container` with:
-- Width: 280px
-- Background: `hollow.surface` at 0.96 alpha
-- Border: `hollow.accent` at 0.15 alpha
-- Border radius: `hollow.radiusLg`
-- Shadow: black at 0.35 alpha, 28px blur, 8px Y offset
-- `Clip.antiAlias` for rounded corners
-
-### Banner Section (80px)
-
-If `profile.bannerBytes` is non-null and non-empty, renders an `AnimatedGifImage` (supports animated GIF/WebP banners) at 80px height, `BoxFit.cover`, with a gradient fallback on error.
-
-If no banner image, renders a `LinearGradient` container using `_bannerColorFromId(peerId)`:
-- Hash-based deterministic hue: `(id.hashCode % 360).abs() + 40) % 360`
-- HSL: saturation 0.45, lightness 0.35
-- Gradient from `bannerColor` to `bannerColor.withAlpha(0.7)` (topLeft -> bottomRight)
-
-### Content Section (overlaps banner by -32px via Transform.translate)
-
-Padded with `HollowSpacing.md` horizontal.
-
-#### Avatar
-`HollowAvatar` at 64px size with `animate: true` (supports animated avatars). Wrapped in a `Container` with `hollow.surface` 3px border and `radiusMd + 2` border radius for the cutout ring effect.
-
-#### Name Display
-Priority resolution for the primary displayed name:
-1. **Local nickname** (`localNicknames[peerId]`)
-2. **Server nickname** (`widget.nickname`)
-3. Falls through to `shownName`
-
-`shownName` is: `displayName` from profile if non-empty, otherwise first 8 chars of peerId + "...".
-
-**When local nick or server nick exists (hasSecondary):** Two lines:
-- Primary: the nickname, `HollowTypography.subheading` at 15px, w700, `textPrimary`
-- Secondary: the profile `shownName`, `HollowTypography.caption` at 11px, `textSecondary`
-
-**When no nickname:** Single line showing `shownName` in the primary style.
-
-Both are centered and single-line with ellipsis overflow.
-
-**Mobile twin (`mobile_profile_sheet.dart` `MobileProfileSheet`):** same two-line behavior. NOTE (fixed 2026-06-21): the secondary "real name" line MUST be computed from raw `profile.displayName` (fallback short peer ID), NOT `displayNameFor()` — `displayNameFor` folds in the local nickname and would duplicate the top line. (Desktop's `shownName` was already correct via raw `displayName`.)
-
-#### Role Badge
-Shown only when `role != null && role.isNotEmpty && role != 'member'`. Renders a pill badge:
-- Background: role color at 0.15 alpha
-- Text: capitalized role name, caption at 10px, w600, full role color
-- Border radius: `HollowRadius.sm`
-
-Role colors via `_roleColor()`:
-- `owner` -> `hollow.warning` (gold)
-- `admin` -> `Color(0xFFA78BFA)` (purple)
-- `moderator` -> `Color.lerp(hollow.warning, hollow.error, 0.5)` (orange)
-- default -> `hollow.textSecondary`
-
-#### Label Badges
-Shown only when `labels` list is non-null and non-empty. Uses `Wrap` with 4px spacing, center alignment. Each label is a pill badge:
-- Color parsed from `l.color` hex string via `_parseLabelColor()` (strips "#", parses 6-digit hex; falls back to `Color(0xFF78909C)` / blue-grey)
-- Background: parsed color at 0.15 alpha
-- Text: `l.name`, caption at 10px, w600, full parsed color
-- Border radius: `HollowRadius.sm`
-
-#### Twitch Badge
-Shown when `_resolvedTwitchUsername` is non-null and non-empty. Renders a clickable pill:
-- Background: `Color(0xFF9146FF)` (Twitch purple) at 0.15 alpha
-- Row: `SimpleIcons.twitch` (11px, Twitch purple) + username text (caption at 10px, w600, Twitch purple)
-- On tap: opens `https://twitch.tv/$username` in external browser via `launchUrl()`
-
-Note: Three resolution tiers — (1) passed from caller (CRDT member data via `_ServerMemberTile`), (2) local Twitch OAuth token for self, (3) profile DB fallback for any peer. Disconnecting Twitch clears the CRDT username on all servers AND the profile DB field.
-
-#### Status Text
-Shown when `profile.status` is non-empty. Italic caption at 11px, `textSecondary`, centered, single-line ellipsis.
-
-#### Divider
-1px `hollow.border` container, full width.
-
-#### About Me Section
-Shown when `profile.aboutMe` is non-empty:
-- "ABOUT ME" header: caption at 9px, w700, letter-spacing 0.5, `textSecondary`
-- Body: caption at 11px, `textSecondary`, centered, max 4 lines with ellipsis
-
-## Self vs Non-Self Actions
-
-### Self (isMe == true)
-Shows an "Edit Profile" button:
-- `HollowButton.outline()`, compact, with `LucideIcons.pencil` icon
-- On tap: gets navigator context, dismisses the card, then calls `showUserSettingsDialog(navContext, ref)`
-
-### Non-Self (isMe == false)
-Shows two action buttons:
-
-#### Set Nickname Button
-`HollowButton.ghost()`, compact. Watches `localNicknameProvider` to determine icon and label:
-- **Has existing nickname:** `LucideIcons.pencil` + "Edit Nickname"
-- **No nickname:** `LucideIcons.tag` + "Set Nickname"
-
-On tap: dismisses card, opens `showLocalNicknameDialog()` with current nickname.
-
-#### _FriendActionButton
-State-aware button that reads `friendsProvider`:
-
-**Not a friend (`friendInfo == null`):**
-- `HollowButton.outline()` with `LucideIcons.userPlus` + "Add Friend"
-- On tap: `friendsProvider.notifier.sendRequest(peerId)`
-
-**Pending outgoing (`status == 'pending', direction != 'incoming'`):**
-- `HollowButton.ghost()` with `LucideIcons.clock` + "Request Sent"
-- `onPressed: null` (disabled/non-interactive)
-- Text and icon colored `textSecondary`
-
-**Pending incoming (`status == 'pending', direction == 'incoming'`):**
-- `HollowButton.filled()` with `LucideIcons.check` + "Accept Request"
-- On tap: `friendsProvider.notifier.acceptRequest(peerId)`
-
-**Accepted friend:**
-- Not a button — renders a centered Row with `LucideIcons.userCheck` (14px, success) + "Friends" text (12px, w600, success)
-
-## Peer ID Footer
-
-A tappable footer at the card's very bottom (translated -28px upward to tuck into the content area):
-- Shows last 8 characters of peerId in monospace (`HollowTypography.mono`, 8px, `textSecondary` at 0.35 alpha)
-- Preceded by `LucideIcons.copy` (8px, same low-alpha color)
-- On tap: copies full `widget.peerId` to clipboard, shows `HollowToast` "Peer ID copied" (success type, 1s duration)
-
-## _LocalNicknameDialog — Set/Edit Local Nickname
-
-Opened by `showLocalNicknameDialog()` via `showHollowDialog()`.
-
-`_LocalNicknameDialog` is a `ConsumerStatefulWidget` with a `TextEditingController`.
-
-### Parameters
-- `peerId` (String) — target peer
-- `currentNickname` (String) — pre-filled value
-
-### Layout
-300px wide container, `hollow.surface` background, `radiusLg` corners, border.
-- Title: "Set Nickname" (subheading, w600)
-- Subtitle: "Only visible to you" (caption, 11px, textSecondary)
-- `HollowTextField`: hint "Nickname (leave empty to clear)", max 32 chars, autofocus, submit on enter
-- Buttons: "Cancel" ghost + "Save" filled
-
-### Save Logic
-Trims the text, calls `localNicknameProvider.notifier.setNickname(peerId, nickname)`, then pops. Setting an empty string effectively clears the nickname.
-
-## _bannerColorFromId() — Deterministic Banner Color
-
-`Color _bannerColorFromId(String id)` generates a consistent banner gradient color from a peer ID:
-- `hue = ((id.hashCode % 360).abs() + 40) % 360` — shifts by 40 degrees from the avatar hash hue
-- Returns `HSLColor.fromAHSL(1.0, hue, 0.45, 0.35).toColor()` — muted, dark tone suitable for banner backgrounds
-
----
-
-# UserBar — Bottom Identity Panel
-
-Source: `lib/src/ui/shell/user_bar.dart` (293 lines)
+# Profile Card, Popup and Full Profile Dialog
+
+## Architecture Overview (redesigned 2026-07-07)
+
+ONE shared widget renders profile card content at two densities:
+`ProfileCardBody` in `lib/src/ui/components/profile_card_body.dart` with
+`ProfileCardDensity.compact` (anchored hover popup) and `.full` (the wide
+profile dialog). Both render the same sections from the same data so the two
+surfaces cannot drift. The HOST owns the outer container and passes
+`dismissHost` (closes popup/dialog before opening another dialog) and, for
+compact, `onExpand` (opens the full dialog).
+
+Sections in order: banner Stack (avatar breaking its bottom edge at left,
+compact-only expand button top-right) → corner band (Twitch/integration chip
+ALONE, right-aligned under the banner, both densities) → identity block
+(name, secondary name, presence StatusDot row via `identityIsOnline`, italic
+custom status) → ONE merged chip row (role incl. Member + cosmetic labels) →
+divider → ABOUT ME → actions → peer-id copy footer. Compact shows a "View
+showcase" hint (sparkles, accentText) when the person has a board. Full
+density puts ALL action buttons in one row below About Me (Edit Showcase +
+Edit Profile for self; Set Nickname + friend action for others).
+
+Density metrics: compact banner 104 / avatar 64 / width 300
+(`kProfileCardPopupWidth`); full banner 220 / avatar 110 / card width 560
+(`kProfileDialogCenterWidth`), name 22px.
+
+## showProfileCardPopup() — Compact Popup (desktop)
+
+`lib/src/ui/components/profile_card_popup.dart`. Keeps the OverlayEntry +
+anchoring/flip/clamp shell (estimated height 400, flip-up when overflowing
+the bottom, horizontal clamp) and the 180ms scale+fade animation; the card
+interior is `ProfileCardBody(compact)`. Member panel anchors derive from
+`kProfileCardPopupWidth`. `showLocalNicknameDialog` moved to
+profile_card_body.dart and is RE-EXPORTED here (chat_pane imports it).
+Expand affordance: scrimmed circle button on the banner (a11y label "View
+full profile") → removes overlay instantly → `showProfileDialog`.
+
+## showProfileDialog() — Full Profile (dialogs/profile_dialog.dart)
+
+Desktop: `showHollowDialog` hosting the center card FLANKED by separate
+showcase board panels (see wiki `profile_showcase_board`). The card is
+self-contained; panels (`kShowcasePanelWidth` 340) are their own surfaces
+(same elevated/border/shadow treatment) stretched to the card's height via
+IntrinsicHeight (ConstrainedBox minHeight 560). Adaptive: no boards → card
+only; when the window can't fit the ensemble, columns SCALE proportionally
+(`scale = (available − gaps) / columnsWidth`, side-by-side down to 0.62×)
+and only below that stack vertically. Watches
+`profileProvider.select(showcaseBoard)` so composer saves update live.
+Mobile: routes to `showMobileProfileSheet` (parity surface; boards stacked,
+sheet is scrollable, self gets Edit Showcase).
+
+## Chat popups + role enrichment
+
+`showChatProfile` (`ui/chat/profile_tap.dart`) takes an optional `serverId`;
+channel contexts (`channel_message_bubble` passes it) resolve the sender's
+role/labels/nickname/twitch from `serverMembersProvider` AT TAP TIME so the
+chat popup matches the member panel. DMs pass none — no roles. The Member
+role renders as a chip like every other role (consistency rule).
 
 ## UserBar Widget Overview
 

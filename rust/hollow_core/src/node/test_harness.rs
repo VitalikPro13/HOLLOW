@@ -4380,6 +4380,105 @@ async fn friend_converges_to_master_across_distinct_device() {
 }
 
 // ---------------------------------------------------------------------------
+// Showcase board replication (profile field, 2026-07): A's board JSON rides
+// ProfileUpdate to B and lands keyed by A's MASTER (A uses device != master);
+// a later update that doesn't touch the board (input None → the handler
+// rebroadcasts the STORED value) must not lose it; Some("") clears it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn showcase_board_replicates_preserves_and_clears() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 61;
+    const A_DEV: u8 = 62;
+    const B_MASTER: u8 = 63;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    sleep_ms(2000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let send_update = |status: &str, board: Option<String>, assets: Option<Vec<u8>>| NodeCommand::UpdateProfile {
+        display_name: "Anon A".to_string(),
+        status: status.to_string(),
+        about_me: String::new(),
+        avatar_bytes: None,
+        banner_bytes: None,
+        twitch_username: String::new(),
+        showcase_board: board,
+        showcase_assets: assets,
+    };
+
+    // --- 1. A composes a board (+ an asset bundle) → B stores both under
+    // A's MASTER. The bundle rides the live full broadcast like avatar bytes. ---
+    let board = r#"{"v":1,"right":[{"t":"text","d":{"title":"Now","body":"testing"}}]}"#;
+    let asset_bytes = vec![7u8; 512];
+    let asset_hash = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(&asset_bytes))
+    };
+    let bundle = crate::api::showcase::encode_asset_bundle(&[(asset_hash.clone(), asset_bytes.clone())]);
+    a.cmd_tx.send(send_update("hi", Some(board.to_string()), Some(bundle.clone()))).await.unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { .. })
+    })
+    .await;
+    assert!(got, "B must receive A's profile update");
+    sleep_ms(300).await;
+    let p = b.store().load_profile(&a_master).unwrap()
+        .expect("B must hold A's profile keyed by A's MASTER (device != master)");
+    assert_eq!(p.showcase_board, board, "board JSON must replicate to B");
+    assert_eq!(
+        p.showcase_assets.as_deref(), Some(bundle.as_slice()),
+        "asset bundle must replicate to B byte-exact"
+    );
+    let decoded = crate::api::showcase::decode_asset_bundle(p.showcase_assets.as_deref().unwrap());
+    assert_eq!(decoded, vec![(asset_hash.clone(), asset_bytes.clone())],
+        "replicated bundle must decode with hashes verifying");
+
+    // --- 2. A board-untouched update (input None): the handler rebroadcasts the
+    // STORED board, and B's COALESCE save preserves it either way. ---
+    drain_events(&mut b);
+    a.cmd_tx.send(send_update("status changed", None, None)).await.unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { .. })
+    })
+    .await;
+    assert!(got, "B must receive A's second profile update");
+    sleep_ms(300).await;
+    let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
+    assert_eq!(p.status, "status changed", "the non-board field must update");
+    assert_eq!(p.showcase_board, board, "an update that didn't touch the board must NOT lose it");
+    assert_eq!(p.showcase_assets.as_deref(), Some(bundle.as_slice()),
+        "an update that didn't touch the assets must NOT lose them");
+
+    // --- 3. Explicit clear (Some("") / empty bundle) propagates. ---
+    drain_events(&mut b);
+    a.cmd_tx.send(send_update("cleared", Some(String::new()), Some(Vec::new()))).await.unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { .. })
+    })
+    .await;
+    assert!(got, "B must receive A's clear update");
+    sleep_ms(300).await;
+    let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
+    assert_eq!(p.showcase_board, "", "an explicit empty board must clear on B");
+    assert_eq!(p.showcase_assets, None, "an explicit empty bundle must clear on B");
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
 // POSITIVE (no regression): the sibling-proof handshake itself links two genuine
 // siblings that meet LIVE in the inbox with NO pre-seeded resolver. Unlike
 // `linked_sibling_resolves_both_devices_at_startup` (which pre-seeds the resolver

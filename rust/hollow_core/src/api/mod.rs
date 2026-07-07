@@ -4,6 +4,7 @@ pub mod identity;
 pub mod network;
 pub mod screen_audio;
 pub mod share;
+pub mod showcase;
 pub mod simple;
 pub mod storage;
 pub mod twitch;

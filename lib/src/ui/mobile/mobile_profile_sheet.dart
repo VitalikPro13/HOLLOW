@@ -7,8 +7,11 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/models/showcase_board.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/ui/components/showcase_blocks.dart';
+import 'package:hollow/src/ui/dialogs/showcase_editor.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -107,8 +110,10 @@ class MobileProfileSheet extends ConsumerWidget {
     final effectiveTwitch = (twitchUsername != null && twitchUsername!.isNotEmpty)
         ? twitchUsername!
         : (profile?.twitchUsername ?? '');
+    final board = ShowcaseBoard.decode(profile?.showcaseBoard);
 
     return SafeArea(
+      child: SingleChildScrollView(
       child: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -206,8 +211,8 @@ class MobileProfileSheet extends ConsumerWidget {
                 ],
               ),
 
-              // Role badge
-              if (role != null && role != 'member') ...[
+              // Role badge — every role shows, Member included (consistency)
+              if (role != null && role!.isNotEmpty) ...[
                 const SizedBox(height: HollowSpacing.sm),
                 Container(
                   padding: const EdgeInsets.symmetric(
@@ -317,7 +322,40 @@ class MobileProfileSheet extends ConsumerWidget {
                 ),
               ],
 
+              // Showcase boards — stacked (left side first) on mobile
+              if (!board.isEmpty) ...[
+                const SizedBox(height: HollowSpacing.lg),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (board.hasLeft)
+                        ShowcaseBoardColumn(peerId: peerId, blocks: board.left),
+                      if (board.hasLeft && board.hasRight)
+                        const SizedBox(height: HollowSpacing.sm),
+                      if (board.hasRight)
+                        ShowcaseBoardColumn(peerId: peerId, blocks: board.right),
+                    ],
+                  ),
+                ),
+              ],
+
               const SizedBox(height: HollowSpacing.lg),
+
+              // Edit Showcase (self only)
+              if (isMe) ...[
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
+                  child: HollowButton.outline(
+                    onPressed: () => showShowcaseEditorDialog(context, ref),
+                    icon: const Icon(LucideIcons.layoutGrid, size: 16),
+                    expand: true,
+                    child: const Text('Edit Showcase'),
+                  ),
+                ),
+                const SizedBox(height: HollowSpacing.sm),
+              ],
 
               // Action buttons
               if (!isMe) ...[
@@ -416,6 +454,7 @@ class MobileProfileSheet extends ConsumerWidget {
           ),
         ),
       ],
+    ),
     ),
     );
   }

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
@@ -13,6 +14,10 @@ import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 /// must NOT be a raw OverlayEntry on touch platforms. On mobile we use the
 /// modal bottom sheet; on desktop the anchored overlay card (same as the
 /// member panel), positioned near the tapped widget.
+///
+/// Pass [serverId] from channel contexts: the sender's server membership
+/// (role, labels, nickname, Twitch) is resolved at tap time so the chat popup
+/// matches the member panel. DMs pass none — no server, no roles.
 void showChatProfile(
   BuildContext context,
   WidgetRef ref, {
@@ -21,7 +26,24 @@ void showChatProfile(
   String? role,
   String? twitchUsername,
   List<crdt_api.LabelFfi>? labels,
+  String? serverId,
 }) {
+  if (serverId != null) {
+    final members = ref.read(serverMembersProvider(serverId)).valueOrNull;
+    final member =
+        members?.where((m) => m.peerId == peerId).firstOrNull;
+    if (member != null) {
+      role ??= member.role;
+      labels ??= member.labels.isNotEmpty ? member.labels : null;
+      if (twitchUsername == null || twitchUsername.isEmpty) {
+        twitchUsername =
+            member.twitchUsername.isNotEmpty ? member.twitchUsername : null;
+      }
+      if (nickname == null || nickname.isEmpty) {
+        nickname = member.nickname.isNotEmpty ? member.nickname : null;
+      }
+    }
+  }
   if (Platform.isAndroid || Platform.isIOS) {
     showMobileProfileSheet(
       context,
@@ -56,6 +78,7 @@ class ProfileTapTarget extends ConsumerWidget {
   final String? role;
   final String? twitchUsername;
   final List<crdt_api.LabelFfi>? labels;
+  final String? serverId;
   final Widget child;
 
   const ProfileTapTarget({
@@ -66,6 +89,7 @@ class ProfileTapTarget extends ConsumerWidget {
     this.role,
     this.twitchUsername,
     this.labels,
+    this.serverId,
   });
 
   @override
@@ -88,6 +112,7 @@ class ProfileTapTarget extends ConsumerWidget {
             role: role,
             twitchUsername: twitchUsername,
             labels: labels,
+            serverId: serverId,
           ),
           child: child,
         ),
