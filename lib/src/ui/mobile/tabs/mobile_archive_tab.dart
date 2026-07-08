@@ -7,6 +7,7 @@ import 'package:hollow/src/core/models/archive_conversation.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/api/archive.dart' as archive_api;
@@ -18,6 +19,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_archive_viewer_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
@@ -328,11 +330,15 @@ class _MobileDmList extends ConsumerWidget {
             style: TextStyle(color: hollow.error)),
       ),
       data: (entries) {
+        // The self-DM renders as "Saved messages" — search should match that
+        // label, not your own profile name.
+        final savedId = ref.watch(savedMessagesPeerIdProvider);
         final filtered = search.isEmpty
             ? entries
             : entries.where((e) {
-                final name =
-                    displayNameFor(profiles, e.peerId).toLowerCase();
+                final name = e.peerId == savedId
+                    ? 'saved messages'
+                    : displayNameFor(profiles, e.peerId).toLowerCase();
                 return name.contains(search);
               }).toList();
 
@@ -440,7 +446,10 @@ class _MobileDmList extends ConsumerWidget {
     bool isHidden,
   ) {
     final hollow = HollowTheme.of(context);
-    final name = displayNameFor(profiles, entry.peerId);
+    // Export dialog title: the self-DM is "Saved messages", not your own name.
+    final name = entry.peerId == ref.read(savedMessagesPeerIdProvider)
+        ? 'Saved messages'
+        : displayNameFor(profiles, entry.peerId);
     showModalBottomSheet(
       context: context,
       backgroundColor: hollow.surface,
@@ -554,9 +563,13 @@ class _MobileDmRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
+    // Self-DM = Saved messages: bookmark avatar + fixed label instead of your
+    // own profile name/picture. Row behavior (open/hide/export) is unchanged.
+    final isSaved = entry.peerId == ref.watch(savedMessagesPeerIdProvider);
     final peerProfile =
         ref.watch(profileProvider.select((p) => p[entry.peerId]));
-    final name = displayNameForPeer(peerProfile, entry.peerId);
+    final name =
+        isSaved ? 'Saved messages' : displayNameForPeer(peerProfile, entry.peerId);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 2),
@@ -571,7 +584,10 @@ class _MobileDmRow extends ConsumerWidget {
           ),
           child: Row(
             children: [
-              HollowAvatar(peerId: entry.peerId, size: 32),
+              if (isSaved)
+                const SavedMessagesAvatar(size: 32)
+              else
+                HollowAvatar(peerId: entry.peerId, size: 32),
               const SizedBox(width: HollowSpacing.sm),
               Expanded(
                 child: Text(

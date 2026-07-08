@@ -1026,6 +1026,24 @@ This connection's daily relay byte budget (10 GB/day per IP, relay-RAM counter, 
 - Data arrives via the event stream: event_provider dispatches `NetworkEvent_BandwidthStatus` → `onStatus(...)`; `NetworkEvent_BandwidthLimited` → `onLimited()` + error toast (overlayState pattern).
 - Consumers: desktop `_RelayStatsCard` (Home) + mobile `_MobileRelayCard` (Settings, gated on tab 3) — both render `DailyUsageMeter` "Daily Relay Data" (renamed 2026-07-06; desktop adds a tooltip: per-IP, shared across the network, both directions, P2P excluded) only when `usedBytes > 0`.
 
+## Blocked Users Provider (2026-07-07)
+
+File: `lib/src/core/providers/blocked_users_provider.dart`
+Provider: `blockedUsersProvider` -- `NotifierProvider<BlockedUsersNotifier, Set<String>>`
+
+Set of blocked MASTER peer_ids mirroring the Rust block list (SQLCipher `blocked_peers` + `node/blocklist.rs`). Rust drops the DM surfaces at ingest; this mirror drives the UI: Block/Unblock button state (profile card/popup/mobile sheet), hiding blocked senders' channel messages (`channel_chat_pane._displayMessages`), suppressing their channel unread/notifications (event_provider), and the Settings > Security "Blocked users" management list (+ mobile settings page).
+- `load()` -- from `loadBlockedPeers()` FFI, called in hollow_shell `_bootstrap` (beside hiddenArchiveDms load), never in build().
+- `block()`/`unblock()` -- optimistic set update + `blockPeer`/`unblockPeer` FFI, revert + rethrow on error (callers toast).
+- ALWAYS compare `deviceLinkProvider.identityOf(peerId)` against the set, never a raw device id.
+- Report flow (relay-side counts, not part of this provider): `report_user` FFI from `report_user_dialog.dart` (4 categories: spam/harassment/illegal_content/impersonation).
+
+## Saved Messages Provider (2026-07-07)
+
+File: `lib/src/core/providers/saved_messages_provider.dart`
+Provider: `savedMessagesPeerIdProvider` -- `Provider<String?>`
+
+The peer id of the "Saved messages" conversation = your OWN master id (`identityOf(identityProvider.peerId)`); null until identity loads. Saved messages is a self-DM riding the whole normal DM pipeline (Rust skips the recipient fan-out branch and fans only to siblings). UI surfaces keying on it: FriendsBar bookmark button (left of Help center), ChatPane/MobileChatRoute self-mode headers (bookmark avatar via `components/saved_messages_avatar.dart`, no presence/call buttons), pinned rows in the Classic sidebar DM section, mobile Chats tab, and both archive lists.
+
 ## Relay Stats Provider
 
 File: `lib/src/core/providers/relay_stats_provider.dart`

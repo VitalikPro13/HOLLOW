@@ -476,6 +476,10 @@ pub(crate) async fn finish_send_file(
         // room (live presence is authoritative — see message_ops::collect_target_devices;
         // a stale/polluted stored list must not hide the connected device).
         let recipient_master = crate::node::resolver::resolve(&peer_str);
+        // Self-DM ("Saved messages"): local store + FileCompleted already
+        // happened above; fan-out is siblings-only (no recipient push, no
+        // bare-master fallback target).
+        let self_dm = crate::node::resolver::same_identity(&peer_str, local_peer_str);
         let dm_room_f = crate::node::types::dm_room_code(local_peer_str, &recipient_master);
         // LIVENESS-FILTERED (Step 7 ghost fix, mirrors message_ops::collect_target_devices):
         // only target stored devices CURRENTLY IN A ROOM. A dead ghost id (from a
@@ -493,9 +497,11 @@ pub(crate) async fn finish_send_file(
         // image path buffers under it + pushes its token so a fully-quit phone gets
         // the image preview. Mirrors message_ops::collect_target_devices. Only the
         // recipient (not our own siblings — never push our own phone for our send).
-        for d in crate::node::resolver::devices_for(&recipient_master) {
-            if ws_room_for_peer(&ws_room_peers, &d).is_none() && olm.has_session(&d) {
-                file_set.insert(d);
+        if !self_dm {
+            for d in crate::node::resolver::devices_for(&recipient_master) {
+                if ws_room_for_peer(&ws_room_peers, &d).is_none() && olm.has_session(&d) {
+                    file_set.insert(d);
+                }
             }
         }
         let own_master_f = crate::node::resolver::resolve(local_peer_str);
@@ -516,7 +522,7 @@ pub(crate) async fn finish_send_file(
         file_set.remove(&recipient_master);   // never the bare master
         file_set.remove(&own_master_f);
         let mut file_targets: Vec<String> = file_set.into_iter().collect();
-        if file_targets.is_empty() {
+        if file_targets.is_empty() && !self_dm {
             // Single-device recipient with no live device → master id as-is.
             file_targets.push(peer_str.clone());
         }

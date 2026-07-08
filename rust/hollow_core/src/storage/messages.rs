@@ -524,6 +524,16 @@ impl MessageStore {
         )
         .map_err(|e| format!("Failed to create app_settings table: {e}"))?;
 
+        // -- Blocked peers (local block list, MASTER-keyed) --
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS blocked_peers (
+                peer_id    TEXT PRIMARY KEY,
+                blocked_at INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .map_err(|e| format!("Failed to create blocked_peers table: {e}"))?;
+
         // -- MLS identity (singleton row, id=1) --
         conn.execute(
             "CREATE TABLE IF NOT EXISTS mls_identity (
@@ -3675,6 +3685,49 @@ impl MessageStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(format!("Failed to check friend status: {e}")),
         }
+    }
+
+    // ── Blocked peers (local block list, MASTER-keyed) ───────────
+
+    pub fn block_peer(&self, master_peer_id: &str) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.conn
+            .execute(
+                "INSERT INTO blocked_peers (peer_id, blocked_at) VALUES (?1, ?2)
+                 ON CONFLICT(peer_id) DO NOTHING",
+                params![master_peer_id, now],
+            )
+            .map_err(|e| format!("Failed to block peer: {e}"))?;
+        Ok(())
+    }
+
+    pub fn unblock_peer(&self, master_peer_id: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM blocked_peers WHERE peer_id = ?1",
+                params![master_peer_id],
+            )
+            .map_err(|e| format!("Failed to unblock peer: {e}"))?;
+        Ok(())
+    }
+
+    /// All blocked master peer_ids, newest first.
+    pub fn load_blocked_peers(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT peer_id FROM blocked_peers ORDER BY blocked_at DESC")
+            .map_err(|e| format!("Failed to prepare blocked query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query blocked peers: {e}"))?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| format!("Failed to read blocked row: {e}"))?);
+        }
+        Ok(result)
     }
 
     // ── App Settings ──────────────────────────────────────────────

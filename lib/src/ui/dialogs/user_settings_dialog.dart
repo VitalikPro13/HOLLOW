@@ -18,6 +18,7 @@ import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -189,7 +190,7 @@ extension _SettingsCategoryMeta on _SettingsCategory {
         _SettingsCategory.shortcuts => 'shortcuts keyboard keys hotkeys chat input',
         _SettingsCategory.security =>
           'security app lock password device protection keychain recovery phrase '
-              'mnemonic encrypt',
+              'mnemonic encrypt blocked block unblock report',
         _SettingsCategory.devices =>
           'devices linked multi device link sync revoke remove reset',
         _SettingsCategory.backup => 'backup export proof verify signature',
@@ -2225,6 +2226,11 @@ class _SecurityTabState extends State<_SecurityTab> {
 
           // ── Verify a Proof ──
           const _VerifyProofSection(),
+
+          const SizedBox(height: HollowSpacing.xl),
+
+          // ── Blocked Users ──
+          const _BlockedUsersSection(),
         ],
       ),
     );
@@ -2277,6 +2283,105 @@ class _SecurityTabState extends State<_SecurityTab> {
               ],
             ),
           ),
+      ],
+    );
+  }
+}
+
+/// Blocked users management — list of blocked MASTER identities with an
+/// Unblock action per row. Purely local; Rust drops their DMs/requests/calls
+/// at ingest and the channel panes hide their messages.
+class _BlockedUsersSection extends ConsumerWidget {
+  const _BlockedUsersSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final blocked = ref.watch(blockedUsersProvider).toList()..sort();
+    final profiles = ref.watch(profileProvider);
+
+    return _SettingsCard(
+      title: 'Blocked Users',
+      children: [
+        if (blocked.isEmpty)
+          Text(
+            'No blocked users.',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary,
+            ),
+          )
+        else ...[
+          Text(
+            'Blocked users can\'t send you friend requests, direct messages, '
+            'or calls, and their channel messages are hidden.',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary,
+            ),
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          for (final id in blocked)
+            Padding(
+              padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.md,
+                  vertical: HollowSpacing.sm,
+                ),
+                decoration: BoxDecoration(
+                  color: hollow.surface,
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
+                  border: Border.all(color: hollow.border),
+                ),
+                child: Row(
+                  children: [
+                    HollowAvatar(peerId: id, size: 32),
+                    const SizedBox(width: HollowSpacing.md),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            displayNameForPeer(profiles[id], id),
+                            style: HollowTypography.body.copyWith(
+                              color: hollow.textPrimary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            shortenPeerId(id),
+                            style: HollowTypography.mono.copyWith(
+                              color: hollow.textSecondary,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: HollowSpacing.sm),
+                    HollowButton.ghost(
+                      compact: true,
+                      onPressed: () async {
+                        try {
+                          await ref
+                              .read(blockedUsersProvider.notifier)
+                              .unblock(id);
+                        } catch (_) {
+                          if (context.mounted) {
+                            HollowToast.show(context, 'Failed to unblock',
+                                type: HollowToastType.error);
+                          }
+                        }
+                      },
+                      child: const Text('Unblock'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        ],
       ],
     );
   }

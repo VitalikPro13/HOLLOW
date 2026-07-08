@@ -510,6 +510,13 @@ fn try_decrypt_dm(
     // links before run_fetch; a single-device sender resolves to itself.
     let convo = crate::node::resolver::resolve(from);
 
+    // BLOCK GUARD: relay-buffered replays from a blocked identity are dropped
+    // exactly like live traffic (covers both the DirectMessage and FileHeader
+    // offline branches below).
+    if crate::node::blocklist::is_blocked(from) {
+        return None;
+    }
+
     match haven {
         HavenMessage::Encrypted {
             message_type,

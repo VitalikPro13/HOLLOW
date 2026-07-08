@@ -21,6 +21,7 @@ add_executable(hollow-relay
     src/main.cpp
     src/crypto.cpp
     src/license.cpp
+    src/reports.cpp
     src/http_handlers.cpp
     src/ws_handler.cpp
 )

@@ -264,6 +264,24 @@ Returns current Unix timestamp in seconds using `std::chrono::system_clock`. Use
 
 ---
 
+## reports.cpp / reports.h — User Reports (2026-07-07)
+
+The ONE thing the relay persists about peers — deliberately minimal.
+
+**`ReportsState`** (member of `RelayState` as `state.reports`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `keys` | `unordered_set<string>` | `sha256_hex(reporter '\0' target '\0' category)` — dedup only, one report per (reporter, target, category) |
+| `counts` | `unordered_map<string, unordered_map<string, uint64_t>>` | target peer_id → category → count (the operator's view) |
+| `file_path` | `string` | From `--reports-file` (default `reports.json`, resolves to the systemd WorkingDirectory `/home/ubuntu/relay/`) |
+| `dirty` | `bool` | Set by `add()`; cleared on successful save |
+
+- **WS command:** `{"type":"report","target":<peer_id>,"category":<cat>}` → `handle_report()` in ws_handler.cpp (beside `handle_set_offline_buffer`). Guest-guarded; `target` non-empty/≤128/≠self; category allow-list: `spam`, `harassment`, `illegal_content`, `impersonation`. Replies `{"type":"report_ack"}` even on dedup (idempotent from the client's view). NO logging — reporter/target ids are user-identifying.
+- **Persistence:** `save_if_dirty()` = nlohmann dump → `.tmp` → `rename()` (atomic); flushed on the 300s sweep timer + after `app.run()` returns (shutdown). `load_from_file()` in main() right after the license load; sets `file_path` even when the file is absent so the first save creates it.
+- **Privacy invariant:** who-reported-whom never touches disk or logs — only hashed dedup keys + per-target counts. Cap `MAX_REPORT_KEYS` (500k) bounds RAM/disk.
+- **Client path:** FFI `report_user(target, category)` (api/network.rs) → `NodeCommand::ReportUser` → swarm arm → `WsCommand::ReportUser` → `send_command` json arm. One-shot: deliberately NOT cached in `track_room_change`, so never re-sent on reconnect.
+
 ## license.cpp / license.h — License Key System
 
 ### LicenseResult enum

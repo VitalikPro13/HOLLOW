@@ -82,9 +82,17 @@ Note: Does not leave the DM WS relay room or deregister the signaling room. The 
 All incoming friend messages are processed directly in `swarm.rs:handle_incoming_request()`, not delegated to social.rs:
 
 ### HavenMessage::FriendRequest { requested_at }
+0. BLOCK GUARD (after the self-guard): `blocklist::is_blocked(peer_str)` → silent drop — no pending row, no room join, no event. This is the anti-spam surface blocking exists for.
 1. Persists as `save_friend(peer_str, "pending", "incoming", requested_at)` in MessageStore
 2. Registers the DM room code via signaling (`SetRoom` + `Bootstrap`) for future peer discovery
 3. Emits `NetworkEvent::FriendRequestReceived { peer_id }`
+
+### User blocking (node/blocklist.rs, 2026-07-07)
+Local block list, MASTER-keyed, enforced at ingest. Process-global `RwLock<HashSet<String>>` mirroring the SQLCipher `blocked_peers` table (same shape as the resolver's REVOKED set), warmed at node startup beside `resolver::warm_from_links`. `is_blocked(peer_id)` collapses device→master via the resolver — a blocked person can't sidestep from a second device.
+
+Guards drop-before-store+emit at: FriendRequest (above), the pending-FriendAccept drains (PeerJoined + RoomMembers arms), DirectMessage (live, beside the revoked guard; own-sibling echoes exempt), DmSyncBatch, DM FileHeader (`sid.is_none()` only — channel files hide in UI), CallInvite + RtcOffer (initiation points; other call signals are inert without them), and `fetch.rs::try_decrypt_dm` (offline relay replay).
+
+FFI is direct (no NodeCommand): `block_peer`/`unblock_peer`/`load_blocked_peers` in api/storage.rs persist then update the global set. Channel messages from blocked masters stay stored but are hidden in Dart (`blockedUsersProvider`), so unblock restores history. HARNESS CAVEAT: the set is process-global — all harness nodes share it; call `blocklist::clear_for_test()` and never assert a third node still receives from a blocked peer.
 
 ### HavenMessage::FriendAccept
 1. Updates to `save_friend(peer_str, "accepted", "", now)` in MessageStore

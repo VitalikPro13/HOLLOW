@@ -56,6 +56,7 @@ int main(int argc, char** argv) {
     if (!state.license.load_from_file(config.keys_file)) {
         fprintf(stderr, "[main] No keys file, license system disabled\n");
     }
+    state.reports.load_from_file(config.reports_file);
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -129,6 +130,7 @@ int main(int argc, char** argv) {
                 sweep_offline_buffer(*s);
                 sweep_link_codes(*s);
                 sweep_ip_budgets(*s);
+                s->reports.save_if_dirty();
             }, 300000, 300000);
 
             // Shutdown check timer (1s)
@@ -150,6 +152,7 @@ int main(int argc, char** argv) {
 
     app.run();
 
+    state.reports.save_if_dirty();
     fprintf(stderr, "[main] Hollow relay shut down\n");
     return 0;
 }

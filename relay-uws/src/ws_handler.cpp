@@ -752,6 +752,23 @@ static void handle_set_offline_buffer(PerSocketData* data, const json& j, RelayS
     // No logging — opt-in status per peer_id is user metadata.
 }
 
+// User report: one per (reporter, target, category), deduped via hashed keys
+// so the persisted file never contains who reported whom — only per-target
+// category totals the operator can act on (e.g. restricting relay access).
+// Ack is sent even on dedup: from the client's view the report "is filed".
+static void handle_report(SSLWebSocket* ws, PerSocketData* data, const json& j,
+                          RelayState& state) {
+    if (data->is_guest) return;
+    std::string target = j.value("target", "");
+    std::string category = j.value("category", "");
+    if (target.empty() || target.size() > 128 || target == data->peer_id) return;
+    if (category != "spam" && category != "harassment" &&
+        category != "illegal_content" && category != "impersonation") return;
+    state.reports.add(data->peer_id, target, category);
+    send_json(ws, {{"type", "report_ack"}});
+    // No logging — reporter/target peer ids are user-identifying.
+}
+
 // Register/refresh per-channel topic ring buffers for a server room. Sent by
 // members of servers whose owner enabled relay catch-up, re-sent on every
 // connect (refresh keeps the registration alive past the idle expiry). Only
@@ -1549,6 +1566,8 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         handle_set_push_prefs(data, j, state);
     } else if (type == "set_offline_buffer") {
         handle_set_offline_buffer(data, j, state);
+    } else if (type == "report") {
+        handle_report(ws, data, j, state);
     } else if (type == "set_topic_buffer") {
         handle_set_topic_buffer(data, j, state);
     } else if (type == "topic_catchup") {

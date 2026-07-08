@@ -32,6 +32,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/typing_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -53,6 +54,7 @@ import 'package:hollow/src/core/services/voice_message_recorder.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
+import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
@@ -878,6 +880,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final isScreenShareActive = isCallWithThisPeer &&
         (call.isScreenSharing || call.remoteScreenSharing);
 
+    // Saved messages: this DM is with our OWN master identity. The header shows
+    // "Saved messages" + a bookmark instead of the peer avatar/name/presence,
+    // and the call buttons are hidden (can't call yourself). Everything below
+    // the header (messages, search, files) works like any other DM.
+    final savedId = ref.watch(savedMessagesPeerIdProvider);
+    final isSavedMessages = savedId != null &&
+        ref.watch(deviceLinkProvider).identityOf(widget.peerId) == savedId;
+
     return Row(
       children: [
         // DM Profile Panel (left side) with slide animation
@@ -906,10 +916,24 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           ),
           child: Row(
             children: [
-              HollowAvatar(peerId: widget.peerId, size: 28),
+              if (isSavedMessages)
+                const SavedMessagesAvatar(size: 28)
+              else
+                HollowAvatar(peerId: widget.peerId, size: 28),
               const SizedBox(width: HollowSpacing.sm),
               Expanded(
                 child: Builder(builder: (_) {
+                  if (isSavedMessages) {
+                    return Text(
+                      'Saved messages',
+                      style: HollowTypography.body.copyWith(
+                        color: hollow.textPrimary,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    );
+                  }
                   // Header names (status dot dropped — the ConnectionProgress on
                   // the right already conveys online/offline):
                   //  • local nickname set  → local nickname on top, the friend's
@@ -957,6 +981,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                   );
                 }),
               ),
+              if (!isSavedMessages)
               Builder(builder: (_) {
                 // Multi-device: `widget.peerId` is the friend's MASTER id, but
                 // `peersProvider` is keyed by the DEVICE peer_ids the relay
@@ -986,7 +1011,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                 );
               }),
               const SizedBox(width: HollowSpacing.sm),
-              // Voice call button
+              // Voice + video call buttons (hidden for Saved messages — you
+              // can't call yourself).
+              if (!isSavedMessages) ...[
               Builder(builder: (_) {
                 final call = ref.watch(callProvider);
                 final isOnline = identityIsOnline(ref, widget.peerId);
@@ -1044,6 +1071,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                   ),
                 );
               }),
+              ],
               const SizedBox(width: HollowSpacing.xs),
               HollowTooltip(
                 message: showProfilePanel ? 'Hide profile' : 'Show profile',

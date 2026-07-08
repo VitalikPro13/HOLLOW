@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/showcase_assets_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -460,6 +461,13 @@ class EventStreamNotifier extends Notifier<bool> {
         // above keeps an open pane current; unread/notifications must not
         // re-fire. See the DM case.
         if (duplicate) break;
+        // Blocked sender: Rust already drops DM surfaces at ingest, but
+        // channel messages still flow (the pane hides them) — they must not
+        // produce unread badges or notification surfaces. Compare the
+        // sender's MASTER identity (block list is master-keyed).
+        final senderMasterBlocked = ref
+            .read(blockedUsersProvider)
+            .contains(ref.read(deviceLinkProvider).identityOf(fromPeer));
         // Track unread channel message — only if not muted.
         // Must be visible, viewing this channel, AND scrolled to bottom. Also
         // require the app to be active (desktop focused / mobile foreground) —
@@ -487,7 +495,7 @@ class EventStreamNotifier extends Notifier<bool> {
             (localNick != null && text.contains('@$localNick')) ||
             replyToMid != null;
         final isMentionFiltered = channelNotifLevel == NotificationLevel.mentions && !isMentioned;
-        if (!isChannelMuted && !isMentionFiltered) {
+        if (!isChannelMuted && !isMentionFiltered && !senderMasterBlocked) {
           ref.read(unreadProvider.notifier).onChannelMessage(
               serverId, channelId, messageId, isViewingChannel,
               isMention: isMentioned);
@@ -499,7 +507,10 @@ class EventStreamNotifier extends Notifier<bool> {
           _processedChannelMessageIds.removeAll(toRemove);
         }
         // System notification for channel message.
-        if (!isViewingChannel && !isChannelMuted && !isMentionFiltered) {
+        if (!isViewingChannel &&
+            !isChannelMuted &&
+            !isMentionFiltered &&
+            !senderMasterBlocked) {
           _notifyChannelWithName(
               serverId, channelId, fromPeer, text, replyToMid, messageId);
         }
@@ -999,6 +1010,12 @@ class EventStreamNotifier extends Notifier<bool> {
         // Ignore own hints.
         final localPeerId = ref.read(identityProvider).peerId ?? '';
         if (fromPeer == localPeerId) break;
+        // Blocked sender — no unread badges from blocked users (master-keyed).
+        if (ref
+            .read(blockedUsersProvider)
+            .contains(ref.read(deviceLinkProvider).identityOf(fromPeer))) {
+          break;
+        }
         // Skip if viewing this channel (live messages handle it).
         final isViewingChannel =
             ref.read(selectedServerProvider) == serverId &&

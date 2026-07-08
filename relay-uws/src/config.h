@@ -8,6 +8,7 @@ struct Config {
     std::string public_ip;
     std::string domain = "relay.anonlisten.com";
     std::string keys_file = "keys.json";
+    std::string reports_file = "reports.json";
     std::string cert_file = "/etc/letsencrypt/live/relay.anonlisten.com/fullchain.pem";
     std::string key_file = "/etc/letsencrypt/live/relay.anonlisten.com/privkey.pem";
     std::string turn_secret;
@@ -20,6 +21,7 @@ inline void print_help() {
         "  --public-ip <ip>      Public IP address\n"
         "  --domain <domain>     Domain name (default: relay.anonlisten.com)\n"
         "  --keys-file <path>    License keys JSON file (default: keys.json)\n"
+        "  --reports-file <path> User reports JSON file (default: reports.json)\n"
         "  --cert-file <path>    TLS certificate file\n"
         "  --key-file <path>     TLS private key file\n"
         "  --help                Show this help\n"
@@ -38,6 +40,7 @@ inline Config parse_args(int argc, char** argv) {
         else if (arg == "--public-ip" && i + 1 < argc) config.public_ip = argv[++i];
         else if (arg == "--domain" && i + 1 < argc) config.domain = argv[++i];
         else if (arg == "--keys-file" && i + 1 < argc) config.keys_file = argv[++i];
+        else if (arg == "--reports-file" && i + 1 < argc) config.reports_file = argv[++i];
         else if (arg == "--cert-file" && i + 1 < argc) config.cert_file = argv[++i];
         else if (arg == "--key-file" && i + 1 < argc) config.key_file = argv[++i];
         else if (arg == "--help") { print_help(); exit(0); }

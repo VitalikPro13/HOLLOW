@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
@@ -23,6 +24,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/core/brand_icons.dart';
@@ -416,6 +418,45 @@ class MobileProfileSheet extends ConsumerWidget {
 
                       // Friend action
                       _FriendActionRow(peerId: peerId),
+
+                      // Block / Report — ghost in the band; .danger is
+                      // reserved for the confirm dialog's destructive action.
+                      // Blocking and reporting key on the MASTER identity.
+                      const SizedBox(height: HollowSpacing.sm),
+                      Builder(builder: (context) {
+                        final master =
+                            ref.watch(deviceLinkProvider).identityOf(peerId);
+                        final isBlocked =
+                            ref.watch(blockedUsersProvider).contains(master);
+                        return Column(
+                          children: [
+                            HollowButton.ghost(
+                              onPressed: isBlocked
+                                  ? () =>
+                                      unblockUser(context, masterId: master)
+                                  : () => confirmAndBlockUser(
+                                        context,
+                                        masterId: master,
+                                        displayName: name,
+                                      ),
+                              icon: const Icon(LucideIcons.ban, size: 16),
+                              expand: true,
+                              child: Text(isBlocked ? 'Unblock' : 'Block'),
+                            ),
+                            const SizedBox(height: HollowSpacing.sm),
+                            HollowButton.ghost(
+                              onPressed: () => showReportUserDialog(
+                                context,
+                                masterId: master,
+                                displayName: name,
+                              ),
+                              icon: const Icon(LucideIcons.flag, size: 16),
+                              expand: true,
+                              child: const Text('Report'),
+                            ),
+                          ],
+                        );
+                      }),
                     ],
                   ),
                 ),

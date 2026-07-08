@@ -21,11 +21,13 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
+import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/recording_indicator.dart';
+import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -634,6 +636,19 @@ class _HomeContent extends ConsumerWidget {
 
         Divider(height: 1, color: hollow.border),
 
+        // Saved messages — pinned above the friend conversations. A DM with
+        // your own master identity; opens through the same flow as a friend.
+        Builder(builder: (context) {
+          final savedId = ref.watch(savedMessagesPeerIdProvider);
+          if (savedId == null) return const SizedBox.shrink();
+          return _SavedMessagesCard(
+            isSelected: savedId == selectedPeerId,
+            lastMessage: lastMessage(savedId),
+            formatTime: formatTime,
+            onTap: () => onPeerSelected(savedId),
+          );
+        }),
+
         // Pending requests section
         if (hasPending) ...[
           Padding(
@@ -746,6 +761,99 @@ class _HomeContent extends ConsumerWidget {
     showHollowDialog(
       context: context,
       builder: (ctx) => _SidebarAddFriendDialog(parentContext: context),
+    );
+  }
+}
+
+/// Pinned "Saved messages" row — mirrors [PeerCard] styling but with a
+/// bookmark avatar and no presence dot (it's a conversation with yourself).
+class _SavedMessagesCard extends StatelessWidget {
+  final bool isSelected;
+  final ChatMessage? lastMessage;
+  final String Function(DateTime) formatTime;
+  final VoidCallback onTap;
+
+  const _SavedMessagesCard({
+    required this.isSelected,
+    required this.lastMessage,
+    required this.formatTime,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final radius = BorderRadius.circular(hollow.radiusMd);
+
+    Widget card = HollowPressable(
+      onTap: onTap,
+      subtle: true,
+      borderRadius: radius,
+      backgroundColor: isSelected ? hollow.accentMuted : null,
+      hoverColor: hollow.elevated,
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.md,
+        vertical: HollowSpacing.sm + 2,
+      ),
+      child: Row(
+        children: [
+          const SavedMessagesAvatar(size: 36),
+          const SizedBox(width: HollowSpacing.sm + 2),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Saved messages',
+                  style: HollowTypography.body.copyWith(
+                    fontSize: 13,
+                    fontWeight:
+                        isSelected ? FontWeight.w600 : FontWeight.w400,
+                    color: hollow.textPrimary,
+                  ),
+                ),
+                if (lastMessage != null) ...[
+                  const SizedBox(height: HollowSpacing.xxs),
+                  Text(
+                    lastMessage!.text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: HollowTypography.bodySmall.copyWith(
+                      color: hollow.textSecondary,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          if (lastMessage != null)
+            Padding(
+              padding: const EdgeInsets.only(left: HollowSpacing.sm),
+              child: Text(
+                formatTime(lastMessage!.timestamp),
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+
+    if (isSelected) {
+      card = SelectionShimmer(
+        highlightColor: hollow.accent.withValues(alpha: 0.12),
+        borderRadius: radius,
+        child: card,
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.sm,
+        vertical: HollowSpacing.xxs,
+      ),
+      child: card,
     );
   }
 }

@@ -9,6 +9,7 @@
 
 #include <App.h>
 #include "license.h"
+#include "reports.h"
 
 // No soft backpressure — let uWebSockets buffer handle delivery.
 // Hard limit (.maxBackpressure = 64MB) catches truly dead connections.
@@ -164,6 +165,7 @@ struct RelayState {
     size_t guest_count = 0;
 
     LicenseState license;
+    ReportsState reports;
     ServerStatsCache stats_cache;
 
     // Temporary nickname registry (RAM only, released on disconnect, 10-min TTL).

@@ -5886,6 +5886,339 @@ async fn channel_relay_catchup_delivers_file_message_and_header() {
 }
 
 // ---------------------------------------------------------------------------
+// SELF-DM ("Saved messages", 2026-07): a DM whose recipient is our OWN master
+// is a notes-to-self thread. The send path stores it locally (keyed on our own
+// master) exactly like any DM, but `fan_out_dm_envelope` must SKIP the
+// recipient-device expansion (`same_identity(local, recipient)`) — there is no
+// other party, and the bare-master fallback would otherwise queue a dead
+// envelope (KeyRequest to a peer nobody authenticates as) forever. Our own
+// SIBLINGS still get the echo (convo-tagged with our own master), so the saved
+// note appears on every device. This drives both halves:
+//   1. solo device: the note lands in the own-master thread (is_mine, signed)
+//      and NOTHING is queued at the relay under the bare master id;
+//   2. a live sibling receives the echo and files it under the own-master
+//      conversation (is_own=true), same thread key as the sender.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn self_dm_saved_messages_stores_locally_and_replicates_to_sibling() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // M = our identity with two devices B + C (the multi-device shape). C spawns
+    // only in phase 2 — phase 1 is the plain single-device saved-messages case.
+    const M_MASTER: u8 = 64;
+    const B_DEV: u8 = 65;
+    const C_DEV: u8 = 66;
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+
+    // Seed our own device→master links (as startup's self-seed would). C's id is
+    // seeded before C exists — the sibling fan-out is live-room-filtered, so a
+    // known-but-offline sibling is simply skipped, never a dead target.
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[]).await;
+    sleep_ms(1500).await;
+    drain_events(&mut b);
+
+    // --- Phase 1: SOLO self-DM (single device, nobody else online) ---
+    b.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: m_master.clone(),
+            text: "saved-note-solo".to_string(),
+            message_id: "self-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    // The send path completes (local insert → fan-out no-op → MessageSent hydrate).
+    let sent = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::MessageSent { message_id, .. } if message_id == "self-1")
+    })
+    .await;
+    assert!(sent, "self-DM send must complete and emit MessageSent");
+    sleep_ms(300).await;
+
+    // UI-layer inspector: the note renders in the own-master ("Saved messages")
+    // thread, outgoing side, signed.
+    let thread = b.dm_thread(&m_master);
+    assert!(
+        thread.iter().any(|m| m.text == "saved-note-solo" && m.is_mine && m.has_sig),
+        "the solo self-DM must land in the own-master thread as an outgoing signed bubble, got {thread:?}"
+    );
+
+    // THE SHORT-CIRCUIT: no dead network send was queued for the bare master id
+    // (nobody authenticates as the master — a frame buffered under it would sit
+    // at the relay forever; pre-fix the recipient-branch fallback produced one).
+    assert_eq!(
+        relay.buffered_count(&m_master),
+        0,
+        "a self-DM must not queue any relay frame under the bare master id"
+    );
+
+    // --- Phase 2: a live SIBLING receives the echo under the same thread ---
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[]).await;
+    // Siblings meet in inbox:{master}; let PeerJoined-driven Olm key exchange settle.
+    sleep_ms(5000).await;
+    drain_events(&mut b);
+    drain_events(&mut c);
+    assert_ne!(
+        b.olm_status(&c_dev).await,
+        "absent",
+        "B must hold an Olm session with sibling C before the echoed self-DM rides it"
+    );
+
+    b.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: m_master.clone(),
+            text: "saved-note-echo".to_string(),
+            message_id: "self-2".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+
+    // Sibling C receives the echo as an OWN message filed under the own-master
+    // conversation (the convo-tagged sibling envelope).
+    let c_got = wait_event(&mut c, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { text, from_peer, is_own, .. }
+            if text == "saved-note-echo" && *from_peer == m_master && *is_own)
+    })
+    .await;
+    assert!(
+        c_got,
+        "sibling C must receive the self-DM echo attributed to our OWN master with is_own=true"
+    );
+    sleep_ms(300).await;
+
+    // UI layer on BOTH devices: same thread key (own master), outgoing side.
+    let c_thread = c.dm_thread(&m_master);
+    assert!(
+        c_thread.iter().any(|m| m.text == "saved-note-echo" && m.is_mine),
+        "sibling C must file the echo under the own-master thread as OUTGOING, got {c_thread:?}"
+    );
+    let b_thread = b.dm_thread(&m_master);
+    assert!(
+        b_thread.iter().any(|m| m.text == "saved-note-solo" && m.is_mine)
+            && b_thread.iter().any(|m| m.text == "saved-note-echo" && m.is_mine),
+        "sender B keeps both saved notes in the own-master thread, got {b_thread:?}"
+    );
+
+    // Still nothing queued under the bare master after the sibling fan-out.
+    assert_eq!(
+        relay.buffered_count(&m_master),
+        0,
+        "the sibling echo must target the DEVICE, never buffer under the bare master"
+    );
+
+    drop(b);
+    drop(c);
+}
+
+// ---------------------------------------------------------------------------
+// BLOCK ENFORCEMENT AT INGEST (node/blocklist.rs, 2026-07): blocking is
+// receiver-side self-protection — the blocked identity's traffic still arrives
+// at the socket, but the swarm guards drop it BEFORE store + emit. This drives
+// the two hot surfaces: a live DM from a blocked FRIEND (guard in the
+// DirectMessage arm, collapsing sender device→master through the resolver) and
+// a friend request from a blocked STRANGER (guard in the FriendRequest arm —
+// the anti-spam surface blocking exists for).
+//
+// CAUTION — the blocklist is PROCESS-GLOBAL (like the resolver), so a block "by
+// A" is visible to every node's guards in the harness process. Assertions are
+// structured so that can't false-positive: the only guarded deliveries the test
+// asserts on are TO A, the control sender (stranger D) is never blocked, and
+// the set is cleared at start + on scope exit (panic-safe drop guard) so later
+// tests aren't poisoned.
+// ---------------------------------------------------------------------------
+
+/// RAII guard: clears the process-global blocklist on scope exit — INCLUDING a
+/// panicking assert — so a failed block test can't leave ids blocked for the
+/// other harness/unit tests in this process (seed tags are reused across tests).
+struct BlocklistClearGuard;
+impl Drop for BlocklistClearGuard {
+    fn drop(&mut self) {
+        super::blocklist::clear_for_test();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn blocked_peer_dm_and_friend_request_dropped() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let _block_guard = BlocklistClearGuard;
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // A = the blocker (keystone: device == master). B = an accepted FRIEND with
+    // device != master — the block is stored MASTER-keyed but B's traffic arrives
+    // from its DEVICE id, so the guard must collapse device→master to catch it.
+    // C = a blocked stranger, D = a NOT-blocked control stranger (both keystone).
+    const A_MASTER: u8 = 45;
+    const B_MASTER: u8 = 46;
+    const B_DEV: u8 = 47;
+    const C_MASTER: u8 = 48;
+    const D_MASTER: u8 = 49;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_master = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER)).peer_id();
+    let d_master = NativeKeypair::from_secret_bytes(&seed_bytes(D_MASTER)).peer_id();
+    assert_ne!(b_dev, b_master, "B must have device != master (the collapse under test)");
+
+    // Seed B's device→master link (as B's ingested device list would) so A's
+    // guard can collapse b_dev → b_master. Pre-seeded accepted friendship A<->B
+    // (the harness's standard friend setup) auto-joins the shared DM room.
+    super::resolver::seed_self(&b_master, &[b_dev.clone()]);
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1500).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[&a_master]).await;
+    // Let the A<->B Olm key exchange fully confirm before any DM rides it.
+    sleep_ms(5000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // --- Control (pre-block): B's DM reaches A — proves session + route work,
+    // so the later non-delivery can only be the guard. ---
+    b.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: a_master.clone(),
+            text: "before-block".to_string(),
+            message_id: "blk-0".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let control = wait_event(&mut a, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { text, from_peer, .. }
+            if text == "before-block" && *from_peer == b_master)
+    })
+    .await;
+    assert!(control, "pre-block control DM must arrive (else the block assertion is meaningless)");
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // --- A blocks B (by MASTER — the FFI wrapper persists then calls this). ---
+    super::blocklist::block(&b_master);
+
+    // B sends again. A's DirectMessage-arm guard must drop it before store+emit.
+    b.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: a_master.clone(),
+            text: "after-block".to_string(),
+            message_id: "blk-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let leaked = wait_event(&mut a, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { message_id, .. } if message_id == "blk-1")
+    })
+    .await;
+    assert!(
+        !leaked,
+        "A must emit NO MessageReceived for the blocked friend's DM"
+    );
+
+    // A's store: the pre-block row is there, the blocked one is NOT.
+    let a_thread = a.dm_thread(&b_master);
+    assert!(
+        a_thread.iter().any(|m| m.text == "before-block"),
+        "A keeps the pre-block message, got {a_thread:?}"
+    );
+    assert!(
+        !a_thread.iter().any(|m| m.text == "after-block"),
+        "the blocked DM must never reach A's store, got {a_thread:?}"
+    );
+    // Sender-side: blocking is receiver-side only — B keeps its own sent row.
+    let b_thread = b.dm_thread(&a_master);
+    assert!(
+        b_thread.iter().any(|m| m.text == "after-block" && m.is_mine),
+        "B (the blocked sender) still holds its own sent row, got {b_thread:?}"
+    );
+
+    // --- Friend requests: blocked stranger C is dropped, control stranger D
+    // lands — same window, same receiver, so the drop is provably the guard. ---
+    let mut c = spawn_node_with_friends(&relay, C_MASTER, C_MASTER, &[]).await;
+    let mut d = spawn_node_with_friends(&relay, D_MASTER, D_MASTER, &[]).await;
+    sleep_ms(1500).await;
+    drain_events(&mut a);
+    drain_events(&mut c);
+    drain_events(&mut d);
+
+    super::blocklist::block(&c_master);
+
+    c.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: a_master.clone() })
+        .await
+        .unwrap();
+    d.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: a_master.clone() })
+        .await
+        .unwrap();
+
+    // Wait for D's request (the positive control), noting if C's ever leaks.
+    let mut saw_c = false;
+    let d_got = wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+            if *peer_id == c_master {
+                saw_c = true;
+            }
+            *peer_id == d_master
+        } else {
+            false
+        }
+    })
+    .await;
+    assert!(d_got, "control stranger D's friend request must reach A");
+    // Extra window in case C's (dropped) request would have trailed D's.
+    let c_late = wait_event(&mut a, std::time::Duration::from_secs(2), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { peer_id } if *peer_id == c_master)
+    })
+    .await;
+    assert!(
+        !saw_c && !c_late,
+        "A must emit NO FriendRequestReceived for blocked stranger C"
+    );
+
+    // A's friend rows: D has a pending incoming row; C has NO row at all.
+    let a_friends = a.store().load_friends(None).unwrap_or_default();
+    assert!(
+        a_friends.iter().any(|(pid, status, dir, _, _)| {
+            *pid == d_master && status == "pending" && dir == "incoming"
+        }),
+        "A must hold a pending INCOMING friend row for control stranger D, got {a_friends:?}"
+    );
+    assert!(
+        a_friends
+            .iter()
+            .all(|(pid, _, _, _, _)| !super::resolver::same_identity(pid, &c_master)),
+        "A must hold NO friend row for blocked stranger C, got {a_friends:?}"
+    );
+
+    // Leave the process clean for later tests (the drop guard also covers panics).
+    super::blocklist::clear_for_test();
+
+    drop(a);
+    drop(b);
+    drop(c);
+    drop(d);
+}
+
+// ---------------------------------------------------------------------------
 // SCALING BENCHMARK (large-server MLS viability, 2026-07-06).
 //
 // Question: can MLS server groups scale to thousands / tens-of-thousands of

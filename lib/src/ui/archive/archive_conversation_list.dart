@@ -4,6 +4,7 @@ import 'package:hollow/src/core/models/archive_conversation.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -11,6 +12,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -170,10 +172,15 @@ class _DmListState extends ConsumerState<_DmList> {
             style: TextStyle(color: hollow.error)),
       ),
       data: (entries) {
+        // The self-DM renders as "Saved messages" — search should match that
+        // label, not your own profile name.
+        final savedId = ref.watch(savedMessagesPeerIdProvider);
         final filtered = search.isEmpty
             ? entries
             : entries.where((e) {
-                final name = displayNameFor(profiles, e.peerId).toLowerCase();
+                final name = e.peerId == savedId
+                    ? 'saved messages'
+                    : displayNameFor(profiles, e.peerId).toLowerCase();
                 return name.contains(search);
               }).toList();
 
@@ -274,9 +281,13 @@ class _DmRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
+    // Self-DM = Saved messages: bookmark avatar + fixed label instead of your
+    // own profile name/picture. Row behavior (open/hide/count) is unchanged.
+    final isSaved = entry.peerId == ref.watch(savedMessagesPeerIdProvider);
     final peerProfile = ref.watch(
         profileProvider.select((p) => p[entry.peerId]));
-    final name = displayNameForPeer(peerProfile, entry.peerId);
+    final name =
+        isSaved ? 'Saved messages' : displayNameForPeer(peerProfile, entry.peerId);
 
     // ONE box: selection bg lives on the pressable itself, so the hover rect
     // and the selected rect are the same shape (the old inner Container drew
@@ -294,10 +305,13 @@ class _DmRow extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            HollowAvatar(
-              peerId: entry.peerId,
-              size: 28,
-            ),
+            if (isSaved)
+              const SavedMessagesAvatar(size: 28)
+            else
+              HollowAvatar(
+                peerId: entry.peerId,
+                size: 28,
+              ),
             const SizedBox(width: HollowSpacing.sm),
             Expanded(
               child: Text(

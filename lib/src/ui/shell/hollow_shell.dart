@@ -24,6 +24,7 @@ import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/core/providers/status_provider.dart';
@@ -932,6 +933,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     // Load hidden Archive DMs from local DB.
     await ref.read(hiddenArchiveDmsProvider.notifier).load();
+
+    // Load the block list from local DB (master-keyed; mirrors Rust's ingest
+    // guard set so Block/Unblock UI and channel hiding are correct at boot).
+    await ref.read(blockedUsersProvider.notifier).load();
 
     // Load verified peers from local DB.
     await ref.read(verifiedPeersProvider.notifier).load();

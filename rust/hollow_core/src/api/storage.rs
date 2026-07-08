@@ -571,6 +571,46 @@ pub fn load_friends(status: Option<String>) -> Result<Vec<FriendFfi>, String> {
         .collect())
 }
 
+/// Block an identity (MASTER-keyed). Persists the row and warms the in-memory
+/// set the Rust ingest guards read, so it takes effect immediately. Purely
+/// local — the blocked peer learns nothing. Pass any of the peer's ids; it is
+/// collapsed to the master via the resolver.
+#[frb]
+pub fn block_peer(peer_id: String) -> Result<(), String> {
+    let master = crate::node::resolver::resolve(&peer_id);
+    {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.block_peer(&master)?;
+    }
+    crate::node::blocklist::block(&master);
+    Ok(())
+}
+
+/// Unblock a previously blocked identity.
+#[frb]
+pub fn unblock_peer(peer_id: String) -> Result<(), String> {
+    let master = crate::node::resolver::resolve(&peer_id);
+    {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.unblock_peer(&master)?;
+    }
+    crate::node::blocklist::unblock(&master);
+    Ok(())
+}
+
+/// All blocked master peer_ids, newest first.
+#[frb]
+pub fn load_blocked_peers() -> Result<Vec<String>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    ms.load_blocked_peers()
+}
+
 /// A single reaction on a message, returned to Dart.
 /// Search channel messages by text.
 #[frb]

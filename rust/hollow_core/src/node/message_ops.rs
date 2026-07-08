@@ -161,9 +161,18 @@ async fn fan_out_dm_envelope(
     // the fan-out would deliver only to a dead ghost id and skip the connected
     // device — the exact "first message lost, peer shows offline" symptom.
     let dm_room = dm_room_code(local_peer_str, recipient_master);
-    let recipient_devices = collect_target_devices(
-        ws_room_peers, Some(olm), &dm_room, recipient_master, recipient_master, /*exclude*/ None,
-    );
+    // Self-DM ("Saved messages"): the recipient IS us — there is no other party
+    // to deliver to, and the recipient-branch fallback below would queue a dead
+    // envelope under the bare master id forever. Our own siblings (next block)
+    // still get their copy.
+    let self_dm = super::resolver::same_identity(local_peer_str, recipient_master);
+    let recipient_devices = if self_dm {
+        Vec::new()
+    } else {
+        collect_target_devices(
+            ws_room_peers, Some(olm), &dm_room, recipient_master, recipient_master, /*exclude*/ None,
+        )
+    };
     for device_peer in &recipient_devices {
         send_dm_to_device(
             olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,

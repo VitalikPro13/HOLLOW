@@ -352,6 +352,16 @@ Future<void> claimNickname({required String nickname}) =>
 Future<void> requestRelayBandwidth() =>
     RustLib.instance.api.crateApiNetworkRequestRelayBandwidth();
 
+/// File a user report with the relay (category: "spam", "harassment",
+/// "illegal_content", or "impersonation"). Fire-and-forget; the relay keeps
+/// only per-(target, category) counts and dedups one report per reporter per
+/// target per category via hashed keys — it never stores who reported whom.
+Future<void> reportUser({required String target, required String category}) =>
+    RustLib.instance.api.crateApiNetworkReportUser(
+      target: target,
+      category: category,
+    );
+
 /// Release the currently claimed temporary nickname.
 Future<void> releaseNickname() =>
     RustLib.instance.api.crateApiNetworkReleaseNickname();

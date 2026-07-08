@@ -583,6 +583,11 @@ async fn run_event_loop(
                 }
                 _ => super::resolver::seed_self(&master_peer_str, &[device_peer_id.clone()]),
             }
+            // Warm the block list alongside the resolver — the ingest guards
+            // must see persisted blocks before the first message arrives.
+            if let Ok(blocked) = store.load_blocked_peers() {
+                super::blocklist::warm(&blocked);
+            }
         }
     }
     // Multi-device (Step 6): install the device→master resolver into the `crdt`
@@ -1657,6 +1662,12 @@ async fn run_event_loop(
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::GetBandwidth);
                     }
 
+                    NodeCommand::ReportUser { target, category } => {
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ReportUser {
+                            target, category,
+                        });
+                    }
+
                     NodeCommand::AcceptFriendRequest { peer_id: peer_id_str } => {
                         social::handle_accept_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
@@ -2439,8 +2450,9 @@ async fn run_event_loop(
                                 // it fires at most once per friend per session.
                                 {
                                     let joined_master = super::resolver::resolve(&peer_id);
-                                    if pending_friend_accepts.remove(&joined_master).is_some()
-                                        || pending_friend_accepts.remove(&peer_id).is_some()
+                                    if (pending_friend_accepts.remove(&joined_master).is_some()
+                                        || pending_friend_accepts.remove(&peer_id).is_some())
+                                        && !super::blocklist::is_blocked(&peer_id)
                                     {
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared (master {joined_master}), (re)sending FriendAccept");
                                         send_message_to_peer(
@@ -3220,8 +3232,9 @@ async fn run_event_loop(
                                         }
                                     }
                                     // (Re)deliver a queued FriendAccept to the requester.
-                                    if pending_friend_accepts.remove(&joined_master).is_some()
-                                        || pending_friend_accepts.remove(&pid_str.to_string()).is_some()
+                                    if (pending_friend_accepts.remove(&joined_master).is_some()
+                                        || pending_friend_accepts.remove(&pid_str.to_string()).is_some())
+                                        && !super::blocklist::is_blocked(pid_str)
                                     {
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {pid_str} appeared in RoomMembers (master {joined_master}), (re)sending FriendAccept");
                                         send_message_to_peer(
@@ -5480,6 +5493,12 @@ async fn handle_incoming_request(
                         hollow_log!("[HOLLOW-REVOKE] Dropped DM from revoked-but-alive device {peer_str}");
                         return;
                     }
+                    // BLOCK GUARD: drop before store + emit — a blocked identity's
+                    // DM never reaches the DB, UI, or notifications. Own sibling
+                    // echoes are exempt (you can't block yourself).
+                    if !is_own_device && super::blocklist::is_blocked(&peer_str) {
+                        return;
+                    }
                     let convo_peer = match (is_own_device, convo.as_deref()) {
                         (true, Some(c)) => c.to_string(),
                         _ => super::resolver::resolve(&peer_str),
@@ -5577,6 +5596,13 @@ async fn handle_incoming_request(
                     // Multi-device: the DM conversation key is the sender's MASTER id
                     // (transport target stays raw `peer_str`). No-op on single-device.
                     let convo_peer = super::resolver::resolve(&peer_str);
+                    // BLOCK GUARD: a blocked friend must not backfill history
+                    // through the sync path either. Siblings are exempt.
+                    if !super::resolver::same_identity(&peer_str, local_peer_str)
+                        && super::blocklist::is_blocked(&peer_str)
+                    {
+                        return;
+                    }
                     // CRITICAL — `DmSyncItem.mine` is RESPONDER-relative (it's
                     // `is_mine` as stored in the SENDER's DB). A FRIEND's perspective is
                     // the OPPOSITE of ours: a message the friend SENT (their is_mine=1)
@@ -6243,6 +6269,15 @@ async fn handle_incoming_request(
                     }
 
                     let ctx_type = if sid.is_some() { "channel" } else { "dm" };
+                    // BLOCK GUARD (DM files only — channel files are hidden in the
+                    // UI layer): drop a blocked identity's file before the metadata
+                    // insert. Own sibling echoes are exempt.
+                    if sid.is_none()
+                        && !super::resolver::same_identity(&peer_str, master_peer_str)
+                        && super::blocklist::is_blocked(&peer_str)
+                    {
+                        return;
+                    }
                     // Multi-device: a DM file's conversation key MUST be the sender's
                     // MASTER id (where the DM message row itself is stored), NOT the
                     // raw sender DEVICE id. Otherwise the file metadata is filed under
@@ -9852,6 +9887,13 @@ async fn handle_incoming_request(
                 return;
             }
 
+            // BLOCK GUARD: a blocked identity's friend request is dropped
+            // outright — no pending row, no room join, no event/notification.
+            // This is the anti-spam surface blocking exists for.
+            if super::blocklist::is_blocked(peer_str) {
+                return;
+            }
+
             hollow_log!("[HOLLOW-FRIENDS] Friend request from {peer_str}");
 
             // Save as pending incoming, keyed by the sender's MASTER (friendships key
@@ -10808,6 +10850,14 @@ async fn handle_incoming_request(
                 hollow_log!("[HOLLOW-SECURITY] BLOCKED RtcOffer — size {} exceeds limit from {peer_str}", sdp.len());
                 return;
             }
+            // BLOCK GUARD: a blocked identity can't open a data channel to us.
+            // Guarding the OFFER kills the connection at initiation; the other
+            // Rtc/Call signals are inert without one. Siblings exempt.
+            if !super::resolver::same_identity(peer_str, master_peer_str)
+                && super::blocklist::is_blocked(peer_str)
+            {
+                return;
+            }
             hollow_log!("[HOLLOW-WEBRTC] RtcOffer from {peer_str} conn={conn_id}");
             // sdp is the raw SDP string (not JSON-wrapped).
             let _ = event_tx.send(NetworkEvent::WebRtcSignal {
@@ -10848,6 +10898,13 @@ async fn handle_incoming_request(
 
         // -- Voice call signaling (Phase 5B) --
         HavenMessage::CallInvite { call_id, video, sframe_key } => {
+            // BLOCK GUARD: a blocked identity can't ring us. Dropping the
+            // invite kills the whole call flow (no ringing UI, no accept path).
+            if !super::resolver::same_identity(peer_str, master_peer_str)
+                && super::blocklist::is_blocked(peer_str)
+            {
+                return;
+            }
             // SECURITY (Phase 6.25): Don't log sframe_key length/presence.
             hollow_log!("[HOLLOW-CALL] CallInvite from {peer_str} call={call_id} video={video} key_len={}", sframe_key.len());
             let payload = serde_json::json!({

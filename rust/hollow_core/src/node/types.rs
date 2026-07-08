@@ -611,6 +611,10 @@ pub(crate) enum NodeCommand {
     AcceptFriendRequest { peer_id: String },
     RejectFriendRequest { peer_id: String },
     RemoveFriend { peer_id: String },
+    /// File a report against a peer with the relay (one per reporter per
+    /// target per category, deduped relay-side via hashed keys). Blocking
+    /// itself is FFI-direct (api/network.rs) — purely local, no node command.
+    ReportUser { target: String, category: String },
     // -- Temporary nicknames --
     ClaimNickname { nickname: String },
     ReleaseNickname,

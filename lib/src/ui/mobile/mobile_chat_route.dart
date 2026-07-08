@@ -22,6 +22,7 @@ import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/typing_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
@@ -37,6 +38,7 @@ import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
@@ -2258,8 +2260,17 @@ class _MobileChatHeader extends ConsumerWidget {
     ref.watch(localNicknameProvider);
     final isDm = peerId != null;
 
+    // Saved messages: a DM with our OWN master identity — bookmark header, no
+    // presence line, no call buttons (can't call yourself).
+    final savedId = ref.watch(savedMessagesPeerIdProvider);
+    final isSaved = isDm &&
+        savedId != null &&
+        ref.watch(deviceLinkProvider).identityOf(peerId!) == savedId;
+
     String title;
-    if (isDm) {
+    if (isSaved) {
+      title = 'Saved messages';
+    } else if (isDm) {
       title = displayNameFor(profiles, peerId!);
     } else {
       title = '# ${channelName ?? 'Channel'}';
@@ -2271,7 +2282,7 @@ class _MobileChatHeader extends ConsumerWidget {
         ? ref.watch(serverListProvider.select((m) => m[serverId]?.name))
         : null;
 
-    final isOnline = isDm && identityIsOnline(ref, peerId!);
+    final isOnline = isDm && !isSaved && identityIsOnline(ref, peerId!);
 
     return Container(
       constraints: const BoxConstraints(minHeight: 52),
@@ -2290,7 +2301,10 @@ class _MobileChatHeader extends ConsumerWidget {
             child: Icon(LucideIcons.arrowLeft, size: 22, color: hollow.textPrimary),
           ),
           const SizedBox(width: HollowSpacing.xs),
-          if (isDm) ...[
+          if (isSaved) ...[
+            const SavedMessagesAvatar(size: 32),
+            const SizedBox(width: HollowSpacing.sm),
+          ] else if (isDm) ...[
             SizedBox(
               width: 32, height: 32,
               child: Stack(
@@ -2350,7 +2364,7 @@ class _MobileChatHeader extends ConsumerWidget {
                       ],
                     ],
                   ),
-                  if (isDm)
+                  if (isDm && !isSaved)
                     Text(
                       isOnline ? 'Online' : 'Offline',
                       style: HollowTypography.caption.copyWith(
@@ -2371,7 +2385,8 @@ class _MobileChatHeader extends ConsumerWidget {
             ),
           ),
           if (isDm) ...[
-            _DmCallButtons(peerId: peerId!),
+            // Can't call yourself — Saved messages hides the call buttons.
+            if (!isSaved) _DmCallButtons(peerId: peerId!),
             _DmMuteButton(peerId: peerId!),
           ],
           // Channel encryption/connection status (Encrypted / Offline).

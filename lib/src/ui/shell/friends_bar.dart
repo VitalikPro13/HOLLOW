@@ -8,6 +8,7 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
@@ -171,6 +172,32 @@ class FriendsBar extends ConsumerWidget {
             margin: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
             color: hollow.border,
           ),
+
+          // Saved messages button — opens the DM with your own master identity.
+          Builder(builder: (context) {
+            final savedId = ref.watch(savedMessagesPeerIdProvider);
+            final isActive = savedId != null && savedId == selectedPeerId;
+            return HollowTooltip(
+              message: 'Saved messages',
+              child: HollowPressable(
+                semanticLabel: 'Saved messages',
+                onTap: savedId == null
+                    ? null
+                    : () => _selectFriend(ref, savedId),
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.sm,
+                  vertical: HollowSpacing.xs,
+                ),
+                child: Icon(
+                  LucideIcons.bookmark,
+                  size: 18,
+                  color: isActive ? hollow.accent : hollow.textSecondary,
+                ),
+              ),
+            );
+          }),
+          const SizedBox(width: HollowSpacing.xs),
 
           // Help button (right side — symmetric with Add Friend on the left)
           Builder(builder: (context) {

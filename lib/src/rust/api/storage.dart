@@ -195,6 +195,21 @@ Future<List<String>> getDmPeerIds() =>
 Future<List<FriendFfi>> loadFriends({String? status}) =>
     RustLib.instance.api.crateApiStorageLoadFriends(status: status);
 
+/// Block an identity (MASTER-keyed). Persists the row and warms the in-memory
+/// set the Rust ingest guards read, so it takes effect immediately. Purely
+/// local — the blocked peer learns nothing. Pass any of the peer's ids; it is
+/// collapsed to the master via the resolver.
+Future<void> blockPeer({required String peerId}) =>
+    RustLib.instance.api.crateApiStorageBlockPeer(peerId: peerId);
+
+/// Unblock a previously blocked identity.
+Future<void> unblockPeer({required String peerId}) =>
+    RustLib.instance.api.crateApiStorageUnblockPeer(peerId: peerId);
+
+/// All blocked master peer_ids, newest first.
+Future<List<String>> loadBlockedPeers() =>
+    RustLib.instance.api.crateApiStorageLoadBlockedPeers();
+
 /// A single reaction on a message, returned to Dart.
 /// Search channel messages by text.
 Future<List<StoredChannelMessage>> searchChannelMessages({

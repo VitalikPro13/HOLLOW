@@ -10,6 +10,7 @@ import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
@@ -265,11 +266,25 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   /// Non-null while the user is scrolled up: display list capped here.
   int? _frozenLen;
 
-  /// The messages currently displayed (frozen prefix while scrolled up).
+  /// The messages currently displayed (frozen prefix while scrolled up),
+  /// minus messages from blocked senders. The freeze cap is applied to the
+  /// RAW list first (the freeze length is captured from raw-list growth in
+  /// the channelChatProvider listener), then blocked senders are filtered —
+  /// blocked-sender comparison collapses device→master via the resolver.
+  /// build() watches blockedUsersProvider so the pane rebuilds on changes.
   List<ChannelChatMessage> _displayMessages(List<ChannelChatMessage> messages) {
     final frozen = _frozenLen;
-    if (frozen == null || messages.length <= frozen) return messages;
-    return messages.sublist(0, frozen);
+    var visible = (frozen == null || messages.length <= frozen)
+        ? messages
+        : messages.sublist(0, frozen);
+    final blocked = ref.read(blockedUsersProvider);
+    if (blocked.isNotEmpty) {
+      final links = ref.read(deviceLinkProvider);
+      visible = visible
+          .where((m) => !blocked.contains(links.identityOf(m.senderId)))
+          .toList();
+    }
+    return visible;
   }
 
   bool get _isNearBottom {
@@ -1397,6 +1412,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         (_, __) => _recomputeSlowMode());
     // While the user reads history the display is frozen — arrivals are held
     // back (see the reversed-list scroll model above).
+    // Rebuild when the block list (or device→master links) change so
+    // _displayMessages' blocked-sender filter re-runs.
+    ref.watch(blockedUsersProvider);
+    ref.watch(deviceLinkProvider);
     final messages = _displayMessages(allMessages);
 
     // If cache was cleared by sync (clearServerCache) and we have no messages,

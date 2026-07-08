@@ -11,6 +11,7 @@ import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -21,6 +22,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
@@ -302,6 +304,21 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       return a.name.compareTo(b.name);
     });
 
+    // Pinned "Saved messages" (a DM with your own master identity) — always
+    // the very first row, deliberately excluded from the unread/recency sort.
+    final savedId = ref.watch(savedMessagesPeerIdProvider);
+    if (savedId != null) {
+      items.insert(
+        0,
+        _ConversationItem(
+          type: _ItemType.dm,
+          id: savedId,
+          name: 'Saved messages',
+          lastMessage: lastMessages[savedId],
+        ),
+      );
+    }
+
     Widget body;
     if (items.isEmpty) {
       body = Expanded(
@@ -342,15 +359,21 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
             // State across DIFFERENT conversations when positions shift
             // (a joined server then shows another server's channel list).
             if (item.type == _ItemType.dm) {
+              final isSaved = item.id == savedId;
               return _DmRow(
                 key: ValueKey('dm-${item.id}'),
                 peerId: item.id,
                 name: item.name,
                 lastMessage: item.lastMessage,
                 isOnline: item.isOnline,
+                isSavedMessages: isSaved,
                 formatTime: _formatTime,
                 onTap: () => _openDmChat(item.id),
-                onLongPress: () => _showDmSheet(context, item.id, item.name),
+                // No context sheet for Saved messages (mute/hide/remove-friend
+                // actions don't apply to a conversation with yourself).
+                onLongPress: isSaved
+                    ? null
+                    : () => _showDmSheet(context, item.id, item.name),
               );
             } else {
               return _ServerRow(
@@ -495,6 +518,7 @@ class _DmRow extends ConsumerWidget {
   final String name;
   final ChatMessage? lastMessage;
   final bool isOnline;
+  final bool isSavedMessages;
   final String Function(DateTime) formatTime;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
@@ -505,6 +529,7 @@ class _DmRow extends ConsumerWidget {
     required this.name,
     required this.lastMessage,
     required this.isOnline,
+    this.isSavedMessages = false,
     required this.formatTime,
     required this.onTap,
     this.onLongPress,
@@ -531,7 +556,11 @@ class _DmRow extends ConsumerWidget {
       ),
       child: Row(
         children: [
-          // Avatar + status dot
+          // Avatar + status dot (Saved messages: bookmark, no presence — it's
+          // a conversation with yourself).
+          if (isSavedMessages)
+            const SavedMessagesAvatar(size: 44)
+          else
           SizedBox(
             width: 44,
             height: 44,
@@ -577,7 +606,9 @@ class _DmRow extends ConsumerWidget {
                 if (lastMessage != null) ...[
                   const SizedBox(height: 2),
                   Text(
-                    lastMessage!.isMe
+                    // Saved messages: every message is yours — the "You:"
+                    // prefix would be pure noise.
+                    lastMessage!.isMe && !isSavedMessages
                         ? 'You: ${lastMessage!.text}'
                         : lastMessage!.text,
                     style: HollowTypography.bodySmall.copyWith(

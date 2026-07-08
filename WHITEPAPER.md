@@ -958,6 +958,7 @@ For peers behind symmetric NATs, the relay provides time-limited TURN credential
 | Voice/video media | **No** (P2P, not relayed) |
 | File transfer bytes | **No** (P2P, not relayed) |
 | IP addresses | **No** (relay does not log IPs; TURN logging disabled) |
+| User reports | Partially — per-target abuse-category **counts** are persisted (§12.14); the reporter's identity is never written to disk |
 
 ### 12.8 License Key System
 
@@ -1019,6 +1020,14 @@ Two tiers exist:
 - **Server channels** — one ciphertext ring per channel (bounded per-channel message and byte caps), populated from the channel's topic-routed frames and replayed on request to any member of the room. Deletion is by retention expiry, never by delivery, because "all members received it" is unknowable to a relay that refuses to learn server membership. Enabled per server via a CRDT-replicated setting (default on; the server owner can disable it).
 
 A global byte budget bounds total buffer memory with oldest-first eviction. Because MLS enforces forward secrecy, replayed channel ciphertext is decryptable only within a bounded window: Hollow configures its MLS groups with an enlarged out-of-order tolerance and a small number of retained past-epoch secrets, deliberately trading a bounded amount of forward secrecy for offline deliverability. Frames outside that window are recovered through ordinary peer synchronization instead.
+
+### 12.14 User Blocking and Reporting
+
+Abuse handling follows Hollow's self-protection model: users defend themselves locally, and the network learns as little as possible in the process.
+
+**Blocking is a purely local, receiver-side decision.** A block is keyed on the offender's *master* identity (so switching devices does not evade it) and enforced at message ingest, before anything is stored, displayed, or notified: friend requests, direct messages (live, sync backfill, and offline-cache replay), file transfers, call invitations, and data-channel offers from a blocked identity are dropped. The blocked party receives no signal that they are blocked, and no other party — including the relay — learns that a block exists. Server channel messages from a blocked member remain in the local store but are hidden from display, so unblocking restores history losslessly.
+
+**Reporting is the single deliberate exception to the relay's persist-nothing rule.** A client may file a report against a peer under a fixed category set (spam, harassment, illegal content, impersonation) over its authenticated relay connection. The relay persists exactly two things: per-target **counts** per category, and a SHA-256 hash of (reporter, target, category) used solely to enforce one report per reporter per target per category. The reporter's identity never appears on disk or in logs, no message content is attached (the relay could not read it anyway), and the resulting file supports exactly one operator action: identifying identities with abnormal report volumes for possible relay-access restriction. Reports carry no in-protocol authority — they cannot delete content, remove members, or affect any server's CRDT state.
 
 ---
 
@@ -1375,6 +1384,7 @@ It deliberately does **not** cover the WebRTC media plane (audio/video pixels, S
 | Storage shard snooping | Encrypt-then-erasure-code. Shards are encrypted; reconstructing all shards yields only ciphertext. |
 | Removed member accessing new content | MLS epoch rotation on removal. New epoch derives fresh keys from randomness the removed member doesn't have. |
 | Message forgery | Ed25519 signatures on every message. Invalid signatures are rejected. |
+| Harassment by a specific peer | Master-keyed local blocking enforced at ingest (§12.14) — DMs, friend requests, calls, and files from a blocked identity are dropped before storage or notification, from any of their devices. |
 | Evidence destruction | Decentralized storage + cryptographic signatures. No central authority can delete data from other users' devices. |
 | CRDT state manipulation | Author verification + role-based permission checks. Unauthorized operations rejected. |
 | Clock manipulation attacks | HLC drift bound (5 minutes). Far-future timestamps rejected to prevent LWW conflict gaming. |

@@ -2072,6 +2072,25 @@ pub fn request_relay_bandwidth() -> Result<(), String> {
     Ok(())
 }
 
+/// File a user report with the relay (category: "spam", "harassment",
+/// "illegal_content", or "impersonation"). Fire-and-forget; the relay keeps
+/// only per-(target, category) counts and dedups one report per reporter per
+/// target per category via hashed keys — it never stores who reported whom.
+#[frb]
+pub fn report_user(target: String, category: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::ReportUser { target, category }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
 /// Release the currently claimed temporary nickname.
 #[frb]
 pub fn release_nickname() -> Result<(), String> {

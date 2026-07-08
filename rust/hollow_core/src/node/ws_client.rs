@@ -113,6 +113,10 @@ pub enum WsCommand {
     /// reply rides the same socket whose bytes are counted, so attribution
     /// is exact (an HTTP poll could resolve to the other address family).
     GetBandwidth,
+    /// File a user report with the relay. One-shot — deliberately NOT cached
+    /// in `track_room_change`, so it is never re-sent on reconnect (the relay
+    /// also dedups per (reporter, target, category) via hashed keys).
+    ReportUser { target: String, category: String },
 }
 
 /// Events received from the WebSocket relay, forwarded to the swarm.
@@ -823,6 +827,18 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             });
             if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] SetOfflineBuffer send failed: {e}");
+                return false;
+            }
+            return true;
+        }
+        WsCommand::ReportUser { target, category } => {
+            let msg = serde_json::json!({
+                "type": "report",
+                "target": target,
+                "category": category,
+            });
+            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+                hollow_log!("[HOLLOW-WS] ReportUser send failed: {e}");
                 return false;
             }
             return true;

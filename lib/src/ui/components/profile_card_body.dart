@@ -5,6 +5,7 @@ import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/models/showcase_board.dart';
 import 'package:hollow/src/ui/dialogs/showcase_editor.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -23,6 +24,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -481,6 +483,26 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     );
   }
 
+  /// Blocking opens a confirm dialog — dismiss the host (hover popup /
+  /// profile dialog) first, like the nickname flow, so the dialog isn't
+  /// stacked under a transient popup. The helper reads providers through the
+  /// nav context's container, so it survives this widget's disposal.
+  void _openBlockConfirm(String masterId) {
+    final name = displayNameForPeer(
+        ref.read(profileProvider)[widget.peerId], widget.peerId);
+    final navContext = Navigator.of(context, rootNavigator: true).context;
+    widget.dismissHost();
+    confirmAndBlockUser(navContext, masterId: masterId, displayName: name);
+  }
+
+  void _openReportDialog(String masterId) {
+    final name = displayNameForPeer(
+        ref.read(profileProvider)[widget.peerId], widget.peerId);
+    final navContext = Navigator.of(context, rootNavigator: true).context;
+    widget.dismissHost();
+    showReportUserDialog(navContext, masterId: masterId, displayName: name);
+  }
+
   List<Widget> _buildFullActions(HollowTheme hollow, String? localNick) {
     final localPeerId = ref.read(identityProvider).peerId;
     if (widget.peerId == localPeerId) {
@@ -500,6 +522,8 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
         ),
       ];
     }
+    final master = ref.watch(deviceLinkProvider).identityOf(widget.peerId);
+    final isBlocked = ref.watch(blockedUsersProvider).contains(master);
     return [
       HollowButton.ghost(
         onPressed: () => _openNicknameDialog(localNick),
@@ -508,6 +532,22 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
         child: Text(localNick != null ? 'Edit Nickname' : 'Set Nickname'),
       ),
       ProfileFriendAction(peerId: widget.peerId, expand: false),
+      // Block/Report stay quiet in the band (ghost); .danger is reserved for
+      // the confirm dialog's destructive action.
+      HollowButton.ghost(
+        onPressed: isBlocked
+            ? () => unblockUser(context, masterId: master)
+            : () => _openBlockConfirm(master),
+        compact: true,
+        icon: const Icon(LucideIcons.ban),
+        child: Text(isBlocked ? 'Unblock' : 'Block'),
+      ),
+      HollowButton.ghost(
+        onPressed: () => _openReportDialog(master),
+        compact: true,
+        icon: const Icon(LucideIcons.flag),
+        child: const Text('Report'),
+      ),
     ];
   }
 
@@ -524,6 +564,8 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
         ),
       ];
     }
+    final master = ref.watch(deviceLinkProvider).identityOf(widget.peerId);
+    final isBlocked = ref.watch(blockedUsersProvider).contains(master);
     return [
       HollowButton.ghost(
         onPressed: () => _openNicknameDialog(localNick),
@@ -534,6 +576,24 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
       ),
       const SizedBox(height: HollowSpacing.xs),
       ProfileFriendAction(peerId: widget.peerId, expand: true),
+      const SizedBox(height: HollowSpacing.xs),
+      HollowButton.ghost(
+        onPressed: isBlocked
+            ? () => unblockUser(context, masterId: master)
+            : () => _openBlockConfirm(master),
+        compact: true,
+        expand: true,
+        icon: const Icon(LucideIcons.ban),
+        child: Text(isBlocked ? 'Unblock' : 'Block'),
+      ),
+      const SizedBox(height: HollowSpacing.xs),
+      HollowButton.ghost(
+        onPressed: () => _openReportDialog(master),
+        compact: true,
+        expand: true,
+        icon: const Icon(LucideIcons.flag),
+        child: const Text('Report'),
+      ),
     ];
   }
 }
