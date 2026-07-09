@@ -1148,15 +1148,17 @@ class _ArchiveHeader extends StatelessWidget {
                   ),
           ),
           if (messageCount != null)
-            Flexible(
-              child: Text(
-                '$countText messages',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                  fontSize: 11,
-                ),
+            // NOT Flexible: a second flex child would split the row's free
+            // space with the title's Expanded and leave a dead gap on the
+            // right. The title Expanded owns all slack; the count + trailing
+            // controls hug the right edge. Counts are short/bounded.
+            Text(
+              '$countText messages',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+                fontSize: 11,
               ),
             ),
           // Peer filter (channel archives only).

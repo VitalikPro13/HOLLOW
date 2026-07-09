@@ -23,6 +23,12 @@ class HollowButton extends StatefulWidget {
   final bool expand;
   final bool compact;
 
+  /// Tints an [HollowButton.outline] with the error color (red border + red
+  /// text) instead of accent — a non-destructive-looking way to flag a
+  /// cautionary action (e.g. Block/Report) without the solid-red `.danger`
+  /// fill that's reserved for confirm dialogs. No effect on other variants.
+  final bool danger;
+
   /// Screen-reader label override. Usually null — the [child] text auto-names
   /// the button. Only set this for icon-only buttons (no text child) or when
   /// the visible text isn't the right thing to announce.
@@ -37,6 +43,7 @@ class HollowButton extends StatefulWidget {
     this.expand = false,
     this.compact = false,
     this.semanticLabel,
+    this.danger = false,
   });
 
   const HollowButton.filled({
@@ -47,7 +54,8 @@ class HollowButton extends StatefulWidget {
     this.expand = false,
     this.compact = false,
     this.semanticLabel,
-  }) : variant = HollowButtonVariant.filled;
+  })  : variant = HollowButtonVariant.filled,
+        danger = false;
 
   const HollowButton.ghost({
     super.key,
@@ -57,7 +65,8 @@ class HollowButton extends StatefulWidget {
     this.expand = false,
     this.compact = false,
     this.semanticLabel,
-  }) : variant = HollowButtonVariant.ghost;
+  })  : variant = HollowButtonVariant.ghost,
+        danger = false;
 
   const HollowButton.outline({
     super.key,
@@ -67,6 +76,7 @@ class HollowButton extends StatefulWidget {
     this.expand = false,
     this.compact = false,
     this.semanticLabel,
+    this.danger = false,
   }) : variant = HollowButtonVariant.outline;
 
   const HollowButton.danger({
@@ -77,7 +87,8 @@ class HollowButton extends StatefulWidget {
     this.expand = false,
     this.compact = false,
     this.semanticLabel,
-  }) : variant = HollowButtonVariant.danger;
+  })  : variant = HollowButtonVariant.danger,
+        danger = false;
 
   @override
   State<HollowButton> createState() => _HollowButtonState();
@@ -152,13 +163,15 @@ class _HollowButtonState extends State<HollowButton>
         fg = hollow.accent;
         hoverBg = hollow.accentMuted;
       case HollowButtonVariant.outline:
-        bg = hollow.accentMuted.withValues(alpha: 0.0);
-        fg = hollow.accent;
-        hoverBg = hollow.accentMuted;
+        final tint = widget.danger ? hollow.error : hollow.accent;
+        bg = tint.withValues(alpha: 0.0);
+        fg = tint;
+        hoverBg =
+            widget.danger ? hollow.error.withValues(alpha: 0.12) : hollow.accentMuted;
         border = Border.all(
           color: _hovering && isInteractive
-              ? hollow.accent.withValues(alpha: 0.6)
-              : hollow.accent.withValues(alpha: 0.4),
+              ? tint.withValues(alpha: 0.6)
+              : tint.withValues(alpha: 0.4),
         );
       case HollowButtonVariant.danger:
         bg = hollow.error;

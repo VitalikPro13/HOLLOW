@@ -525,29 +525,51 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     final master = ref.watch(deviceLinkProvider).identityOf(widget.peerId);
     final isBlocked = ref.watch(blockedUsersProvider).contains(master);
     return [
-      HollowButton.ghost(
-        onPressed: () => _openNicknameDialog(localNick),
-        compact: true,
-        icon: Icon(localNick != null ? LucideIcons.pencil : LucideIcons.tag),
-        child: Text(localNick != null ? 'Edit Nickname' : 'Set Nickname'),
+      // Set Nickname — full-width outline (matches Edit Profile styling).
+      SizedBox(
+        width: double.infinity,
+        child: HollowButton.outline(
+          onPressed: () => _openNicknameDialog(localNick),
+          compact: true,
+          icon: Icon(localNick != null ? LucideIcons.pencil : LucideIcons.tag),
+          child: Text(localNick != null ? 'Edit Nickname' : 'Set Nickname'),
+        ),
       ),
+      // Block + Report share one full-width row (each half). Red outline
+      // (danger tint) — the solid-red .danger fill stays for the confirm
+      // dialog's destructive action.
+      SizedBox(
+        width: double.infinity,
+        child: Row(
+          children: [
+            Expanded(
+              child: HollowButton.outline(
+                danger: true,
+                onPressed: isBlocked
+                    ? () => unblockUser(context, masterId: master)
+                    : () => _openBlockConfirm(master),
+                compact: true,
+                expand: true,
+                icon: const Icon(LucideIcons.ban),
+                child: Text(isBlocked ? 'Unblock' : 'Block'),
+              ),
+            ),
+            const SizedBox(width: HollowSpacing.sm),
+            Expanded(
+              child: HollowButton.outline(
+                danger: true,
+                onPressed: () => _openReportDialog(master),
+                compact: true,
+                expand: true,
+                icon: const Icon(LucideIcons.flag),
+                child: const Text('Report'),
+              ),
+            ),
+          ],
+        ),
+      ),
+      // Friends status at the bottom.
       ProfileFriendAction(peerId: widget.peerId, expand: false),
-      // Block/Report stay quiet in the band (ghost); .danger is reserved for
-      // the confirm dialog's destructive action.
-      HollowButton.ghost(
-        onPressed: isBlocked
-            ? () => unblockUser(context, masterId: master)
-            : () => _openBlockConfirm(master),
-        compact: true,
-        icon: const Icon(LucideIcons.ban),
-        child: Text(isBlocked ? 'Unblock' : 'Block'),
-      ),
-      HollowButton.ghost(
-        onPressed: () => _openReportDialog(master),
-        compact: true,
-        icon: const Icon(LucideIcons.flag),
-        child: const Text('Report'),
-      ),
     ];
   }
 
@@ -567,7 +589,8 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     final master = ref.watch(deviceLinkProvider).identityOf(widget.peerId);
     final isBlocked = ref.watch(blockedUsersProvider).contains(master);
     return [
-      HollowButton.ghost(
+      // Set Nickname — outline (matches Edit Profile styling).
+      HollowButton.outline(
         onPressed: () => _openNicknameDialog(localNick),
         compact: true,
         expand: true,
@@ -575,25 +598,37 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
         child: Text(localNick != null ? 'Edit Nickname' : 'Set Nickname'),
       ),
       const SizedBox(height: HollowSpacing.xs),
+      // Block + Report share one row (each half), red outline (danger tint).
+      Row(
+        children: [
+          Expanded(
+            child: HollowButton.outline(
+              danger: true,
+              onPressed: isBlocked
+                  ? () => unblockUser(context, masterId: master)
+                  : () => _openBlockConfirm(master),
+              compact: true,
+              expand: true,
+              icon: const Icon(LucideIcons.ban),
+              child: Text(isBlocked ? 'Unblock' : 'Block'),
+            ),
+          ),
+          const SizedBox(width: HollowSpacing.xs),
+          Expanded(
+            child: HollowButton.outline(
+              danger: true,
+              onPressed: () => _openReportDialog(master),
+              compact: true,
+              expand: true,
+              icon: const Icon(LucideIcons.flag),
+              child: const Text('Report'),
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: HollowSpacing.xs),
+      // Friends status at the bottom.
       ProfileFriendAction(peerId: widget.peerId, expand: true),
-      const SizedBox(height: HollowSpacing.xs),
-      HollowButton.ghost(
-        onPressed: isBlocked
-            ? () => unblockUser(context, masterId: master)
-            : () => _openBlockConfirm(master),
-        compact: true,
-        expand: true,
-        icon: const Icon(LucideIcons.ban),
-        child: Text(isBlocked ? 'Unblock' : 'Block'),
-      ),
-      const SizedBox(height: HollowSpacing.xs),
-      HollowButton.ghost(
-        onPressed: () => _openReportDialog(master),
-        compact: true,
-        expand: true,
-        icon: const Icon(LucideIcons.flag),
-        child: const Text('Report'),
-      ),
     ];
   }
 }

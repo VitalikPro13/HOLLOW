@@ -777,6 +777,12 @@ impl TestNode {
             .unwrap_or_else(|| "absent".to_string())
     }
 
+    /// Friend-table status for a person (master-keyed): "accepted", "pending",
+    /// or None if no row exists. Used by the reject/mutual-request tests.
+    pub(crate) fn friend_status(&self, master: &str) -> Option<String> {
+        self.store().get_friend_status(master).ok().flatten()
+    }
+
     // --- File-transfer control state (DB-backed) ---------------------------
 
     /// A received file's metadata row, as the receiver persisted it from the
@@ -5267,6 +5273,289 @@ async fn fresh_single_device_friends_dm_both_ways() {
     assert!(
         al_thread.iter().any(|b| b.text == "AL-to-VM-hello" && b.is_mine),
         "AL's DM thread must also show AL's own outgoing message, got {al_thread:?}"
+    );
+
+    drop(al);
+    drop(vm);
+}
+
+// ---------------------------------------------------------------------------
+// Reject must NOT silently re-friend: rejecting an incoming request while our
+// OWN outbound request to the same person is still queued used to leave the
+// outbound request armed; it drained on the peer's next appearance, the peer
+// accepted, and the pair became friends behind the user's back. The fix clears
+// pending_friend_requests on reject. Regression guard for the reject/accept race.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn reject_cancels_own_queued_request_no_refriend() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const AL_MASTER: u8 = 61;
+    const AL_DEV: u8 = 62;
+    const VM_MASTER: u8 = 63;
+    const VM_DEV: u8 = 64;
+    let al_master = NativeKeypair::from_secret_bytes(&seed_bytes(AL_MASTER)).peer_id();
+    let vm_master = NativeKeypair::from_secret_bytes(&seed_bytes(VM_MASTER)).peer_id();
+
+    let mut al = spawn_node_with_friends(&relay, AL_MASTER, AL_DEV, &[]).await;
+    let mut vm = spawn_node_with_friends(&relay, VM_MASTER, VM_DEV, &[]).await;
+    sleep_ms(1500).await;
+    drain_events(&mut al);
+    drain_events(&mut vm);
+
+    // BOTH sides request each other (mutual). AL's request + VM's request cross.
+    al.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: vm_master.clone() })
+        .await
+        .unwrap();
+    vm.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: al_master.clone() })
+        .await
+        .unwrap();
+    sleep_ms(1500).await;
+    drain_events(&mut al);
+    drain_events(&mut vm);
+
+    // AL REJECTS VM. With the fix, AL's own queued outbound request to VM is
+    // cancelled, so it can never drain and re-friend them.
+    al.cmd_tx
+        .send(NodeCommand::RejectFriendRequest { peer_id: vm_master.clone() })
+        .await
+        .unwrap();
+
+    // Give the reject + any (buggy) queued-request drain + a possible VM accept a
+    // generous window to fire. Before the fix, AL ends up "accepted" here.
+    sleep_ms(3000).await;
+    drain_events(&mut al);
+    drain_events(&mut vm);
+
+    let al_status = al.friend_status(&vm_master);
+    assert_ne!(
+        al_status.as_deref(),
+        Some("accepted"),
+        "AL rejected VM — must NOT silently become friends via its own queued request \
+         (got status {al_status:?})"
+    );
+
+    drop(al);
+    drop(vm);
+}
+
+// ---------------------------------------------------------------------------
+// Mutual friend requests converge to friends WITHOUT a reject prompt. When both
+// sides request each other, the inbound request arriving while our own outbound
+// request is live is treated as an implicit accept → both become friends. Guards
+// the mutual auto-converge path.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn mutual_friend_requests_auto_converge() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const AL_MASTER: u8 = 71;
+    const AL_DEV: u8 = 72;
+    const VM_MASTER: u8 = 73;
+    const VM_DEV: u8 = 74;
+    let al_master = NativeKeypair::from_secret_bytes(&seed_bytes(AL_MASTER)).peer_id();
+    let vm_master = NativeKeypair::from_secret_bytes(&seed_bytes(VM_MASTER)).peer_id();
+
+    let mut al = spawn_node_with_friends(&relay, AL_MASTER, AL_DEV, &[]).await;
+    let mut vm = spawn_node_with_friends(&relay, VM_MASTER, VM_DEV, &[]).await;
+    sleep_ms(1500).await;
+    drain_events(&mut al);
+    drain_events(&mut vm);
+
+    // Both request each other with no explicit accept from either side.
+    al.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: vm_master.clone() })
+        .await
+        .unwrap();
+    vm.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: al_master.clone() })
+        .await
+        .unwrap();
+    sleep_ms(3000).await;
+    drain_events(&mut al);
+    drain_events(&mut vm);
+
+    // Both sides converge to "accepted" purely from the mutual requests.
+    assert_eq!(
+        al.friend_status(&vm_master).as_deref(),
+        Some("accepted"),
+        "AL must auto-converge to friends with VM on a mutual request"
+    );
+    assert_eq!(
+        vm.friend_status(&al_master).as_deref(),
+        Some("accepted"),
+        "VM must auto-converge to friends with AL on a mutual request"
+    );
+
+    drop(al);
+    drop(vm);
+}
+
+// ---------------------------------------------------------------------------
+// One-way DM delivery guard: a DM must arrive when the sender is in several relay
+// rooms alongside the DM room. The online send path used to route via
+// `ws_room_for_peer` (first-match over a HashMap); if the sender's map ever lists
+// the recipient's device under a room the recipient has since left (handshake
+// room churn / a stale ghost entry), the first-match can pick it, the relay
+// buffers the frame against a room the recipient never rejoins, and it's silently
+// lost (sends "succeeded", never arrived — the one-way DM bug). The fix routes
+// online DMs into the deterministic `dm_room_code`, which every recipient device
+// is always a member of. NOTE: the harness can't force a stale relay-room desync
+// (no node-level LeaveRoom command), so this asserts delivery under multiple
+// shared rooms rather than reproducing the exact staleness; the fix's correctness
+// is that it never consults the racy lookup for a DM.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn dm_delivers_with_multiple_shared_rooms() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const AL_MASTER: u8 = 81;
+    const AL_DEV: u8 = 82;
+    const VM_MASTER: u8 = 83;
+    const VM_DEV: u8 = 84;
+    let al_master = NativeKeypair::from_secret_bytes(&seed_bytes(AL_MASTER)).peer_id();
+    let vm_master = NativeKeypair::from_secret_bytes(&seed_bytes(VM_MASTER)).peer_id();
+
+    let mut al = spawn_node_with_friends(&relay, AL_MASTER, AL_DEV, &[]).await;
+    let mut vm = spawn_node_with_friends(&relay, VM_MASTER, VM_DEV, &[]).await;
+    sleep_ms(1500).await;
+    drain_events(&mut al);
+    drain_events(&mut vm);
+
+    // Establish the friendship (drives the real handshake + confirmed Olm session).
+    al.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: vm_master.clone() })
+        .await
+        .unwrap();
+    let vm_got = wait_event(&mut vm, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { .. })
+    })
+    .await;
+    assert!(vm_got, "VM must receive AL's friend request");
+    vm.cmd_tx
+        .send(NodeCommand::AcceptFriendRequest { peer_id: al_master.clone() })
+        .await
+        .unwrap();
+    sleep_ms(2000).await;
+    drain_events(&mut al);
+    drain_events(&mut vm);
+
+    // Multi-shared-room condition: AL joins an EXTRA room that VM never joins, but
+    // whose membership churn (plus the inbox/DM rooms) means AL's ws_room_peers can
+    // list VM's device under more than one room key across the handshake. The DM
+    // send must deterministically target the DM room, not a first-match room VM is
+    // absent from. Driving several extra rooms widens the window that the racy
+    // first-match would land on the wrong one; the fix makes delivery reliable.
+    for i in 0..6 {
+        al.cmd_tx
+            .send(NodeCommand::JoinRoom { room_code: format!("extra_room_{i}") })
+            .await
+            .unwrap();
+    }
+    sleep_ms(1000).await;
+    drain_events(&mut al);
+    drain_events(&mut vm);
+
+    // AL → VM DM. Must arrive despite the multiple shared rooms.
+    al.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: vm_master.clone(),
+            text: "multi-room-dm".to_string(),
+            message_id: "mr-dm-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let vm_rx = wait_event(&mut vm, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { text, from_peer, is_own, .. }
+            if text == "multi-room-dm" && *from_peer == al_master && !*is_own)
+    })
+    .await;
+    assert!(
+        vm_rx,
+        "VM must receive AL's DM even with multiple shared rooms (the one-way bug: \
+         the send picked a non-DM room and the relay silently buffered it)"
+    );
+
+    drop(al);
+    drop(vm);
+}
+
+// ---------------------------------------------------------------------------
+// Friend-request-needs-restart race: a request sent to a target whose device→
+// master mapping the requester hasn't learned yet queues (keyed by target MASTER)
+// and the presence-event drains no-op (they can't attribute the target's present
+// DEVICE to the queued master while the resolver is cold). The target then never
+// receives it until it re-joins a shared room (a restart). The fix drains the
+// queue the moment the mapping is learned (device-list ingest). This test drives
+// a fresh cold requester and asserts the target receives the request WITHOUT
+// restarting. NOTE: the in-process MockRelay collapses the exact micro-timing
+// window of the field race, so this is a delivery guarantee for the cold-requester
+// path rather than a deterministic repro of the presence-event miss; the fix's
+// correctness is that learning the mapping now always re-drives the queued drain.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn friend_request_delivers_without_recipient_restart() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    // Fresh distinct identities, each device != master (real fresh-install shape),
+    // resolver NOT pre-seeded → the requester starts COLD (can't map the target's
+    // device to its master until it ingests the target's device list).
+    const AL_MASTER: u8 = 91;
+    const AL_DEV: u8 = 92;
+    const VM_MASTER: u8 = 93;
+    const VM_DEV: u8 = 94;
+    let al_master = NativeKeypair::from_secret_bytes(&seed_bytes(AL_MASTER)).peer_id();
+    let al_dev = NativeKeypair::from_secret_bytes(&seed_bytes(AL_DEV)).peer_id();
+    let vm_master = NativeKeypair::from_secret_bytes(&seed_bytes(VM_MASTER)).peer_id();
+    let vm_dev = NativeKeypair::from_secret_bytes(&seed_bytes(VM_DEV)).peer_id();
+    assert_ne!(al_dev, al_master);
+    assert_ne!(vm_dev, vm_master);
+
+    let mut al = spawn_node_with_friends(&relay, AL_MASTER, AL_DEV, &[]).await;
+    let mut vm = spawn_node_with_friends(&relay, VM_MASTER, VM_DEV, &[]).await;
+    // Minimal settle: send the request BEFORE the device-list/profile exchange has
+    // taught AL that VM's device resolves to VM's master — so AL queues it and the
+    // presence drains can't attribute VM's device to the queued master.
+    sleep_ms(200).await;
+    drain_events(&mut al);
+    drain_events(&mut vm);
+
+    al.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: vm_master.clone() })
+        .await
+        .unwrap();
+
+    // VM must receive the request WITHOUT restarting — the mapping-learned drain
+    // (device-list ingest on AL) must re-fire the queued request once AL learns
+    // VM's device→master. Before the fix, VM never sees it (it sat queued on AL).
+    let vm_got = wait_event(&mut vm, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { .. })
+    })
+    .await;
+    assert!(
+        vm_got,
+        "VM must receive AL's friend request WITHOUT a restart (the needs-restart \
+         race: AL queued it while cold and no drain re-fired on learning the mapping)"
     );
 
     drop(al);

@@ -6268,6 +6268,10 @@ class _AntiCensorshipCardState extends ConsumerState<_AntiCensorshipCard> {
     await ref.read(proxyConfigProvider.notifier).save(_current);
     try {
       await network_api.notifyShutdown();
+      // stopNode() runs the node teardown, which kills the shoes tunnel
+      // subprocess (proxy_tunnel::stop). Without this the old shoes.exe is
+      // orphaned across the restart. Boot-time sweep is the backstop.
+      await network_api.stopNode();
       await Future.delayed(const Duration(milliseconds: 200));
     } catch (_) {}
     final exe = Platform.resolvedExecutable;

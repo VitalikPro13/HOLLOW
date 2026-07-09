@@ -1342,19 +1342,30 @@ pub fn start_node() -> Result<String, String> {
     // startup — we log it and fall back to a direct connection (which is what
     // the user was doing before), so a bad proxy config never bricks the app.
     {
+        // Kill any shoes orphaned by a prior run (hard restart / crash) BEFORE
+        // deciding to launch — runs whether the proxy is now on or off, so a
+        // stale tunnel never lingers after the user turns the proxy off.
+        node::proxy_tunnel::sweep_orphan();
+
         let cfg = get_proxy_config()
             .lock()
             .map_err(|e| format!("Lock poisoned: {e}"))?
             .clone();
         match cfg {
-            Some(cfg) => match node::proxy_tunnel::start(&cfg) {
-                Ok(addr) => set_proxy_socks_addr(Some(addr)),
-                Err(e) => {
-                    hollow_log!("[HOLLOW-PROXY] Tunnel failed to start ({e}); connecting directly");
-                    set_proxy_socks_addr(None);
+            Some(cfg) => {
+                hollow_log!("[HOLLOW-PROXY] Proxy config present (server {}) — launching tunnel", cfg.server);
+                match node::proxy_tunnel::start(&cfg) {
+                    Ok(addr) => set_proxy_socks_addr(Some(addr)),
+                    Err(e) => {
+                        hollow_log!("[HOLLOW-PROXY] Tunnel failed to start ({e}); connecting directly");
+                        set_proxy_socks_addr(None);
+                    }
                 }
-            },
-            None => set_proxy_socks_addr(None),
+            }
+            None => {
+                hollow_log!("[HOLLOW-PROXY] No proxy config set — connecting directly");
+                set_proxy_socks_addr(None);
+            }
         }
     }
 

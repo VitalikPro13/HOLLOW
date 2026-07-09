@@ -584,7 +584,7 @@ class FilesCacheCapNotifier extends AsyncNotifier<int> {
 // Baked in like `kDefaultRelayDomain` so a normal user just flips the toggle —
 // no copy-paste. The fields stay editable for anyone self-hosting their own
 // relay + Xray. Update these if the server's keys/SNI are rotated.
-const kDefaultProxyServer = '141.227.186.209:8443';
+const kDefaultProxyServer = '141.227.186.209:443';
 const kDefaultProxyUuid = 'bfe68ae0-4435-41ec-950a-aacc1caa2771';
 const kDefaultProxyPublicKey = 'zWJevNXCtw-PMBsUrrJWmYNZlXeSP5ojVDH8aoCA_xQ';
 const kDefaultProxyShortId = '5294730d0b4e9be7';

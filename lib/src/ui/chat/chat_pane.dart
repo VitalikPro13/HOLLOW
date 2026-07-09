@@ -62,7 +62,9 @@ import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
+import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -1086,40 +1088,44 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                       size: 16, color: showProfilePanel ? hollow.accent : hollow.textSecondary),
                 ),
               ),
-              const SizedBox(width: HollowSpacing.xs),
-              HollowTooltip(
-                message: ref.watch(notificationSettingsProvider
-                        .select((s) => s.dmEnabled[widget.peerId] ?? true))
-                    ? 'Mute notifications'
-                    : 'Unmute notifications',
-                child: HollowPressable(
-                  semanticLabel: ref.watch(notificationSettingsProvider
+              // Notification mute toggle — hidden for Saved Messages (you
+              // never get notified about your own self-DM).
+              if (!isSavedMessages) ...[
+                const SizedBox(width: HollowSpacing.xs),
+                HollowTooltip(
+                  message: ref.watch(notificationSettingsProvider
                           .select((s) => s.dmEnabled[widget.peerId] ?? true))
                       ? 'Mute notifications'
                       : 'Unmute notifications',
-                  onTap: () {
-                    final current = ref
-                        .read(notificationSettingsProvider.notifier)
-                        .isDmEnabled(widget.peerId);
-                    ref
-                        .read(notificationSettingsProvider.notifier)
-                        .setDmEnabled(widget.peerId, !current);
-                  },
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
-                  padding: const EdgeInsets.all(HollowSpacing.xs),
-                  child: Icon(
-                    ref.watch(notificationSettingsProvider
+                  child: HollowPressable(
+                    semanticLabel: ref.watch(notificationSettingsProvider
                             .select((s) => s.dmEnabled[widget.peerId] ?? true))
-                        ? LucideIcons.bell
-                        : LucideIcons.bellOff,
-                    size: 18,
-                    color: ref.watch(notificationSettingsProvider
-                            .select((s) => s.dmEnabled[widget.peerId] ?? true))
-                        ? hollow.textSecondary
-                        : hollow.textSecondary.withValues(alpha: 0.4),
+                        ? 'Mute notifications'
+                        : 'Unmute notifications',
+                    onTap: () {
+                      final current = ref
+                          .read(notificationSettingsProvider.notifier)
+                          .isDmEnabled(widget.peerId);
+                      ref
+                          .read(notificationSettingsProvider.notifier)
+                          .setDmEnabled(widget.peerId, !current);
+                    },
+                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    padding: const EdgeInsets.all(HollowSpacing.xs),
+                    child: Icon(
+                      ref.watch(notificationSettingsProvider
+                              .select((s) => s.dmEnabled[widget.peerId] ?? true))
+                          ? LucideIcons.bell
+                          : LucideIcons.bellOff,
+                      size: 18,
+                      color: ref.watch(notificationSettingsProvider
+                              .select((s) => s.dmEnabled[widget.peerId] ?? true))
+                          ? hollow.textSecondary
+                          : hollow.textSecondary.withValues(alpha: 0.4),
+                    ),
                   ),
                 ),
-              ),
+              ],
               // Split view button (dock mode only)
               if ((ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock) == LayoutMode.dock) ...[
                 const SizedBox(width: HollowSpacing.xs),
@@ -3840,6 +3846,15 @@ class _DmProfilePanel extends ConsumerWidget {
     final friends = ref.watch(friendsProvider);
     final friendInfo = friends[peerId];
 
+    // Block/Report key on the MASTER identity (device→master collapse).
+    final master = ref.watch(deviceLinkProvider).identityOf(peerId);
+    final isBlocked = ref.watch(blockedUsersProvider).contains(master);
+
+    // Saved Messages (self-DM): no nickname/block/report actions — you can't
+    // block or report yourself.
+    final savedId = ref.watch(savedMessagesPeerIdProvider);
+    final isSavedMessages = savedId != null && master == savedId;
+
     final displayName = profile?.displayName ?? '';
     final status = profile?.status ?? '';
     final aboutMe = profile?.aboutMe ?? '';
@@ -4036,34 +4051,79 @@ class _DmProfilePanel extends ConsumerWidget {
 
                     const SizedBox(height: HollowSpacing.sm),
 
-                    // Set/Edit Nickname button (outline, full width, like Edit Profile)
-                    SizedBox(
-                      width: double.infinity,
-                      child: HollowButton.outline(
-                        onPressed: () {
-                          showLocalNicknameDialog(
-                            context, ref, peerId,
-                            currentNickname: localNick ?? '',
-                          );
-                        },
-                        compact: true,
-                        icon: Icon(
-                          localNick != null && localNick.isNotEmpty
-                              ? LucideIcons.pencil
-                              : LucideIcons.tag,
-                        ),
-                        child: Text(
-                          localNick != null && localNick.isNotEmpty
-                              ? 'Edit Nickname'
-                              : 'Set Nickname',
+                    // Action buttons — hidden for Saved Messages (self-DM: no
+                    // nickname/block/report on yourself). All outline styled
+                    // (like Edit Profile); Block/Report use the red outline
+                    // (danger tint). Blocking and reporting key on the MASTER
+                    // identity, not the device.
+                    if (!isSavedMessages) ...[
+                      SizedBox(
+                        width: double.infinity,
+                        child: HollowButton.outline(
+                          onPressed: () {
+                            showLocalNicknameDialog(
+                              context, ref, peerId,
+                              currentNickname: localNick ?? '',
+                            );
+                          },
+                          compact: true,
+                          icon: Icon(
+                            localNick != null && localNick.isNotEmpty
+                                ? LucideIcons.pencil
+                                : LucideIcons.tag,
+                          ),
+                          child: Text(
+                            localNick != null && localNick.isNotEmpty
+                                ? 'Edit Nickname'
+                                : 'Set Nickname',
+                          ),
                         ),
                       ),
-                    ),
 
-                    const SizedBox(height: HollowSpacing.xs),
+                      const SizedBox(height: HollowSpacing.xs),
 
-                    // Friend status
-                    if (friendInfo != null && friendInfo.status == 'accepted')
+                      // Block + Report share one row (each half), red outline.
+                      Row(
+                        children: [
+                          Expanded(
+                            child: HollowButton.outline(
+                              danger: true,
+                              onPressed: isBlocked
+                                  ? () => unblockUser(context, masterId: master)
+                                  : () => confirmAndBlockUser(
+                                        context,
+                                        masterId: master,
+                                        displayName: shownName,
+                                      ),
+                              compact: true,
+                              expand: true,
+                              icon: const Icon(LucideIcons.ban),
+                              child: Text(isBlocked ? 'Unblock' : 'Block'),
+                            ),
+                          ),
+                          const SizedBox(width: HollowSpacing.xs),
+                          Expanded(
+                            child: HollowButton.outline(
+                              danger: true,
+                              onPressed: () => showReportUserDialog(
+                                context,
+                                masterId: master,
+                                displayName: shownName,
+                              ),
+                              compact: true,
+                              expand: true,
+                              icon: const Icon(LucideIcons.flag),
+                              child: const Text('Report'),
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(height: HollowSpacing.sm),
+                    ],
+
+                    // Friend status — shown at the end.
+                    if (friendInfo != null && friendInfo.status == 'accepted') ...[
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -4078,8 +4138,8 @@ class _DmProfilePanel extends ConsumerWidget {
                           ),
                         ],
                       ),
-
-                    const SizedBox(height: HollowSpacing.sm),
+                      const SizedBox(height: HollowSpacing.sm),
+                    ],
                     Container(height: 1, color: hollow.border),
                     const SizedBox(height: HollowSpacing.sm),
 

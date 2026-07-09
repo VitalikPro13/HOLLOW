@@ -342,16 +342,53 @@ async fn send_dm_to_device(
     let device_online = super::crypto_handler::ws_room_for_peer(ws_room_peers, device_peer).is_some();
 
     if olm.has_session(device_peer) {
-        if device_online {
-            // Session exists and device is online — encrypt and send.
-            send_encrypted_message(
-                olm,
-                crypto_store,
-                device_peer,
-                envelope_json,
-                event_tx,
-                ws_cmd_tx, ws_room_peers,
-            ).await;
+        if device_online && !is_sibling {
+            // Genuine recipient device, online — encrypt and send into the
+            // DETERMINISTIC DM room (the master-pair `dm_room_code` the caller
+            // computed), NOT a `ws_room_for_peer` lookup. When the recipient's
+            // device is co-present in more than one of our rooms (its DM room
+            // PLUS an inbox/server room during friend-handshake churn), the
+            // first-match lookup inside send_encrypted_message can pick a room
+            // the recipient has since left → the relay buffers the frame against
+            // a room they never rejoin and it's silently lost (the one-way DM
+            // bug: sends "succeed" but never arrive). The offline branch below
+            // already routes by dm_room for this exact reason; the online branch
+            // must too. Every device of the FRIEND is a member of dm_room.
+            // NOTE: siblings are handled by the branch below — they meet in
+            // inbox:{our_master}, NOT dm_room_code(M,M), so dm_room is wrong for
+            // them; keep the flexible lookup for the sibling self-echo path.
+            match olm.encrypt(device_peer, envelope_json.as_bytes()) {
+                Ok((msg_type, ciphertext)) => {
+                    super::crypto_handler::persist_olm_session(olm, crypto_store, device_peer);
+                    if msg_type == 0 {
+                        hollow_log!("[HOLLOW-CRYPTO] Sending PreKey (type 0) to {device_peer}");
+                    }
+                    let identity_key = if msg_type == 0 {
+                        Some(olm.identity_key_base64())
+                    } else {
+                        None
+                    };
+                    let haven_msg = HavenMessage::Encrypted {
+                        message_type: msg_type,
+                        body: OlmManager::encode_base64(&ciphertext),
+                        identity_key,
+                    };
+                    let json = serde_json::to_string(&haven_msg).unwrap_or_default();
+                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                        room_code: dm_room.to_string(),
+                        target_peer: device_peer.to_string(),
+                        data: json.into_bytes(),
+                    });
+                }
+                Err(e) => {
+                    let _ = event_tx
+                        .send(NetworkEvent::MessageSendFailed {
+                            to_peer: device_peer.to_string(),
+                            error: format!("Encryption failed: {e}"),
+                        })
+                        .await;
+                }
+            }
             // ALSO queue for re-delivery on the next session (re)establishment.
             // The relay never ACKs a direct message, and a session we believe is
             // confirmed bidirectional can be silently dead on the PEER's side —
@@ -373,6 +410,20 @@ async fn send_dm_to_device(
                 let overflow = q.len() - RETRY_QUEUE_CAP;
                 q.drain(0..overflow);
             }
+        } else if is_sibling && device_online {
+            // Our OWN sibling device, online — send the self-echo NOW. Siblings meet
+            // in inbox:{our_master}, NOT dm_room_code(M,M), so route via the flexible
+            // ws_room_for_peer lookup (which finds the inbox room), NOT the DM room.
+            // The multi-room one-way risk doesn't apply here: a sibling shares only
+            // the inbox room with us, so the lookup is unambiguous.
+            send_encrypted_message(
+                olm, crypto_store, device_peer, envelope_json,
+                event_tx, ws_cmd_tx, ws_room_peers,
+            ).await;
+            pending_messages
+                .entry(device_peer.to_string())
+                .or_default()
+                .push(envelope_json.to_string());
         } else if is_sibling {
             // Session exists but our OWN sibling device is offline. Do NOT room-send
             // (that would trigger a push — Pixel buzzing for VM's own message). Just

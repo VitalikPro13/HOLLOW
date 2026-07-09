@@ -3687,6 +3687,26 @@ impl MessageStore {
         }
     }
 
+    /// Returns `(status, direction)` for a friend row, or `None` if absent.
+    /// Used to detect a MUTUAL friend request: an inbound request arriving while
+    /// our own row is `("pending", "outgoing")` means both sides requested and
+    /// should deterministically converge to friends.
+    pub fn get_friend_status_direction(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<(String, String)>, String> {
+        let result = self.conn.query_row(
+            "SELECT status, direction FROM friends WHERE peer_id = ?1",
+            params![peer_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        );
+        match result {
+            Ok(sd) => Ok(Some(sd)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("Failed to read friend row: {e}")),
+        }
+    }
+
     // ── Blocked peers (local block list, MASTER-keyed) ───────────
 
     pub fn block_peer(&self, master_peer_id: &str) -> Result<(), String> {

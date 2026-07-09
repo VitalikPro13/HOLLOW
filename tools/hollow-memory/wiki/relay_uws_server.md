@@ -478,7 +478,7 @@ No soft limit — sends unconditionally. `maxBackpressure` (64 MB) is the only s
    ```json
    {"type":"members","room":"<room>","peers":["peer1","peer2","self"]}
    ```
-7. Send `peer_joined` to every OTHER peer in the room:
+7. Send `peer_joined` to every OTHER peer in the room — **but ONLY on a genuine join, not a redundant re-join (2026-07-09).** `handle_join` captures `already_present = ws_room.peers.find(peer_id) != end()` BEFORE the map insert; the `peer_joined` broadcast is gated `&& !already_present`. A client re-joins a room it never left (the PeerLeft "still listed → refreshing membership" path fires a JoinRoom per still-shared room); re-broadcasting `peer_joined` on those re-fires the other side's FULL discovery cascade (profile + key-exchange + sync), looping ~10x in seconds during a fresh friend handshake's room churn — which widened the DM/friend establishment races. The joiner still gets its `members` reply (step 6) for stale-membership reconciliation. **This is the ONLY relay change deployed in the 2026-07 establishment-bug fix pass** (byte-identical binary swap on the OG TLS relay). See `feedback_dm_friend_establishment_bugs_2026_07.md`.
    ```json
    {"type":"peer_joined","room":"<room>","peer_id":"<joiner>"}
    ```

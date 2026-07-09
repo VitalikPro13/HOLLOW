@@ -259,11 +259,14 @@ pub(crate) async fn handle_accept_friend_request(
 }
 
 /// Handle `NodeCommand::RejectFriendRequest`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_reject_friend_request(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     peer_id_str: String,
+    pending_friend_requests: &mut HashMap<String, i64>,
+    pending_friend_accepts: &mut HashMap<String, i64>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -273,6 +276,17 @@ pub(crate) async fn handle_reject_friend_request(
     // request is cleared regardless of which key it currently lives under.
     let master = super::resolver::resolve(&peer_id_str);
     hollow_log!("[HOLLOW-FRIENDS] Rejecting friend request from {peer_id_str} (master {master})");
+
+    // CANCEL any pending outgoing REQUEST and queued ACCEPT for this person —
+    // rejecting supersedes them. In the MUTUAL case (both sides requested), our
+    // own outgoing request was still queued; without this the request drain
+    // (swarm.rs PeerJoined/RoomMembers) re-sends it after the reject, the peer
+    // accepts, and the pair silently becomes friends behind the user's back (the
+    // reject/accept race). Mirrors handle_remove_friend's cancellation.
+    pending_friend_requests.remove(&master);
+    pending_friend_requests.remove(&peer_id_str);
+    pending_friend_accepts.remove(&master);
+    pending_friend_accepts.remove(&peer_id_str);
 
     // Remove from friends table (both possible keys).
     {
@@ -427,8 +441,13 @@ pub(crate) fn handle_send_typing_indicator(
             if target == &recipient_master && targets.len() > 1 {
                 continue;
             }
+            // Route into the deterministic DM room (not a first-match lookup):
+            // the target may be co-present in several rooms and the first match
+            // could be one it has since left, silently losing the typing frame.
             if super::crypto_handler::ws_room_for_peer(&ws_room_peers, target).is_some() {
-                send_message_to_peer(&ws_cmd_tx, &ws_room_peers, target, msg.clone());
+                super::crypto_handler::send_message_to_peer_in_room(
+                    &ws_cmd_tx, &dm_room, target, msg.clone(),
+                );
                 sent_to += 1;
             }
         }

@@ -290,6 +290,16 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
         }
     }
 
+    // Was this peer already in the room BEFORE this join? A client re-joins a
+    // room it never left (the PeerLeft "still listed → refreshing membership"
+    // path fires a JoinRoom for every still-shared room). Re-broadcasting
+    // peer_joined on those redundant joins re-fires the other side's full
+    // discovery cascade (profile + key-exchange + sync), which — during a fresh
+    // friend handshake's room churn — loops ~10x in seconds. Suppress the
+    // broadcast on a redundant join; the joiner still gets its `members` reply
+    // below for stale-membership reconciliation.
+    bool already_present = ws_room.peers.find(data->peer_id) != ws_room.peers.end();
+
     // Add peer to room
     ws_room.peers[data->peer_id] = ws;
 
@@ -308,8 +318,9 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     };
     send_json(ws, members_msg);
 
-    // Notify existing non-guest peers (skip if joiner is a guest or fetch-mode)
-    if (!data->is_guest && !data->is_fetch) {
+    // Notify existing non-guest peers (skip if joiner is a guest or fetch-mode,
+    // or if this is a redundant re-join — the peer was already in the room).
+    if (!data->is_guest && !data->is_fetch && !already_present) {
         json join_msg = {
             {"type", "peer_joined"},
             {"room", room},

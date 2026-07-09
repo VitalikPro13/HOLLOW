@@ -1683,6 +1683,8 @@ async fn run_event_loop(
                         social::handle_reject_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             peer_id_str,
+                            &mut pending_friend_requests,
+                            &mut pending_friend_accepts,
                             &db_path, &db_passphrase,
                         ).await;
                     }
@@ -2067,6 +2069,7 @@ async fn run_event_loop(
                                 &local_peer_str, &sender_peer_id, is_invisible,
                                 &mut link_snapshot_requested, &mut pending_sibling_challenges,
                                 &mut pending_friend_accepts, &mut pending_friend_requests,
+                                &mut pending_friend_removals,
                                 HavenMessage::CrdtOpBroadcast { server_id, op_json },
                             ).await;
                         }
@@ -3784,6 +3787,7 @@ async fn run_event_loop(
                                         &local_peer_str, &from, is_invisible,
                                         &mut link_snapshot_requested, &mut pending_sibling_challenges,
                                         &mut pending_friend_accepts, &mut pending_friend_requests,
+                                        &mut pending_friend_removals,
                                         msg,
                                     ).await;
                             } else {
@@ -4824,6 +4828,7 @@ async fn handle_incoming_request(
     pending_sibling_challenges: &mut HashMap<String, (String, std::time::Instant)>,
     pending_friend_accepts: &mut HashMap<String, i64>,
     pending_friend_requests: &mut HashMap<String, i64>,
+    pending_friend_removals: &mut std::collections::HashSet<String>,
     request: HavenMessage,
 ) {
 
@@ -8590,11 +8595,34 @@ async fn handle_incoming_request(
                             };
                             let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
-                            send_encrypted_message(
-                                olm, crypto_store,
-                                peer_str, &envelope_json, event_tx,
-                                ws_cmd_tx, ws_room_peers,
-                            ).await;
+                            if olm.has_session(peer_str) {
+                                send_encrypted_message(
+                                    olm, crypto_store,
+                                    peer_str, &envelope_json, event_tx,
+                                    ws_cmd_tx, ws_room_peers,
+                                ).await;
+                            } else {
+                                // Asymmetric fresh-peer handshake: THEY built a session
+                                // and sent us this catch-up request, but our half was
+                                // never built (a dropped glare frame). Encrypting now
+                                // would hit "No session" and surface a user-visible
+                                // MessageSendFailed for a purely internal sync reply.
+                                // Queue the batch + re-key instead — pending_messages is
+                                // drained on the KeyBundle-success / PreKey-decrypt /
+                                // co-presence heal paths, exactly like every deferred DM.
+                                pending_messages
+                                    .entry(peer_str.to_string())
+                                    .or_default()
+                                    .push(envelope_json);
+                                if !key_request_is_fresh(key_request_in_flight, peer_str) {
+                                    send_message_to_peer(
+                                        ws_cmd_tx, ws_room_peers,
+                                        peer_str, HavenMessage::KeyRequest,
+                                    );
+                                    key_request_in_flight
+                                        .insert(peer_str.to_string(), std::time::Instant::now());
+                                }
+                            }
                         }
                     }
             }
@@ -8641,11 +8669,29 @@ async fn handle_incoming_request(
                         has_more,
                     };
                     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-                    send_encrypted_message(
-                        olm, crypto_store,
-                        peer_str, &envelope_json, event_tx,
-                        ws_cmd_tx, ws_room_peers,
-                    ).await;
+                    if olm.has_session(peer_str) {
+                        send_encrypted_message(
+                            olm, crypto_store,
+                            peer_str, &envelope_json, event_tx,
+                            ws_cmd_tx, ws_room_peers,
+                        ).await;
+                    } else {
+                        // No session yet (asymmetric fresh handshake) — queue each
+                        // batch + re-key rather than hard-fail with MessageSendFailed.
+                        // See the DmSyncRequest responder above for the full rationale.
+                        pending_messages
+                            .entry(peer_str.to_string())
+                            .or_default()
+                            .push(envelope_json);
+                        if !key_request_is_fresh(key_request_in_flight, peer_str) {
+                            send_message_to_peer(
+                                ws_cmd_tx, ws_room_peers,
+                                peer_str, HavenMessage::KeyRequest,
+                            );
+                            key_request_in_flight
+                                .insert(peer_str.to_string(), std::time::Instant::now());
+                        }
+                    }
                 }
             }
         }
@@ -9896,6 +9942,53 @@ async fn handle_incoming_request(
 
             hollow_log!("[HOLLOW-FRIENDS] Friend request from {peer_str}");
 
+            let req_master_early = super::resolver::resolve(&peer_str);
+
+            // MUTUAL request → auto-converge to friends. If our OWN outgoing request
+            // to this person is still live (a queued outbound request in
+            // `pending_friend_requests`, or a persisted "pending outgoing" row),
+            // both sides requested each other. Saving "pending incoming" here and
+            // showing a Reject affordance is the reject/accept race: rejecting drops
+            // our row but our queued outbound request later drains and re-friends us
+            // anyway. Instead, treat the inbound request as an implicit accept and
+            // converge deterministically. FriendAccept is idempotent, so both sides
+            // running this branch still converge.
+            let is_mutual = {
+                let queued = pending_friend_requests.contains_key(&req_master_early)
+                    || pending_friend_requests.contains_key(peer_str);
+                let persisted = crate::storage::MessageStore::open(db_path, db_passphrase)
+                    .ok()
+                    .and_then(|s| {
+                        s.get_friend_status_direction(&req_master_early)
+                            .ok()
+                            .flatten()
+                    })
+                    .map(|(status, dir)| status == "pending" && dir == "outgoing")
+                    .unwrap_or(false);
+                queued || persisted
+            };
+
+            if is_mutual {
+                hollow_log!(
+                    "[HOLLOW-FRIENDS] Mutual friend request with {peer_str} (master {req_master_early}) — auto-accepting"
+                );
+                // Disarm our queued outbound request/removal for this person; we are
+                // converging to friends, so those queued ops must not re-fire.
+                pending_friend_requests.remove(&req_master_early);
+                pending_friend_requests.remove(peer_str);
+                pending_friend_removals.remove(&req_master_early);
+                pending_friend_removals.remove(peer_str);
+                social::handle_accept_friend_request(
+                    event_tx, ws_cmd_tx, ws_room_peers,
+                    local_peer_str, master_keypair, device_peer_id, is_invisible,
+                    peer_str.to_string(),
+                    pending_friend_accepts,
+                    pending_friend_removals,
+                    db_path, db_passphrase,
+                ).await;
+                return;
+            }
+
             // Save as pending incoming, keyed by the sender's MASTER (friendships key
             // on the master). Cold resolver → resolves to the device id itself, which
             // the device-list ingest re-key later migrates to the master. Also migrate
@@ -10651,6 +10744,44 @@ async fn handle_incoming_request(
                         is_invisible,
                         db_path, db_passphrase,
                     );
+                }
+            }
+
+            // MAPPING-LEARNED friend-request drain. A queued outbound friend
+            // request is keyed by the TARGET'S MASTER, but the presence-event
+            // drains (PeerJoined/RoomMembers) only match a joining DEVICE to that
+            // master via the resolver. A FRESH requester that has never ingested
+            // the target's device list resolves the target's device to ITSELF
+            // (cold resolver → identity), so those drains no-op — the request sits
+            // queued and the target never receives it UNTIL it re-joins a shared
+            // room (a restart) AFTER the mapping is finally learned. The moment we
+            // learn device→master (this ingest) is exactly when we CAN attribute
+            // the target's present device to the queued master — so drain here.
+            // `peer_str` (the sender of this profile) is guaranteed co-present (it
+            // just reached us), so friend_device_targets resolves a live device.
+            {
+                let sender_master = super::resolver::resolve(peer_str);
+                let queued: Option<i64> = pending_friend_requests
+                    .keys()
+                    .find(|k| super::resolver::resolve(k) == sender_master || k.as_str() == peer_str)
+                    .cloned()
+                    .and_then(|k| pending_friend_requests.remove(&k));
+                if let Some(requested_at) = queued {
+                    hollow_log!(
+                        "[HOLLOW-FRIENDS] Learned {peer_str}→master {sender_master} — draining queued friend request"
+                    );
+                    for t in &social::friend_device_targets(ws_room_peers, peer_str, &sender_master) {
+                        send_message_to_peer(
+                            ws_cmd_tx, ws_room_peers,
+                            t, HavenMessage::FriendRequest { requested_at },
+                        );
+                    }
+                    // Leave the target's inbox now the request is delivered (the
+                    // accept returns via the DM room, not the inbox) — mirrors the
+                    // presence-event drains.
+                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+                        room_code: format!("inbox:{sender_master}"),
+                    });
                 }
             }
 

@@ -1907,6 +1907,26 @@ pub(crate) fn send_message_to_peer(
     // else: peer unreachable — drop silently
 }
 
+/// Like `send_message_to_peer` but routes into an EXPLICIT room (the
+/// deterministic `dm_room_code`), not a `ws_room_for_peer` first-match lookup.
+/// Use for DM-scoped sends (typing, etc.) where the recipient device may be
+/// co-present in several of our rooms and the first-match could pick one the
+/// recipient has since left → the frame is buffered against a room they never
+/// rejoin and lost. Every device of the recipient is a member of the DM room.
+pub(crate) fn send_message_to_peer_in_room(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    room_code: &str,
+    peer_str: &str,
+    msg: HavenMessage,
+) {
+    let json = serde_json::to_string(&msg).unwrap_or_default();
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+        room_code: room_code.to_string(),
+        target_peer: peer_str.to_string(),
+        data: json.into_bytes(),
+    });
+}
+
 /// Send pre-serialized bytes to a specific peer via the WS relay.
 /// Use in broadcast loops to serialize once and send the same bytes to each peer.
 pub(crate) fn send_raw_to_peer(

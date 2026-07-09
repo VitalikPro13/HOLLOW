@@ -54,11 +54,14 @@ Steps:
 Called when the local user rejects an incoming friend request (`NodeCommand::RejectFriendRequest`).
 
 Steps:
-1. **Remove from DB:** Opens MessageStore, calls `store.remove_friend()` for BOTH the resolved master row and the original-id row. The friend record is deleted entirely, not set to "rejected".
-2. **Notify peer (device-targeted, 2026-07-02):** Fans `HavenMessage::FriendReject` to each id from `friend_device_targets()` — the old raw send to `peer_id_str` (often the MASTER) was silently dropped, so a multi-device requester's outgoing request stayed "pending" forever. Rejects remain best-effort (no redelivery queue, unlike accepts): an offline requester simply never learns, by design.
-3. **Emit event:** `NetworkEvent::FriendRequestRejected { peer_id }`.
+1. **CLEAR `pending_friend_requests` + `pending_friend_accepts` for both master and peer_id (2026-07-09).** Rejecting supersedes our OWN queued outbound intents. Without this, on a MUTUAL request (both sides requested) our still-queued outbound request drained on the peer's next appearance → the peer accepted → the pair became friends BEHIND THE USER'S BACK (the reject/accept race). Mirrors `handle_remove_friend`'s cancellation; the two maps were threaded into the handler for this.
+2. **Remove from DB:** `store.remove_friend()` for BOTH the resolved master row and the original-id row. Deleted entirely, not set to "rejected".
+3. **Notify peer (device-targeted, 2026-07-02):** Fans `HavenMessage::FriendReject` to each id from `friend_device_targets()` — a raw send to the MASTER is silently dropped. Best-effort (no redelivery queue).
+4. **Emit event:** `NetworkEvent::FriendRequestRejected { peer_id }`.
 
-Note: No DM room registration — rejecting does not create a DM channel. No signaling cmd involvement.
+**Mutual-request auto-converge (2026-07-09):** the FriendRequest RECEIVE arm (swarm.rs) checks, before saving "pending incoming", whether we already hold a pending-OUTGOING request to this master (`pending_friend_requests` OR DB `direction=outgoing` via `get_friend_status_direction`). If so → treat the inbound request as an implicit accept → `handle_accept_friend_request` (idempotent, both sides converge). Removes the confusing reject prompt on a mutual pair. See `feedback_dm_friend_establishment_bugs_2026_07.md`.
+
+Note: No DM room registration — rejecting does not create a DM channel.
 
 ---
 
@@ -111,6 +114,8 @@ FFI is direct (no NodeCommand): `block_peer`/`unblock_peer`/`load_blocked_peers`
 ### Pending Friend Request / Removal / Accept Drains
 
 When a peer becomes reachable (`PeerJoined` or `RoomMembers` events in swarm.rs), the node drains `pending_friend_requests` (sends the queued `FriendRequest`), `pending_friend_removals` (sends the queued `FriendRemove`), and `pending_friend_accepts` (re-sends `FriendAccept`). Each matches by resolving the joining DEVICE → MASTER. All are one-shot (`.remove()`). **These drains run OUTSIDE the `is_new` guard (2026-06-23) in BOTH PeerJoined and RoomMembers** — RoomMembers fires for a peer ALREADY present when WE join/reconnect, so for an already-synced peer `is_new=false` and the drain was being SKIPPED. That stranded the queued FriendRequest of a RE-ADD to an online ex-friend (the peer never saw the new request). The fix made the friendship require fresh consent again; see `feedback_friend_readd_online_auto_accept.md`.
+
+**Mapping-learned FriendRequest drain (2026-07-09) — fixes "friend request needs a restart".** The presence-event drains match a queued request (keyed by target MASTER) to a joining DEVICE via `resolver::resolve`. A FRESH requester that hasn't ingested the target's device list resolves the target's device to ITSELF (cold resolver → identity), so the drain NO-OPS while cold — the request sits queued and the target only sees it after RE-JOINING a shared room (a restart) once the mapping is finally known. FIX: the ProfileUpdate handler (swarm.rs, right after `ingest_device_list`) now ALSO drains `pending_friend_requests` — the mapping-learned moment — re-firing any queued request whose target resolves to the sender's now-known master to `friend_device_targets`, then leaving `inbox:{master}`. See `feedback_dm_friend_establishment_bugs_2026_07.md`.
 
 ---
 

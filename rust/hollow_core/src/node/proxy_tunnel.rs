@@ -13,7 +13,7 @@
 //! written to the data dir each start.
 
 use std::io::Write;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener, TcpStream as StdTcpStream};
 use std::process::{Child, Command};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -159,39 +159,47 @@ pub(crate) fn start(cfg: &ProxyConfig) -> Result<String, String> {
     let child = spawn_hidden(&mut cmd)
         .map_err(|e| format!("Failed to launch shoes tunnel: {e}"))?;
 
+    // Record the PID so a NEXT app launch can kill this shoes if we're orphaned
+    // (hard exit(0) on restart, crash, or Task-Manager-kill all skip stop()).
+    write_pid_file(child.id());
+
     // Store the child so stop() can kill it.
     if let Ok(mut slot) = child_slot().lock() {
         *slot = Some(child);
     }
 
-    // Health-gate: wait until the SOCKS listener accepts, or bail.
+    // Health-gate: wait until the SOCKS listener ACCEPTS a TCP connection.
+    // We probe by CONNECTING (not by trying to bind — a bind-probe races shoes
+    // for the port and can hold it away from shoes). connect refused = shoes not
+    // up yet; connect ok = shoes is listening and we're good.
     let socks_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, socks_port));
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if StdTcpListener::bind(socks_addr).is_err() {
-            // Bind fails → something (shoes) is already listening there. Good.
-            // (We can't connect-probe SOCKS without speaking the handshake, and
-            // a failed bind on a just-freed port reliably means shoes took it.)
-            break;
-        }
-        if Instant::now() >= deadline {
-            stop();
-            return Err(
-                "REALITY tunnel did not come up within 8s (check server config/keys)".to_string(),
-            );
-        }
-        // Also detect an early crash (bad config → shoes exits immediately).
-        if let Ok(mut slot) = child_slot().lock() {
-            if let Some(ch) = slot.as_mut() {
-                if let Ok(Some(status)) = ch.try_wait() {
-                    *slot = None;
-                    return Err(format!(
-                        "REALITY tunnel exited immediately ({status}) — likely bad proxy config"
-                    ));
+        match StdTcpStream::connect_timeout(&socks_addr, Duration::from_millis(300)) {
+            Ok(_) => break, // shoes is accepting connections
+            Err(_) => {
+                // Not up yet — but first check the child didn't crash outright
+                // (bad config → shoes exits immediately).
+                if let Ok(mut slot) = child_slot().lock() {
+                    if let Some(ch) = slot.as_mut() {
+                        if let Ok(Some(status)) = ch.try_wait() {
+                            *slot = None;
+                            return Err(format!(
+                                "REALITY tunnel exited immediately ({status}) — likely bad proxy config"
+                            ));
+                        }
+                    }
                 }
+                if Instant::now() >= deadline {
+                    stop();
+                    return Err(
+                        "REALITY tunnel did not come up within 10s (check server config/keys)"
+                            .to_string(),
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(150));
             }
         }
-        std::thread::sleep(Duration::from_millis(150));
     }
 
     let addr = format!("127.0.0.1:{socks_port}");
@@ -208,4 +216,61 @@ pub(crate) fn stop() {
             hollow_log!("[HOLLOW-PROXY] REALITY tunnel stopped");
         }
     }
+    clear_pid_file();
+}
+
+/// Path of the file holding the running shoes PID (data dir).
+fn pid_file_path() -> Option<std::path::PathBuf> {
+    let data_dir = crate::identity::data_dir().ok()?;
+    Some(std::path::Path::new(&data_dir).join("shoes.pid"))
+}
+
+fn write_pid_file(pid: u32) {
+    if let Some(p) = pid_file_path() {
+        let _ = std::fs::write(p, pid.to_string());
+    }
+}
+
+fn clear_pid_file() {
+    if let Some(p) = pid_file_path() {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// Kill a shoes process orphaned by a previous app run (hard exit / crash /
+/// Task-Manager-kill). Called at node startup, BEFORE deciding whether to launch
+/// a fresh tunnel, so a stale shoes never lingers — whether the proxy is now on
+/// or off. Reads the PID we recorded on the last spawn; no-op if none.
+pub(crate) fn sweep_orphan() {
+    let Some(p) = pid_file_path() else { return };
+    let Ok(raw) = std::fs::read_to_string(&p) else { return };
+    let Ok(pid) = raw.trim().parse::<u32>() else {
+        let _ = std::fs::remove_file(&p);
+        return;
+    };
+    kill_pid(pid);
+    let _ = std::fs::remove_file(&p);
+    hollow_log!("[HOLLOW-PROXY] Swept orphaned shoes tunnel (pid {pid}) from a prior run");
+}
+
+#[cfg(windows)]
+fn kill_pid(pid: u32) {
+    // taskkill is the simplest reliable cross-version way; /F force, /T tree.
+    // Hidden window via CREATE_NO_WINDOW. Best-effort — a dead pid just no-ops.
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F", "/T"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(not(windows))]
+fn kill_pid(pid: u32) {
+    // SIGKILL via the kill(1) command — best-effort, dead pid no-ops.
+    let _ = Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status();
 }
