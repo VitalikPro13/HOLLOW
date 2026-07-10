@@ -451,6 +451,8 @@ For peers behind symmetric NATs (~10-15% of users), a **TURN server** relays the
 
 SFrame cryptors must be initialized with the correct key index corresponding to the current MLS epoch (`epoch % 16`). New keys are applied via key rotation (not replacement) to update all existing cryptor indices atomically. The key index is explicitly set per peer after every cryptor creation. Without this, cryptors default to key index 0 and silently fail to decrypt frames encrypted under a non-zero epoch index.
 
+Cryptors are bound to individual RTP senders and receivers. When a renegotiation replaces a media sender mid-call — for example, a live input-device switch — the cryptor pair is re-established on both endpoints (the sender's at the point of the swap, the receiver's when the replacement track arrives), so the new track is encrypted under the same session key with no window in which media falls back to transport-only encryption.
+
 ### 6.7 SFrame Key Memory Handling
 
 SFrame keys are zeroed in memory after use. Key bytes are cleared via `fillRange(0, length, 0)` in `finally` blocks at every site where keys are set or consumed.

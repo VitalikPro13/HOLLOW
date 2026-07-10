@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
+import 'package:hollow/src/ui/mobile/mobile_source_switch_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_avatars.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -63,12 +64,15 @@ class _MobileVoiceChannelRouteState
   // the old per-second setState rebuilt this ENTIRE Scaffold every second.
 
   bool _hasVideo(VoiceChannelState vcState) {
-    // A SELF share focus doesn't count — mobile never previews its own share
+    // A SELF share doesn't count — mobile never previews its own share
     // (mirror recursion; see _buildVideoView), so it must not force an empty
-    // video view over the avatars.
+    // video view over the avatars. Checked against peerScreenSharing (the
+    // authoritative map), not focusedScreenSharePeerId — focus may point at
+    // a camera source while a different peer is sharing.
     final localPeerId = ref.read(identityProvider).peerId ?? '';
-    final screenPeer = vcState.focusedScreenSharePeerId;
-    if (screenPeer != null && screenPeer != localPeerId) return true;
+    for (final entry in vcState.peerScreenSharing.entries) {
+      if (entry.value && entry.key != localPeerId) return true;
+    }
     if (vcState.isCameraOn) return true;
     for (final entry in vcState.peerCameraOn.entries) {
       if (entry.value) return true;
@@ -226,15 +230,76 @@ class _MobileVoiceChannelRouteState
       HollowTheme hollow, VoiceChannelState vcState, String localPeerId) {
     final vcNotifier = ref.read(voiceChannelProvider.notifier);
 
-    // Remote screen share takes priority. A SELF share is deliberately not
-    // previewed on mobile: the phone shares its own screen, so a preview
-    // would show the app showing itself (infinite mirror) — the avatar view
-    // + the accent share button convey the sharing state instead.
-    final screenPeer = vcState.focusedScreenSharePeerId;
-    if (screenPeer != null && screenPeer != localPeerId) {
+    // A SELF share is deliberately not previewed on mobile: the phone shares
+    // its own screen, so a preview would show the app showing itself
+    // (infinite mirror) — the avatar view + the accent share button convey
+    // the sharing state instead.
+    final remoteSharers = <String>[
+      for (final e in vcState.peerScreenSharing.entries)
+        if (e.value && e.key != localPeerId) e.key,
+    ];
+
+    // Source switcher pill tabs: remote screens first, then all cameras.
+    // Same setFocusedSource flow as desktop's _buildSharerSwitcher; only
+    // shown in mixed mode (a screen share is up) — a camera-only grid
+    // already shows every camera at once.
+    final sources = <({String peerId, String type})>[
+      for (final p in remoteSharers) (peerId: p, type: 'screen'),
+      if (vcState.isCameraOn) (peerId: localPeerId, type: 'camera'),
+      for (final e in vcState.peerCameraOn.entries)
+        if (e.value && e.key != localPeerId)
+          (peerId: e.key, type: 'camera'),
+    ];
+    final showPill = remoteSharers.isNotEmpty && sources.length > 1;
+
+    final focusedPeer = vcState.focusedScreenSharePeerId;
+    final focusedType = vcState.focusedSourceType;
+
+    Widget? content;
+    String? effectivePeer;
+    String? effectiveType;
+
+    // 1) Explicit camera focus (mixed mode) — that camera full-bleed.
+    if (remoteSharers.isNotEmpty &&
+        focusedType == 'camera' &&
+        focusedPeer != null) {
+      final isLocal = focusedPeer == localPeerId;
+      final camOn = isLocal
+          ? vcState.isCameraOn
+          : (vcState.peerCameraOn[focusedPeer] ?? false);
+      final renderer =
+          camOn ? vcNotifier.getCameraRenderer(focusedPeer) : null;
+      if (renderer != null) {
+        content = Stack(
+          children: [
+            Positioned.fill(
+              child: RepaintBoundary(
+                child: RTCVideoView(
+                  renderer,
+                  mirror: isLocal,
+                  objectFit:
+                      RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                ),
+              ),
+            ),
+            if (vcState.isCameraOn && !isLocal)
+              _buildLocalPip(
+                  hollow, vcNotifier.getCameraRenderer(localPeerId)),
+          ],
+        );
+        effectivePeer = focusedPeer;
+        effectiveType = 'camera';
+      }
+    }
+
+    // 2) Remote screen share full-bleed (prior behavior).
+    if (content == null && remoteSharers.isNotEmpty) {
+      final screenPeer = remoteSharers.contains(focusedPeer)
+          ? focusedPeer!
+          : remoteSharers.first;
       final renderer = vcNotifier.getScreenShareRenderer(screenPeer);
       if (renderer != null) {
-        return Stack(
+        content = Stack(
           children: [
             Positioned.fill(
               // Pinch-zoom + pan for reading a desktop screen on a phone.
@@ -251,10 +316,41 @@ class _MobileVoiceChannelRouteState
             ),
             // Local camera PiP if on.
             if (vcState.isCameraOn)
-              _buildLocalPip(hollow, vcNotifier.getCameraRenderer(localPeerId)),
+              _buildLocalPip(
+                  hollow, vcNotifier.getCameraRenderer(localPeerId)),
           ],
         );
+        effectivePeer = screenPeer;
+        effectiveType = 'screen';
       }
+    }
+
+    if (content != null) {
+      if (!showPill) return content;
+      return Stack(
+        children: [
+          Positioned.fill(child: content),
+          Positioned(
+            top: HollowSpacing.sm,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: HollowSpacing.md),
+                child: MobileSourceSwitchPill(
+                  sources: sources,
+                  focusedPeerId: effectivePeer,
+                  focusedType: effectiveType,
+                  localPeerId: localPeerId,
+                  onSelect: (peerId, type) =>
+                      vcNotifier.setFocusedSource(peerId, type),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
     }
 
     // Camera grid.

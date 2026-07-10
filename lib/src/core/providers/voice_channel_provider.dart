@@ -315,8 +315,26 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Remote camera renderers (peer_id -> RTCVideoRenderer), managed by service.
   final Map<String, RTCVideoRenderer> _remoteCameraRenderers = {};
 
+  /// Device-provider listeners registered once (the join path re-runs).
+  bool _deviceListenersWired = false;
+
   @override
   VoiceChannelState build() => const VoiceChannelState();
+
+  /// Live camera device switch: the service swaps every mesh PC's sender and
+  /// returns the fresh capture stream — rebind the self-view to it.
+  Future<void> _applyCameraDevice(String? deviceId) async {
+    final service = _service;
+    if (service == null) return;
+    try {
+      final newStream = await service.setCameraDevice(deviceId);
+      if (newStream != null && _localCameraRenderer != null) {
+        _localCameraRenderer!.srcObject = newStream;
+      }
+    } catch (e) {
+      debugPrint('[HOLLOW-VC] Camera device switch failed: $e');
+    }
+  }
 
   VoiceChannelService? get service => _service;
 
@@ -533,6 +551,32 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       final enabled = next.valueOrNull ?? true;
       _service?.updateVoiceEnhanceDynamic(enabled);
     });
+
+    // Live device switching mid-session (Settings > Audio & Video pickers).
+    // Registered ONCE — this join path re-runs per join and would stack
+    // duplicate listeners; the service methods also dedup by captured device.
+    // Guard on prev==next: AsyncNotifier listeners also fire on initial load.
+    if (!_deviceListenersWired) {
+      _deviceListenersWired = true;
+      ref.listen(audioInputDeviceProvider, (prev, next) {
+        if (prev?.valueOrNull == next.valueOrNull) return;
+        unawaited(_service
+                ?.setAudioInputDevice(next.valueOrNull)
+                .catchError((_) {}) ??
+            Future.value());
+      });
+      ref.listen(cameraDeviceProvider, (prev, next) {
+        if (prev?.valueOrNull == next.valueOrNull) return;
+        unawaited(_applyCameraDevice(next.valueOrNull));
+      });
+      ref.listen(audioOutputDeviceProvider, (prev, next) {
+        if (prev?.valueOrNull == next.valueOrNull) return;
+        unawaited(_service
+                ?.setAudioOutputDevice(next.valueOrNull)
+                .catchError((_) {}) ??
+            Future.value());
+      });
+    }
 
     // Apply cached SFrame key (may have arrived before the service was created).
     // A RESTRICTED channel (per-channel MLS subgroup) uses ONLY its subgroup key

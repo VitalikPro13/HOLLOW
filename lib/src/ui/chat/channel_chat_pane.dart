@@ -1446,6 +1446,20 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       _jumpToBottom();
     });
 
+    // Focus-return mark-seen: a message arriving while the window is
+    // unfocused counts as unread (the isViewingChannel gate requires focus),
+    // and if this channel was ALREADY open at the bottom nothing else clears
+    // it — the scroll handler only marks seen on a bottom re-ENTRY. See the
+    // matching listener in chat_pane.dart.
+    ref.listen<bool>(windowFocusedProvider, (prev, focused) {
+      if (!focused || prev == true) return;
+      if (!_isNearBottom || _frozenLen != null) return;
+      final msgs = ref.read(channelChatProvider)[_stateKey];
+      if (msgs == null || msgs.isEmpty) return;
+      ref.read(unreadProvider.notifier).markChannelSeen(
+          widget.serverId, widget.channelId, msgs.last.messageId);
+    });
+
     // Focus search field when opened via global shortcut (Ctrl+K).
     ref.listen(channelSearchOpenProvider, (prev, next) {
       if (next && !(prev ?? false)) {

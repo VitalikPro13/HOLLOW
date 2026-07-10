@@ -658,6 +658,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   Future<void> _handleSend() async {
     final text = _controller.text.trim();
     final filePath = _stagedFilePath;
+    final fileName = _stagedFileName;
+    final fileIsImage = _stagedFileIsImage;
     final preview = _stagedPreview;
 
     if (text.isEmpty && filePath == null) return;
@@ -704,16 +706,54 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     });
 
     if (filePath != null) {
+      // Optimistic insert BEFORE the network send (desktop parity): the
+      // bubble renders instantly from the picker's local path; the sender's
+      // FileCompleted DB reload replaces it with the canonical row (dedup by
+      // message_id prevents a double bubble).
+      final messageId = generateMessageId();
+      final name = fileName ?? filePath.replaceAll('\\', '/').split('/').last;
+      final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
+      if (widget.isDm) {
+        ref.read(chatProvider.notifier).addFileMessage(
+              widget.peerId!,
+              messageId,
+              name,
+              File(filePath).lengthSync(),
+              ext,
+              fileIsImage,
+              filePath,
+              text: text,
+            );
+      } else {
+        ref.read(channelChatProvider.notifier).addFileMessage(
+              widget.serverId!,
+              widget.channelId!,
+              messageId,
+              name,
+              File(filePath).lengthSync(),
+              ext,
+              fileIsImage,
+              filePath,
+              text: text,
+            );
+      }
+      _jumpToBottom();
       try {
-        final messageId = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
-        await network_api.sendFile(
-          peerId: widget.isDm ? widget.peerId : null,
-          serverId: widget.isDm ? null : widget.serverId,
-          channelId: widget.isDm ? null : widget.channelId,
-          filePath: filePath,
-          messageId: messageId,
-          messageText: text,
-        );
+        // Full send pipeline (not raw network_api.sendFile): transfer
+        // progress state, video thumbnail pre-extraction, and >34 MB
+        // share-backed routing — same path desktop uses.
+        final members = widget.isDm
+            ? null
+            : ref.read(serverMembersProvider(widget.serverId!)).valueOrNull;
+        await ref.read(fileTransferProvider.notifier).sendFile(
+              peerId: widget.isDm ? widget.peerId : null,
+              serverId: widget.isDm ? null : widget.serverId,
+              channelId: widget.isDm ? null : widget.channelId,
+              filePath: filePath,
+              messageId: messageId,
+              messageText: text,
+              memberCount: members?.length ?? 0,
+            );
       } catch (e) {
         if (mounted) {
           HollowToast.show(context, 'Failed to send file', type: HollowToastType.error);
@@ -919,15 +959,45 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       }
     }
     try {
-      final messageId = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
-      await network_api.sendFile(
-        peerId: widget.isDm ? widget.peerId : null,
-        serverId: widget.isDm ? null : widget.serverId,
-        channelId: widget.isDm ? null : widget.channelId,
-        filePath: result.filePath,
-        messageId: messageId,
-        messageText: '',
-      );
+      final messageId = generateMessageId();
+      // Optimistic insert first (desktop parity) — the voice bubble appears
+      // immediately; the FileCompleted reload repoints diskPath to the
+      // files/ copy before the temp file below is deleted.
+      if (widget.isDm) {
+        ref.read(chatProvider.notifier).addFileMessage(
+              widget.peerId!,
+              messageId,
+              'Voice message.ogg',
+              size,
+              'ogg',
+              false,
+              result.filePath,
+            );
+      } else {
+        ref.read(channelChatProvider.notifier).addFileMessage(
+              widget.serverId!,
+              widget.channelId!,
+              messageId,
+              'Voice message.ogg',
+              size,
+              'ogg',
+              false,
+              result.filePath,
+            );
+      }
+      _jumpToBottom();
+      final members = widget.isDm
+          ? null
+          : ref.read(serverMembersProvider(widget.serverId!)).valueOrNull;
+      await ref.read(fileTransferProvider.notifier).sendFile(
+            peerId: widget.isDm ? widget.peerId : null,
+            serverId: widget.isDm ? null : widget.serverId,
+            channelId: widget.isDm ? null : widget.channelId,
+            filePath: result.filePath,
+            messageId: messageId,
+            messageText: '',
+            memberCount: members?.length ?? 0,
+          );
     } catch (e) {
       if (mounted) {
         HollowToast.show(context, 'Failed to send voice message',

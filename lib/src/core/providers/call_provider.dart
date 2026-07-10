@@ -363,6 +363,78 @@ class CallNotifier extends Notifier<CallState> {
       final enabled = next.valueOrNull ?? true;
       _voiceService?.updateVoiceEnhanceDynamic(enabled);
     });
+
+    // Live device switching mid-call (Settings > Audio & Video pickers).
+    // Guard on prev==next: AsyncNotifier listeners also fire on initial load.
+    ref.listen(audioInputDeviceProvider, (prev, next) {
+      if (prev?.valueOrNull == next.valueOrNull) return;
+      unawaited(_applyInputDeviceChange(next.valueOrNull));
+    });
+    ref.listen(cameraDeviceProvider, (prev, next) {
+      if (prev?.valueOrNull == next.valueOrNull) return;
+      unawaited(_applyCameraDeviceChange(next.valueOrNull));
+    });
+    ref.listen(audioOutputDeviceProvider, (prev, next) {
+      if (prev?.valueOrNull == next.valueOrNull) return;
+      unawaited(
+          _voiceService?.setAudioOutputDevice(next.valueOrNull) ??
+              Future.value());
+    });
+  }
+
+  /// Live mic switch: swap the sender in the service, then renegotiate so
+  /// the remote stack picks up the fresh track (same contract as
+  /// toggleVideo — an addTrack without renegotiation is never announced).
+  Future<void> _applyInputDeviceChange(String? deviceId) async {
+    final service = _voiceService;
+    if (service == null) {
+      return; // no service yet — the next call seeds from the provider
+    }
+    try {
+      final swapped = await service.setAudioInputDevice(deviceId);
+      if (swapped) await _sendDeviceSwitchReneg('mic');
+    } catch (e) {
+      _callLog('[HOLLOW-CALL] Mic device switch failed: $e');
+    }
+  }
+
+  /// Live camera switch (only meaningful while the camera is on).
+  Future<void> _applyCameraDeviceChange(String? deviceId) async {
+    final service = _voiceService;
+    if (service == null) return;
+    try {
+      final swapped = await service.setCameraDevice(deviceId);
+      if (swapped) await _sendDeviceSwitchReneg('camera');
+    } catch (e) {
+      _callLog('[HOLLOW-CALL] Camera device switch failed: $e');
+    }
+  }
+
+  /// Renegotiate after a mid-call sender swap — same glare guard as
+  /// [toggleVideo]. Any new renegotiation trigger must respect the queue
+  /// rules (see feedback_renegotiation_glare).
+  Future<void> _sendDeviceSwitchReneg(String what) async {
+    final peerId = state.peerId;
+    final callId = state.callId;
+    if (peerId == null || callId == null) return;
+    if (_renegotiationInProgress) {
+      _callLog('[HOLLOW-CALL] $what switch: renegotiation already in '
+          'progress, skipping offer');
+      return;
+    }
+    _renegotiationInProgress = true;
+    try {
+      final offerSdp = await _service.createRenegotiationOffer();
+      if (offerSdp != null) {
+        _sendSignal(
+            peerId, 'sdp_offer', jsonEncode({'call_id': callId, 'sdp': offerSdp}));
+        _callLog('[HOLLOW-CALL] $what switch: sent renegotiation offer');
+      }
+    } catch (e) {
+      _callLog('[HOLLOW-CALL] $what switch: renegotiation failed: $e');
+    } finally {
+      _renegotiationInProgress = false;
+    }
   }
 
   /// Ensure audio device preferences are loaded from SQLCipher before starting

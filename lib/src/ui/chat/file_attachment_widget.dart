@@ -246,6 +246,14 @@ class FileAttachmentWidget extends ConsumerWidget {
                     : Image.file(
                         File(diskPath),
                         fit: BoxFit.contain,
+                        // Decode at bubble size, not the photo's full
+                        // resolution — a 12 MP camera image otherwise decodes
+                        // on first paint (a visible beat on phones). ResizeImage
+                        // never upscales, so small images are untouched;
+                        // fullscreen view decodes full-res separately.
+                        cacheWidth: (maxWidth *
+                                MediaQuery.devicePixelRatioOf(context))
+                            .ceil(),
                         errorBuilder: (_, e, st) => _buildPlaceholder(
                             hollow, displayWidth, displayHeight, false, 1.0, 0, null),
                       ),

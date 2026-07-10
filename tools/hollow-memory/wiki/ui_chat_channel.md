@@ -95,6 +95,8 @@ Uses `scrollable_positioned_list` package with sentinel pattern: `itemCount: mes
 
 **Auto-scroll on new messages**: In `build()`, `ref.listen(channelChatProvider)` compares previous and next message counts. If new messages arrived and `_isInAutoScrollZone`, calls `_scrollToBottom()`.
 
+**Focus-return mark-seen (2026-07-10)**: `ref.listen(windowFocusedProvider)` in `build()` — on the unfocused→focused edge, if at bottom and not frozen, `markChannelSeen` with the newest message. Same ghost-unread fix as ChatPane (see ui_chat_dm.md §Focus-return mark-seen).
+
 ## Channel Header Bar
 
 48px height, surface background, bottom border. Contains left-to-right:

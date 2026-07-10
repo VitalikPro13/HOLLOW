@@ -623,6 +623,7 @@ class VoiceService {
         }
         _localVideoStream =
             await navigator.mediaDevices.getUserMedia(constraints);
+        _capturedCameraDeviceId = preferredCameraDeviceId;
         final videoTracks = _localVideoStream!.getVideoTracks();
         if (videoTracks.isEmpty) {
           _log('[HOLLOW-VOICE] No camera available');
@@ -711,6 +712,7 @@ class VoiceService {
       final constraints = {'audio': false, 'video': videoConstraints};
       _localVideoStream =
           await navigator.mediaDevices.getUserMedia(constraints);
+      _capturedCameraDeviceId = preferredCameraDeviceId;
       final videoTracks = _localVideoStream!.getVideoTracks();
       if (videoTracks.isEmpty) {
         _log('[HOLLOW-VOICE] No camera available');
@@ -743,6 +745,224 @@ class VoiceService {
     await Helper.switchCamera(videoTracks.first);
     _useFrontCamera = !_useFrontCamera;
     _log('[HOLLOW-VOICE] Camera switched, front=$_useFrontCamera');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Live device switching (Settings picker changed mid-call)
+  // ---------------------------------------------------------------------------
+
+  /// Device id the live audio stream was actually captured from (dedup guard
+  /// for duplicate provider listeners firing the same switch twice).
+  String? _capturedAudioInputDeviceId;
+  /// Device id the live camera stream was actually captured from.
+  String? _capturedCameraDeviceId;
+
+  /// Live mid-call microphone switch. Captures a fresh stream from
+  /// [deviceId], swaps the PC's audio sender via removeTrack + addTrack
+  /// (NEVER replaceTrack — silently fails on Windows libwebrtc), re-binds
+  /// SFrame to the new sender, and releases the old mic. Returns true when a
+  /// swap happened — the caller MUST send a renegotiation offer afterwards
+  /// (same contract as [toggleVideo]).
+  Future<bool> setAudioInputDevice(String? deviceId) async {
+    preferredAudioInputDeviceId = deviceId;
+    if (_pc == null || _localStream == null) return false; // next call uses it
+    if (_capturedAudioInputDeviceId == deviceId) return false; // already live
+
+    // Capture the NEW mic first — if it fails, keep the old one working.
+    final audioConstraints = <String, dynamic>{
+      'echoCancellation': true,
+      'noiseSuppression': true,
+      // AGC stays OFF — see _captureLocalAudio.
+      'autoGainControl': false,
+      'googAutoGainControl': false,
+    };
+    if (deviceId != null) {
+      audioConstraints['optional'] = [
+        {'sourceId': deviceId}
+      ];
+    }
+    MediaStream newStream;
+    try {
+      newStream = await navigator.mediaDevices
+          .getUserMedia({'audio': audioConstraints, 'video': false});
+    } catch (e) {
+      _log('[HOLLOW-VOICE] Mic switch: getUserMedia failed: $e');
+      return false;
+    }
+    final audioTracks = newStream.getAudioTracks();
+    if (audioTracks.isEmpty) {
+      await newStream.dispose();
+      return false;
+    }
+    final newTrack = audioTracks.first;
+    newTrack.enabled = !_isMuted; // preserve mute state across the swap
+
+    // Swap the PC's audio sender.
+    try {
+      final senders = await _pc!.getSenders();
+      for (final s in senders) {
+        if (s.track?.kind == 'audio') {
+          await _pc!.removeTrack(s);
+          break;
+        }
+      }
+      await _pc!.addTrack(newTrack, newStream);
+    } catch (e) {
+      _log('[HOLLOW-VOICE] Mic switch: sender swap failed: $e');
+      try {
+        await newTrack.stop();
+        await newStream.dispose();
+      } catch (_) {}
+      return false;
+    }
+
+    final oldStream = _localStream;
+    _localStream = newStream;
+    _capturedAudioInputDeviceId = deviceId;
+
+    // Re-assert the capture chain (process-global, but defensive).
+    try {
+      await Helper.setCaptureGain(micGain);
+      await Helper.setVoiceEnhance(voiceEnhance,
+          makeupDb: enhanceMakeupDb, dynamicMode: enhanceDynamic);
+    } catch (_) {}
+
+    // Re-bind SFrame to the NEW audio sender — enableForSender is idempotent
+    // per (peer, kind), so the cryptor bound to the removed sender must be
+    // dropped first or the new track is never encrypted.
+    if (_frameCryptor != null &&
+        _frameCryptor!.isEnabled &&
+        _activePeerId != null) {
+      try {
+        await _frameCryptor!.disableSender(_activePeerId!);
+        final senders = await _pc!.getSenders();
+        for (final sender in senders) {
+          if (sender.track?.id == newTrack.id) {
+            await _frameCryptor!.enableForSender(_activePeerId!, sender);
+            break;
+          }
+        }
+      } catch (e) {
+        _log('[HOLLOW-VOICE] Mic switch: SFrame re-bind failed: $e');
+      }
+    }
+
+    // Release the old mic.
+    if (oldStream != null) {
+      try {
+        for (final t in oldStream.getAudioTracks()) {
+          await t.stop();
+        }
+        await oldStream.dispose();
+      } catch (_) {}
+    }
+    _log('[HOLLOW-VOICE] Mic switched live to ${deviceId ?? "default"}');
+    return true;
+  }
+
+  /// Live mid-call camera device switch (desktop picker). NO-OP on Linux —
+  /// the V4L2 device must never be closed mid-call (_toggleVideoLinux);
+  /// there the new device applies on the next call. Returns true when a swap
+  /// happened — the caller MUST send a renegotiation offer afterwards.
+  Future<bool> setCameraDevice(String? deviceId) async {
+    preferredCameraDeviceId = deviceId;
+    if (_pc == null || !_isVideoEnabled) return false; // next enable uses it
+    if (Platform.isLinux) return false;
+    if (_capturedCameraDeviceId == deviceId) return false;
+
+    final prev = _videoToggleLock;
+    final completer = Completer<void>();
+    _videoToggleLock = completer.future;
+    try {
+      try {
+        await prev;
+      } catch (_) {}
+      if (_pc == null || !_isVideoEnabled) return false;
+
+      // Capture the NEW camera first — on failure keep the old one.
+      final videoConstraints = <String, dynamic>{
+        'width': {'ideal': 640},
+        'height': {'ideal': 480},
+        'frameRate': {'ideal': 30},
+      };
+      if (deviceId != null) {
+        videoConstraints['optional'] = [
+          {'sourceId': deviceId}
+        ];
+      } else {
+        videoConstraints['facingMode'] =
+            _useFrontCamera ? 'user' : 'environment';
+      }
+      MediaStream newStream;
+      try {
+        newStream = await navigator.mediaDevices
+            .getUserMedia({'audio': false, 'video': videoConstraints});
+      } catch (e) {
+        _log('[HOLLOW-VOICE] Camera switch: getUserMedia failed: $e');
+        return false;
+      }
+      final videoTracks = newStream.getVideoTracks();
+      if (videoTracks.isEmpty) {
+        await newStream.dispose();
+        return false;
+      }
+      final newTrack = videoTracks.first;
+
+      try {
+        final senders = await _pc!.getSenders();
+        for (final s in senders) {
+          if (s.track?.kind == 'video') {
+            await _pc!.removeTrack(s);
+            break;
+          }
+        }
+        await _pc!.addTrack(newTrack, newStream);
+        // Same VP8-first constraint as every camera enable (iOS answerer).
+        if (newTrack.id != null) {
+          await _constrainCameraCodecs(newTrack.id!);
+        }
+      } catch (e) {
+        _log('[HOLLOW-VOICE] Camera switch: sender swap failed: $e');
+        try {
+          await newTrack.stop();
+          await newStream.dispose();
+        } catch (_) {}
+        return false;
+      }
+
+      final oldStream = _localVideoStream;
+      _localVideoStream = newStream;
+      _capturedCameraDeviceId = deviceId;
+
+      // Rebind the self-preview to the new camera.
+      await _initLocalRenderer();
+
+      if (oldStream != null) {
+        try {
+          for (final t in oldStream.getTracks()) {
+            await t.stop();
+          }
+          await oldStream.dispose();
+        } catch (_) {}
+      }
+      _log('[HOLLOW-VOICE] Camera switched live to ${deviceId ?? "default"}');
+      return true;
+    } finally {
+      completer.complete();
+    }
+  }
+
+  /// Live audio output (speaker) switch. selectAudioOutput is process-global
+  /// on desktop, so this applies to the call immediately.
+  Future<void> setAudioOutputDevice(String? deviceId) async {
+    preferredAudioOutputDeviceId = deviceId;
+    if (deviceId == null) return; // system default — applies on next call
+    try {
+      await Helper.selectAudioOutput(deviceId);
+      _log('[HOLLOW-VOICE] Audio output switched live to $deviceId');
+    } catch (e) {
+      _log('[HOLLOW-VOICE] Audio output switch failed: $e');
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -970,6 +1190,37 @@ class VoiceService {
     _log('[HOLLOW-VOICE] SFrame E2EE enabled for DM call with $peerId');
   }
 
+  /// (Re)bind the SFrame receiver cryptor to the CURRENT inbound audio
+  /// receiver. Fired from onTrack: a remote mid-call mic switch arrives as
+  /// a NEW audio transceiver via renegotiation, and enableForReceiver is
+  /// idempotent per (peer, kind) — the old cryptor must be dropped first or
+  /// the new track is never decrypted. Harmless on the initial track (drop
+  /// is a no-op / re-binds the same receiver); skipped before key exchange
+  /// (setSframeKey binds the receiver itself once the key lands).
+  Future<void> _rebindSframeAudioReceiver(RTCRtpReceiver? receiver) async {
+    final peerId = _activePeerId;
+    if (peerId == null) return;
+    final fc = _frameCryptor;
+    if (fc == null || !fc.isEnabled) return;
+    try {
+      await fc.disableReceiver(peerId);
+      var target = receiver;
+      if (target == null) {
+        // Fallback: the NEWEST audio receiver on the PC (transceivers are
+        // in creation order; dead ones from prior switches come first).
+        final receivers = await _pc?.getReceivers() ?? const <RTCRtpReceiver>[];
+        for (final r in receivers) {
+          if (r.track?.kind == 'audio') target = r;
+        }
+      }
+      if (target == null) return;
+      await fc.enableForReceiver(peerId, target);
+      _log('[HOLLOW-VOICE] SFrame receiver re-bound to new audio track');
+    } catch (e) {
+      _log('[HOLLOW-VOICE] SFrame receiver rebind failed: $e');
+    }
+  }
+
   Future<void> dispose() async => endCall();
 
   // ---------------------------------------------------------------------------
@@ -1031,8 +1282,13 @@ class VoiceService {
 
       if (event.track.kind == 'video') {
         _handleRemoteVideoTrack(peerId, event);
+      } else if (event.track.kind == 'audio') {
+        // Audio auto-plays (no renderer), but a remote mid-call mic switch
+        // lands as a NEW transceiver — the SFrame decryptor is still bound
+        // to the dead receiver, so without a rebind the fresh track plays
+        // as ciphertext gibberish. No-op before the key exchange.
+        unawaited(_rebindSframeAudioReceiver(event.receiver));
       }
-      // Audio tracks are played automatically by libwebrtc — no renderer needed.
     };
 
     // ICE connection state handler (ICE layer — checking/connected/failed/disconnected).
@@ -1133,6 +1389,7 @@ class VoiceService {
 
     try {
       _localStream = await navigator.mediaDevices.getUserMedia(constraints);
+      _capturedAudioInputDeviceId = preferredAudioInputDeviceId;
       final audioTracks = _localStream!.getAudioTracks();
       _log('[HOLLOW-VOICE] Got local audio, '
           'tracks: ${audioTracks.length}'
@@ -1246,6 +1503,7 @@ class VoiceService {
 
     try {
       _localVideoStream = await navigator.mediaDevices.getUserMedia(constraints);
+      _capturedCameraDeviceId = preferredCameraDeviceId;
       final videoTracks = _localVideoStream!.getVideoTracks();
       if (videoTracks.isEmpty) {
         _log('[HOLLOW-VOICE] No video tracks — camera not available');

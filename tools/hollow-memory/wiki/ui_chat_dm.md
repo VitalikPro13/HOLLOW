@@ -75,7 +75,10 @@ Checks if the sentinel item (index >= messages.length - 1) is visible. Returns `
 More forgiving than `_isNearBottom`. Returns `true` if any of the last 3 messages are visible (index >= messages.length - 3). Used to decide whether to auto-scroll on new incoming messages. Outside this zone, the unread pill takes over instead.
 
 ### _onScrollPositionChanged()
-Listener invoked whenever visible items change. Updates `_showScrollPill` (inverted from `_isNearBottom`). Writes to `chatAtBottomProvider` (shared `StateProvider<bool>` in `member_panel_provider.dart`). When `_isNearBottom` is true, marks the DM as read via `unreadProvider.notifier.markDmSeen()`.
+Listener invoked whenever visible items change. Updates `_showScrollPill` (inverted from `_isNearBottom`). Writes to `chatAtBottomProvider` (shared `StateProvider<bool>` in `member_panel_provider.dart`). When `_isNearBottom` is true, marks the DM as read via `unreadProvider.notifier.markDmSeen()` — but ONLY on a bottom re-ENTRY transition.
+
+### Focus-return mark-seen (2026-07-10)
+A `ref.listen(windowFocusedProvider)` in `build()` (next to the auto-scroll listener; mirrored in `channel_chat_pane.dart`): on the unfocused→focused edge, if `_isNearBottom && _frozenLen == null`, marks the newest message seen. Closes the ghost-unread: a message arriving while the window is unfocused counts as unread (event_provider's `isViewingDm` gate requires focus) and neither the scroll handler (needs a re-entry) nor chat-open (already open) ever cleared it. Scrolled-up readers keep the pill (`_frozenLen` guard). Mobile needs no equivalent — its arrival listener calls `_scrollToBottom()` which marks seen at arrival.
 
 ### _jumpToBottom()
 Post-frame callback. Calls `_itemScrollController.jumpTo(index: messages.length, alignment: 1.0)` to instantly jump to the sentinel item at the end. Used after history load and after sending a file.

@@ -142,6 +142,42 @@ class FrameCryptorService {
     _fcLog('[HOLLOW-SFRAME] Key rotated to index $newIndex');
   }
 
+  /// Dispose the SENDER cryptor for (peerId, kind) so a REPLACEMENT RTP
+  /// sender (mid-call device switch swaps the sender via removeTrack +
+  /// addTrack) can be re-enabled. Without this, [enableForSender] — which is
+  /// idempotent per key — silently keeps the cryptor bound to the removed
+  /// sender and the new track goes out unencrypted-side undecryptable.
+  Future<void> disableSender(String peerId, {String kind = 'audio'}) async {
+    final key = '$peerId:$kind';
+    final sender = _senderCryptors.remove(key);
+    if (sender == null) return;
+    try {
+      await sender.setEnabled(false);
+      await sender.dispose();
+      _fcLog('[HOLLOW-SFRAME] Sender cryptor dropped for $key (device switch)');
+    } catch (e) {
+      _fcLog('[HOLLOW-SFRAME] Failed to drop sender cryptor for $key: $e');
+    }
+  }
+
+  /// Dispose the RECEIVER cryptor for (peerId, kind) — the receive-side
+  /// mirror of [disableSender]. A remote mid-call device switch lands as a
+  /// NEW inbound transceiver via renegotiation; without dropping the old
+  /// cryptor, [enableForReceiver] (idempotent per key) silently skips the
+  /// new receiver and the fresh track plays as ciphertext gibberish.
+  Future<void> disableReceiver(String peerId, {String kind = 'audio'}) async {
+    final key = '$peerId:$kind';
+    final receiver = _receiverCryptors.remove(key);
+    if (receiver == null) return;
+    try {
+      await receiver.setEnabled(false);
+      await receiver.dispose();
+      _fcLog('[HOLLOW-SFRAME] Receiver cryptor dropped for $key (rebind)');
+    } catch (e) {
+      _fcLog('[HOLLOW-SFRAME] Failed to drop receiver cryptor for $key: $e');
+    }
+  }
+
   /// Set the key index on all cryptors for a specific peer (e.g. newly created screen share cryptors).
   Future<void> setKeyIndexForPeer(String peerId, int index) async {
     for (final entry in _senderCryptors.entries) {

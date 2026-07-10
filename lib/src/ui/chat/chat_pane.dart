@@ -863,6 +863,21 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       _jumpToBottom();
     });
 
+    // Focus-return mark-seen: a message arriving while the window is
+    // unfocused counts as unread (the isViewingDm gate requires focus), and
+    // if this chat was ALREADY open at the bottom nothing else clears it —
+    // the scroll handler only marks seen on a bottom re-ENTRY transition.
+    // The user is now looking straight at the message; retire the unread.
+    ref.listen<bool>(windowFocusedProvider, (prev, focused) {
+      if (!focused || prev == true) return;
+      if (!_isNearBottom || _frozenLen != null) return;
+      final msgs = ref.read(chatProvider)[widget.peerId];
+      if (msgs == null || msgs.isEmpty) return;
+      ref
+          .read(unreadProvider.notifier)
+          .markDmSeen(widget.peerId, msgs.last.messageId);
+    });
+
     final typingPeers =
         ref.watch(typingProvider.select((t) => t[widget.peerId])) ?? {};
     final showProfilePanel = ref.watch(dmProfilePanelProvider);

@@ -148,6 +148,15 @@ Four methods manage per-peer, per-kind SFrame encryption:
 - `setDeafened(bool)`: Sets volume 0.0 or 1.0 on all remote audio receiver tracks via `Helper.setVolume()`
 - `setRemoteVolume(peerId, volume)`: Per-peer volume control
 
+### Live Device Switching (2026-07-10)
+
+Settings picker changes apply mid-session via `setAudioInputDevice(deviceId)` / `setCameraDevice(deviceId)` / `setAudioOutputDevice(deviceId)` (called from voice_channel_provider's device-provider listeners; see providers_voice_files.md).
+
+- **Mic**: captures the NEW device first (failure keeps the old mic working), preserves mute via `track.enabled = !_isMuted`, re-asserts capture gain/enhance, then for EVERY mesh PC: removeTrack(old audio sender) + addTrack, `frameCryptor.disableSender(peerId)` + `_enableSframeSender` (fresh sender needs a fresh cryptor — enableForSender is idempotent per key), reneg if stable else `_pendingCameraReneg`. Old stream disposed LAST. Restarts the local VAD recorder (`record` package holds its own handle on the old device). Dedup guard `_capturedAudioInputDeviceId` (set at every getUserMedia site) absorbs duplicate listener fires.
+- **Camera**: same swap under `_cameraLock`, per-PC video-sender replacement + `_preferVp8ForVideoTrackOnPc` + `disableSender(kind:'video')` + `_enableSframeSenderVideo` + reneg. Returns the NEW stream so the provider rebinds `_localCameraRenderer.srcObject`. **NO-OP on Linux** (V4L2 open-once rule — applies next camera start).
+- **Output**: `Helper.selectAudioOutput` (process-global on desktop, applies immediately); null (system default) applies next session.
+- **Receive side of a remote peer's switch**: the swap lands here as a NEW audio transceiver → onTrack fires → `_rebindSframeReceiver(peerId, pc, event.receiver)` drops the old receiver cryptor (`disableReceiver`) and enables on the event's receiver + `setKeyIndexForPeer`. Without the rebind the fresh track plays raw SFrame ciphertext (gibberish). `_enableSframeReceiver`'s fallback walk picks the NEWEST audio receiver (dead transceivers from prior switches come first).
+
 ### Voice Activity Detection (VAD)
 
 Two-tier detection: remote peers via WebRTC getStats, local mic via `record` package amplitude.
@@ -286,6 +295,10 @@ On **Linux**, `_toggleVideoInner` returns early into `_toggleVideoLinux()`, whic
 Caller (CallNotifier) triggers SDP renegotiation after toggleVideo returns (a no-op SDP for the Linux pause/resume case — harmless).
 
 `switchCamera()`: Mobile only. Calls `Helper.switchCamera()` on the video track, toggles `_useFrontCamera`.
+
+### Live Device Switching (2026-07-10)
+
+`setAudioInputDevice` / `setCameraDevice` (both return bool "swap happened — caller MUST renegotiate", called from CallNotifier's device-provider listeners) / `setAudioOutputDevice`. Same shape as the VoiceChannelService versions (see above): new-capture-first, removeTrack+addTrack, mute preserved, gain/enhance re-asserted, SFrame sender rebind via `disableSender` + `enableForSender`, old stream disposed last; camera variant serialized on `_videoToggleLock`, re-runs `_constrainCameraCodecs` + `_initLocalRenderer`, NO-OP on Linux. Dedup guards `_capturedAudioInputDeviceId`/`_capturedCameraDeviceId`. Receive side: `pc.onTrack`'s audio branch calls `_rebindSframeAudioReceiver(event.receiver)` (disableReceiver + enableForReceiver; no-op before key exchange) — without it a remote mic switch plays as ciphertext gibberish.
 
 ### SFrame Encryption for DM Calls
 
@@ -691,6 +704,8 @@ Wraps flutter_webrtc's `FrameCryptor` + `KeyProvider` APIs for SFrame encryption
 ### Per-Peer Cleanup
 
 `disableForPeer(peerId)`: Iterates kinds `['audio', 'video', 'screen_audio', 'screen_video']`, removes and disables/disposes both sender and receiver cryptors for each kind. Called by `VoiceChannelService.closePeer()`.
+
+`disableSender(peerId, {kind})` / `disableReceiver(peerId, {kind})` (2026-07-10): targeted single-cryptor drops for mid-call sender swaps (live device switching). **The trap they exist for:** `enableForSender`/`enableForReceiver` are idempotent per `'$peerId:$kind'` key — after a removeTrack+addTrack swap (or the matching new transceiver on the receiving end) the cryptor stays bound to the DEAD sender/receiver and the new track goes out unencrypted-bindable / arrives undecryptable (plays as gibberish). Rule: **any renegotiation that replaces a sender must re-bind SFrame on BOTH ends** — sender cryptor at the swap site, receiver cryptor in onTrack.
 
 ### Cryptor Maps
 

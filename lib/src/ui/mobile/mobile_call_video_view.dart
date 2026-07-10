@@ -17,6 +17,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
+import 'package:hollow/src/ui/mobile/mobile_source_switch_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_avatars.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
@@ -234,24 +235,65 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     final localRenderer = voiceService?.localRenderer;
     final screenRenderer = notifier.screenShareRenderer;
     final screenWidth = MediaQuery.sizeOf(context).width;
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final focused = ref.watch(focusedDmSourceProvider);
 
-    // Incoming screen share takes priority over camera feeds.
-    final showScreen = call.remoteScreenSharing &&
+    final screenAvailable = call.remoteScreenSharing &&
         screenRenderer != null &&
         screenRenderer.srcObject != null;
-    final showRemoteFull = !showScreen &&
-        call.remoteVideoEnabled &&
+    final remoteCamAvailable = call.remoteVideoEnabled &&
         remoteRenderer != null &&
         remoteRenderer.srcObject != null;
-    final showLocalFull = !showScreen &&
-        !showRemoteFull &&
-        call.isVideoEnabled &&
+    final localCamAvailable = call.isVideoEnabled &&
         localRenderer != null &&
         localRenderer.srcObject != null;
-    final showLocalPip = (showScreen || showRemoteFull) &&
-        call.isVideoEnabled &&
-        localRenderer != null &&
-        localRenderer.srcObject != null;
+
+    // Which source fills the screen: explicit pill focus first (same
+    // focusedDmSourceProvider the desktop switcher writes), then the old
+    // fixed priority (remote screen > remote camera > local camera).
+    var big = 'none'; // 'screen' | 'remoteCam' | 'localCam' | 'none'
+    if (focused.peerId != null && focused.type != null) {
+      final focusLocal = focused.peerId == localPeerId;
+      if (focused.type == 'screen' && !focusLocal && screenAvailable) {
+        big = 'screen';
+      } else if (focused.type == 'camera' &&
+          !focusLocal &&
+          remoteCamAvailable) {
+        big = 'remoteCam';
+      } else if (focused.type == 'camera' && focusLocal && localCamAvailable) {
+        big = 'localCam';
+      }
+    }
+    if (big == 'none') {
+      if (screenAvailable) {
+        big = 'screen';
+      } else if (remoteCamAvailable) {
+        big = 'remoteCam';
+      } else if (localCamAvailable) {
+        big = 'localCam';
+      }
+    }
+
+    final showScreen = big == 'screen';
+    final showRemoteFull = big == 'remoteCam';
+    final showLocalFull = big == 'localCam';
+    final showLocalPip =
+        (showScreen || showRemoteFull) && localCamAvailable;
+
+    // Source switcher pill: one tab per active source. A local SCREEN share
+    // is excluded — the phone can't preview its own share (infinite mirror).
+    final sources = <({String peerId, String type})>[
+      if (call.remoteScreenSharing)
+        (peerId: widget.peerId, type: 'screen'),
+      if (call.isVideoEnabled) (peerId: localPeerId, type: 'camera'),
+      if (call.remoteVideoEnabled) (peerId: widget.peerId, type: 'camera'),
+    ];
+    // Highlight what's ACTUALLY big (focus may have fallen back).
+    final String? effectiveFocusPeer = showScreen || showRemoteFull
+        ? widget.peerId
+        : (showLocalFull ? localPeerId : null);
+    final String? effectiveFocusType =
+        showScreen ? 'screen' : (big == 'none' ? null : 'camera');
 
     // Diagnostics: log the gate decision whenever it changes, so device logs
     // show exactly why the remote camera is (in)visible.
@@ -276,7 +318,8 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
               maxScale: 6,
               child: RepaintBoundary(
                 child: RTCVideoView(
-                  screenRenderer,
+                  // Non-null: big == 'screen' requires screenAvailable.
+                  screenRenderer!,
                   objectFit:
                       RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
                 ),
@@ -287,7 +330,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
           Positioned.fill(
             child: RepaintBoundary(
               child: RTCVideoView(
-                remoteRenderer,
+                remoteRenderer!,
                 objectFit:
                     RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
               ),
@@ -297,7 +340,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
           Positioned.fill(
             child: RepaintBoundary(
               child: RTCVideoView(
-                localRenderer,
+                localRenderer!,
                 mirror: true,
                 objectFit:
                     RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
@@ -352,6 +395,29 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                           .RTCVideoViewObjectFitCover,
                     ),
                   ),
+                ),
+              ),
+            ),
+          ),
+        // Source switcher pill (top center) when 2+ sources are active.
+        if (sources.length >= 2)
+          Positioned(
+            top: HollowSpacing.sm,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: HollowSpacing.md),
+                child: MobileSourceSwitchPill(
+                  sources: sources,
+                  focusedPeerId: effectiveFocusPeer,
+                  focusedType: effectiveFocusType,
+                  localPeerId: localPeerId,
+                  onSelect: (peerId, type) {
+                    ref.read(focusedDmSourceProvider.notifier).state =
+                        DmFocusedSource(peerId: peerId, type: type);
+                  },
                 ),
               ),
             ),

@@ -179,6 +179,7 @@ class VoiceChannelService {
         'audio': audioConstraints,
         'video': false,
       });
+      _capturedAudioInputDeviceId = preferredAudioInputDeviceId;
       final tracks = _localAudioStream!.getAudioTracks();
       _vcLog('[HOLLOW-VC] Got local audio, tracks=${tracks.length}');
 
@@ -472,16 +473,47 @@ class VoiceChannelService {
     }
   }
 
+  /// (Re)bind the SFrame receiver cryptor to the CURRENT inbound audio
+  /// receiver for [peerId]. Drops the old cryptor first (enableForReceiver
+  /// is idempotent per (peer, kind)) — required after the remote side swaps
+  /// its mic mid-call, harmless on the initial track. Skipped before the
+  /// key lands (the key-apply path binds receivers itself).
+  Future<void> _rebindSframeReceiver(
+      String peerId, RTCPeerConnection pc, RTCRtpReceiver? receiver) async {
+    if (frameCryptor == null || !frameCryptor!.isEnabled) return;
+    try {
+      await frameCryptor!.disableReceiver(peerId);
+      var target = receiver;
+      if (target == null) {
+        // Fallback: the NEWEST audio receiver (dead ones come first).
+        final receivers = await pc.getReceivers();
+        for (final r in receivers) {
+          if (r.track?.kind == 'audio') target = r;
+        }
+      }
+      if (target == null) return;
+      await frameCryptor!.enableForReceiver(peerId, target);
+      await frameCryptor!
+          .setKeyIndexForPeer(peerId, frameCryptor!.currentKeyIndex);
+      _vcLog('[HOLLOW-VC] SFrame receiver re-bound for $peerId');
+    } catch (e) {
+      _vcLog('[HOLLOW-VC] SFrame receiver rebind failed for $peerId: $e');
+    }
+  }
+
   /// Enable SFrame receiver decryption on incoming audio tracks from a peer.
   Future<void> _enableSframeReceiver(String peerId, RTCPeerConnection pc) async {
     if (frameCryptor == null || !frameCryptor!.isEnabled) return;
     try {
       final receivers = await pc.getReceivers();
+      // NEWEST audio receiver wins — mid-call mic switches leave dead
+      // transceivers earlier in the list.
+      RTCRtpReceiver? target;
       for (final receiver in receivers) {
-        if (receiver.track?.kind == 'audio') {
-          await frameCryptor!.enableForReceiver(peerId, receiver);
-          break;
-        }
+        if (receiver.track?.kind == 'audio') target = receiver;
+      }
+      if (target != null) {
+        await frameCryptor!.enableForReceiver(peerId, target);
       }
       await frameCryptor!.setKeyIndexForPeer(peerId, frameCryptor!.currentKeyIndex);
     } catch (e) {
@@ -818,6 +850,7 @@ class VoiceChannelService {
           'audio': false,
           'video': videoConstraints,
         });
+        _capturedCameraDeviceId = preferredCameraDeviceId;
         _isCameraOn = true;
         _vcLog('[HOLLOW-VC] Camera started, tracks=${_localVideoStream!.getVideoTracks().length}');
       } catch (e) {
@@ -942,6 +975,219 @@ class VoiceChannelService {
     await Helper.switchCamera(videoTracks.first);
     _useFrontCamera = !_useFrontCamera;
     _vcLog('[HOLLOW-VC] Camera switched, front=$_useFrontCamera');
+  }
+
+  // ---------------------------------------------------------------
+  //  Live device switching (Settings picker changed mid-session)
+  // ---------------------------------------------------------------
+
+  /// Device id the live audio stream was actually captured from (dedup guard
+  /// for duplicate provider listeners firing the same switch twice).
+  String? _capturedAudioInputDeviceId;
+  /// Device id the live camera stream was actually captured from.
+  String? _capturedCameraDeviceId;
+
+  /// Live mid-session microphone switch across the whole mesh. Captures a
+  /// fresh stream, swaps every PC's audio sender via removeTrack + addTrack
+  /// (NEVER replaceTrack — silently fails on Windows libwebrtc), re-binds
+  /// SFrame per peer, renegotiates each stable PC, and restarts the local
+  /// VAD recorder (it holds its own handle on the old device).
+  Future<void> setAudioInputDevice(String? deviceId) async {
+    preferredAudioInputDeviceId = deviceId;
+    if (_localAudioStream == null) return; // next session uses it
+    if (_capturedAudioInputDeviceId == deviceId) return; // already live
+
+    // Capture the NEW mic first — if it fails, keep the old one working.
+    final audioConstraints = <String, dynamic>{
+      'echoCancellation': true,
+      'noiseSuppression': true,
+      // AGC stays OFF — see startAudio.
+      'autoGainControl': false,
+      'googAutoGainControl': false,
+    };
+    if (deviceId != null) {
+      audioConstraints['optional'] = [
+        {'sourceId': deviceId}
+      ];
+    }
+    MediaStream newStream;
+    try {
+      newStream = await navigator.mediaDevices
+          .getUserMedia({'audio': audioConstraints, 'video': false});
+    } catch (e) {
+      _vcLog('[HOLLOW-VC] Mic switch: getUserMedia failed: $e');
+      return;
+    }
+    final audioTracks = newStream.getAudioTracks();
+    if (audioTracks.isEmpty) {
+      await newStream.dispose();
+      return;
+    }
+    final newTrack = audioTracks.first;
+    newTrack.enabled = !_isMuted; // preserve mute state across the swap
+
+    final oldStream = _localAudioStream;
+    _localAudioStream = newStream;
+    _capturedAudioInputDeviceId = deviceId;
+
+    // Re-assert the capture chain (process-global, but defensive).
+    try {
+      await Helper.setCaptureGain(micGain);
+      await Helper.setVoiceEnhance(voiceEnhance,
+          makeupDb: enhanceMakeupDb, dynamicMode: enhanceDynamic);
+    } catch (_) {}
+
+    // Swap the sender on every PC in the mesh.
+    for (final entry in _peerConnections.entries.toList()) {
+      final peerId = entry.key;
+      final pc = entry.value;
+      try {
+        final senders = await pc.getSenders();
+        for (final s in senders) {
+          if (s.track?.kind == 'audio') {
+            await pc.removeTrack(s);
+            break;
+          }
+        }
+        await pc.addTrack(newTrack, newStream);
+        // A fresh sender needs a fresh cryptor — enableForSender is
+        // idempotent per (peer, kind), so drop the dead one first.
+        await frameCryptor?.disableSender(peerId);
+        await _enableSframeSender(peerId, pc);
+        if (pc.signalingState == RTCSignalingState.RTCSignalingStateStable) {
+          await _sendRenegotiationOffer(peerId);
+        } else {
+          // Reneg fires once the PC settles (same path as camera enable).
+          _pendingCameraReneg.add(peerId);
+        }
+      } catch (e) {
+        _vcLog('[HOLLOW-VC] Mic switch: sender swap failed for $peerId: $e');
+      }
+    }
+
+    // Release the old mic.
+    if (oldStream != null) {
+      try {
+        for (final t in oldStream.getAudioTracks()) {
+          await t.stop();
+        }
+        await oldStream.dispose();
+      } catch (_) {}
+    }
+
+    // The local VAD recorder (record package) holds the OLD device — restart.
+    await _stopLocalVad();
+    await _startLocalVad();
+
+    _vcLog('[HOLLOW-VC] Mic switched live to ${deviceId ?? "default"}');
+  }
+
+  /// Live mid-session camera device switch (desktop picker). NO-OP on Linux
+  /// — the V4L2 device must never be closed mid-session (see stopCamera);
+  /// there the new device applies on the next camera start. Returns the new
+  /// camera stream when a swap happened (the provider rebinds its local
+  /// preview renderer to it), null otherwise.
+  Future<MediaStream?> setCameraDevice(String? deviceId) async {
+    preferredCameraDeviceId = deviceId;
+    if (!_isCameraOn) return null; // next enable uses it
+    if (Platform.isLinux) return null;
+    if (_capturedCameraDeviceId == deviceId) return null;
+
+    final prev = _cameraLock;
+    final completer = Completer<void>();
+    _cameraLock = completer.future;
+    try {
+      try {
+        await prev;
+      } catch (_) {}
+      if (!_isCameraOn) return null;
+
+      // Capture the NEW camera first — on failure keep the old one.
+      final videoConstraints = <String, dynamic>{
+        'width': {'ideal': 640},
+        'height': {'ideal': 480},
+        'frameRate': {'ideal': 30},
+      };
+      if (deviceId != null) {
+        videoConstraints['optional'] = [
+          {'sourceId': deviceId}
+        ];
+      }
+      MediaStream newStream;
+      try {
+        newStream = await navigator.mediaDevices
+            .getUserMedia({'audio': false, 'video': videoConstraints});
+      } catch (e) {
+        _vcLog('[HOLLOW-VC] Camera switch: getUserMedia failed: $e');
+        return null;
+      }
+      final videoTracks = newStream.getVideoTracks();
+      if (videoTracks.isEmpty) {
+        await newStream.dispose();
+        return null;
+      }
+      final newTrack = videoTracks.first;
+
+      final oldStream = _localVideoStream;
+      _localVideoStream = newStream;
+      _capturedCameraDeviceId = deviceId;
+
+      for (final entry in _peerConnections.entries.toList()) {
+        final peerId = entry.key;
+        final pc = entry.value;
+        try {
+          final senders = await pc.getSenders();
+          for (final s in senders) {
+            if (s.track?.kind == 'video') {
+              await pc.removeTrack(s);
+            }
+          }
+          await pc.addTrack(newTrack, newStream);
+          // Same VP8-first constraint as every camera enable (iOS answerer).
+          if (newTrack.id != null) {
+            await _preferVp8ForVideoTrackOnPc(pc, newTrack.id!);
+          }
+          await frameCryptor?.disableSender(peerId, kind: 'video');
+          await _enableSframeSenderVideo(peerId, pc);
+          if (pc.signalingState ==
+              RTCSignalingState.RTCSignalingStateStable) {
+            await _sendRenegotiationOffer(peerId);
+          } else {
+            _pendingCameraReneg.add(peerId);
+          }
+        } catch (e) {
+          _vcLog(
+              '[HOLLOW-VC] Camera switch: sender swap failed for $peerId: $e');
+        }
+      }
+
+      // Release the old camera (never reached on Linux — guarded above).
+      if (oldStream != null) {
+        try {
+          for (final t in oldStream.getTracks()) {
+            await t.stop();
+          }
+          await oldStream.dispose();
+        } catch (_) {}
+      }
+      _vcLog('[HOLLOW-VC] Camera switched live to ${deviceId ?? "default"}');
+      return newStream;
+    } finally {
+      completer.complete();
+    }
+  }
+
+  /// Live audio output (speaker) switch. selectAudioOutput is process-global
+  /// on desktop, so this applies to the session immediately.
+  Future<void> setAudioOutputDevice(String? deviceId) async {
+    preferredAudioOutputDeviceId = deviceId;
+    if (deviceId == null) return; // system default — applies on next session
+    try {
+      await Helper.selectAudioOutput(deviceId);
+      _vcLog('[HOLLOW-VC] Audio output switched live to $deviceId');
+    } catch (e) {
+      _vcLog('[HOLLOW-VC] Audio output switch failed: $e');
+    }
   }
 
   // ---------------------------------------------------------------
@@ -1295,7 +1541,11 @@ class VoiceChannelService {
     // In gossip mode, also forward received tracks to other neighbors.
     pc.onTrack = (RTCTrackEvent event) {
       if (event.track.kind == 'audio') {
-        _enableSframeReceiver(peerId, pc);
+        // REBIND, not just enable: a remote mid-call mic switch lands as a
+        // NEW transceiver, and _enableSframeReceiver is idempotent per
+        // (peer, kind) — it would silently keep the cryptor on the dead
+        // receiver and the fresh track plays as ciphertext gibberish.
+        unawaited(_rebindSframeReceiver(peerId, pc, event.receiver));
       } else if (event.track.kind == 'video') {
         _handleRemoteVideoTrack(peerId, event, pc);
       }
