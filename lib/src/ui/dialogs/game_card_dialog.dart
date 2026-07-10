@@ -4,12 +4,14 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/models/showcase_board.dart';
+import 'package:hollow/src/theme/contrast.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/platform_icons.dart';
+import 'package:hollow/src/ui/components/showcase_image_stats.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -57,7 +59,7 @@ const double _kSideWidth = 300.0;
 /// Gap between panels.
 const double _kPanelGap = HollowSpacing.md;
 
-class _GameCardDialog extends StatelessWidget {
+class _GameCardDialog extends StatefulWidget {
   final String name;
   final int? year;
   final String blurb;
@@ -76,11 +78,47 @@ class _GameCardDialog extends StatelessWidget {
     required this.assets,
   });
 
-  /// The shared panel surface — same recipe as the profile dialog's card.
+  @override
+  State<_GameCardDialog> createState() => _GameCardDialogState();
+}
+
+class _GameCardDialogState extends State<_GameCardDialog> {
+  String get name => widget.name;
+  int? get year => widget.year;
+  String get blurb => widget.blurb;
+  Uint8List? get coverBytes => widget.coverBytes;
+  Uint8List? get artBytes => widget.artBytes;
+  GameDetails get details => widget.details;
+  Map<String, Uint8List> get assets => widget.assets;
+
+  /// The game's own dominant color, probed from the cover at open (render
+  /// time — old boards get it too). Null until resolved / when the art is
+  /// effectively colorless; the theme accent stands in.
+  Color? _gameAccent;
+
+  @override
+  void initState() {
+    super.initState();
+    final probe = (coverBytes != null && coverBytes!.isNotEmpty)
+        ? coverBytes
+        : artBytes;
+    if (probe != null && probe.isNotEmpty) {
+      showcaseImageStats(probe).then((s) {
+        if (mounted && s.accent != null) {
+          setState(() => _gameAccent = s.accent);
+        }
+      });
+    }
+  }
+
+  /// The shared panel surface — same recipe as the profile dialog's card,
+  /// with the border tinted toward the game's own color once probed.
   BoxDecoration _surface(HollowTheme hollow) => BoxDecoration(
         color: hollow.elevated.withValues(alpha: 0.92),
         borderRadius: BorderRadius.circular(hollow.radiusLg),
-        border: Border.all(color: hollow.accent.withValues(alpha: 0.15)),
+        border: Border.all(
+          color: (_gameAccent ?? hollow.accent).withValues(alpha: 0.18),
+        ),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.3),
@@ -94,6 +132,7 @@ class _GameCardDialog extends StatelessWidget {
       details.platforms.isNotEmpty ||
       details.releaseDate.isNotEmpty ||
       (details.achievements != null && details.achievements! > 0) ||
+      details.franchise.isNotEmpty ||
       details.hasRequirements ||
       details.companies.isNotEmpty;
 
@@ -133,6 +172,7 @@ class _GameCardDialog extends StatelessWidget {
         coverBytes: coverBytes,
         artBytes: artBytes,
         details: details,
+        accent: _gameAccent ?? hollow.accent,
       ),
     );
 
@@ -158,15 +198,17 @@ class _GameCardDialog extends StatelessWidget {
         ],
       );
     } else {
-      content = IntrinsicHeight(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            centerPanel,
-            const SizedBox(width: _kPanelGap),
-            sidePanel(sideWidth),
-          ],
-        ),
+      // Panels are top-aligned and size to their OWN content — never
+      // stretched to each other's height (the old IntrinsicHeight coupling
+      // left a dead band of empty surface under About whenever the details
+      // panel ran taller).
+      content = Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          centerPanel,
+          const SizedBox(width: _kPanelGap),
+          sidePanel(sideWidth),
+        ],
       );
     }
 
@@ -195,6 +237,9 @@ class _CenterPanel extends StatelessWidget {
   final Uint8List? artBytes;
   final GameDetails details;
 
+  /// The game's probed dominant color (theme accent until/unless resolved).
+  final Color accent;
+
   const _CenterPanel({
     required this.name,
     required this.year,
@@ -202,7 +247,22 @@ class _CenterPanel extends StatelessWidget {
     required this.coverBytes,
     required this.artBytes,
     required this.details,
+    required this.accent,
   });
+
+  /// Genre/theme/mode tags, deduped case-insensitively in that priority
+  /// order ("Adventure" often rides both genres and themes).
+  List<String> get _tags {
+    final seen = <String>{};
+    final out = <String>[];
+    for (final t in [...details.genres, ...details.themes, ...details.modes]) {
+      final k = t.trim().toLowerCase();
+      if (k.isEmpty || !seen.add(k)) continue;
+      out.add(t.trim());
+      if (out.length >= 8) break;
+    }
+    return out;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -302,6 +362,17 @@ class _CenterPanel extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // Reception strip: critic score, Steam's own verdict, and how
+              // long the game runs — the three things a person actually
+              // cites when recommending a game. All baked text; tinted with
+              // the game's probed color.
+              if (details.metacritic != null ||
+                  details.steamReviews != null ||
+                  details.timeToBeat != null) ...[
+                _StatStrip(details: details, accent: accent),
+                const SizedBox(height: HollowSpacing.md),
+              ],
+
               // The owner's blurb — a centered pull-quote flanked by
               // proper “ ” marks that flow with the text.
               if (blurb.isNotEmpty) ...[
@@ -363,10 +434,54 @@ class _CenterPanel extends StatelessWidget {
                   ),
                 ),
               ],
+
+              // Genre / theme / mode tags as a quiet footer row —
+              // Steam-style, and they keep the panel's floor from ending on
+              // a wall of prose.
+              if (_tags.isNotEmpty) ...[
+                const SizedBox(height: HollowSpacing.md),
+                Wrap(
+                  spacing: HollowSpacing.xs + 2,
+                  runSpacing: HollowSpacing.xs + 2,
+                  children: [
+                    for (final t in _tags) _TagChip(label: t, accent: accent),
+                  ],
+                ),
+              ],
             ],
           ),
         ),
       ],
+    );
+  }
+}
+
+/// A small descriptive tag ("Dark Fantasy", "Co-operative"). Pure display —
+/// washed with the game's own color, text stays a theme token.
+class _TagChip extends StatelessWidget {
+  final String label;
+  final Color accent;
+
+  const _TagChip({required this.label, required this.accent});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: accent.withValues(alpha: 0.22)),
+      ),
+      child: Text(
+        label,
+        style: HollowTypography.caption.copyWith(
+          color: hollow.textSecondary,
+          fontSize: 10.5,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
     );
   }
 }
@@ -495,8 +610,16 @@ class _TitleBlock extends StatelessWidget {
                   fontSize: 11.5,
                 ),
               ),
-            if (details.metacritic != null)
-              _MetacriticBadge(score: details.metacritic!),
+            if (details.franchise.isNotEmpty)
+              Text(
+                dateLabel.isNotEmpty
+                    ? '·  ${details.franchise} series'
+                    : '${details.franchise} series',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textTertiary,
+                  fontSize: 11.5,
+                ),
+              ),
           ],
         ),
       ],
@@ -504,37 +627,178 @@ class _TitleBlock extends StatelessWidget {
   }
 }
 
-class _MetacriticBadge extends StatelessWidget {
-  final int score;
+/// Metacritic's own score bands: green ≥75, yellow 50-74, red <50. The raw
+/// band hues are legible on NEITHER theme as-is — every use runs through
+/// [Contrast.ensureContrast] against the actual panel color (the old badge
+/// hardcoded them and vanished in dark mode).
+Color _scoreBandColor(int score) => score >= 75
+    ? const Color(0xFF66CC33)
+    : score >= 50
+        ? const Color(0xFFFFCC33)
+        : const Color(0xFFFF4136);
 
-  const _MetacriticBadge({required this.score});
+/// "512431" → "512k", "1200000" → "1.2M".
+String _compactCount(int n) {
+  if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
+  if (n >= 1000) return '${(n / 1000).round()}k';
+  return '$n';
+}
+
+/// The reception strip under the hero: up to three equal tiles (critic
+/// score / Steam verdict / time to beat), washed with the game's probed
+/// color. Values are theme text tokens; the Metacritic number is the only
+/// colored value and is contrast-corrected against the panel.
+class _StatStrip extends StatelessWidget {
+  final GameDetails details;
+  final Color accent;
+
+  const _StatStrip({required this.details, required this.accent});
 
   @override
   Widget build(BuildContext context) {
-    // Metacritic's own bands: green ≥75, yellow 50-74, red <50.
-    final Color color = score >= 75
-        ? const Color(0xFF66CC33)
-        : score >= 50
-            ? const Color(0xFFFFCC33)
-            : const Color(0xFFFF4136);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.16),
-        borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: color.withValues(alpha: 0.35)),
-      ),
+    final hollow = HollowTheme.of(context);
+    final tiles = <Widget>[];
+
+    final mc = details.metacritic;
+    if (mc != null) {
+      tiles.add(_StatTile(
+        icon: LucideIcons.star,
+        label: 'Metacritic',
+        value: '$mc',
+        valueColor: Contrast.ensureContrast(
+          _scoreBandColor(mc),
+          hollow.elevated,
+          targetRatio: 4.5,
+        ),
+        sub: 'critic score',
+        accent: accent,
+      ));
+    }
+
+    final rev = details.steamReviews;
+    if (rev != null) {
+      tiles.add(_StatTile(
+        icon: LucideIcons.thumbsUp,
+        label: 'Steam reviews',
+        value: rev.label,
+        sub: '${rev.percent}% of ${_compactCount(rev.total)}',
+        accent: accent,
+      ));
+    }
+
+    final ttb = details.timeToBeat;
+    if (ttb != null) {
+      final story = ttb.storySeconds;
+      final full = ttb.completely;
+      tiles.add(_StatTile(
+        icon: LucideIcons.hourglass,
+        label: 'Time to beat',
+        value: story != null
+            ? '~${TimeToBeat.hoursLabel(story)}'
+            : '~${TimeToBeat.hoursLabel(full!)}',
+        sub: story != null && full != null
+            ? '100%: ~${TimeToBeat.hoursLabel(full)}'
+            : (story != null ? 'main story' : '100% completion'),
+        accent: accent,
+      ));
+    }
+
+    if (tiles.isEmpty) return const SizedBox.shrink();
+    // IntrinsicHeight bounds the row so stretch can equalize tile heights —
+    // a BARE stretch here sits in the dialog's unbounded-height scroll
+    // context, which hands the tiles a tight INFINITE height and kills the
+    // whole center panel with a layout exception.
+    return IntrinsicHeight(
       child: Row(
-        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Icon(LucideIcons.star, size: 10, color: color),
-          const SizedBox(width: 3),
+          for (var i = 0; i < tiles.length; i++) ...[
+            if (i > 0) const SizedBox(width: HollowSpacing.sm),
+            Expanded(child: tiles[i]),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _StatTile extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color? valueColor;
+  final String sub;
+  final Color accent;
+
+  const _StatTile({
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.valueColor,
+    required this.sub,
+    required this.accent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.sm + 2,
+        vertical: HollowSpacing.sm,
+      ),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.09),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        border: Border.all(color: accent.withValues(alpha: 0.24)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 10.5, color: hollow.textTertiary),
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(
+                  label.toUpperCase(),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textTertiary,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.6,
+                    fontSize: 8.5,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          // Long verdicts ("Overwhelmingly Positive") scale down instead of
+          // ellipsizing — the verdict IS the datum.
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              value,
+              maxLines: 1,
+              style: HollowTypography.body.copyWith(
+                color: valueColor ?? hollow.textPrimary,
+                fontWeight: FontWeight.w700,
+                fontSize: 13.5,
+              ),
+            ),
+          ),
+          const SizedBox(height: 2),
           Text(
-            '$score',
+            sub,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: HollowTypography.caption.copyWith(
-              color: color,
-              fontWeight: FontWeight.w700,
-              fontSize: 10.5,
+              color: hollow.textTertiary,
+              fontSize: 9.5,
             ),
           ),
         ],
@@ -609,15 +873,10 @@ class _DetailsPanel extends StatelessWidget {
       );
     }
 
-    // Release date lives under the title in the center panel — the Info
-    // section carries what ISN'T shown elsewhere.
+    // Release date + series ride the title row, genres/themes/modes are the
+    // center panel's tag footer, the reception numbers live in the stat
+    // strip — the Info section carries only what ISN'T shown elsewhere.
     final facts = <Widget>[
-      if (details.genres.isNotEmpty)
-        _FactRow(
-          icon: LucideIcons.shapes,
-          label: 'Genres',
-          value: details.genres.take(2).join(', '),
-        ),
       if (details.achievements != null && details.achievements! > 0)
         _FactRow(
           icon: LucideIcons.trophy,
@@ -640,13 +899,6 @@ class _DetailsPanel extends StatelessWidget {
       );
     }
 
-    if (details.hasRequirements) {
-      section(
-        'System Requirements',
-        _Requirements(min: details.reqMin, rec: details.reqRec),
-      );
-    }
-
     if (details.companies.isNotEmpty) {
       section(
         'Credits',
@@ -659,6 +911,18 @@ class _DetailsPanel extends StatelessWidget {
             ],
           ],
         ),
+      );
+    }
+
+    // System requirements: store-page utility, not showcase material —
+    // demoted to a collapsed expander at the panel's floor (it used to be a
+    // wall of text that dictated the whole dialog's height).
+    if (details.hasRequirements) {
+      if (children.isNotEmpty) {
+        children.add(const SizedBox(height: HollowSpacing.lg));
+      }
+      children.add(
+        _SysReqSection(min: details.reqMin, rec: details.reqRec),
       );
     }
 
@@ -812,6 +1076,55 @@ class _FactRow extends StatelessWidget {
   }
 }
 
+/// The whole System Requirements block behind a closed-by-default expander:
+/// header row = section label + chevron, body = the Min/Rec tabs. Nobody
+/// opens a friend's showcase to spec-check their GPU, but the answer is one
+/// tap away for whoever does.
+class _SysReqSection extends StatefulWidget {
+  final String min;
+  final String rec;
+
+  const _SysReqSection({required this.min, required this.rec});
+
+  @override
+  State<_SysReqSection> createState() => _SysReqSectionState();
+}
+
+class _SysReqSectionState extends State<_SysReqSection> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        HollowPressable(
+          onTap: () => setState(() => _open = !_open),
+          semanticLabel:
+              '${_open ? 'Hide' : 'Show'} system requirements',
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Row(
+            children: [
+              const Expanded(child: _SectionLabel('System Requirements')),
+              Icon(
+                _open ? LucideIcons.chevronUp : LucideIcons.chevronDown,
+                size: 13,
+                color: hollow.textTertiary,
+              ),
+            ],
+          ),
+        ),
+        if (_open) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          _Requirements(min: widget.min, rec: widget.rec),
+        ],
+      ],
+    );
+  }
+}
+
 /// Minimum / Recommended requirements behind selection chips (chips =
 /// selection state per the design system; `.filled` is for actions).
 class _Requirements extends StatefulWidget {
@@ -909,8 +1222,14 @@ class _ReqTab extends StatelessWidget {
 }
 
 /// One deduped credit: logo + name + role + social/link icon buttons. Logos
-/// are transparent PNGs from the replicated bundle — drawn straight on the
-/// panel, never on a white plate.
+/// are transparent PNGs from the replicated bundle.
+///
+/// Visibility (the old "drawn straight on the panel" rule made black
+/// wordmarks vanish in dark mode): a one-shot pixel probe classifies each
+/// logo — single-ink marks are re-tinted to the theme's text color (reads
+/// as an intentional press-kit treatment, works on BOTH themes), colorful
+/// marks draw as-is unless their luminance sits too close to the panel's,
+/// in which case they get a small neutral plate.
 ///
 /// Logo slot: fixed 56×32 so names align down the credits column, but the
 /// image keeps its NATURAL aspect inside it (BoxFit.contain, left-anchored)
@@ -921,6 +1240,59 @@ class _CompanyRow extends StatelessWidget {
   final Map<String, Uint8List> assets;
 
   const _CompanyRow({required this.company, required this.assets});
+
+  Widget _logoImage(HollowTheme hollow, Uint8List logo) {
+    Widget plain() => ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: Image.memory(logo, fit: BoxFit.contain, gaplessPlayback: true),
+        );
+
+    return FutureBuilder<ShowcaseImageStats>(
+      future: showcaseImageStats(logo),
+      builder: (context, snap) {
+        final stats = snap.data;
+        if (stats == null) return plain(); // probe pending — resolves in ms
+
+        // Opaque logos (black-on-WHITE wordmarks etc.) carry their own
+        // background and are legible on any panel — draw untouched. An
+        // srcIn tint on one would paint the whole rectangle a single color
+        // (the FromSoftware white-slab bug).
+        if (!stats.hasTransparency) return plain();
+
+        if (stats.isMonochrome) {
+          return ColorFiltered(
+            colorFilter:
+                ColorFilter.mode(hollow.textPrimary, BlendMode.srcIn),
+            child: Image.memory(
+              logo,
+              fit: BoxFit.contain,
+              gaplessPlayback: true,
+            ),
+          );
+        }
+
+        final panelDark = Contrast.relativeLuminance(hollow.elevated) < 0.5;
+        final needsPlate = panelDark
+            ? stats.avgLuminance < 0.35 // dark colorful mark on dark panel
+            : stats.avgLuminance > 0.75; // pale colorful mark on light panel
+        if (!needsPlate) return plain();
+        return Container(
+          padding: const EdgeInsets.all(3),
+          decoration: BoxDecoration(
+            color: panelDark
+                ? const Color(0xFFEDEDED)
+                : const Color(0xFF26262B),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Image.memory(
+            logo,
+            fit: BoxFit.contain,
+            gaplessPlayback: true,
+          ),
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -934,14 +1306,7 @@ class _CompanyRow extends StatelessWidget {
           child: Align(
             alignment: Alignment.centerLeft,
             child: logo != null && logo.isNotEmpty
-                ? ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: Image.memory(
-                      logo,
-                      fit: BoxFit.contain,
-                      gaplessPlayback: true,
-                    ),
-                  )
+                ? _logoImage(hollow, logo)
                 : Icon(
                     LucideIcons.building2,
                     size: 18,

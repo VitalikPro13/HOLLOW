@@ -71,7 +71,9 @@ const SEARCH_TTL = 30 * 24 * 3600; // re-ask upstream after 30 days
 // console chips get store-SEARCH fallback URLs when IGDB has no direct one.
 // v9: genres ride the DETAILS payload (card Info section — they left the
 // search rows in v8); company links deduped by KIND (no double globes).
-const SEARCH_VER = 9;
+// v10: card redesign data — Steam review verdict (appreviews summary),
+// time-to-beat (IGDB game_time_to_beats), themes, game modes, franchise.
+const SEARCH_VER = 10;
 
 // IGDB legacy `category` enum → human tag (fallback; `game_type.type` is
 // the current source — `category` is deprecated and returns empty).
@@ -162,6 +164,11 @@ function db(): PDO {
             legal TEXT,          -- cleaned Steam legal_notice (one line)
             stores TEXT,         -- JSON {steam|playstation|xbox|nintendo|...: url}
             genres TEXT,         -- JSON array of genre names (card Info row)
+            steam_reviews TEXT,  -- JSON {label, pos, total} (appreviews summary)
+            ttb TEXT,            -- JSON {normally?, hastily?, completely?} seconds
+            themes TEXT,         -- JSON array of IGDB theme names
+            modes TEXT,          -- JSON array of IGDB game-mode names
+            franchise TEXT,      -- series name (franchises → collections fallback)
             ver INTEGER NOT NULL DEFAULT 0,
             fetched_at INTEGER NOT NULL
         )');
@@ -173,6 +180,11 @@ function db(): PDO {
         try { $pdo->exec('ALTER TABLE game_details ADD COLUMN stores TEXT'); } catch (Throwable $e) {}
         try { $pdo->exec('ALTER TABLE game_details ADD COLUMN genres TEXT'); } catch (Throwable $e) {}
         try { $pdo->exec('ALTER TABLE game_details ADD COLUMN ver INTEGER NOT NULL DEFAULT 0'); } catch (Throwable $e) {}
+        try { $pdo->exec('ALTER TABLE game_details ADD COLUMN steam_reviews TEXT'); } catch (Throwable $e) {}
+        try { $pdo->exec('ALTER TABLE game_details ADD COLUMN ttb TEXT'); } catch (Throwable $e) {}
+        try { $pdo->exec('ALTER TABLE game_details ADD COLUMN themes TEXT'); } catch (Throwable $e) {}
+        try { $pdo->exec('ALTER TABLE game_details ADD COLUMN modes TEXT'); } catch (Throwable $e) {}
+        try { $pdo->exec('ALTER TABLE game_details ADD COLUMN franchise TEXT'); } catch (Throwable $e) {}
     }
     return $pdo;
 }
@@ -346,6 +358,44 @@ function steam_details(int $appid): array {
         if (!empty($d['platforms'][$pk])) $out[$pk] = true;
     }
     return $out;
+}
+
+/// Steam review verdict for one appid: the store's own summary line ("Very
+/// Positive", 94% of 512k). `num_per_page=0` returns just `query_summary` —
+/// no review bodies. Best-effort like steam_details(): null on any failure,
+/// and null when a game has no reviews (unreleased / delisted).
+function steam_reviews(int $appid): ?array {
+    $resp = curl_req(
+        "https://store.steampowered.com/appreviews/$appid"
+        . '?json=1&language=all&purchase_type=all&num_per_page=0'
+    );
+    if ($resp === null) return null;
+    $j = json_decode($resp, true);
+    $s = $j['query_summary'] ?? null;
+    if (!is_array($s)) return null;
+    $total = (int)($s['total_reviews'] ?? 0);
+    $label = (string)($s['review_score_desc'] ?? '');
+    if ($total <= 0 || $label === '') return null;
+    return [
+        'label' => mb_substr($label, 0, 40),
+        'pos'   => (int)($s['total_positive'] ?? 0),
+        'total' => $total,
+    ];
+}
+
+/// Time-to-beat for one game (IGDB game_time_to_beats; values in SECONDS).
+/// Aggregated from IGDB user submissions — absent for most niche titles.
+/// Returns only the fields present, or null when IGDB has no data.
+function igdb_time_to_beat(int $gameId): ?array {
+    $rows = igdb_query('game_time_to_beats',
+        "fields hastily,normally,completely; where game_id = $gameId; limit 1;");
+    $t = is_array($rows) ? ($rows[0] ?? null) : null;
+    if (!is_array($t)) return null;
+    $out = [];
+    foreach (['hastily', 'normally', 'completely'] as $k) {
+        if (!empty($t[$k]) && (int)$t[$k] > 0) $out[$k] = (int)$t[$k];
+    }
+    return $out ?: null;
 }
 
 /// Build the platform slug list. Prefer Steam's booleans (clean PC/Mac/Linux),
@@ -569,6 +619,15 @@ function details_row_to_json(?array $row): ?array {
     if (is_array($companies) && $companies) $out['companies'] = $companies;
     if (!empty($row['legal'])) $out['legal'] = (string)$row['legal'];
     if (is_array($stores) && $stores) $out['stores'] = $stores;
+    $reviews = json_decode((string)($row['steam_reviews'] ?? 'null'), true);
+    if (is_array($reviews) && !empty($reviews['total'])) $out['steam_reviews'] = $reviews;
+    $ttb = json_decode((string)($row['ttb'] ?? 'null'), true);
+    if (is_array($ttb) && $ttb) $out['ttb'] = $ttb;
+    $themes = json_decode((string)($row['themes'] ?? '[]'), true);
+    if (is_array($themes) && $themes) $out['themes'] = array_values($themes);
+    $modes = json_decode((string)($row['modes'] ?? '[]'), true);
+    if (is_array($modes) && $modes) $out['modes'] = array_values($modes);
+    if (!empty($row['franchise'])) $out['franchise'] = (string)$row['franchise'];
     return $out ?: null;
 }
 
@@ -598,6 +657,7 @@ if ($idParam !== '') {
     // 2. Miss → ONE IGDB query for this game + ONE Steam query.
     $games = igdb_query('games',
         'fields name,summary,genres.name,platforms.name,artworks.image_id,'
+        . 'themes.name,game_modes.name,franchises.name,collections.name,'
         . 'external_games.category,external_games.uid,external_games.url,'
         . 'external_games.external_game_source.name,'
         . 'involved_companies.developer,involved_companies.publisher,'
@@ -651,10 +711,40 @@ if ($idParam !== '') {
         if (count($genres) >= 4) break;
     }
 
+    // Expanded name lists (themes / game modes) — same shape as genres.
+    $nameList = function (array $rows, int $cap): array {
+        $out = [];
+        foreach ($rows as $r) {
+            if (is_array($r) && !empty($r['name'])) {
+                $out[] = mb_substr((string)$r['name'], 0, 40);
+            }
+            if (count($out) >= $cap) break;
+        }
+        return $out;
+    };
+    $themes = $nameList($g['themes'] ?? [], 4);
+    $modes  = $nameList($g['game_modes'] ?? [], 4);
+    // Series line: franchises first (curated), collections as fallback.
+    $franchise = null;
+    foreach ([($g['franchises'] ?? []), ($g['collections'] ?? [])] as $series) {
+        foreach ($series as $s) {
+            if (is_array($s) && !empty($s['name'])) {
+                $franchise = mb_substr((string)$s['name'], 0, 80);
+                break 2;
+            }
+        }
+    }
+
+    // Two more best-effort upstream calls, both cached with the row for 30d:
+    // Steam's review verdict and IGDB's time-to-beat aggregate.
+    $reviews = $steamAppid !== null ? steam_reviews($steamAppid) : null;
+    $ttb = igdb_time_to_beat($gameId);
+
     $pdo->prepare('INSERT INTO game_details
         (id, steam_appid, description, req_min, req_rec, platforms, metacritic,
-         release_date, achievements, companies, artwork, legal, stores, genres, ver, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         release_date, achievements, companies, artwork, legal, stores, genres,
+         steam_reviews, ttb, themes, modes, franchise, ver, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             steam_appid=excluded.steam_appid, description=excluded.description,
             req_min=excluded.req_min, req_rec=excluded.req_rec,
@@ -662,7 +752,9 @@ if ($idParam !== '') {
             release_date=excluded.release_date, achievements=excluded.achievements,
             companies=excluded.companies, artwork=excluded.artwork,
             legal=excluded.legal, stores=excluded.stores,
-            genres=excluded.genres, ver=excluded.ver, fetched_at=excluded.fetched_at')
+            genres=excluded.genres, steam_reviews=excluded.steam_reviews,
+            ttb=excluded.ttb, themes=excluded.themes, modes=excluded.modes,
+            franchise=excluded.franchise, ver=excluded.ver, fetched_at=excluded.fetched_at')
         ->execute([
             $gameId,
             $steamAppid,
@@ -678,6 +770,11 @@ if ($idParam !== '') {
             $steam['legal'] ?? null,
             json_encode($stores),
             json_encode($genres),
+            $reviews !== null ? json_encode($reviews) : null,
+            $ttb !== null ? json_encode($ttb) : null,
+            json_encode($themes),
+            json_encode($modes),
+            $franchise,
             SEARCH_VER,
             $now,
         ]);
@@ -695,6 +792,11 @@ if ($idParam !== '') {
         'legal'        => $steam['legal'] ?? null,
         'stores'       => json_encode($stores),
         'genres'       => json_encode($genres),
+        'steam_reviews'=> $reviews !== null ? json_encode($reviews) : null,
+        'ttb'          => $ttb !== null ? json_encode($ttb) : null,
+        'themes'       => json_encode($themes),
+        'modes'        => json_encode($modes),
+        'franchise'    => $franchise,
     ])]);
 }
 

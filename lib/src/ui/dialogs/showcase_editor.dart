@@ -67,18 +67,23 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
   }
 
   Future<void> _save() async {
+    if (_busy) return;
+    // The Save button spins for the WHOLE save: in-flight bakes + the FFI
+    // write (big asset bundles take a moment — a silent frozen dialog reads
+    // as "nothing happened").
+    setState(() => _busy = true);
+
     // Let in-flight background bakes land first (usually already done —
     // they run while the user composes). Their .then patches registered
     // earlier fire before this await resumes, so the board is enriched.
     if (_pendingBakes.isNotEmpty) {
-      setState(() => _busy = true);
       await Future.wait(_pendingBakes.toList());
       if (!mounted) return;
-      setState(() => _busy = false);
     }
 
     final encoded = _board.encode();
     if (encoded.length > ShowcaseBoard.maxEncodedLength) {
+      setState(() => _busy = false);
       HollowToast.show(
         context,
         'Showcase is too large — shorten a text block',
@@ -105,6 +110,7 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
     final totalBytes =
         assets.fold<int>(0, (sum, a) => sum + a.bytes.length);
     if (totalBytes > 1_400_000) {
+      setState(() => _busy = false);
       HollowToast.show(
         context,
         'Showcase images too large — remove an artwork or game',
@@ -114,9 +120,20 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
     }
     final peerId = ref.read(identityProvider).peerId ?? '';
     final navigator = Navigator.of(context);
-    await ref
-        .read(profileProvider.notifier)
-        .updateShowcaseBoard(peerId, encoded, assets: assets);
+    try {
+      await ref
+          .read(profileProvider.notifier)
+          .updateShowcaseBoard(peerId, encoded, assets: assets);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      HollowToast.show(
+        context,
+        'Couldn\'t save the showcase — try again',
+        type: HollowToastType.error,
+      );
+      return;
+    }
     if (!mounted) return;
     navigator.pop();
     HollowToast.show(
@@ -403,12 +420,23 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
         ),
         HollowButton.filled(
           onPressed: _busy ? null : _save,
-          child: const Text('Save'),
+          child: _busy ? _savingSpinner(hollow) : const Text('Save'),
         ),
       ],
     );
   }
 }
+
+/// In-button progress for a filled Save that's finishing background bakes /
+/// the profile write — the visible "it's working" the frozen dialog lacked.
+Widget _savingSpinner(HollowTheme hollow) => SizedBox(
+      width: 14,
+      height: 14,
+      child: CircularProgressIndicator(
+        strokeWidth: 2,
+        color: hollow.textOnAccent,
+      ),
+    );
 
 /// One side's block list: reorder (drag), edit, remove, add.
 class _SideEditor extends StatelessWidget {
@@ -835,6 +863,11 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
   bool _searching = false;
   String? _error;
 
+  /// Query of the last COMPLETED search — gates the "no games found" state
+  /// so it only shows for what the user is currently looking at (never a
+  /// flash of "nothing found" while the debounce is still pending).
+  String _searchedFor = '';
+
   @override
   void dispose() {
     _debounce?.cancel();
@@ -849,22 +882,35 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
 
   Future<void> _search(String q) async {
     if (q.trim().isEmpty) {
-      setState(() { _results = const []; _error = null; });
+      setState(() {
+        _results = const [];
+        _error = null;
+        _searchedFor = '';
+      });
       return;
     }
     setState(() { _searching = true; _error = null; });
     try {
       final results = await showcase_api.showcaseGameSearch(query: q);
       if (!mounted) return;
-      setState(() { _results = results; _searching = false; });
+      setState(() {
+        _results = results;
+        _searching = false;
+        _searchedFor = q.trim();
+      });
     } catch (_) {
       if (!mounted) return;
       setState(() {
         _searching = false;
-        _error = 'Search unavailable — check your connection';
+        _error = 'Search unavailable — check your connection and try again';
       });
     }
   }
+
+  bool get _showNoResults =>
+      _results.isEmpty &&
+      _searchedFor.isNotEmpty &&
+      _searchedFor == _controller.text.trim();
 
   /// Instant: the heavy enrichment happens in the BACKGROUND after the
   /// picker closes (see [bakeGame]) — no spinner between tap and editor.
@@ -907,12 +953,52 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
           else if (_error != null)
             Padding(
               padding: const EdgeInsets.all(HollowSpacing.md),
-              child: Text(
-                _error!,
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.error,
-                  fontSize: 11,
-                ),
+              child: Row(
+                children: [
+                  Icon(LucideIcons.wifiOff, size: 14, color: hollow.error),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Expanded(
+                    child: Text(
+                      _error!,
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.error,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else if (_showNoResults)
+            Padding(
+              padding: const EdgeInsets.all(HollowSpacing.lg),
+              child: Column(
+                children: [
+                  Icon(
+                    LucideIcons.searchX,
+                    size: 22,
+                    color: hollow.textSecondary.withValues(alpha: 0.6),
+                  ),
+                  const SizedBox(height: HollowSpacing.sm),
+                  Text(
+                    'No games found for “$_searchedFor”',
+                    textAlign: TextAlign.center,
+                    style: HollowTypography.body.copyWith(
+                      color: hollow.textPrimary,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 12.5,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Check the spelling or try a shorter name.',
+                    textAlign: TextAlign.center,
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
               ),
             )
           else
@@ -1126,7 +1212,9 @@ class _ShelfEditorDialogState extends State<_ShelfEditorDialog> {
 
   Future<void> _save() async {
     if (_games.isEmpty || _saving) return;
-    // Wait for in-flight bakes so covers/details ship with the shelf.
+    // Wait for in-flight bakes so covers/details ship with the shelf —
+    // with the Save button spinning meanwhile (a fresh pick can still be
+    // downloading its cover/key art when the user hits Save).
     if (_pendingBakes.isNotEmpty) {
       setState(() => _saving = true);
       await Future.wait(_pendingBakes.toList());
@@ -1200,8 +1288,8 @@ class _ShelfEditorDialogState extends State<_ShelfEditorDialog> {
           child: const Text('Cancel'),
         ),
         HollowButton.filled(
-          onPressed: _games.isEmpty ? null : _save,
-          child: const Text('Save'),
+          onPressed: _games.isEmpty || _saving ? null : _save,
+          child: _saving ? _savingSpinner(hollow) : const Text('Save'),
         ),
       ],
     );

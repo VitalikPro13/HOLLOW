@@ -55,6 +55,71 @@ enum ShowcaseBlockType {
   }
 }
 
+/// Steam's own review verdict, baked at authoring from the appreviews
+/// summary ("Very Positive", 94% of 512,431). A snapshot, not live data —
+/// review sentiment is stable enough that a stale label stays honest.
+class SteamReviews {
+  final String label;
+  final int positive;
+  final int total;
+
+  const SteamReviews({
+    required this.label,
+    required this.positive,
+    required this.total,
+  });
+
+  /// 0-100, rounded.
+  int get percent => total > 0 ? ((positive / total) * 100).round() : 0;
+
+  static SteamReviews? fromJson(Map<String, dynamic>? json) {
+    if (json == null) return null;
+    final label = (json['label'] as String?) ?? '';
+    final total = (json['total'] as int?) ?? 0;
+    if (label.isEmpty || total <= 0) return null;
+    return SteamReviews(
+      label: label,
+      positive: (json['pos'] as int?) ?? 0,
+      total: total,
+    );
+  }
+}
+
+/// IGDB's aggregated time-to-beat (seconds). `normally` = main story at a
+/// normal pace (falls back to `hastily`), `completely` = 100% run.
+class TimeToBeat {
+  final int? hastily;
+  final int? normally;
+  final int? completely;
+
+  const TimeToBeat({this.hastily, this.normally, this.completely});
+
+  int? get storySeconds => normally ?? hastily;
+  bool get isEmpty => storySeconds == null && completely == null;
+
+  static TimeToBeat? fromJson(Map<String, dynamic>? json) {
+    if (json == null) return null;
+    int? sec(String k) {
+      final v = json[k];
+      return v is int && v > 0 ? v : null;
+    }
+
+    final t = TimeToBeat(
+      hastily: sec('hastily'),
+      normally: sec('normally'),
+      completely: sec('completely'),
+    );
+    return t.isEmpty ? null : t;
+  }
+
+  /// "34h" / "12.5h" / "45m" from a seconds value.
+  static String hoursLabel(int seconds) {
+    if (seconds < 3600) return '${(seconds / 60).round()}m';
+    final h = seconds / 3600;
+    return h >= 10 ? '${h.round()}h' : '${(h * 2).round() / 2}h';
+  }
+}
+
 /// A dev/publisher credit inside a game's baked details.
 ///
 /// [logoHash] references replicated bytes in the profile's asset bundle (an
@@ -135,6 +200,21 @@ class GameDetails {
   final Map<String, String> stores;
   final List<GameCompany> companies;
 
+  /// Steam's review verdict at bake time (null: no Steam presence).
+  final SteamReviews? steamReviews;
+
+  /// IGDB time-to-beat aggregate (null: no community data).
+  final TimeToBeat? timeToBeat;
+
+  /// IGDB theme names ("Fantasy", "Horror", …) — chips next to genres.
+  final List<String> themes;
+
+  /// IGDB game-mode names ("Single player", "Co-operative", …).
+  final List<String> modes;
+
+  /// Series name ("Dark Souls") — IGDB franchises/collections.
+  final String franchise;
+
   const GameDetails({
     this.description = '',
     this.reqMin = '',
@@ -147,6 +227,11 @@ class GameDetails {
     this.genres = const [],
     this.stores = const {},
     this.companies = const [],
+    this.steamReviews,
+    this.timeToBeat,
+    this.themes = const [],
+    this.modes = const [],
+    this.franchise = '',
   });
 
   /// True when there's genuinely nothing worth showing on a card.
@@ -161,7 +246,12 @@ class GameDetails {
       platforms.isEmpty &&
       genres.isEmpty &&
       stores.isEmpty &&
-      companies.isEmpty;
+      companies.isEmpty &&
+      steamReviews == null &&
+      timeToBeat == null &&
+      themes.isEmpty &&
+      modes.isEmpty &&
+      franchise.isEmpty;
 
   bool get hasRequirements => reqMin.isNotEmpty || reqRec.isNotEmpty;
 
@@ -196,6 +286,23 @@ class GameDetails {
             e.key as String: e.value as String,
       },
       companies: companies,
+      steamReviews: SteamReviews.fromJson(
+        json['steam_reviews'] is Map<String, dynamic>
+            ? json['steam_reviews'] as Map<String, dynamic>
+            : null,
+      ),
+      timeToBeat: TimeToBeat.fromJson(
+        json['ttb'] is Map<String, dynamic>
+            ? json['ttb'] as Map<String, dynamic>
+            : null,
+      ),
+      themes: ((json['themes'] as List?) ?? const [])
+          .whereType<String>()
+          .toList(),
+      modes: ((json['modes'] as List?) ?? const [])
+          .whereType<String>()
+          .toList(),
+      franchise: (json['franchise'] as String?) ?? '',
     );
     return d.isEmpty ? null : d;
   }
