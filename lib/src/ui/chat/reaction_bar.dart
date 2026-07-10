@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 
 /// Displays emoji reaction pills below a message.
@@ -43,12 +44,14 @@ class ReactionBar extends StatelessWidget {
           final emoji = entry.key;
           final reactors = entry.value;
           final isMine = reactors.contains(localPeerId);
+          final emote = parseEmoteToken(emoji);
 
           return HollowPressable(
             onTap: onToggleReaction != null
                 ? () => onToggleReaction!(emoji)
                 : null,
-            semanticLabel: 'Reaction $emoji, ${reactors.length}',
+            semanticLabel:
+                'Reaction ${emote != null ? ':${emote.name}:' : emoji}, ${reactors.length}',
             borderRadius: BorderRadius.circular(12),
             padding: EdgeInsets.zero,
             child: Container(
@@ -67,7 +70,15 @@ class ReactionBar extends StatelessWidget {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(emoji, style: const TextStyle(fontSize: 14)),
+                  if (emote != null)
+                    EmoteImage(
+                      name: emote.name,
+                      hash: emote.hash,
+                      size: 17,
+                      fallbackStyle: const TextStyle(fontSize: 11),
+                    )
+                  else
+                    Text(emoji, style: const TextStyle(fontSize: 14)),
                   const SizedBox(width: 3),
                   Text(
                     reactors.length.toString(),

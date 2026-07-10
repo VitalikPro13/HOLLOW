@@ -732,6 +732,7 @@ CrdtOp {
 | Members | MemberAdded, MemberRemoved, MemberBanned, MemberUnbanned, NicknameChanged, TwitchUsernameChanged |
 | Roles | RoleChanged (owner/admin/moderator/member), RolePermissionsChanged |
 | Labels | LabelCreated, LabelDeleted, LabelUpdated, LabelAssigned, LabelUnassigned |
+| Emotes | EmojiAdded, EmojiRemoved (metadata only — see Custom Emotes below) |
 | Messages | MessagePinned, MessageUnpinned |
 | Storage | StoragePledgeChanged |
 
@@ -758,6 +759,8 @@ When two peers connect:
 
 This is idempotent: applying the same operation twice has no effect. Peers can sync with any other online member — there is no single source of truth.
 
+**Forward compatibility.** Synchronization batches are parsed tolerantly: each operation in a batch deserializes independently, and an operation whose payload type is unknown to the receiving client (introduced by a newer client version) is skipped rather than failing the batch. Without this, a single unrecognized operation would prevent an older client from ever converging with a server whose members use newer features.
+
 **Operation-log persistence.** Every merged operation is persisted to the local encrypted database, not held only in memory. A member that joined purely by synchronizing must be able to serve the full operation history to future joiners after a restart.
 
 **State snapshot on join.** Because operation logs are compacted past a threshold and cannot be trusted as a complete reconstruction source, a join is preceded by a signed **server-state snapshot** sent ahead of the operation-log delta (the WebSocket transport is FIFO). A joiner adopts the snapshot only while its own join is still pending; an established member never lets a peer overwrite its state. Operation deltas are then merged on top.
@@ -773,6 +776,17 @@ CRDT operations are validated on receipt:
 - Unauthorized operations are rejected and logged.
 
 **Multi-device note.** Membership entries are keyed by **master** identity (§3), while MLS leaves and transport peer IDs are device-keyed. All role and membership checks resolve a device ID to its master before comparing, so one person is one member regardless of device count, and an authorization check against a device ID never silently fails to match.
+
+### 10.7 Custom Emotes (Content-Addressed Asset Replication)
+
+Custom emotes are small images usable inline in messages and as reactions. Their design extends the CRDT model with a content-addressed asset layer:
+
+- **Metadata and bytes are separated.** The replicated CRDT entry (`EmojiAdded`) carries only a name and the SHA-256 hash of the processed image. The image bytes never ride CRDT operations, message envelopes, or relay buffers.
+- **Bytes replicate on demand, peer-to-peer.** A client that must render an unknown hash requests it from a single source — the message sender's devices (direct messages) or one online server member (channels). Any member holding the bytes can serve them: content addressing makes every copy equally trustworthy, because the receiver recomputes the hash (and enforces format and size bounds) before caching. A tampered or substituted image simply fails verification and is discarded.
+- **Wire form degrades gracefully.** An emote appears in message text as a compact token containing its name and hash; a client that predates the feature renders the token as text, and reaction strings accept either a short Unicode emoji or a well-formed token — nothing else.
+- **Third-party catalogs are authoring-time only.** Emotes may be imported from an external catalog (FrankerFaceZ), but the catalog is browsed exclusively through a Hollow-operated caching proxy, and only by the person actively choosing an emote. At import the image is re-encoded and content-addressed; from then on it replicates purely peer-to-peer. **A message recipient never makes an HTTP request to render an emote** — the external service learns nothing about who views which emotes, or that a conversation exists at all, and cannot alter an emote after import (the hash pins the bytes).
+
+Server emote sets are capped and gated by a dedicated permission bit (§11.2); names and hashes are grammar-validated at every ingest path so the emote registry cannot be used to smuggle markup or oversized data into clients.
 
 ---
 
@@ -795,7 +809,7 @@ Hollow implements a **two-layer role system**:
 
 ### 11.2 Permission Bits
 
-Six permission bits control access:
+Seven permission bits control access:
 
 | Bit | Permission | Effect |
 |-----|-----------|--------|
@@ -806,6 +820,7 @@ Six permission bits control access:
 | 4 | `KICK_MEMBERS` | Kick and ban members |
 | 5 | `SEND_MESSAGES` | Post messages in channels |
 | 6 | `READ_MESSAGES` | View channel content |
+| 7 | `MANAGE_EMOTES` | Add and remove custom server emotes |
 
 Default permissions per role can be overridden via `RolePermissionsChanged` CRDT operations. Custom permission sets are stored as `AdminLwwReg<u32>` (Last-Writer-Wins register, admin-only writes).
 

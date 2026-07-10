@@ -55,6 +55,16 @@ class HollowTextField extends StatefulWidget {
   State<HollowTextField> createState() => _HollowTextFieldState();
 }
 
+/// ONE stable instance for every field. A fresh `MaterialTextSelectionControls()`
+/// per build changes the controls IDENTITY on every keystroke (this state
+/// setState's on each text change), which makes EditableText tear down and
+/// recreate its TextSelectionOverlay entries mid-build. Inside a route that
+/// happens to survive; inside a raw OverlayEntry (emoji picker) the recreated
+/// entry is re-inserted after dispose → "Null check operator used on a null
+/// value" in _OverlayEntryWidgetState.initState = the whole app crashes on
+/// the second keystroke. See crash.log 2026-07-10.
+final TextSelectionControls _selectionControls = MaterialTextSelectionControls();
+
 class _HollowTextFieldState extends State<HollowTextField>
     with SingleTickerProviderStateMixin {
   late final FocusNode _focusNode;
@@ -151,7 +161,7 @@ class _HollowTextFieldState extends State<HollowTextField>
               required isFocused,
               required maxLength}) =>
           null,
-      selectionControls: MaterialTextSelectionControls(),
+      selectionControls: _selectionControls,
       decoration: InputDecoration(
         hintText: widget.hintText,
         hintStyle: (widget.style ?? HollowTypography.body).copyWith(

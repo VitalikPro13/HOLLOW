@@ -142,6 +142,9 @@ pub(crate) enum NetworkEvent {
     // -- CRDT events (Phase 3) --
     ServerCreated { server_id: String, name: String },
     ServerUpdated { server_id: String },
+    /// Custom emote bytes arrived (EmoteAssets verified + cached). Dart
+    /// invalidates the hash-keyed emote image cache so pending tokens render.
+    EmoteAssetsReceived { hashes: Vec<String> },
     ChannelAdded { server_id: String, channel_id: String, name: String, channel_type: String },
     ChannelRemoved { server_id: String, channel_id: String },
     ChannelRenamed { server_id: String, channel_id: String, new_name: String },
@@ -589,6 +592,14 @@ pub(crate) enum NodeCommand {
     UpdateLabel { server_id: String, label_id: String, name: String, color: String },
     AssignLabel { server_id: String, label_id: String, peer_id: String },
     UnassignLabel { server_id: String, label_id: String, peer_id: String },
+    // -- Custom emotes --
+    /// Add/replace a custom server emote (blob already stored locally by the
+    /// FFI import; the CRDT op carries metadata only).
+    AddServerEmote { server_id: String, name: String, hash: String, animated: bool },
+    RemoveServerEmote { server_id: String, name: String },
+    /// Pull emote bytes we don't have. `server_id` targets an online member of
+    /// that server's room; `peer_hint` targets a specific peer (DM sender).
+    RequestEmotes { hashes: Vec<String>, server_id: Option<String>, peer_hint: Option<String> },
     SetNickname { server_id: String, peer_id: String, nickname: String },
     SetTwitchUsername { server_id: String, peer_id: String, twitch_username: String },
     NotifyShutdown,
@@ -1496,6 +1507,23 @@ pub(crate) enum HavenMessage {
     /// Request a peer's profile (they respond with ProfileUpdate).
     #[serde(rename = "profile_request")]
     ProfileRequest,
+
+    /// Request custom emote bytes by content hash (answered with EmoteAssets
+    /// for whatever subset the receiver has cached).
+    #[serde(rename = "emote_request")]
+    EmoteRequest {
+        #[serde(default)]
+        hashes: Vec<String>,
+    },
+
+    /// Content-addressed emote bytes: JSON map hash → base64 (same codec as
+    /// showcase asset bundles — the receiver drops any entry whose bytes
+    /// don't match their hash, so a hostile peer can't poison the cache).
+    #[serde(rename = "emote_assets")]
+    EmoteAssets {
+        #[serde(default)]
+        bundle_json: String,
+    },
 
     /// Ask an online peer to relay a third (offline) peer's profile.
     #[serde(rename = "profile_request_for")]

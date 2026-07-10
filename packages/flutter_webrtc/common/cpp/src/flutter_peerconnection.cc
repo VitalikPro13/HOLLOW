@@ -395,10 +395,13 @@ void FlutterPeerConnection::RTCPeerConnectionClose(
     base_->peerconnections_.erase(it2);
   }
 
-  auto it = base_->peerconnection_observers_.find(uuid);
-  if (it != base_->peerconnection_observers_.end())
-    base_->peerconnection_observers_.erase(it);
-
+  // Do NOT erase the observer here: it owns the EventChannel stream handler,
+  // and the Dart side only cancels its subscription in dispose() (which runs
+  // AFTER close()). Erasing on close made every close→dispose sequence fire
+  // a MissingPluginException("cancel on FlutterWebRTC/peerConnectionEvent…")
+  // into the crash log — the cancel arrived at an already-unregistered
+  // channel. Observer teardown belongs in RTCPeerConnectionDispose, after
+  // Dart has cancelled (matches upstream flutter-webrtc).
   result->Success();
 }
 
@@ -406,6 +409,17 @@ void FlutterPeerConnection::RTCPeerConnectionDispose(
     RTCPeerConnection* pc,
     const std::string& uuid,
     std::unique_ptr<MethodResultProxy> result) {
+  // Defensive: dispose without a prior close still closes + unmaps the PC.
+  auto it2 = base_->peerconnections_.find(uuid);
+  if (it2 != base_->peerconnections_.end()) {
+    it2->second->Close();
+    base_->peerconnections_.erase(it2);
+  }
+
+  auto it = base_->peerconnection_observers_.find(uuid);
+  if (it != base_->peerconnection_observers_.end())
+    base_->peerconnection_observers_.erase(it);
+
   result->Success();
 }
 

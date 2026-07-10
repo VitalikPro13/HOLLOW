@@ -6690,3 +6690,156 @@ async fn scaling_benchmark_mls_fanout() {
     for j in joiners { drop(j); }
 }
 
+
+// ---------------------------------------------------------------------------
+// Custom emotes: EmojiAdded replicates the (name, hash) metadata via the CRDT
+// to a joined member; the member pulls the content-addressed BYTES on demand
+// (EmoteRequest → EmoteAssets) and verifies them before caching; a member
+// without MANAGE_EMOTES is rejected at ingest; EmojiRemoved converges.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn server_emote_replicates_and_bytes_pull_on_demand() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // O = owner, J = joiner — both plain single-device identities.
+    const O_MASTER: u8 = 73;
+    const J_MASTER: u8 = 74;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1500).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+
+    let server_id = create_server_and_wait(&mut o, "Emote Server").await;
+    sleep_ms(300).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "J must join the server");
+    sleep_ms(3000).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // --- 1. Owner processes + registers a custom emote; metadata replicates. ---
+    use sha2::{Digest, Sha256};
+    // A tiny valid WebP the way authoring produces it (still, ≤64px).
+    let (emote_bytes, animated) = {
+        let img = image::RgbaImage::from_pixel(32, 32, image::Rgba([200, 40, 40, 255]));
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode test png");
+        super::image_convert::process_emote_image(&png).expect("process emote")
+    };
+    assert!(!animated, "still emote");
+    let hash = hex::encode(Sha256::digest(&emote_bytes));
+    o.store()
+        .save_emote_blob(&hash, &emote_bytes, false)
+        .expect("owner caches its own emote blob");
+
+    o.cmd_tx
+        .send(NodeCommand::AddServerEmote {
+            server_id: server_id.clone(),
+            name: "pogfish".to_string(),
+            hash: hash.clone(),
+            animated: false,
+        })
+        .await
+        .unwrap();
+    let updated = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerUpdated { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(updated, "J must receive ServerUpdated for the emote add");
+    sleep_ms(500).await;
+
+    let j_state = j.server_state(&server_id).expect("J holds the server state");
+    let emote = j_state.emotes.get("pogfish").expect("emote metadata replicated to J");
+    assert_eq!(emote.hash, hash, "replicated hash matches");
+    assert!(!emote.animated);
+
+    // --- 2. J pulls the bytes on demand (EmoteRequest → EmoteAssets). ---
+    assert!(
+        !j.store().has_emote_blob(&hash).unwrap(),
+        "J must NOT have the bytes yet — they never ride the CRDT"
+    );
+    j.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            server_id: Some(server_id.clone()),
+            peer_hint: None,
+        })
+        .await
+        .unwrap();
+    let got_assets = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(got_assets, "J must receive the emote bytes from the owner");
+    sleep_ms(300).await;
+    assert_eq!(
+        j.store().load_emote_blob(&hash).unwrap().as_deref(),
+        Some(emote_bytes.as_slice()),
+        "pulled bytes must match the owner's blob byte-exact (hash-verified)"
+    );
+
+    // --- 3. A plain Member's EmojiAdded is REJECTED at ingest (no MANAGE_EMOTES). ---
+    drain_events(&mut o);
+    j.cmd_tx
+        .send(NodeCommand::AddServerEmote {
+            server_id: server_id.clone(),
+            name: "sneaky".to_string(),
+            hash: hash.clone(),
+            animated: false,
+        })
+        .await
+        .unwrap();
+    // J's own authoring handler refuses (permission denied error event).
+    let denied = wait_event(&mut j, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::Error { message } if message.contains("cannot manage emotes"))
+    })
+    .await;
+    assert!(denied, "member without MANAGE_EMOTES must be refused at authoring");
+    sleep_ms(500).await;
+    let o_state = o.server_state(&server_id).expect("owner state");
+    assert!(
+        !o_state.emotes.contains_key("sneaky"),
+        "a member-authored emote op must never reach the owner's state"
+    );
+
+    // --- 4. EmojiRemoved converges. ---
+    drain_events(&mut j);
+    o.cmd_tx
+        .send(NodeCommand::RemoveServerEmote {
+            server_id: server_id.clone(),
+            name: "pogfish".to_string(),
+        })
+        .await
+        .unwrap();
+    let removed = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerUpdated { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(removed, "J must receive ServerUpdated for the emote removal");
+    sleep_ms(500).await;
+    let j_state = j.server_state(&server_id).expect("J state after removal");
+    assert!(j_state.emotes.is_empty(), "EmojiRemoved must converge on J");
+
+    drop(o);
+    drop(j);
+}

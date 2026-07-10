@@ -18,6 +18,7 @@ const _permissionEntries = <({String label, String desc, int bit})>[
   (label: 'Kick Members', desc: 'Remove or ban members', bit: Permission.kickMembers),
   (label: 'Send Messages', desc: 'Send messages in channels', bit: Permission.sendMessages),
   (label: 'Read Messages', desc: 'View messages in channels', bit: Permission.readMessages),
+  (label: 'Manage Emotes', desc: 'Add and remove custom server emotes', bit: Permission.manageEmotes),
 ];
 
 /// Default permission bitmasks per role (must match Rust MemberRole::default_permissions).
@@ -26,7 +27,8 @@ const _defaultPerms = <String, int>{
       Permission.manageRoles |
       Permission.kickMembers |
       Permission.sendMessages |
-      Permission.readMessages,
+      Permission.readMessages |
+      Permission.manageEmotes,
   'moderator': Permission.kickMembers |
       Permission.sendMessages |
       Permission.readMessages,

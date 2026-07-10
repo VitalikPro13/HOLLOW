@@ -5,6 +5,7 @@
 
 import 'api/archive.dart';
 import 'api/crdt.dart';
+import 'api/emotes.dart';
 import 'api/identity.dart';
 import 'api/network.dart';
 import 'api/screen_audio.dart';
@@ -137,6 +138,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FetchedMessage dco_decode_fetched_message(dynamic raw);
 
   @protected
+  FfzEmote dco_decode_ffz_emote(dynamic raw);
+
+  @protected
   FriendFfi dco_decode_friend_ffi(dynamic raw);
 
   @protected
@@ -210,6 +214,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<FetchedMessage> dco_decode_list_fetched_message(dynamic raw);
 
   @protected
+  List<FfzEmote> dco_decode_list_ffz_emote(dynamic raw);
+
+  @protected
   List<FriendFfi> dco_decode_list_friend_ffi(dynamic raw);
 
   @protected
@@ -234,6 +241,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MutedMemberFfi> dco_decode_list_muted_member_ffi(dynamic raw);
 
   @protected
+  List<PersonalEmote> dco_decode_list_personal_emote(dynamic raw);
+
+  @protected
   List<int> dco_decode_list_prim_u_32_loose(dynamic raw);
 
   @protected
@@ -252,6 +262,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<(String, PlatformInt64)> dco_decode_list_record_string_i_64(dynamic raw);
+
+  @protected
+  List<ServerEmote> dco_decode_list_server_emote(dynamic raw);
 
   @protected
   List<ServerFfi> dco_decode_list_server_ffi(dynamic raw);
@@ -348,6 +361,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ShowcaseAsset>? dco_decode_opt_list_showcase_asset(dynamic raw);
 
   @protected
+  PersonalEmote dco_decode_personal_emote(dynamic raw);
+
+  @protected
+  ProcessedEmote dco_decode_processed_emote(dynamic raw);
+
+  @protected
   ProtectionStatus dco_decode_protection_status(dynamic raw);
 
   @protected
@@ -361,6 +380,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   (String, PlatformInt64) dco_decode_record_string_i_64(dynamic raw);
+
+  @protected
+  ServerEmote dco_decode_server_emote(dynamic raw);
 
   @protected
   ServerFfi dco_decode_server_ffi(dynamic raw);
@@ -573,6 +595,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FetchedMessage sse_decode_fetched_message(SseDeserializer deserializer);
 
   @protected
+  FfzEmote sse_decode_ffz_emote(SseDeserializer deserializer);
+
+  @protected
   FriendFfi sse_decode_friend_ffi(SseDeserializer deserializer);
 
   @protected
@@ -662,6 +687,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<FfzEmote> sse_decode_list_ffz_emote(SseDeserializer deserializer);
+
+  @protected
   List<FriendFfi> sse_decode_list_friend_ffi(SseDeserializer deserializer);
 
   @protected
@@ -696,6 +724,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<PersonalEmote> sse_decode_list_personal_emote(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<int> sse_decode_list_prim_u_32_loose(SseDeserializer deserializer);
 
   @protected
@@ -716,6 +749,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<(String, PlatformInt64)> sse_decode_list_record_string_i_64(
     SseDeserializer deserializer,
   );
+
+  @protected
+  List<ServerEmote> sse_decode_list_server_emote(SseDeserializer deserializer);
 
   @protected
   List<ServerFfi> sse_decode_list_server_ffi(SseDeserializer deserializer);
@@ -846,6 +882,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PersonalEmote sse_decode_personal_emote(SseDeserializer deserializer);
+
+  @protected
+  ProcessedEmote sse_decode_processed_emote(SseDeserializer deserializer);
+
+  @protected
   ProtectionStatus sse_decode_protection_status(SseDeserializer deserializer);
 
   @protected
@@ -863,6 +905,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   (String, PlatformInt64) sse_decode_record_string_i_64(
     SseDeserializer deserializer,
   );
+
+  @protected
+  ServerEmote sse_decode_server_emote(SseDeserializer deserializer);
 
   @protected
   ServerFfi sse_decode_server_ffi(SseDeserializer deserializer);
@@ -1136,6 +1181,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_ffz_emote(FfzEmote self, SseSerializer serializer);
+
+  @protected
   void sse_encode_friend_ffi(FriendFfi self, SseSerializer serializer);
 
   @protected
@@ -1256,6 +1304,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_ffz_emote(List<FfzEmote> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_friend_ffi(
     List<FriendFfi> self,
     SseSerializer serializer,
@@ -1301,6 +1352,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_personal_emote(
+    List<PersonalEmote> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_32_loose(
     List<int> self,
     SseSerializer serializer,
@@ -1330,6 +1387,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_record_string_i_64(
     List<(String, PlatformInt64)> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_server_emote(
+    List<ServerEmote> self,
     SseSerializer serializer,
   );
 
@@ -1499,6 +1562,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_personal_emote(PersonalEmote self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_processed_emote(
+    ProcessedEmote self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_protection_status(
     ProtectionStatus self,
     SseSerializer serializer,
@@ -1524,6 +1596,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     (String, PlatformInt64) self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_server_emote(ServerEmote self, SseSerializer serializer);
 
   @protected
   void sse_encode_server_ffi(ServerFfi self, SseSerializer serializer);

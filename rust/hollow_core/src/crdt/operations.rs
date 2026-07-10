@@ -174,6 +174,34 @@ pub enum CrdtPayload {
         channel_id: String,
         media_only: bool,
     },
+
+    // Custom emotes (server emote set)
+    /// Add (or replace, same name) a custom emote. `hash` is the SHA-256 hex
+    /// of the processed WebP bytes — the CRDT carries METADATA ONLY; bytes
+    /// replicate on demand via EmoteRequest/EmoteResponse (content-addressed,
+    /// receiver-verified). Mirrors the showcase asset playbook.
+    EmojiAdded {
+        name: String,
+        hash: String,
+        animated: bool,
+    },
+    EmojiRemoved {
+        name: String,
+    },
+}
+
+/// Tolerant sync-batch parse: each op deserializes INDIVIDUALLY, so a batch
+/// containing a NEWER client's payload variant skips just that op instead of
+/// poisoning the whole Vec (which permanently wedged older clients' server
+/// sync whenever any member used a feature they didn't know yet).
+pub fn parse_ops_tolerant(json: &str) -> Vec<CrdtOp> {
+    match serde_json::from_str::<Vec<serde_json::Value>>(json) {
+        Ok(vals) => vals
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<CrdtOp>(v).ok())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Member roles with hierarchical priority.
@@ -225,7 +253,8 @@ impl MemberRole {
                 | Permission::MANAGE_ROLES
                 | Permission::KICK_MEMBERS
                 | Permission::SEND_MESSAGES
-                | Permission::READ_MESSAGES,
+                | Permission::READ_MESSAGES
+                | Permission::MANAGE_EMOTES,
             Self::Moderator => Permission::KICK_MEMBERS
                 | Permission::SEND_MESSAGES
                 | Permission::READ_MESSAGES,
@@ -381,6 +410,8 @@ impl Permission {
     pub const KICK_MEMBERS: u32 = 1 << 4;
     pub const SEND_MESSAGES: u32 = 1 << 5;
     pub const READ_MESSAGES: u32 = 1 << 6;
+    /// Add/remove custom server emotes. Admin+ by default.
+    pub const MANAGE_EMOTES: u32 = 1 << 7;
 
     /// Owner gets all permissions.
     pub const ALL: u32 = Self::MANAGE_SERVER
@@ -388,5 +419,6 @@ impl Permission {
         | Self::MANAGE_ROLES
         | Self::KICK_MEMBERS
         | Self::SEND_MESSAGES
-        | Self::READ_MESSAGES;
+        | Self::READ_MESSAGES
+        | Self::MANAGE_EMOTES;
 }

@@ -24,6 +24,7 @@ void showMobileMessageActions({
   VoidCallback? onInfo,
   VoidCallback? onPin,
   bool isPinned = false,
+  String? serverId,
 }) {
   final hollow = HollowTheme.of(context);
   showModalBottomSheet(
@@ -49,6 +50,7 @@ void showMobileMessageActions({
       onInfo: onInfo,
       onPin: onPin,
       isPinned: isPinned,
+      serverId: serverId,
     ),
   );
 }
@@ -69,6 +71,7 @@ class _MessageActionsSheet extends StatefulWidget {
   final VoidCallback? onInfo;
   final VoidCallback? onPin;
   final bool isPinned;
+  final String? serverId;
 
   const _MessageActionsSheet({
     required this.messageText,
@@ -84,6 +87,7 @@ class _MessageActionsSheet extends StatefulWidget {
     this.onInfo,
     this.onPin,
     this.isPinned = false,
+    this.serverId,
   });
 
   @override
@@ -264,30 +268,14 @@ class _MessageActionsSheetState extends State<_MessageActionsSheet> {
         ),
         const SizedBox(height: HollowSpacing.md),
 
-        // Full emoji grid
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
-          child: GridView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 6,
-              crossAxisSpacing: 2,
-              mainAxisSpacing: 2,
-            ),
-            itemCount: kReactionEmojis.length,
-            itemBuilder: (context, index) {
-              final emoji = kReactionEmojis[index];
-              return HollowPressable(
-                onTap: () {
-                  Navigator.pop(context);
-                  widget.onReaction!(emoji);
-                },
-                semanticLabel: 'React $emoji',
-                child: Center(
-                  child: Text(emoji, style: const TextStyle(fontSize: 26)),
-                ),
-              );
+        // Full picker: Unicode + server + personal + FFZ emotes.
+        SizedBox(
+          height: MediaQuery.sizeOf(context).height * 0.5,
+          child: EmojiPickerBody(
+            serverId: widget.serverId,
+            onSelect: (emoji) {
+              Navigator.pop(context);
+              widget.onReaction!(emoji);
             },
           ),
         ),
@@ -432,8 +420,8 @@ class _QuickReactionsRow extends StatelessWidget {
         children: [
           for (int i = 0; i < _kQuickReactionCount; i++)
             HollowPressable(
-              onTap: () => onReaction(kReactionEmojis[i]),
-              semanticLabel: 'React ${kReactionEmojis[i]}',
+              onTap: () => onReaction(kQuickReactionEmojis[i]),
+              semanticLabel: 'React ${kQuickReactionEmojis[i]}',
               child: Container(
                 width: 42,
                 height: 42,
@@ -442,7 +430,7 @@ class _QuickReactionsRow extends StatelessWidget {
                   color: hollow.elevated,
                   borderRadius: BorderRadius.circular(hollow.radiusSm),
                 ),
-                child: Text(kReactionEmojis[i], style: const TextStyle(fontSize: 22)),
+                child: Text(kQuickReactionEmojis[i], style: const TextStyle(fontSize: 22)),
               ),
             ),
           HollowPressable(

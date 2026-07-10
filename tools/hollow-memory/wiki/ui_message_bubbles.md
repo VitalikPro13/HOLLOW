@@ -493,6 +493,7 @@ Each pill is a `HollowPressable` wrapping a `Container`:
 - **Own reaction:** accent at 15% alpha background, accent at 40% alpha border, accent-colored count text at w600.
 - **Others' reaction:** elevated background, border color, secondary count text at normal weight.
 - Content: Row with emoji (14px) + SizedBox(3) + count (caption 11px).
+- **Custom emote reactions:** a key matching the `[e:name:hash]` token (`parseEmoteToken` from `emote_image.dart`) renders an `EmoteImage` (17px) instead of Text; semantic label uses `:name:`.
 - Border radius: 12px (fully rounded pill shape).
 
 ---
@@ -641,7 +642,9 @@ Processing order (each character is checked against these patterns):
 
 1. **URL detection:** If character is `h` or `H` and `_looksLikeUrlStart()` matches, tries `_inlineUrlRegex.matchAsPrefix()`. Regex: `(?:https?|hollow)://[^\s<>"')\]}]+`. Renders as `WidgetSpan` containing `MouseRegion(cursor: click)` + `GestureDetector(onTap: _openUrl)` + `Text` styled with accent color and underline. **Uses WidgetSpan + GestureDetector (not TextSpan)** to avoid the SelectionArea gesture stealing issue.
 
-2. **@mention detection:** If character is `@`, checks for `@everyone` first, then longest-match against `memberNames`. Renders as `WidgetSpan` containing a `Container` with accent at 15% alpha background, 3px radius, 4px horizontal / 1px vertical padding. Text in accent color at w600 weight. **Also uses WidgetSpan + GestureDetector pattern.**
+2. **Custom emote token:** If character is `[`, tries `emoteTokenRegex.matchAsPrefix()` (`\[e:([a-z0-9_]{2,24}):([0-9a-f]{64})\]` from `emote_image.dart`). Produces `_TokenKind.customEmote` (text = name, `extra` = hash), rendered as a middle-aligned `WidgetSpan` `EmoteImage` sized `fontSize * 1.45` with a `:name:` text fallback while bytes load. Unknown hashes trigger a network pull via the surrounding `EmoteScope` (serverId/peerHint).
+
+3. **@mention detection:** If character is `@`, checks for `@everyone` first, then longest-match against `memberNames`. Renders as `WidgetSpan` containing a `Container` with accent at 15% alpha background, 3px radius, 4px horizontal / 1px vertical padding. Text in accent color at w600 weight. **Also uses WidgetSpan + GestureDetector pattern.**
 
 3. **Bold:** `**text**` -- recursively parses inner content with `fontWeight: w700`.
 
@@ -779,34 +782,32 @@ Layout: 48x48 icon box (accent or error colored) + title/subtitle + dismiss X bu
 
 ---
 
-## EmojiPicker
+## EmojiPicker (unified picker)
 
 **File:** `lib/src/ui/chat/emoji_picker.dart`
-**Purpose:** Small overlay grid of ~30 curated reaction emojis.
+**Purpose:** The unified emoji/emote picker — full Unicode set + custom emote tabs. Used for reactions AND composer insertion, desktop overlay + mobile bottom sheets.
 
 ### showEmojiPicker()
 
-Top-level function: `showEmojiPicker({context, anchorPosition, onSelect})`.
+Top-level function: `showEmojiPicker({context, anchorPosition, onSelect, serverId})`.
 
-Creates an `OverlayEntry` containing `_EmojiPickerOverlay`. Selecting an emoji or tapping outside removes and disposes the entry.
+Creates an `OverlayEntry` (360x440, anchor-clamped) with a dismiss barrier hosting `EmojiPickerBody`. `onSelect` receives either a Unicode emoji OR a custom-emote wire token `[e:name:hash]` — callers treat both as opaque strings. Teardown goes through ONE `removed`-guarded closure: a rapid double-tap fires onSelect twice before the removal frame builds out, and a second `entry.remove()` crashes (see memory `feedback_textfield_overlay_selectioncontrols`; regression tests in `test/widget/emoji_picker_crash_test.dart`).
 
-### _EmojiPickerOverlay
+### EmojiPickerBody (public, reusable)
 
-**Positioning:**
-- Picker size: 280x220 pixels.
-- Tries to position above the anchor, left-aligned (offset by `pickerWidth - 30` to the left).
-- Clamped to screen edges (8px margin).
-- If above doesn't fit (top < 8), positions below the anchor (+30px down).
+`EmojiPickerBody({serverId, onSelect})` — the tabbed body, embedded directly by mobile bottom sheets (`MobileChatRoute._showEmojiSheet`, `mobile_message_actions.dart` reactions view).
 
-**Layout:**
-- Full-screen `GestureDetector` dismiss barrier (translucent hit test).
-- Positioned picker: `Material(transparent)` wrapping a container with surface background, `radiusMd` corners, border, drop shadow (black 25%, blur 12, offset 0,4).
-- `GridView.builder` with 6 columns, `HollowSpacing.sm` padding, 2px spacing.
-- Each emoji cell: `HollowPressable` with `radiusSm`, 4px padding, centered text at 22px.
+- **Search field** (HollowTextField, isDense, autofocus) filters the active tab; on the FFZ tab it drives a 350ms-debounced endpoint search.
+- **Tabs:** `Emoji` (Unicode) / `Server` (only when `serverId != null`; from `serverEmotesProvider`) / `Mine` (personal set + Upload emote button + long-press remove) / `FFZ` (browse via the website proxy; tap = `ffzImportEmote` → add to personal set → insert token).
+- Every selection routes through `_select` → `_recordRecentEmoji` (persisted in app_settings key `recent_emojis`, cap 24, cached in-memory).
 
-### Curated Emoji Set
+### Unicode data
 
-`kReactionEmojis` constant list (~30 emojis): thumbs up, red heart, tears of joy, fire, clapping hands, party popper, heart eyes, thinking face, sunglasses, crying face, angry face, screaming face, hundred points, eyes, folded hands, check mark, cross mark, rocket, glowing star, gem stone, purple/blue/green heart, smiling faces, exploding head, partying face, clown, skull, poo.
+`lib/src/ui/chat/emoji_data.dart` — GENERATED (1,907 fully-qualified emojis, skin-tone variants excluded) from Unicode emoji-test.txt v16 via a Dart script (never awk — `tolower()` corrupts multibyte names). `kUnicodeEmojiGroups: Map<String, List<UnicodeEmoji>>` in CLDR order. `_UnicodeGrid` renders lazily by ROW (8 columns, header entries between groups); search matches on lowercase CLDR names, capped at 160 results.
+
+### Quick reactions
+
+`kQuickReactionEmojis` (8 entries) — the mobile long-press quick row. The old ~30-emoji `kReactionEmojis` list is GONE.
 
 ---
 

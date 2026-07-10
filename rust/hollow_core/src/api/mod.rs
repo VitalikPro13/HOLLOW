@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod crdt;
+pub mod emotes;
 pub mod identity;
 pub mod network;
 pub mod screen_audio;

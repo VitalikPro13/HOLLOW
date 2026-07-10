@@ -1158,6 +1158,13 @@ sealed class NetworkEvent with _$NetworkEvent {
   }) = NetworkEvent_ServerCreated;
   const factory NetworkEvent.serverUpdated({required String serverId}) =
       NetworkEvent_ServerUpdated;
+
+  /// Custom emote bytes arrived and were verified + cached — Dart
+  /// invalidates the hash-keyed emote image providers so pending
+  /// `[e:name:hash]` tokens re-render as images.
+  const factory NetworkEvent.emoteAssetsReceived({
+    required List<String> hashes,
+  }) = NetworkEvent_EmoteAssetsReceived;
   const factory NetworkEvent.channelAdded({
     required String serverId,
     required String channelId,

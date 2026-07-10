@@ -35,3 +35,17 @@ pub(crate) fn resolve_identity(peer_id: &str) -> String {
         None => peer_id.to_string(),
     }
 }
+
+/// Custom emote name rules: 2-24 chars of `[a-z0-9_]` (lowercase enforced at
+/// authoring; validated again at every ingest so a hostile client can't
+/// smuggle markup/whitespace into message tokens through the emote registry).
+pub(crate) fn valid_emote_name(name: &str) -> bool {
+    (2..=24).contains(&name.len())
+        && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Emote hashes are full SHA-256 hex (content addressing IS the integrity
+/// check — receivers verify bytes against this before caching).
+pub(crate) fn valid_emote_hash(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}

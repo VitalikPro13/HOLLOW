@@ -754,6 +754,114 @@ pub fn process_showcase_artwork(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+/// Process a raw image into a custom emote (content-addressed WebP):
+/// - animated GIF → animated WebP, frames resized to ≤64px, Q=75, ≤256KB;
+/// - already-animated WebP → accepted AS-IS under the same cap (the image
+///   crate can't re-encode animation; the container/magic + first-frame
+///   decode are still verified);
+/// - anything else → still ≤64px lossy WebP Q=90, ≤32KB.
+///
+/// Returns `(webp_bytes, animated)`.
+pub fn process_emote_image(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
+    const MAX_DIM: u32 = 64;
+    const MAX_STILL: usize = 32_000;
+    const MAX_ANIMATED: usize = 262_144;
+
+    if data.starts_with(b"GIF8") {
+        let decoder = GifDecoder::new(Cursor::new(data))
+            .map_err(|e| format!("Failed to decode GIF: {e}"))?;
+        let frames = decoder
+            .into_frames()
+            .collect_frames()
+            .map_err(|e| format!("Failed to collect GIF frames: {e}"))?;
+        if frames.is_empty() {
+            return Err("GIF has no frames".into());
+        }
+        let (w, h) = (frames[0].buffer().width(), frames[0].buffer().height());
+        if w == 0 || h == 0 {
+            return Err("GIF has zero dimensions".into());
+        }
+        let (nw, nh) = if w.max(h) > MAX_DIM {
+            let scale = MAX_DIM as f32 / w.max(h) as f32;
+            (
+                ((w as f32 * scale).max(1.0)) as u32,
+                ((h as f32 * scale).max(1.0)) as u32,
+            )
+        } else {
+            (w, h)
+        };
+        let mut encoder = webp_animation::Encoder::new_with_options(
+            (nw, nh),
+            webp_animation::EncoderOptions {
+                encoding_config: Some(webp_animation::EncodingConfig {
+                    quality: 75.0,
+                    encoding_type: webp_animation::EncodingType::Lossy(Default::default()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("Failed to create WebP encoder: {e}"))?;
+        let mut timestamp_ms: i32 = 0;
+        for frame in &frames {
+            let resized;
+            let rgba = if (nw, nh) != (w, h) {
+                resized = image::imageops::resize(frame.buffer(), nw, nh, FilterType::Lanczos3);
+                &resized
+            } else {
+                frame.buffer()
+            };
+            encoder
+                .add_frame(rgba.as_raw(), timestamp_ms)
+                .map_err(|e| format!("Failed to add WebP frame: {e}"))?;
+            let delay: std::time::Duration = frame.delay().into();
+            let delay_ms = delay.as_millis() as i32;
+            timestamp_ms += if delay_ms < 20 { 100 } else { delay_ms };
+        }
+        let webp = encoder
+            .finalize(timestamp_ms)
+            .map_err(|e| format!("Failed to finalize animated WebP: {e}"))?;
+        if webp.len() > MAX_ANIMATED {
+            return Err("Animated emote too large after processing (>256KB)".into());
+        }
+        return Ok((webp.to_vec(), true));
+    }
+
+    // Animated WebP passthrough (verify container + first-frame decode + cap).
+    if data.len() > 20
+        && &data[0..4] == b"RIFF"
+        && &data[8..12] == b"WEBP"
+        && &data[12..16] == b"VP8X"
+        && (data[20] & 0x02) != 0
+    {
+        if data.len() > MAX_ANIMATED {
+            return Err("Animated emote too large (>256KB)".into());
+        }
+        image::load_from_memory(data)
+            .map_err(|e| format!("Failed to decode animated WebP: {e}"))?;
+        return Ok((data.to_vec(), true));
+    }
+
+    let img = image::load_from_memory(data)
+        .map_err(|e| format!("Failed to decode emote image: {e}"))?;
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return Err("Image has zero dimensions".into());
+    }
+    let resized = if w.max(h) > MAX_DIM {
+        img.resize(MAX_DIM, MAX_DIM, FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let rgba = resized.to_rgba8();
+    let (ew, eh) = (rgba.width(), rgba.height());
+    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), ew, eh, 90.0)?;
+    if buf.len() > MAX_STILL {
+        return Err("Emote too large after processing (>32KB)".into());
+    }
+    Ok((buf, false))
+}
+
 /// Process a raw image into banner format: center-crop to 3:1 aspect, resize to 600x200, encode as WebP.
 /// Accepts any image — crops the widest 3:1 region it can find, or stretches if very small.
 pub fn process_banner_image(data: &[u8]) -> Result<Vec<u8>, String> {

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 /// Parses message text with lightweight markup into styled spans.
@@ -41,14 +42,16 @@ enum _TokenKind {
   spoiler,
   url,
   mention,
+  customEmote,
 }
 
 class _Token {
   final _TokenKind kind;
   final String text;
   final List<_Token>? children; // for nested markup (bold > italic, etc.)
+  final String? extra; // customEmote: the content hash
 
-  const _Token(this.kind, this.text, [this.children]);
+  const _Token(this.kind, this.text, [this.children, this.extra]);
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +126,22 @@ List<_Token> _tokenize(
       if (match != null) {
         flushBuffer();
         tokens.add(_Token(_TokenKind.url, match.group(0)!));
+        i = match.end;
+        continue;
+      }
+    }
+
+    // --- [e:name:hash] custom emote ---
+    if (text[i] == '[') {
+      final match = emoteTokenRegex.matchAsPrefix(text, i);
+      if (match != null) {
+        flushBuffer();
+        tokens.add(_Token(
+          _TokenKind.customEmote,
+          match.group(1)!,
+          null,
+          match.group(2)!,
+        ));
         i = match.end;
         continue;
       }
@@ -328,6 +347,16 @@ List<InlineSpan> _tokensToSpans(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
           child: _SpoilerText(text: tok.text, style: style, hollow: hollow),
+        ));
+      case _TokenKind.customEmote:
+        spans.add(WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: EmoteImage(
+            name: tok.text,
+            hash: tok.extra!,
+            size: (style.fontSize ?? 15) * 1.45,
+            fallbackStyle: style,
+          ),
         ));
       case _TokenKind.code:
         spans.add(WidgetSpan(

@@ -16,6 +16,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
+import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
@@ -223,6 +224,7 @@ class EventStreamNotifier extends Notifier<bool> {
   void _refreshServerState(String serverId) {
     ref.read(serverListProvider.notifier).onServerUpdated(serverId);
     ref.invalidate(serverMembersProvider(serverId));
+    ref.invalidate(serverEmotesProvider(serverId));
     ref.invalidate(serverIsNsfwProvider(serverId));
     ref.invalidate(myPermissionsProvider(serverId));
     ref.invalidate(myRoleProvider(serverId));
@@ -559,6 +561,13 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Server updated: $serverId');
         ref.read(serverAvatarProvider.notifier).loadAvatar(serverId);
         _refreshServerState(serverId);
+
+      case NetworkEvent_EmoteAssetsReceived(:final hashes):
+        debugPrint('[HOLLOW] Emote assets received: ${hashes.length}');
+        clearRequestedEmotes(hashes);
+        for (final hash in hashes) {
+          ref.invalidate(emoteBytesProvider(hash));
+        }
 
       case NetworkEvent_ChannelAdded(
             :final serverId, :final channelId, :final name, :final channelType):

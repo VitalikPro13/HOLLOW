@@ -265,6 +265,7 @@ use super::crypto_handler::{
 use super::file_handler;
 use super::link_handler;
 use super::message_ops;
+use super::emotes;
 use super::social;
 use super::sync_handler;
 use super::vault_ops;
@@ -474,6 +475,10 @@ async fn run_event_loop(
 
     // Peers we've already triggered sync for this session.
     let mut synced_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Emote hashes already requested THIS connection (pull-once throttle).
+    // Cleared on WS disconnect so a lost reply can be re-pulled after reconnect.
+    let mut requested_emote_hashes: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // (server room, channel) pairs whose relay offline catch-up replay already
     // ran THIS connection — fed by both the connect-time sweep (RoomMembers)
@@ -1267,6 +1272,32 @@ async fn run_event_loop(
                             server_id, CrdtPayload::LabelUnassigned { label_id, peer_id },
                             &crypto_store, &crdt_store,
                         ).await { continue; }
+                    }
+
+                    NodeCommand::AddServerEmote { server_id, name, hash, animated } => {
+                        if sync_handler::handle_emote_op(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
+                            server_id, CrdtPayload::EmojiAdded { name, hash, animated },
+                            &crypto_store, &crdt_store,
+                        ).await { continue; }
+                    }
+
+                    NodeCommand::RemoveServerEmote { server_id, name } => {
+                        if sync_handler::handle_emote_op(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
+                            server_id, CrdtPayload::EmojiRemoved { name },
+                            &crypto_store, &crdt_store,
+                        ).await { continue; }
+                    }
+
+                    NodeCommand::RequestEmotes { hashes, server_id, peer_hint } => {
+                        emotes::handle_request_emotes(
+                            &ws_cmd_tx, &ws_room_peers, &mut requested_emote_hashes,
+                            hashes, server_id, peer_hint, &local_peer_str,
+                            &db_path, &db_passphrase,
+                        );
                     }
 
                     NodeCommand::SetChannelVisibility { server_id, channel_id, visibility } => {
@@ -2284,6 +2315,7 @@ async fn run_event_loop(
                         let _ = event_tx.send(NetworkEvent::RelayDisconnected).await;
                         ws_room_peers.clear();
                         synced_peers.clear();
+                        requested_emote_hashes.clear();
                         relay_catchup_done.clear();
                         key_request_in_flight.clear();
                         key_bundle_sent_to.clear();
@@ -6135,9 +6167,10 @@ async fn handle_incoming_request(
                     }
                 }
                 Ok(MessageEnvelope::AddReaction { mid, emoji, ts, sig, pk, sid, cid }) => {
-                    // SECURITY: Reject emoji strings longer than 10 characters.
-                    if emoji.len() > 10 {
-                        hollow_log!("[HOLLOW-SECURITY] REJECTED AddReaction from {peer_str} — emoji too long ({} chars)", emoji.len());
+                    // SECURITY: short Unicode emoji or a well-formed custom
+                    // emote token ([e:name:hash]) — nothing else.
+                    if !emotes::valid_reaction_emoji(&emoji) {
+                        hollow_log!("[HOLLOW-SECURITY] REJECTED AddReaction from {peer_str} — invalid emoji string ({} bytes)", emoji.len());
                         return;
                     }
                     hollow_log!("[HOLLOW-REACTION] Received reaction {emoji} on {mid} from {peer_str}");
@@ -7002,7 +7035,10 @@ async fn handle_incoming_request(
                 }
                 Ok(MessageEnvelope::SyncResp { sid, ops_json, .. }) => {
                     if let Some(state) = server_states.get_mut(&sid) {
-                        if let Ok(incoming_ops) = serde_json::from_str::<Vec<crate::crdt::operations::CrdtOp>>(&ops_json) {
+                        // Tolerant parse: a NEWER client's op variant skips
+                        // just that op, never the whole batch.
+                        let incoming_ops = crate::crdt::operations::parse_ops_tolerant(&ops_json);
+                        if !incoming_ops.is_empty() {
                             // Persist synced ops (op_log is RAM-only — see the
                             // plaintext SyncResponse handler for rationale).
                             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -7307,7 +7343,10 @@ async fn handle_incoming_request(
                 return;
             }
 
-            if let Ok(incoming_ops) = serde_json::from_str::<Vec<crate::crdt::operations::CrdtOp>>(&ops_json) {
+            // Tolerant parse: a NEWER client's op variant skips just that op,
+            // never the whole batch.
+            let incoming_ops = crate::crdt::operations::parse_ops_tolerant(&ops_json);
+            if !incoming_ops.is_empty() {
                 let state = server_states.entry(server_id.clone()).or_insert_with(|| {
                     // Skeleton for a pending join. The responder (peer_str) is
                     // just our sync source — when the owner is offline this is
@@ -7710,6 +7749,14 @@ async fn handle_incoming_request(
                         CrdtPayload::LabelAssigned { peer_id, .. }
                         | CrdtPayload::LabelUnassigned { peer_id, .. } => {
                             peer_id == &op.author || (sender_perms & Permission::MANAGE_ROLES) != 0
+                        }
+                        CrdtPayload::EmojiAdded { name, hash, .. } => {
+                            (sender_perms & Permission::MANAGE_EMOTES) != 0
+                                && crate::crdt::valid_emote_name(name)
+                                && crate::crdt::valid_emote_hash(hash)
+                        }
+                        CrdtPayload::EmojiRemoved { .. } => {
+                            (sender_perms & Permission::MANAGE_EMOTES) != 0
                         }
                         // Only the Owner can delete a server (tombstone).
                         CrdtPayload::ServerDeleted { .. } => sender_role == MemberRole::Owner,
@@ -11256,6 +11303,20 @@ async fn handle_incoming_request(
                 is_invisible,
                 db_path, db_passphrase,
             );
+        }
+
+        HavenMessage::EmoteRequest { hashes } => {
+            emotes::handle_emote_request(
+                ws_cmd_tx, ws_room_peers, peer_str, hashes,
+                db_path, db_passphrase,
+            );
+        }
+
+        HavenMessage::EmoteAssets { bundle_json } => {
+            emotes::handle_emote_assets(
+                event_tx, bundle_json,
+                db_path, db_passphrase,
+            ).await;
         }
 
         HavenMessage::ProfileRequestFor { target_peer_id } => {

@@ -1946,6 +1946,13 @@ pub(crate) async fn handle_envelope_add_reaction(
     db_path: &str,
     db_passphrase: &str,
 ) {
+    // Choke-point validation for EVERY inbound add path (MLS envelope, Olm
+    // fallback, public channel): short Unicode emoji or a well-formed custom
+    // emote token — nothing else reaches the DB.
+    if !super::emotes::valid_reaction_emoji(&emoji) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED reaction from {peer_str} — invalid emoji string ({} bytes)", emoji.len());
+        return;
+    }
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let _ = store.add_reaction(
             &mid, &emoji, peer_str, ts,

@@ -534,6 +534,31 @@ impl MessageStore {
         )
         .map_err(|e| format!("Failed to create blocked_peers table: {e}"))?;
 
+        // -- Custom emotes: content-addressed blob cache (shared across
+        //    servers/DMs — the same hash is stored once) + the user's own
+        //    personal emote set (names are local; hashes are global) --
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS emote_blobs (
+                hash     TEXT PRIMARY KEY,
+                bytes    BLOB NOT NULL,
+                animated INTEGER NOT NULL DEFAULT 0,
+                added_at INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .map_err(|e| format!("Failed to create emote_blobs table: {e}"))?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS personal_emotes (
+                name     TEXT PRIMARY KEY,
+                hash     TEXT NOT NULL,
+                animated INTEGER NOT NULL DEFAULT 0,
+                source   TEXT NOT NULL DEFAULT '',
+                added_at INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .map_err(|e| format!("Failed to create personal_emotes table: {e}"))?;
+
         // -- MLS identity (singleton row, id=1) --
         conn.execute(
             "CREATE TABLE IF NOT EXISTS mls_identity (
@@ -3746,6 +3771,107 @@ impl MessageStore {
         let mut result = Vec::new();
         for row in rows {
             result.push(row.map_err(|e| format!("Failed to read blocked row: {e}"))?);
+        }
+        Ok(result)
+    }
+
+    // ── Custom emotes (content-addressed blobs + personal set) ───
+
+    pub fn save_emote_blob(&self, hash: &str, bytes: &[u8], animated: bool) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.conn
+            .execute(
+                "INSERT INTO emote_blobs (hash, bytes, animated, added_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(hash) DO NOTHING",
+                params![hash, bytes, animated as i64, now],
+            )
+            .map_err(|e| format!("Failed to save emote blob: {e}"))?;
+        Ok(())
+    }
+
+    pub fn load_emote_blob(&self, hash: &str) -> Result<Option<Vec<u8>>, String> {
+        let result = self.conn.query_row(
+            "SELECT bytes FROM emote_blobs WHERE hash = ?1",
+            params![hash],
+            |row| row.get::<_, Vec<u8>>(0),
+        );
+        match result {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("Failed to read emote blob: {e}")),
+        }
+    }
+
+    pub fn has_emote_blob(&self, hash: &str) -> Result<bool, String> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM emote_blobs WHERE hash = ?1",
+                params![hash],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to check emote blob: {e}"))?;
+        Ok(count > 0)
+    }
+
+    pub fn add_personal_emote(
+        &self,
+        name: &str,
+        hash: &str,
+        animated: bool,
+        source: &str,
+    ) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.conn
+            .execute(
+                "INSERT INTO personal_emotes (name, hash, animated, source, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(name) DO UPDATE SET
+                     hash = excluded.hash, animated = excluded.animated,
+                     source = excluded.source, added_at = excluded.added_at",
+                params![name, hash, animated as i64, source, now],
+            )
+            .map_err(|e| format!("Failed to add personal emote: {e}"))?;
+        Ok(())
+    }
+
+    pub fn remove_personal_emote(&self, name: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM personal_emotes WHERE name = ?1",
+                params![name],
+            )
+            .map_err(|e| format!("Failed to remove personal emote: {e}"))?;
+        Ok(())
+    }
+
+    /// All personal emotes as (name, hash, animated, source), newest first.
+    pub fn list_personal_emotes(&self) -> Result<Vec<(String, String, bool, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT name, hash, animated, source FROM personal_emotes ORDER BY added_at DESC",
+            )
+            .map_err(|e| format!("Failed to prepare personal emote query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? != 0,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| format!("Failed to query personal emotes: {e}"))?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| format!("Failed to read personal emote row: {e}"))?);
         }
         Ok(result)
     }

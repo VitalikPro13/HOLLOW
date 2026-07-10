@@ -139,6 +139,10 @@ pub enum NetworkEvent {
     // -- CRDT events (Phase 3) --
     ServerCreated { server_id: String, name: String },
     ServerUpdated { server_id: String },
+    /// Custom emote bytes arrived and were verified + cached — Dart
+    /// invalidates the hash-keyed emote image providers so pending
+    /// `[e:name:hash]` tokens re-render as images.
+    EmoteAssetsReceived { hashes: Vec<String> },
     ChannelAdded { server_id: String, channel_id: String, name: String, channel_type: String },
     ChannelRemoved { server_id: String, channel_id: String },
     ChannelRenamed { server_id: String, channel_id: String, new_name: String },
@@ -761,6 +765,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::ServerUpdated { server_id } => {
             NetworkEvent::ServerUpdated { server_id }
+        }
+        node::NetworkEvent::EmoteAssetsReceived { hashes } => {
+            NetworkEvent::EmoteAssetsReceived { hashes }
         }
         node::NetworkEvent::ChannelAdded { server_id, channel_id, name, channel_type } => {
             NetworkEvent::ChannelAdded { server_id, channel_id, name, channel_type }

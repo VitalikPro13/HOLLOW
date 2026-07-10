@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
+import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Coordinates action bar visibility across all messages in a list.
@@ -269,6 +270,7 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
                       showEmojiPicker(
                         context: context,
                         anchorPosition: globalPosition,
+                        serverId: EmoteScope.of(context)?.serverId,
                         onSelect: (emoji) => widget.onReaction?.call(emoji),
                       );
                     }

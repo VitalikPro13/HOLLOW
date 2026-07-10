@@ -35,6 +35,7 @@ import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
 import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
+import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -830,45 +831,38 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: hollow.surface,
+      isScrollControlled: true,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
       ),
       builder: (_) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(HollowSpacing.md),
-          child: GridView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 6,
-              mainAxisSpacing: HollowSpacing.sm,
-              crossAxisSpacing: HollowSpacing.sm,
-            ),
-            itemCount: kReactionEmojis.length,
-            itemBuilder: (_, i) {
-              final emoji = kReactionEmojis[i];
-              return GestureDetector(
-                onTap: () {
-                  Navigator.pop(context);
-                  final sel = _controller.selection;
-                  final base = sel.isValid ? sel.baseOffset : _controller.text.length;
-                  final newText = _controller.text.replaceRange(
-                    base.clamp(0, _controller.text.length),
-                    (sel.isValid ? sel.extentOffset : base).clamp(0, _controller.text.length),
-                    emoji,
-                  );
-                  _controller.text = newText;
-                  final pos = base + emoji.length;
-                  _controller.selection = TextSelection.collapsed(offset: pos);
-                  _focusNode.requestFocus();
-                },
-                child: Center(child: Text(emoji, style: const TextStyle(fontSize: 28))),
-              );
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * 0.55,
+          child: EmojiPickerBody(
+            serverId: widget.serverId,
+            onSelect: (emoji) {
+              Navigator.pop(context);
+              _insertAtCursor(emoji);
             },
           ),
         ),
       ),
     );
+  }
+
+  /// Insert [text] (a Unicode emoji or an emote token) at the composer's
+  /// cursor, replacing any selection.
+  void _insertAtCursor(String text) {
+    final sel = _controller.selection;
+    final base = sel.isValid ? sel.baseOffset : _controller.text.length;
+    final newText = _controller.text.replaceRange(
+      base.clamp(0, _controller.text.length),
+      (sel.isValid ? sel.extentOffset : base).clamp(0, _controller.text.length),
+      text,
+    );
+    _controller.text = newText;
+    _controller.selection = TextSelection.collapsed(offset: base + text.length);
+    _focusNode.requestFocus();
   }
 
   /// Attach menu (Telegram-style): one [+] button opens this Photo / File sheet,
@@ -1156,7 +1150,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
     Widget scaffold = Scaffold(
           backgroundColor: bg.hasBackground ? Colors.transparent : hollow.background,
-          body: SafeArea(
+          // Custom-emote pull source for every token/reaction in this chat:
+          // DM asks the counterpart's devices, channel asks a room member.
+          body: EmoteScope(
+            serverId: widget.serverId,
+            peerHint: widget.peerId,
+            child: SafeArea(
             child: Column(
               children: [
                 _MobileChatHeader(
@@ -1407,6 +1406,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                   ),
           ],
         ),
+      ),
       ),
     );
 
@@ -1877,6 +1877,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       senderName: senderName,
       timestamp: _formatTime(msg.timestamp),
       isMe: msg.isMe,
+      serverId: widget.serverId,
       onReply: msg.messageId != null
           ? () => _setReply(msg.messageId!, senderName, msg.text)
           : null,
@@ -1953,6 +1954,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       senderName: senderName,
       timestamp: _formatTime(msg.timestamp),
       isMe: msg.isMe,
+      serverId: widget.serverId,
       onReply: msg.messageId != null
           ? () => _setReply(msg.messageId!, senderName, msg.text)
           : null,

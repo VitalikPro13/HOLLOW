@@ -168,6 +168,12 @@ Self-contained: every op carries its own server, author, timestamp, and payload.
 - `LabelAssigned { label_id: String, peer_id: String }` — adds label to a member's assignment list if not already present.
 - `LabelUnassigned { label_id: String, peer_id: String }` — removes label from a member's assignment list. Cleans up empty entries.
 
+**Custom emotes (2026-07-10):**
+- `EmojiAdded { name: String, hash: String, animated: bool }` — adds/replaces a server emote (metadata ONLY — `hash` is SHA-256 hex of the WebP blob; bytes replicate via EmoteRequest/EmoteAssets, never the CRDT). Replace-on-same-name; NEW names refused past `MAX_SERVER_EMOTES = 50` so replicas converge. Ingest validates `crdt::valid_emote_name` (2-24 `[a-z0-9_]`) + `valid_emote_hash` (64 lowercase hex) + `Permission::MANAGE_EMOTES`.
+- `EmojiRemoved { name: String }` — removes from `emotes`.
+
+**Tolerant batch parsing:** `operations.rs:parse_ops_tolerant(json)` — sync-batch ops deserialize INDIVIDUALLY (per-item `from_value`), so a batch containing a NEWER client's unknown payload variant skips just that op. Used at ALL THREE sync-batch sites (sync_handler MLS SyncResp, swarm MLS SyncResp, swarm plaintext SyncResponse). Before this, one unknown variant failed the whole `Vec<CrdtOp>` parse and permanently wedged older clients' server sync.
+
 ### MemberRole Enum
 
 ```
@@ -193,12 +199,15 @@ Permission::MANAGE_ROLES    = 1 << 2  (bit 2)
 Permission::KICK_MEMBERS    = 1 << 4  (bit 4)
 Permission::SEND_MESSAGES   = 1 << 5  (bit 5)
 Permission::READ_MESSAGES   = 1 << 6  (bit 6)
+Permission::MANAGE_EMOTES   = 1 << 7  (bit 7)
 Permission::ALL = all of the above OR'd together
 ```
 
+Mirrored in Dart at `lib/src/core/providers/server_provider.dart:Permission` and the roles-tab permission entries/defaults (`roles_tab.dart`).
+
 **Default permissions by role:**
 - Owner: ALL
-- Admin: MANAGE_CHANNELS | MANAGE_ROLES | KICK_MEMBERS | SEND_MESSAGES | READ_MESSAGES
+- Admin: MANAGE_CHANNELS | MANAGE_ROLES | KICK_MEMBERS | SEND_MESSAGES | READ_MESSAGES | MANAGE_EMOTES
 - Moderator: KICK_MEMBERS | SEND_MESSAGES | READ_MESSAGES
 - Member: SEND_MESSAGES | READ_MESSAGES
 
@@ -227,6 +236,7 @@ The complete replicated state of a Hollow server. Every field is either an add-w
 | `banned_members` | `HashMap<String, AdminLwwReg<bool>>` | LWW per peer_id | `#[serde(default)]` |
 | `labels` | `HashMap<String, LabelInfo>` | Add-wins, remove deletes | `#[serde(default)]` |
 | `label_assignments` | `HashMap<String, Vec<String>>` | Add/remove set per peer | `#[serde(default)]` |
+| `emotes` | `HashMap<String, EmoteInfo>` | Keyed by NAME; replace-on-add, remove deletes; cap 50 at apply | `#[serde(default)]` |
 | `deleted` | `bool` | Tombstone latch (set by `ServerDeleted`, Step 9D); UI hides it; shell retained to serve the op | `#[serde(default)]` |
 | `op_log` | `Vec<CrdtOp>` | Append-only (compacted at 1000) | Required |
 | `hlc` | `Option<Hlc>` | Transient (not serialized) | `#[serde(skip)]` |

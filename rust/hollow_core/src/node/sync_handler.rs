@@ -1761,6 +1761,87 @@ broadcast_crdt_op_to_members(
     false
 }
 
+// ── 10e2. Custom emote operations ───────────────────────────────────
+
+/// Author an EmojiAdded / EmojiRemoved op. Mirrors [handle_label_op]
+/// (apply → CrdtStore persist → ServerUpdated → MLS broadcast + plaintext
+/// twin). The emote BYTES never ride the CRDT — the caller stored them in
+/// the local emote blob cache before issuing the command; members pull them
+/// on demand via EmoteRequest.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_emote_op(
+    server_states: &mut HashMap<String, ServerState>,
+    mls: &mut Option<MlsManager>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
+    _bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    local_peer_str: &str,
+    server_id: String,
+    payload: CrdtPayload,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+) -> bool {
+    if let Some(state) = server_states.get_mut(&server_id) {
+        let local_peer = local_peer_str.to_string();
+
+        if !state.has_permission(&local_peer, Permission::MANAGE_EMOTES) {
+            hollow_log!("[HOLLOW-CRDT] Permission denied: cannot manage emotes in {server_id}");
+            let _ = event_tx.send(NetworkEvent::Error {
+                message: "Permission denied: cannot manage emotes".to_string(),
+            }).await;
+            return true;
+        }
+
+        if let CrdtPayload::EmojiAdded { name, hash, .. } = &payload {
+            if !crate::crdt::valid_emote_name(name) || !crate::crdt::valid_emote_hash(hash) {
+                let _ = event_tx.send(NetworkEvent::Error {
+                    message: "Invalid emote name".to_string(),
+                }).await;
+                return true;
+            }
+            if !state.emotes.contains_key(name)
+                && state.emotes.len() >= crate::crdt::server_state::MAX_SERVER_EMOTES
+            {
+                let _ = event_tx.send(NetworkEvent::Error {
+                    message: format!(
+                        "Emote limit reached ({} per server)",
+                        crate::crdt::server_state::MAX_SERVER_EMOTES
+                    ),
+                }).await;
+                return true;
+            }
+        }
+
+        let op = state.create_op(payload);
+        let _ = state.apply_op(&op);
+
+        crdt_store.insert_op(op.clone());
+        crdt_store.save_state_snapshot(server_id.clone(), state);
+
+        let _ = event_tx.send(NetworkEvent::ServerUpdated {
+            server_id: server_id.clone(),
+        }).await;
+
+        if let Ok(op_json) = serde_json::to_string(&op) {
+            let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+            if mls_ok {
+                let envelope = MessageEnvelope::CrdtOp { sid: server_id.clone(), op_json: op_json.clone() };
+                if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store) {
+                    hollow_log!("[HOLLOW-MLS] Emote CrdtOp broadcast failed, plaintext twin still goes out: {e}");
+                }
+            }
+            // Plaintext twin — same rationale as labels (skewed-epoch receivers
+            // must still converge; op_log dedups, receiver re-validates).
+            broadcast_crdt_op_to_members(
+                ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op_json,
+            )
+        }
+    }
+    false
+}
+
 // ── 10f. SetChannelVisibility ───────────────────────────────────────
 
 pub(crate) async fn handle_set_channel_visibility(
@@ -2697,6 +2778,14 @@ pub(crate) async fn handle_envelope_crdt_op(
             | CrdtPayload::LabelUnassigned { peer_id, .. } => {
                 peer_id == &op.author || (sender_perms & Permission::MANAGE_ROLES) != 0
             }
+            CrdtPayload::EmojiAdded { name, hash, .. } => {
+                (sender_perms & Permission::MANAGE_EMOTES) != 0
+                    && crate::crdt::valid_emote_name(name)
+                    && crate::crdt::valid_emote_hash(hash)
+            }
+            CrdtPayload::EmojiRemoved { .. } => {
+                (sender_perms & Permission::MANAGE_EMOTES) != 0
+            }
             // Only the Owner can delete a server (tombstone).
             CrdtPayload::ServerDeleted { .. } => sender_role == MemberRole::Owner,
             CrdtPayload::ServerCreated { .. } => true,
@@ -2789,7 +2878,9 @@ pub(crate) async fn handle_envelope_crdt_op(
             | CrdtPayload::LabelDeleted { .. }
             | CrdtPayload::LabelUpdated { .. }
             | CrdtPayload::LabelAssigned { .. }
-            | CrdtPayload::LabelUnassigned { .. } => {
+            | CrdtPayload::LabelUnassigned { .. }
+            | CrdtPayload::EmojiAdded { .. }
+            | CrdtPayload::EmojiRemoved { .. } => {
                 let _ = event_tx.send(NetworkEvent::ServerUpdated {
                     server_id: sid.clone(),
                 }).await;
@@ -2929,7 +3020,10 @@ pub(crate) async fn handle_envelope_sync_resp(
     crdt_store: &CrdtStore,
 ) {
     if let Some(state) = server_states.get_mut(&sid) {
-        if let Ok(incoming_ops) = serde_json::from_str::<Vec<crate::crdt::operations::CrdtOp>>(&ops_json) {
+        // Tolerant parse: an op variant from a NEWER client skips just that
+        // op, never the whole batch.
+        let incoming_ops = crate::crdt::operations::parse_ops_tolerant(&ops_json);
+        if !incoming_ops.is_empty() {
             // SECURITY (tombstone): drop a `ServerDeleted` op not authored by the Owner
             // (validated against OUR role map) BEFORE persist + merge — never trust the
             // relayer. Mirrors the plaintext SyncResponse path.

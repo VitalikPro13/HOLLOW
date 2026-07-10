@@ -41,6 +41,21 @@ pub struct LabelInfo {
     pub color: String,
 }
 
+/// A custom server emote. METADATA ONLY — the image bytes are content-
+/// addressed by `hash` (SHA-256 hex of the processed WebP) and replicate
+/// on demand via EmoteRequest/EmoteResponse, never through the CRDT.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EmoteInfo {
+    pub name: String,
+    pub hash: String,
+    #[serde(default)]
+    pub animated: bool,
+}
+
+/// Hard cap on custom emotes per server (enforced at authoring AND apply so
+/// replicas converge on the same refusal).
+pub const MAX_SERVER_EMOTES: usize = 50;
+
 /// Who can see a channel.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ChannelVisibility {
@@ -140,6 +155,10 @@ pub struct ServerState {
     pub labels: HashMap<String, LabelInfo>,
     #[serde(default)]
     pub label_assignments: HashMap<String, Vec<String>>,
+    /// Custom emote set, keyed by emote name. `#[serde(default)]` so every
+    /// pre-existing persisted ServerState loads with an empty set.
+    #[serde(default)]
+    pub emotes: HashMap<String, EmoteInfo>,
     /// Tombstone latch (Step "server sync hardening"): set true by a `ServerDeleted`
     /// op. The state shell + op_log are RETAINED (not removed) so this node keeps
     /// serving the deletion op to reconnecting peers via normal grow-only sync.
@@ -171,7 +190,7 @@ impl ServerState {
             server_id, name, channels, members, roles, nicknames,
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members, labels,
-            label_assignments, deleted,
+            label_assignments, emotes, deleted,
             op_log: _, hlc: _, op_log_dedup: _,
         } = self;
         ServerState {
@@ -191,6 +210,7 @@ impl ServerState {
             muted_members: muted_members.clone(),
             labels: labels.clone(),
             label_assignments: label_assignments.clone(),
+            emotes: emotes.clone(),
             deleted: *deleted,
             op_log: Vec::new(),
             hlc: None,
@@ -253,6 +273,7 @@ impl ServerState {
             muted_members: HashMap::new(),
             labels: HashMap::new(),
             label_assignments: HashMap::new(),
+            emotes: HashMap::new(),
             deleted: false,
             op_log: Vec::new(),
             hlc: Some(hlc),
@@ -731,6 +752,28 @@ impl ServerState {
                     }
                 }
             }
+
+            CrdtPayload::EmojiAdded { name, hash, animated } => {
+                // Replace-on-same-name (re-adding a name swaps the image);
+                // refuse NEW names past the cap so replicas converge on the
+                // same refusal regardless of op arrival order relative to
+                // other adds already in the log.
+                let is_new = !self.emotes.contains_key(name);
+                if !is_new || self.emotes.len() < MAX_SERVER_EMOTES {
+                    self.emotes.insert(
+                        name.clone(),
+                        EmoteInfo {
+                            name: name.clone(),
+                            hash: hash.clone(),
+                            animated: *animated,
+                        },
+                    );
+                }
+            }
+
+            CrdtPayload::EmojiRemoved { name } => {
+                self.emotes.remove(name);
+            }
         }
 
         // Append to op log (sorted insert by HLC for deterministic ordering)
@@ -1027,6 +1070,13 @@ impl ServerState {
     /// Get all label definitions, sorted by name for stable ordering.
     pub fn labels_list(&self) -> Vec<&LabelInfo> {
         let mut list: Vec<_> = self.labels.values().collect();
+        list.sort_by(|a, b| a.name.cmp(&b.name));
+        list
+    }
+
+    /// Get all custom emotes, sorted by name for stable ordering.
+    pub fn emotes_list(&self) -> Vec<&EmoteInfo> {
+        let mut list: Vec<_> = self.emotes.values().collect();
         list.sort_by(|a, b| a.name.cmp(&b.name));
         list
     }

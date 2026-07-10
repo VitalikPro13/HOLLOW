@@ -11,6 +11,7 @@ import 'package:hollow/src/ui/settings/channels_tab.dart';
 import 'package:hollow/src/ui/settings/danger_zone_tab.dart';
 import 'package:hollow/src/ui/settings/members_tab.dart';
 import 'package:hollow/src/ui/settings/notifications_tab.dart';
+import 'package:hollow/src/ui/settings/emotes_tab.dart';
 import 'package:hollow/src/ui/settings/labels_tab.dart';
 import 'package:hollow/src/ui/settings/overview_tab.dart';
 import 'package:hollow/src/ui/settings/roles_tab.dart';
@@ -68,6 +69,13 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
       isDanger: false,
     ));
 
+    // Emotes — visible to everyone (browse), management for MANAGE_EMOTES
+    tabs.add((
+      icon: LucideIcons.smile,
+      label: 'Emotes',
+      isDanger: false,
+    ));
+
     // Members — always visible (viewing is OK, actions gated inside)
     tabs.add((
       icon: LucideIcons.users,
@@ -111,6 +119,8 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
           key: const ValueKey('roles'), serverId: server.serverId),
       'Labels' => LabelsTab(
           key: const ValueKey('labels'), serverId: server.serverId),
+      'Emotes' => EmotesTab(
+          key: const ValueKey('emotes'), serverId: server.serverId),
       'Members' => MembersTab(
           key: const ValueKey('members'), serverId: server.serverId),
       'Notifications' => NotificationsTab(

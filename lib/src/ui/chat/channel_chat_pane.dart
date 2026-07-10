@@ -35,6 +35,8 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
+import 'package:hollow/src/ui/chat/emoji_picker.dart';
+import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
@@ -1398,6 +1400,32 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     }
   }
 
+  /// Open the unified emoji/emote picker anchored to the composer button and
+  /// insert the selection (Unicode emoji or emote token) at the cursor.
+  void _openComposerEmojiPicker(BuildContext btnCtx) {
+    final box = btnCtx.findRenderObject() as RenderBox?;
+    final anchor = box?.localToGlobal(Offset(box.size.width, 0)) ?? Offset.zero;
+    showEmojiPicker(
+      context: context,
+      anchorPosition: anchor,
+      serverId: widget.serverId,
+      onSelect: _insertEmojiAtCursor,
+    );
+  }
+
+  void _insertEmojiAtCursor(String text) {
+    final sel = _controller.selection;
+    final base = sel.isValid ? sel.baseOffset : _controller.text.length;
+    final newText = _controller.text.replaceRange(
+      base.clamp(0, _controller.text.length),
+      (sel.isValid ? sel.extentOffset : base).clamp(0, _controller.text.length),
+      text,
+    );
+    _controller.text = newText;
+    _controller.selection = TextSelection.collapsed(offset: base + text.length);
+    _focusNode.requestFocus();
+  }
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
@@ -1495,7 +1523,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             ? '@$localNickRaw'
             : null;
 
-    return ChatDropZone(
+    // Custom-emote pull source for every token/reaction in this channel:
+    // ask one online member of the server room.
+    return EmoteScope(
+      serverId: widget.serverId,
+      child: ChatDropZone(
       onFileDropped: _handleDroppedFile,
       child: Column(
       children: [
@@ -2566,6 +2598,20 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                         ),
                       ),
                     ),
+                    const SizedBox(width: HollowSpacing.xs),
+                    Builder(
+                      builder: (btnCtx) => HollowPressable(
+                        semanticLabel: 'Insert emoji',
+                        onTap: () => _openComposerEmojiPicker(btnCtx),
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
+                        padding: const EdgeInsets.all(HollowSpacing.sm),
+                        child: Icon(
+                          LucideIcons.smile,
+                          color: hollow.textSecondary,
+                          size: 20,
+                        ),
+                      ),
+                    ),
                     const SizedBox(width: HollowSpacing.sm),
                     if (_slowModeReadyAt != null) ...[
                       Container(
@@ -2610,7 +2656,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         ),
       ],
       ),
-    );
+      ),
+    ); // EmoteScope
   }
 }
 

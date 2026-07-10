@@ -6,6 +6,8 @@ import 'package:flutter/services.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
+import 'package:hollow/src/ui/chat/emoji_picker.dart';
+import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
@@ -905,7 +907,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final isSavedMessages = savedId != null &&
         ref.watch(deviceLinkProvider).identityOf(widget.peerId) == savedId;
 
-    return Row(
+    // Custom-emote pull source for every token/reaction in this DM: ask the
+    // conversation counterpart's devices.
+    return EmoteScope(
+      peerHint: widget.peerId,
+      child: Row(
       children: [
         // DM Profile Panel (left side) with slide animation
         _DmProfilePanelSlider(
@@ -1330,7 +1336,33 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           ), // ChatDropZone
         ), // Expanded (chat area)
       ],
-    ); // Row
+      ), // Row
+    ); // EmoteScope
+  }
+
+  /// Open the unified emoji/emote picker anchored to the composer button and
+  /// insert the selection (Unicode emoji or emote token) at the cursor.
+  void _openComposerEmojiPicker(BuildContext btnCtx) {
+    final box = btnCtx.findRenderObject() as RenderBox?;
+    final anchor = box?.localToGlobal(Offset(box.size.width, 0)) ?? Offset.zero;
+    showEmojiPicker(
+      context: context,
+      anchorPosition: anchor,
+      onSelect: _insertEmojiAtCursor,
+    );
+  }
+
+  void _insertEmojiAtCursor(String text) {
+    final sel = _controller.selection;
+    final base = sel.isValid ? sel.baseOffset : _controller.text.length;
+    final newText = _controller.text.replaceRange(
+      base.clamp(0, _controller.text.length),
+      (sel.isValid ? sel.extentOffset : base).clamp(0, _controller.text.length),
+      text,
+    );
+    _controller.text = newText;
+    _controller.selection = TextSelection.collapsed(offset: base + text.length);
+    _focusNode.requestFocus();
   }
 
   /// Builds the message list + typing + reply bar + input bar.
@@ -1991,6 +2023,20 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                         ),
                         borderRadius: hollow.radiusLg,
                         onChanged: _onTextChanged,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: HollowSpacing.xs),
+                  Builder(
+                    builder: (btnCtx) => HollowPressable(
+                      semanticLabel: 'Insert emoji',
+                      onTap: () => _openComposerEmojiPicker(btnCtx),
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
+                      padding: const EdgeInsets.all(HollowSpacing.sm),
+                      child: Icon(
+                        LucideIcons.smile,
+                        color: hollow.textSecondary,
+                        size: 20,
                       ),
                     ),
                   ),
