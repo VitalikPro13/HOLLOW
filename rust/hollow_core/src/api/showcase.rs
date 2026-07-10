@@ -19,9 +19,10 @@ const ENDPOINT_BASE: &str = "https://hollow.anonlisten.com/igdb";
 /// Covers must come from here and nowhere else.
 const COVER_BASE: &str = "https://hollow.anonlisten.com/igdb/covers/";
 /// Endpoint response-schema version (keep in sync with SEARCH_VER in
-/// search.php). Sent as a `v` query param — the endpoint ignores it, but it
-/// changes the URL on every schema bump so CDN-cached responses from older
-/// versions can never be served to a newer client.
+/// search.php). Params ride the POST body so the search text never appears
+/// in the request URL (and therefore never in web-server access logs); POST
+/// also bypasses the hCDN edge cache, so `v` is no longer needed for cache
+/// busting — it's still sent so the endpoint could branch on it someday.
 const ENDPOINT_SCHEMA_VER: &str = "9";
 
 /// One processed showcase image, content-addressed by its hash. The board
@@ -73,8 +74,8 @@ pub fn showcase_game_search(query: String) -> Result<Vec<GameSearchResult>, Stri
     rt.block_on(async move {
         let client = reqwest::Client::new();
         let resp = client
-            .get(format!("{ENDPOINT_BASE}/search.php"))
-            .query(&[("q", q.as_str()), ("v", ENDPOINT_SCHEMA_VER)])
+            .post(format!("{ENDPOINT_BASE}/search.php"))
+            .form(&[("q", q.as_str()), ("v", ENDPOINT_SCHEMA_VER)])
             .timeout(std::time::Duration::from_secs(20))
             .send()
             .await
@@ -119,8 +120,8 @@ pub fn showcase_game_details(game_id: i64) -> Result<Option<GameCardDetails>, St
     rt.block_on(async move {
         let client = reqwest::Client::new();
         let resp = client
-            .get(format!("{ENDPOINT_BASE}/search.php"))
-            .query(&[
+            .post(format!("{ENDPOINT_BASE}/search.php"))
+            .form(&[
                 ("id", game_id.to_string().as_str()),
                 ("v", ENDPOINT_SCHEMA_VER),
             ])

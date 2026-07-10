@@ -34,7 +34,7 @@
 >
 > As for Hollow, I made it open-source because I want people to have software they can trust, own a copy of, and run themselves. It should be accessible to every regular user who just wants to chat with their friends, with everything working out of the box and have actual privacy/security that's easily verifiable. This is the reason why I adopted modern E2EE protocols and built custom implementations to create the messenger I would want to use myself.
 >
-> Hollow won't have paywalls. Ever. No matter how much money someone is willing to pay, Hollow will stay open for everybody. Contributors are welcome because we can come together on a single matter that is taken away from us every single day - privacy and ownership. You deserve it. Don't let anybody tell you otherwise.
+> Hollow won't have paywalls. Ever. No matter how much money someone is willing to pay, Hollow will stay open for everybody. Contributors are welcome because we can come together on a single matter that is taken away from us every single day: privacy and ownership. You deserve it. Don't let anybody tell you otherwise.
 >
 > Thank you for reading, and as always, let's strive for better software together.
 >
@@ -44,7 +44,7 @@
 
 ## Overview
 
-Hollow is a fully distributed, end-to-end encrypted communication platform. There are no central servers that store your messages or files. Members of a server collectively host it. The relay is a zero-knowledge signaling pipe that forwards encrypted blobs between peers without any ability to read, modify, or store them.
+Hollow is a fully distributed, end-to-end encrypted communication software. There are no central servers that store your messages or files. Members of a server collectively host it. The relay is a zero-knowledge signaling pipe that forwards encrypted blobs between peers without any ability to read, modify, or store them.
 
 Your identity is a cryptographic keypair. Zero registrations. One recovery phrase or export of your identity into .hollow file, and you own your account forever.
 

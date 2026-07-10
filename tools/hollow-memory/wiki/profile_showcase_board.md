@@ -63,8 +63,11 @@ don't hash to their key are DROPPED. Harness test:
 `showcase_game_search(query)` → FAST basics only: `GameSearchResult {id,
 name, year, game_type, cover_url}`. `showcase_game_details(game_id)` →
 `GameCardDetails {details_json, logo_urls, artwork_url}` — called ONCE on
-pick (?id= mode), never per search result. Both send
-`v=ENDPOINT_SCHEMA_VER` (keep in sync with SEARCH_VER — CDN cache bust).
+pick (id= mode), never per search result. Both are **POST with form-body
+params** (2026-07-10 hardening: search text never appears in the URL, so it
+never lands in Hostinger access logs; POST also bypasses the hCDN edge cache
+so the stale-URL trap can't bite). `v=ENDPOINT_SCHEMA_VER` still rides the
+body (keep in sync with SEARCH_VER).
 `showcase_fetch_cover(url)` (≤400px) / `showcase_fetch_key_art(url)`
 (≤800px, hero) REFUSE any URL not under
 `https://hollow.anonlisten.com/igdb/covers/` (never a generic fetcher);
@@ -92,18 +95,23 @@ return NOTHING — `game.category` → `game_type.type`, `external_games.categor
 `company_website.category` → `websites.type` (Website Type ref; broke all
 credit links). Resolution helpers `is_steam_external()` / `website_kind()`
 match the new expanded refs ({id, name/type}) with legacy-category fallback.
-Bump `SEARCH_VER` when the response schema grows (currently 5) — the app also
-sends it as a `v` query param because **Hostinger's hCDN edge-cached old
-responses (`x-hcdn-cache-status: HIT`, forced max-age=31536000)** — the URL
-must change per version or clients get year-stale pre-bump JSON.
-`config.php` (real credentials) is gitignored; `.htaccess` denies
-config/token/db. Manual upload only (Hostinger file manager, no shell).
+Bump `SEARCH_VER` when the response schema grows (currently 9). Historical
+note: the app used to send `v` as a GET query param because **Hostinger's
+hCDN edge-cached old responses (`x-hcdn-cache-status: HIT`, forced
+max-age=31536000)**; since 2026-07-10 the endpoint is **POST-ONLY** (GET →
+405) — POST is never edge-cached, and body params keep search text out of
+access logs. Also hardened: `display_errors` off, nosniff/no-referrer/
+noindex headers. `config.php` (real credentials) is gitignored; `.htaccess`
+denies config/token/db and hard-caches covers (.jpg AND .png). Manual upload
+only (Hostinger file manager, no shell). The canonical source lives at
+`HOLLOW/igdb/`; the `!hollow-website/igdb/` copy is a synced mirror — sync
+it after edits.
 
-**TWO MODES (SEARCH_VER 8).** `?q=` = FAST search: ONE IGDB query returning
+**TWO MODES (SEARCH_VER 9).** `q=` = FAST search: ONE IGDB query returning
 EXACTLY what the picker renders — {id, name, year, type, cover} and nothing
 else (genres/rating/summary stripped in v8; v6 enriched all 12 results
 inline = 12 sequential Steam calls ≈ 10-20s per fresh search — never
-again). Live-measured 0.4-1.1s. `?id=` = card details for ONE game
+again). Live-measured 0.4-1.1s. `id=` = card details for ONE game
 (~1-2s), fetched when the user PICKS it: one IGDB query
 (external_games + involved_companies + websites + artworks expanded) + one
 Steam appdetails (no API key; ~200 req/5min per IP → hence the cache) →

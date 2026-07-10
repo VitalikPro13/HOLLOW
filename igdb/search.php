@@ -1,13 +1,14 @@
 <?php
 // Hollow — IGDB game search + per-game card details, fully write-through
-// cached. TWO MODES:
+// cached. POST only (GET rejected — keeps search text out of access logs).
+// TWO MODES:
 //
-//   ?q=<text>  FAST search: ONE IGDB query, basic rows only (name, year,
+//   q=<text>   FAST search: ONE IGDB query, basic rows only (name, year,
 //              type, genres, rating, summary, cover). No Steam, no
 //              companies, no artwork — a cache miss costs one IGDB round
 //              trip plus cover thumbnails. (v6 enriched all 12 results
 //              inline = 12 sequential Steam calls ≈ 10-20s. Never again.)
-//   ?id=<igdb> CARD DETAILS for ONE game, fetched when the user actually
+//   id=<igdb>  CARD DETAILS for ONE game, fetched when the user actually
 //              picks it: Steam appdetails + dev/publisher credits (deduped,
 //              logos as PNG) + social links + key art + per-platform store
 //              links + copyright. One pick = one IGDB query + one Steam
@@ -27,8 +28,30 @@
 declare(strict_types=1);
 require __DIR__ . '/config.php'; // defines IGDB_CLIENT_ID, IGDB_CLIENT_SECRET
 
+// Never leak file paths / stack traces to the client on a fatal.
+ini_set('display_errors', '0');
+
+// POST ONLY. Params ride the POST body so search text never appears in the
+// request URL — and therefore never lands in web-server access logs (which we
+// don't control on shared hosting). GET is deliberately rejected: no released
+// client ever used it, and accepting it would let query text leak into logs.
+// POST also bypasses the hCDN edge cache entirely, sidestepping the stale-URL
+// poisoning trap (see SEARCH_VER).
+if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+    http_response_code(405);
+    header('Allow: POST');
+    exit;
+}
+
+function param(string $name): string {
+    return trim((string)($_POST[$name] ?? ''));
+}
+
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: no-referrer');
+header('X-Robots-Tag: noindex');
 
 const COVERS_DIR = __DIR__ . '/covers';
 const COVERS_URL = 'https://hollow.anonlisten.com/igdb/covers/';
@@ -557,8 +580,8 @@ function emit(array|string $payload): void {
 $pdo = db();
 $now = time();
 
-// ═══ MODE B: ?id= — card details for ONE game, fetched on pick. ═══
-$idParam = trim((string)($_GET['id'] ?? ''));
+// ═══ MODE B: id= — card details for ONE game, fetched on pick. ═══
+$idParam = param('id');
 if ($idParam !== '') {
     if (!ctype_digit($idParam)) emit(['id' => 0, 'details' => null]);
     $gameId = (int)$idParam;
@@ -675,8 +698,8 @@ if ($idParam !== '') {
     ])]);
 }
 
-// ═══ MODE A: ?q= — fast search, basic rows only. ═══
-$q = trim((string)($_GET['q'] ?? ''));
+// ═══ MODE A: q= — fast search, basic rows only. ═══
+$q = param('q');
 if ($q === '' || mb_strlen($q) > 100) {
     emit([]);
 }

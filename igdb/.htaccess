@@ -3,9 +3,9 @@
     Require all denied
 </FilesMatch>
 
-# Cached covers are immutable — cache hard.
+# Cached covers/key art (.jpg) and company logos (.png) are immutable — cache hard.
 <IfModule mod_headers.c>
-    <FilesMatch "\.jpg$">
+    <FilesMatch "\.(jpg|png)$">
         Header set Cache-Control "public, max-age=31536000, immutable"
     </FilesMatch>
 </IfModule>
